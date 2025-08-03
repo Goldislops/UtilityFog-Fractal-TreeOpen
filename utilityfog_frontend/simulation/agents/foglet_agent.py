@@ -1,1 +1,0 @@
-# Placeholder for simulation/agents/foglet_agent.py

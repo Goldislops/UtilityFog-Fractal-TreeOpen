@@ -1,1 +1,0 @@
-# Placeholder for simulation/networks/network_topology.py
