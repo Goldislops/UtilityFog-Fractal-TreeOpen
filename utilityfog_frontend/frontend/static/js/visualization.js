@@ -1,0 +1,1 @@
+# Placeholder for frontend/static/js/visualization.js
