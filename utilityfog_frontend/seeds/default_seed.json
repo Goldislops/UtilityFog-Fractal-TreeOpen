@@ -1,0 +1,52 @@
+{
+  "agents": [
+    {
+      "id": "foglet_001",
+      "role": "initiator",
+      "traits": {
+        "curiosity": 0.7,
+        "resilience": 0.5,
+        "cooperation": 0.9
+      },
+      "memes": ["meme_alpha"],
+      "connections": ["foglet_002", "foglet_003"]
+    },
+    {
+      "id": "foglet_002",
+      "role": "observer",
+      "traits": {
+        "curiosity": 0.4,
+        "resilience": 0.8,
+        "cooperation": 0.6
+      },
+      "memes": [],
+      "connections": ["foglet_001"]
+    },
+    {
+      "id": "foglet_003",
+      "role": "responder",
+      "traits": {
+        "curiosity": 0.6,
+        "resilience": 0.6,
+        "cooperation": 0.7
+      },
+      "memes": ["meme_beta"],
+      "connections": ["foglet_001"]
+    }
+  ],
+  "network": {
+    "type": "fractal_tree",
+    "depth": 2,
+    "branching_factor": 2
+  },
+  "memes": {
+    "meme_alpha": {
+      "infectivity": 0.3,
+      "resistance": 0.2
+    },
+    "meme_beta": {
+      "infectivity": 0.5,
+      "resistance": 0.4
+    }
+  }
+}
