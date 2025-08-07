@@ -105,6 +105,11 @@ class SimulationRunner:
     def run_simulation(self) -> Dict[str, Any]:
         """Run the complete simulation and return results."""
         print(f"\n⚡ Starting simulation: {self.config.test_name}")
+        
+        if not MODULES_AVAILABLE:
+            print("⚠️  Some modules are not available - running in limited mode")
+            return self._run_limited_simulation()
+        
         self.simulation_start_time = time.time()
         
         try:
