@@ -21,7 +21,7 @@ from collections import defaultdict, deque
 import networkx as nx
 import numpy as np
 
-from foglet_agent import FogletAgent
+from .foglet_agent import FogletAgent
 
 
 class NodeType(Enum):
