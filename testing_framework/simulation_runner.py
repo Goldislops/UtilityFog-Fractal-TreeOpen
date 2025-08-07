@@ -13,8 +13,6 @@ import uuid
 from typing import Dict, List, Any, Optional, Tuple
 
 # Add agent modules to path
-import sys
-import os
 sys.path.insert(0, '/app')
 
 try:
