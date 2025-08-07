@@ -22,9 +22,39 @@ try:
     from agent.evolution_engine import EvolutionEngine, EvolutionParameters
     from agent.simulation_metrics import SimulationMetrics, AgentMetricCollector, MemeMetricCollector
     from utilityfog_frontend.quantum_myelin import myelin_layer
+    MODULES_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: Could not import some modules: {e}")
     print("Some functionality may be limited.")
+    MODULES_AVAILABLE = False
+    
+    # Create dummy classes for testing
+    class FogletAgent:
+        pass
+    class AgentCapabilities:
+        pass
+    class AgentRole:
+        pass
+    class Meme:
+        pass
+    class MemeType:
+        pass
+    class MemePool:
+        pass
+    class FractalNetwork:
+        pass
+    class EvolutionEngine:
+        pass
+    class EvolutionParameters:
+        pass
+    class SimulationMetrics:
+        pass
+    class AgentMetricCollector:
+        pass
+    class MemeMetricCollector:
+        pass
+    def myelin_layer(*args, **kwargs):
+        pass
 
 from .loggers import QuantumMyelinLogger, SimulationLogger
 
