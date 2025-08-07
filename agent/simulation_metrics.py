@@ -21,10 +21,10 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pandas as pd
 
-from meme_structure import Meme, MemeType
-from foglet_agent import FogletAgent, AgentState
-from evolution_engine import GenerationStats
-from network_topology import FractalNetwork, NetworkNode
+from .meme_structure import Meme, MemeType
+from .foglet_agent import FogletAgent, AgentState
+from .evolution_engine import GenerationStats
+from .network_topology import FractalNetwork, NetworkNode
 
 
 class MetricType(Enum):
