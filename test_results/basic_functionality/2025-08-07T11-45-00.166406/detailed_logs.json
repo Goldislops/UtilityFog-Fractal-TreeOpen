@@ -1,0 +1,8 @@
+[
+  {
+    "timestamp": 1754567101.166734,
+    "level": "INFO",
+    "message": "Limited simulation completed successfully",
+    "component": "limited_mode"
+  }
+]
