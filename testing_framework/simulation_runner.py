@@ -13,7 +13,9 @@ import uuid
 from typing import Dict, List, Any, Optional, Tuple
 
 # Add agent modules to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
 try:
     from agent.foglet_agent import FogletAgent, AgentCapabilities, AgentRole
@@ -23,6 +25,7 @@ try:
     from agent.simulation_metrics import SimulationMetrics, AgentMetricCollector, MemeMetricCollector
     from utilityfog_frontend.quantum_myelin import myelin_layer
     MODULES_AVAILABLE = True
+    print("✅ All agent modules imported successfully!")
 except ImportError as e:
     print(f"Warning: Could not import some modules: {e}")
     print("Some functionality may be limited.")
