@@ -18,7 +18,7 @@ import time
 import math
 from abc import ABC, abstractmethod
 
-from meme_structure import Meme, MemeType, MemePool
+from .meme_structure import Meme, MemeType, MemePool
 
 
 class AgentState(Enum):
