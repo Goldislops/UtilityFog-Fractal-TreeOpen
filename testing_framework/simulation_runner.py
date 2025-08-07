@@ -16,12 +16,27 @@ from typing import Dict, List, Any, Optional, Tuple
 sys.path.insert(0, '/app')
 
 try:
+    print("🔍 Attempting to import agent modules...")
+    print("🔍 Python path includes:", '/app' in sys.path)
+    
     from agent.foglet_agent import FogletAgent, AgentCapabilities, AgentRole
+    print("✅ Imported foglet_agent")
+    
     from agent.meme_structure import Meme, MemeType, MemePool
+    print("✅ Imported meme_structure")
+    
     from agent.network_topology import FractalNetwork, NetworkNode
+    print("✅ Imported network_topology")
+    
     from agent.evolution_engine import EvolutionEngine, EvolutionParameters
+    print("✅ Imported evolution_engine")
+    
     from agent.simulation_metrics import SimulationMetrics, AgentMetricCollector, MemeMetricCollector
+    print("✅ Imported simulation_metrics")
+    
     from utilityfog_frontend.quantum_myelin import myelin_layer
+    print("✅ Imported quantum_myelin")
+    
     MODULES_AVAILABLE = True
     print("✅ All agent modules imported successfully!")
 except ImportError as e:
