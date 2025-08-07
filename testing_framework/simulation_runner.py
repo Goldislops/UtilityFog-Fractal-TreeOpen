@@ -461,21 +461,27 @@ class SimulationRunner:
             if not agent.active_memes:
                 continue
             
-            # Find nearby agents for propagation
-            nearby_agents = self._get_nearby_agents(agent, max_distance=2)
-            
-            if nearby_agents:
-                propagation_results = agent.propagate_memes(nearby_agents)
+            try:
+                # Find nearby agents for propagation
+                nearby_agents = self._get_nearby_agents(agent, max_distance=2)
                 
-                for meme_id, count in propagation_results.items():
-                    propagation_events += count
-                    if count > 0:
-                        self.quantum_logger.log_meme_propagation(
-                            agent.agent_id,
-                            meme_id,
-                            [a.agent_id for a in nearby_agents],
-                            count
-                        )
+                if nearby_agents:
+                    propagation_results = agent.propagate_memes(nearby_agents)
+                    
+                    for meme_id, count in propagation_results.items():
+                        propagation_events += count
+                        if count > 0:
+                            self.quantum_logger.log_meme_propagation(
+                                agent.agent_id,
+                                meme_id,
+                                [a.agent_id for a in nearby_agents],
+                                count
+                            )
+            except Exception as e:
+                error_msg = f"Meme propagation failed for agent {agent.agent_id}: {str(e)}"
+                self.simulation_logger.log_error(error_msg)
+                print(f"⚠️  {error_msg}")
+                # Continue with other agents
         
         if propagation_events > 0:
             self.all_logs.append({
