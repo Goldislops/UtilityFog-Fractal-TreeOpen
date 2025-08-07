@@ -8,7 +8,7 @@ Author: UtilityFog-Fractal-TreeOpen Project
 License: MIT
 """
 
-from .test_runner import TestRunner
+from .test_runner import TestRunner, TestConfiguration
 from .simulation_runner import SimulationRunner
 from .loggers import QuantumMyelinLogger, SimulationLogger
 from .reporters import TestReporter
@@ -17,6 +17,7 @@ from .validators import SimulationValidator
 __version__ = "0.1.0"
 __all__ = [
     "TestRunner",
+    "TestConfiguration",
     "SimulationRunner", 
     "QuantumMyelinLogger",
     "SimulationLogger",
