@@ -334,7 +334,7 @@ class SimulationRunner:
                 "component": "quantum_myelin"
             })
     
-    def _should_form_entanglement(self, agent_a: FogletAgent, agent_b: FogletAgent) -> bool:
+    def _should_form_entanglement(self, agent_a, agent_b) -> bool:
         """Determine if two agents should form an entanglement."""
         # Simple conditions - can be made more sophisticated
         
