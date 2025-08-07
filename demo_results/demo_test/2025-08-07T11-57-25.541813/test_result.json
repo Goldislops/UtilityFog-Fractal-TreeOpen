@@ -1,0 +1,16 @@
+{
+  "test_name": "demo_test",
+  "timestamp": "2025-08-07T11:57:25.541813",
+  "duration": 0.0019478797912597656,
+  "success": false,
+  "final_generation": 0,
+  "metrics": {
+    "agent_metrics": {},
+    "meme_metrics": {},
+    "network_metrics": {},
+    "quantum_myelin_metrics": {},
+    "evolution_metrics": {}
+  },
+  "error_message": "'1ac2d91d-db2f-469c-8bd9-5a4820c45908'",
+  "total_logs": 0
+}
