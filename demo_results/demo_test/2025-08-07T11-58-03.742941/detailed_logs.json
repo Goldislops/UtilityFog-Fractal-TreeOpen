@@ -1,0 +1,815 @@
+[
+  {
+    "timestamp": 1754567883.7436635,
+    "level": "INFO",
+    "component": "simulation",
+    "message": "Simulation components initialized successfully",
+    "data": {}
+  },
+  {
+    "timestamp": 1754567883.743675,
+    "level": "INFO",
+    "message": "Initialized 5 agents with 10 memes",
+    "component": "initialization"
+  },
+  {
+    "timestamp": 1754567883.7437549,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_1 (strength: 0.531)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_1",
+      "entanglement_strength": 0.5312298510435697,
+      "timestamp": 1754567883.7437549,
+      "agent_a_state_before": 0.9842007615316227,
+      "agent_b_state_before": 0.9843669926278525,
+      "agent_a_state_after": 0.9842007615316227,
+      "agent_b_state_after": 0.9843669926278525
+    }
+  },
+  {
+    "timestamp": 1754567883.7437906,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.546)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.5461941650456698,
+      "timestamp": 1754567883.7437906,
+      "agent_a_state_before": 0.9855387966984324,
+      "agent_b_state_before": 0.9853124690615293,
+      "agent_a_state_after": 0.9855387966984324,
+      "agent_b_state_after": 0.9853124690615293
+    }
+  },
+  {
+    "timestamp": 1754567883.7438107,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_3 (strength: 0.461)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.46144061122869273,
+      "timestamp": 1754567883.7438107,
+      "agent_a_state_before": 0.9809533323783728,
+      "agent_b_state_before": 0.9801869815322983,
+      "agent_a_state_after": 0.9809533323783728,
+      "agent_b_state_after": 0.9801869815322983
+    }
+  },
+  {
+    "timestamp": 1754567883.7438257,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.744177,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.664)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.6635121120447416,
+      "timestamp": 1754567883.744177,
+      "agent_a_state_before": 0.9564495314985301,
+      "agent_b_state_before": 0.9543464460877695,
+      "agent_a_state_after": 0.9564495314985301,
+      "agent_b_state_after": 0.9543464460877695
+    }
+  },
+  {
+    "timestamp": 1754567883.7442338,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_2 (strength: 0.202)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.20175118044421808,
+      "timestamp": 1754567883.7442338,
+      "agent_a_state_before": 0.9510950885787567,
+      "agent_b_state_before": 0.9535246907660961,
+      "agent_a_state_after": 0.9510950885787567,
+      "agent_b_state_after": 0.9535246907660961
+    }
+  },
+  {
+    "timestamp": 1754567883.744247,
+    "level": "INFO",
+    "message": "Processed 2 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7442987,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_3 (strength: 0.143)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.1427095788504399,
+      "timestamp": 1754567883.7442987,
+      "agent_a_state_before": 0.9212445452348046,
+      "agent_b_state_before": 0.8890272043346986,
+      "agent_a_state_after": 0.9212445452348046,
+      "agent_b_state_after": 0.8890272043346986
+    }
+  },
+  {
+    "timestamp": 1754567883.7443202,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_4 (strength: 0.129)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.12910456214424448,
+      "timestamp": 1754567883.7443202,
+      "agent_a_state_before": 0.924229496154513,
+      "agent_b_state_before": 0.9413800082658709,
+      "agent_a_state_after": 0.924229496154513,
+      "agent_b_state_after": 0.9413800082658709
+    }
+  },
+  {
+    "timestamp": 1754567883.744343,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.349)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.34872461581207626,
+      "timestamp": 1754567883.744343,
+      "agent_a_state_before": 0.9136444336146551,
+      "agent_b_state_before": 0.9022084699428174,
+      "agent_a_state_after": 0.9136444336146551,
+      "agent_b_state_after": 0.9022084699428174
+    }
+  },
+  {
+    "timestamp": 1754567883.7443538,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7443821,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.515)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.5148302063397162,
+      "timestamp": 1754567883.7443821,
+      "agent_a_state_before": 0.904927893172637,
+      "agent_b_state_before": 0.9052111246697299,
+      "agent_a_state_after": 0.904927893172637,
+      "agent_b_state_after": 0.9052111246697299
+    }
+  },
+  {
+    "timestamp": 1754567883.744405,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_4 (strength: 0.573)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.5728221829512883,
+      "timestamp": 1754567883.744405,
+      "agent_a_state_before": 0.9173101954829909,
+      "agent_b_state_before": 0.9128974041425987,
+      "agent_a_state_after": 0.9173101954829909,
+      "agent_b_state_after": 0.9128974041425987
+    }
+  },
+  {
+    "timestamp": 1754567883.7444165,
+    "level": "INFO",
+    "message": "Processed 2 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.744453,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.110)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.10969527201317424,
+      "timestamp": 1754567883.744453,
+      "agent_a_state_before": 0.8906871817418629,
+      "agent_b_state_before": 0.8917169241737027,
+      "agent_a_state_after": 0.8906871817418629,
+      "agent_b_state_after": 0.8917169241737027
+    }
+  },
+  {
+    "timestamp": 1754567883.7445042,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_3 (strength: 0.401)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.40134260641376174,
+      "timestamp": 1754567883.7445042,
+      "agent_a_state_before": 0.8814597176158288,
+      "agent_b_state_before": 0.8722151525490724,
+      "agent_a_state_after": 0.8814597176158288,
+      "agent_b_state_after": 0.8722151525490724
+    }
+  },
+  {
+    "timestamp": 1754567883.7445266,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.575)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.574747021881126,
+      "timestamp": 1754567883.7445266,
+      "agent_a_state_before": 0.8805083390110406,
+      "agent_b_state_before": 0.8834237377117345,
+      "agent_a_state_after": 0.8805083390110406,
+      "agent_b_state_after": 0.8834237377117345
+    }
+  },
+  {
+    "timestamp": 1754567883.7445362,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7445698,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_4 (strength: 0.522)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.5218199306617408,
+      "timestamp": 1754567883.7445698,
+      "agent_a_state_before": 0.8837855099044144,
+      "agent_b_state_before": 0.8831596434991388,
+      "agent_a_state_after": 0.8837855099044144,
+      "agent_b_state_after": 0.8831596434991388
+    }
+  },
+  {
+    "timestamp": 1754567883.7446005,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_2 (strength: 0.627)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.6267144862907901,
+      "timestamp": 1754567883.7446005,
+      "agent_a_state_before": 0.8661338179012611,
+      "agent_b_state_before": 0.8654379132685626,
+      "agent_a_state_after": 0.8661338179012611,
+      "agent_b_state_after": 0.8654379132685626
+    }
+  },
+  {
+    "timestamp": 1754567883.7446187,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_3 (strength: 0.354)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.35418424446510155,
+      "timestamp": 1754567883.7446187,
+      "agent_a_state_before": 0.8636160768939178,
+      "agent_b_state_before": 0.8615429959313166,
+      "agent_a_state_after": 0.8636160768939178,
+      "agent_b_state_after": 0.8615429959313166
+    }
+  },
+  {
+    "timestamp": 1754567883.744637,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_4 (strength: 0.782)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.7816304279245554,
+      "timestamp": 1754567883.744637,
+      "agent_a_state_before": 0.8792897568522514,
+      "agent_b_state_before": 0.8693077999154499,
+      "agent_a_state_after": 0.8792897568522514,
+      "agent_b_state_after": 0.8693077999154499
+    }
+  },
+  {
+    "timestamp": 1754567883.744646,
+    "level": "INFO",
+    "message": "Processed 4 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7446764,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_1 (strength: 0.540)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_1",
+      "entanglement_strength": 0.5399405448988605,
+      "timestamp": 1754567883.7446764,
+      "agent_a_state_before": 0.8570727940275643,
+      "agent_b_state_before": 0.8588965469302432,
+      "agent_a_state_after": 0.8570727940275643,
+      "agent_b_state_after": 0.8588965469302432
+    }
+  },
+  {
+    "timestamp": 1754567883.7446945,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_3 (strength: 0.332)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.33160315490483616,
+      "timestamp": 1754567883.7446945,
+      "agent_a_state_before": 0.8516835039009809,
+      "agent_b_state_before": 0.8443575561728176,
+      "agent_a_state_after": 0.8516835039009809,
+      "agent_b_state_after": 0.8443575561728176
+    }
+  },
+  {
+    "timestamp": 1754567883.7447035,
+    "level": "INFO",
+    "message": "Processed 2 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7447286,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_3 (strength: 0.242)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.24188609535478242,
+      "timestamp": 1754567883.7447286,
+      "agent_a_state_before": 0.8371897170459403,
+      "agent_b_state_before": 0.8254567342115403,
+      "agent_a_state_after": 0.8371897170459403,
+      "agent_b_state_after": 0.8254567342115403
+    }
+  },
+  {
+    "timestamp": 1754567883.744738,
+    "level": "INFO",
+    "message": "Processed 1 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7447643,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.465)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.464501954884762,
+      "timestamp": 1754567883.7447643,
+      "agent_a_state_before": 0.8215051829801522,
+      "agent_b_state_before": 0.818794337980895,
+      "agent_a_state_after": 0.8215051829801522,
+      "agent_b_state_after": 0.818794337980895
+    }
+  },
+  {
+    "timestamp": 1754567883.744773,
+    "level": "INFO",
+    "message": "Processed 1 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7448077,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_3 (strength: 0.206)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.20619425699765154,
+      "timestamp": 1754567883.7448077,
+      "agent_a_state_before": 0.8053636167151591,
+      "agent_b_state_before": 0.7966567273584415,
+      "agent_a_state_after": 0.8053636167151591,
+      "agent_b_state_after": 0.7966567273584415
+    }
+  },
+  {
+    "timestamp": 1754567883.7448277,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.410)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.4102406425614361,
+      "timestamp": 1754567883.7448277,
+      "agent_a_state_before": 0.8031115255630862,
+      "agent_b_state_before": 0.800904232276488,
+      "agent_a_state_after": 0.8031115255630862,
+      "agent_b_state_after": 0.800904232276488
+    }
+  },
+  {
+    "timestamp": 1754567883.7448547,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_3 and agent_4 (strength: 0.488)",
+    "data": {
+      "agent_a": "agent_3",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.48785248103054835,
+      "timestamp": 1754567883.7448547,
+      "agent_a_state_before": 0.8121515471901631,
+      "agent_b_state_before": 0.8127515481179617,
+      "agent_a_state_after": 0.8121515471901631,
+      "agent_b_state_after": 0.8127515481179617
+    }
+  },
+  {
+    "timestamp": 1754567883.7448652,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7448926,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.734)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.7340475108252911,
+      "timestamp": 1754567883.7448926,
+      "agent_a_state_before": 0.7892953879611595,
+      "agent_b_state_before": 0.7898641021599331,
+      "agent_a_state_after": 0.7892953879611595,
+      "agent_b_state_after": 0.7898641021599331
+    }
+  },
+  {
+    "timestamp": 1754567883.7449095,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_3 (strength: 0.687)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.6869327919206242,
+      "timestamp": 1754567883.7449095,
+      "agent_a_state_before": 0.7869065460056903,
+      "agent_b_state_before": 0.7877771048411051,
+      "agent_a_state_after": 0.7869065460056903,
+      "agent_b_state_after": 0.7877771048411051
+    }
+  },
+  {
+    "timestamp": 1754567883.7449274,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_4 (strength: 0.331)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.3310169050614923,
+      "timestamp": 1754567883.7449274,
+      "agent_a_state_before": 0.7889728313549297,
+      "agent_b_state_before": 0.7953643975744308,
+      "agent_a_state_after": 0.7889728313549297,
+      "agent_b_state_after": 0.7953643975744308
+    }
+  },
+  {
+    "timestamp": 1754567883.7449446,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.215)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.21533882190668968,
+      "timestamp": 1754567883.7449446,
+      "agent_a_state_before": 0.7884556369316766,
+      "agent_b_state_before": 0.7868201517575193,
+      "agent_a_state_after": 0.7884556369316766,
+      "agent_b_state_after": 0.7868201517575193
+    }
+  },
+  {
+    "timestamp": 1754567883.7449605,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_4 (strength: 0.153)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.15267615111720495,
+      "timestamp": 1754567883.7449605,
+      "agent_a_state_before": 0.7888423626506441,
+      "agent_b_state_before": 0.7941892162185317,
+      "agent_a_state_after": 0.7888423626506441,
+      "agent_b_state_after": 0.7941892162185317
+    }
+  },
+  {
+    "timestamp": 1754567883.7449682,
+    "level": "INFO",
+    "message": "Processed 5 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7450066,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_1 (strength: 0.760)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_1",
+      "entanglement_strength": 0.7599117374208807,
+      "timestamp": 1754567883.7450066,
+      "agent_a_state_before": 0.7533940463373539,
+      "agent_b_state_before": 0.7550817946851779,
+      "agent_a_state_after": 0.7533940463373539,
+      "agent_b_state_after": 0.7550817946851779
+    }
+  },
+  {
+    "timestamp": 1754567883.7450259,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.482)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.4819909524111813,
+      "timestamp": 1754567883.7450259,
+      "agent_a_state_before": 0.7479103867238127,
+      "agent_b_state_before": 0.747017647707456,
+      "agent_a_state_after": 0.7479103867238127,
+      "agent_b_state_after": 0.747017647707456
+    }
+  },
+  {
+    "timestamp": 1754567883.745034,
+    "level": "INFO",
+    "message": "Processed 2 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.745057,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.683)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.6832317289590821,
+      "timestamp": 1754567883.745057,
+      "agent_a_state_before": 0.7330259144436269,
+      "agent_b_state_before": 0.734649328606201,
+      "agent_a_state_after": 0.7330259144436269,
+      "agent_b_state_after": 0.734649328606201
+    }
+  },
+  {
+    "timestamp": 1754567883.745075,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_2 (strength: 0.198)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.19750931970925772,
+      "timestamp": 1754567883.745075,
+      "agent_a_state_before": 0.7344168051778763,
+      "agent_b_state_before": 0.732376751253694,
+      "agent_a_state_after": 0.7344168051778763,
+      "agent_b_state_after": 0.732376751253694
+    }
+  },
+  {
+    "timestamp": 1754567883.7450964,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.778)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.777909336060326,
+      "timestamp": 1754567883.7450964,
+      "agent_a_state_before": 0.7213249566172659,
+      "agent_b_state_before": 0.7271283567265096,
+      "agent_a_state_after": 0.7213249566172659,
+      "agent_b_state_after": 0.7271283567265096
+    }
+  },
+  {
+    "timestamp": 1754567883.7451057,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.745148,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_1 (strength: 0.406)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_1",
+      "entanglement_strength": 0.4055487218635895,
+      "timestamp": 1754567883.745148,
+      "agent_a_state_before": 0.6984445274395005,
+      "agent_b_state_before": 0.6977062311333105,
+      "agent_a_state_after": 0.6984445274395005,
+      "agent_b_state_after": 0.6977062311333105
+    }
+  },
+  {
+    "timestamp": 1754567883.7451682,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_root and agent_2 (strength: 0.105)",
+    "data": {
+      "agent_a": "agent_root",
+      "agent_b": "agent_2",
+      "entanglement_strength": 0.10513713931491232,
+      "timestamp": 1754567883.7451682,
+      "agent_a_state_before": 0.6938547963877937,
+      "agent_b_state_before": 0.6908572731705698,
+      "agent_a_state_after": 0.6938547963877937,
+      "agent_b_state_after": 0.6908572731705698
+    }
+  },
+  {
+    "timestamp": 1754567883.745187,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_4 (strength: 0.502)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.5020961522484676,
+      "timestamp": 1754567883.745187,
+      "agent_a_state_before": 0.714277357027963,
+      "agent_b_state_before": 0.714104041245638,
+      "agent_a_state_after": 0.714277357027963,
+      "agent_b_state_after": 0.714104041245638
+    }
+  },
+  {
+    "timestamp": 1754567883.7452078,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.245)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.24544854750020412,
+      "timestamp": 1754567883.7452078,
+      "agent_a_state_before": 0.6834896212862862,
+      "agent_b_state_before": 0.6768055796581903,
+      "agent_a_state_after": 0.6834896212862862,
+      "agent_b_state_after": 0.6768055796581903
+    }
+  },
+  {
+    "timestamp": 1754567883.7452261,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_3 and agent_4 (strength: 0.682)",
+    "data": {
+      "agent_a": "agent_3",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.6818543040257957,
+      "timestamp": 1754567883.7452261,
+      "agent_a_state_before": 0.6982958621796475,
+      "agent_b_state_before": 0.6843055994603453,
+      "agent_a_state_after": 0.6982958621796475,
+      "agent_b_state_after": 0.6843055994603453
+    }
+  },
+  {
+    "timestamp": 1754567883.745235,
+    "level": "INFO",
+    "message": "Processed 5 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.745262,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_3 (strength: 0.551)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.5514027961424343,
+      "timestamp": 1754567883.745262,
+      "agent_a_state_before": 0.6792024234702135,
+      "agent_b_state_before": 0.681653690537718,
+      "agent_a_state_after": 0.6792024234702135,
+      "agent_b_state_after": 0.681653690537718
+    }
+  },
+  {
+    "timestamp": 1754567883.7452815,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_3 (strength: 0.578)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_3",
+      "entanglement_strength": 0.5784217975186603,
+      "timestamp": 1754567883.7452815,
+      "agent_a_state_before": 0.6716679403807265,
+      "agent_b_state_before": 0.6699816652687124,
+      "agent_a_state_after": 0.6716679403807265,
+      "agent_b_state_after": 0.6699816652687124
+    }
+  },
+  {
+    "timestamp": 1754567883.745301,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_3 and agent_4 (strength: 0.323)",
+    "data": {
+      "agent_a": "agent_3",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.3232284273328901,
+      "timestamp": 1754567883.745301,
+      "agent_a_state_before": 0.6660820635349126,
+      "agent_b_state_before": 0.6676792681613264,
+      "agent_a_state_after": 0.6660820635349126,
+      "agent_b_state_after": 0.6676792681613264
+    }
+  },
+  {
+    "timestamp": 1754567883.745309,
+    "level": "INFO",
+    "message": "Processed 3 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  },
+  {
+    "timestamp": 1754567883.7453363,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_1 and agent_4 (strength: 0.588)",
+    "data": {
+      "agent_a": "agent_1",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.5877083806136876,
+      "timestamp": 1754567883.7453363,
+      "agent_a_state_before": 0.6539774290842321,
+      "agent_b_state_before": 0.6548373141287714,
+      "agent_a_state_after": 0.6539774290842321,
+      "agent_b_state_after": 0.6548373141287714
+    }
+  },
+  {
+    "timestamp": 1754567883.745361,
+    "level": "INFO",
+    "component": "quantum_myelin",
+    "message": "Entanglement formed between agent_2 and agent_4 (strength: 0.396)",
+    "data": {
+      "agent_a": "agent_2",
+      "agent_b": "agent_4",
+      "entanglement_strength": 0.39604391924158067,
+      "timestamp": 1754567883.745361,
+      "agent_a_state_before": 0.6519435902742096,
+      "agent_b_state_before": 0.6513617597078534,
+      "agent_a_state_after": 0.6519435902742096,
+      "agent_b_state_after": 0.6513617597078534
+    }
+  },
+  {
+    "timestamp": 1754567883.7453697,
+    "level": "INFO",
+    "message": "Processed 2 quantum myelin entanglements",
+    "component": "quantum_myelin"
+  }
+]
