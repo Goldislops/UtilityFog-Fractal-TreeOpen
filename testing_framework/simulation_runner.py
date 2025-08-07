@@ -30,29 +30,80 @@ except ImportError as e:
     
     # Create dummy classes for testing
     class FogletAgent:
-        pass
+        def __init__(self, *args, **kwargs):
+            self.agent_id = kwargs.get('agent_id', 'dummy')
+            self.energy_level = 0.5
+            self.health = 0.5
+            self.active_memes = {}
+            self.performance_metrics = {}
+        def update(self, *args, **kwargs):
+            pass
+        def infect_with_meme(self, *args, **kwargs):
+            return False
+        def propagate_memes(self, *args, **kwargs):
+            return {}
+    
     class AgentCapabilities:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
+    
     class AgentRole:
-        pass
+        COORDINATOR = "coordinator"
+        WORKER = "worker"
+        SENSOR = "sensor"
+        RELAY = "relay"
+    
     class Meme:
-        pass
+        def __init__(self, *args, **kwargs):
+            self.meme_id = 'dummy'
+            self.meme_type = 'dummy'
+            
     class MemeType:
-        pass
+        BEHAVIORAL = "behavioral"
+    
     class MemePool:
-        pass
+        def __init__(self, *args, **kwargs):
+            self.memes = {}
+        def add_meme(self, meme):
+            return True
+    
     class FractalNetwork:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
+        def add_node(self, *args, **kwargs):
+            return True
+        def get_node(self, node_id):
+            class DummyNode:
+                def __init__(self):
+                    self.children_ids = set()
+            return DummyNode()
+        def get_network_stats(self):
+            return {}
+    
     class EvolutionEngine:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
+    
     class EvolutionParameters:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
+    
     class SimulationMetrics:
-        pass
+        def __init__(self, *args, **kwargs):
+            self.entity_sources = {}
+        def add_collector(self, *args, **kwargs):
+            pass
+        def collect_all_metrics(self, *args, **kwargs):
+            pass
+        def generate_report(self):
+            return {}
+    
     class AgentMetricCollector:
         pass
+    
     class MemeMetricCollector:
         pass
+    
     def myelin_layer(*args, **kwargs):
         pass
 
