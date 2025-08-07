@@ -1,0 +1,22 @@
+# Testing Framework Requirements for UtilityFog-Fractal-TreeOpen
+
+# Core Python packages (typically included in standard Python installations)
+# These are needed for the simulation system to run properly
+
+# Data analysis and processing
+pandas>=1.3.0
+numpy>=1.20.0
+
+# Network analysis (used in network_topology.py)
+networkx>=2.6
+
+# Optional: Enhanced data visualization (for future extensions)
+# matplotlib>=3.3.0
+# seaborn>=0.11.0
+
+# Development and testing utilities
+# pytest>=6.0.0  # For future unit testing extensions
+# pytest-cov>=2.0.0  # For code coverage analysis
+
+# Note: Most functionality uses only Python standard library
+# The core simulation should work with minimal dependencies
