@@ -18,8 +18,8 @@ import time
 import statistics
 from abc import ABC, abstractmethod
 
-from meme_structure import Meme, MemeType, MemePool
-from foglet_agent import FogletAgent
+from .meme_structure import Meme, MemeType, MemePool
+from .foglet_agent import FogletAgent
 
 
 class SelectionMethod(Enum):
