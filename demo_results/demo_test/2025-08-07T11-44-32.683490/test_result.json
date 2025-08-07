@@ -1,0 +1,16 @@
+{
+  "test_name": "demo_test",
+  "timestamp": "2025-08-07T11:44:32.683490",
+  "duration": 0.00011515617370605469,
+  "success": false,
+  "final_generation": 0,
+  "metrics": {
+    "agent_metrics": {},
+    "meme_metrics": {},
+    "network_metrics": {},
+    "quantum_myelin_metrics": {},
+    "evolution_metrics": {}
+  },
+  "error_message": "MemePool() takes no arguments",
+  "total_logs": 0
+}
