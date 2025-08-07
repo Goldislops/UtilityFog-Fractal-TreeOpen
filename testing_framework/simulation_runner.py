@@ -383,7 +383,7 @@ class SimulationRunner:
                 "component": "meme_propagation"
             })
     
-    def _get_nearby_agents(self, agent: FogletAgent, max_distance: int = 2) -> List[FogletAgent]:
+    def _get_nearby_agents(self, agent, max_distance: int = 2):
         """Get agents within network distance of the given agent."""
         # Simplified - in real implementation would use network topology
         nearby = []
