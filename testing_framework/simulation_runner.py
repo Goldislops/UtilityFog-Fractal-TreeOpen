@@ -13,9 +13,9 @@ import uuid
 from typing import Dict, List, Any, Optional, Tuple
 
 # Add agent modules to path
-current_dir = os.path.dirname(__file__)
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+import sys
+import os
+sys.path.insert(0, '/app')
 
 try:
     from agent.foglet_agent import FogletAgent, AgentCapabilities, AgentRole
