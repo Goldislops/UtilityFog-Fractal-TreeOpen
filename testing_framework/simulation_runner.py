@@ -321,6 +321,7 @@ class SimulationRunner:
             self.meme_pool.add_meme(meme)
         
         # Infect agents with initial memes
+        total_infections = 0
         for agent in self.agents:
             num_memes = random.randint(1, self.config.initial_memes_per_agent)
             selected_memes = random.sample(initial_memes, min(num_memes, len(initial_memes)))
@@ -328,9 +329,15 @@ class SimulationRunner:
             for meme in selected_memes:
                 success = agent.infect_with_meme(meme, infection_strength=0.7)
                 if success:
+                    total_infections += 1
                     self.quantum_logger.log_meme_infection(agent.agent_id, meme.meme_id, 0.7)
         
         print(f"   ✅ Created {len(initial_memes)} initial memes")
+        print(f"   🧠 Successful initial infections: {total_infections}")
+        
+        # Log active memes per agent
+        for agent in self.agents:
+            print(f"   🧠 Agent {agent.agent_id}: {len(agent.active_memes)} active memes")
     
     def _run_simulation_steps(self):
         """Run the main simulation loop."""
