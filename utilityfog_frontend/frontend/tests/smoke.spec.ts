@@ -8,9 +8,13 @@ test.describe('UtilityFog SimBridge Smoke Test', () => {
     // Check that the page loads
     await expect(page.locator('h1')).toContainText('UtilityFog SimBridge');
     
-    // Wait for connection status to appear (should show connecting or connected)
-    const connectionBadge = page.locator('text=/Connected|Connecting|Disconnected/');
+    // Wait for connection badge specifically
+    const connectionBadge = page.locator('[style*="border: 1px solid"]').first();
     await expect(connectionBadge).toBeVisible({ timeout: 10000 });
+    
+    // Check connection status text
+    const statusText = page.locator('span').filter({ hasText: /Connected|Connecting|Disconnected/ }).first();
+    await expect(statusText).toBeVisible();
     
     // Check if we get connected (may take a few seconds)
     try {
