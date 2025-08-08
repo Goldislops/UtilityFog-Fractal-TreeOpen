@@ -1,0 +1,203 @@
+{
+  "test_name": "demo_test",
+  "timestamp": "2025-08-08T00:39:56.448497",
+  "duration": 0.002615690231323242,
+  "success": true,
+  "final_generation": 0,
+  "metrics": {
+    "agent_metrics": {
+      "total_agents": 5,
+      "average_energy": 0.6857626450286568,
+      "average_health": 0.9932000000000001,
+      "total_active_memes": 1,
+      "agent_states": {
+        "agent_root": {
+          "energy": 0.6899324407877018,
+          "health": 0.993,
+          "active_memes": 0,
+          "performance_metrics": {
+            "tasks_completed": 0,
+            "successful_communications": 0,
+            "memes_propagated": 0,
+            "cooperation_events": 0
+          }
+        },
+        "agent_1": {
+          "energy": 0.6810709309071309,
+          "health": 0.993,
+          "active_memes": 0,
+          "performance_metrics": {
+            "tasks_completed": 0,
+            "successful_communications": 0,
+            "memes_propagated": 0,
+            "cooperation_events": 0
+          }
+        },
+        "agent_2": {
+          "energy": 0.6839190128846523,
+          "health": 0.994,
+          "active_memes": 0,
+          "performance_metrics": {
+            "tasks_completed": 0,
+            "successful_communications": 0,
+            "memes_propagated": 0,
+            "cooperation_events": 0
+          }
+        },
+        "agent_3": {
+          "energy": 0.686911112966519,
+          "health": 0.993,
+          "active_memes": 0,
+          "performance_metrics": {
+            "tasks_completed": 0,
+            "successful_communications": 0,
+            "memes_propagated": 0,
+            "cooperation_events": 0
+          }
+        },
+        "agent_4": {
+          "energy": 0.6869797275972798,
+          "health": 0.993,
+          "active_memes": 1,
+          "performance_metrics": {
+            "tasks_completed": 0,
+            "successful_communications": 0,
+            "memes_propagated": 0,
+            "cooperation_events": 0
+          }
+        }
+      },
+      "validation": {
+        "total_rules": 10,
+        "passed_rules": 9,
+        "failed_rules": 1,
+        "errors": [],
+        "warnings": [
+          {
+            "rule": "simulation_duration_reasonable",
+            "message": "Simulation duration too short: 0.00s (may indicate immediate failure)"
+          }
+        ],
+        "all_results": [
+          {
+            "rule": "agent_count_positive",
+            "passed": true,
+            "severity": "ERROR",
+            "message": "Total agents: 5"
+          },
+          {
+            "rule": "energy_levels_valid",
+            "passed": true,
+            "severity": "ERROR",
+            "message": "All energy levels valid (avg: 0.686)"
+          },
+          {
+            "rule": "health_levels_valid",
+            "passed": true,
+            "severity": "ERROR",
+            "message": "All health levels valid (avg: 0.993)"
+          },
+          {
+            "rule": "meme_count_reasonable",
+            "passed": true,
+            "severity": "WARNING",
+            "message": "Meme count reasonable: 10 memes for 5 agents"
+          },
+          {
+            "rule": "entanglement_events_present",
+            "passed": true,
+            "severity": "WARNING",
+            "message": "Entanglement events present: 44 total"
+          },
+          {
+            "rule": "propagation_events_present",
+            "passed": true,
+            "severity": "INFO",
+            "message": "Meme propagation events present: 1 total"
+          },
+          {
+            "rule": "simulation_duration_reasonable",
+            "passed": false,
+            "severity": "WARNING",
+            "message": "Simulation duration too short: 0.00s (may indicate immediate failure)"
+          },
+          {
+            "rule": "fitness_scores_valid",
+            "passed": true,
+            "severity": "ERROR",
+            "message": "Average fitness score valid: 0.000"
+          },
+          {
+            "rule": "network_connectivity",
+            "passed": true,
+            "severity": "WARNING",
+            "message": "Network connectivity adequate: 4 connections for 5 nodes"
+          },
+          {
+            "rule": "logs_present",
+            "passed": true,
+            "severity": "INFO",
+            "message": "Logs present: 65 log entries"
+          }
+        ],
+        "validation_passed": true
+      }
+    },
+    "meme_metrics": {
+      "total_memes": 10,
+      "average_fitness": 0.0,
+      "total_propagations": 1,
+      "meme_types_distribution": {
+        "behavioral": 4,
+        "cognitive": 2,
+        "social": 2,
+        "resource": 2,
+        "communication": 0
+      }
+    },
+    "network_metrics": {
+      "total_nodes": 5,
+      "total_connections": 4,
+      "max_depth": 3,
+      "branching_factor": 3,
+      "total_messages_sent": 0,
+      "total_messages_delivered": 0,
+      "total_messages_dropped": 0,
+      "average_latency": 0.0,
+      "active_messages": 0,
+      "queued_messages": 0,
+      "node_types": {
+        "root": 1,
+        "branch": 4
+      },
+      "node_levels": {
+        "0": 1,
+        "1": 3,
+        "2": 1
+      }
+    },
+    "quantum_myelin_metrics": {
+      "total_entanglements": 44,
+      "total_infections": 1,
+      "total_propagations": 0,
+      "average_entanglement_strength": 0.5061187698443764,
+      "most_entangled_agents": {
+        "agent_4": 20,
+        "agent_1": 19,
+        "agent_3": 19,
+        "agent_root": 15,
+        "agent_2": 15
+      },
+      "most_infectious_memes": {
+        "45cb2670-7452-4d90-835f-1cd227108e46": 1
+      },
+      "total_events": 45
+    },
+    "evolution_metrics": {
+      "generations_completed": 0,
+      "steps_completed": 19
+    }
+  },
+  "error_message": null,
+  "total_logs": 65
+}
