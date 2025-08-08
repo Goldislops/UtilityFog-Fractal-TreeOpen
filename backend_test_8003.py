@@ -344,8 +344,8 @@ class SimBridgeBackendTester:
                 self.log_result("full_simulation_flow", False, "No run_id returned from start simulation")
                 return False
             
-            # Connect WebSocket to this run_id
-            ws_url = f"{self.ws_base_url}/ws?run_id={run_id}"
+            # Connect WebSocket to this run_id (WebSocket app is mounted at /ws, endpoint is /ws)
+            ws_url = f"{self.ws_base_url}/ws/ws?run_id={run_id}"
             websocket = await websockets.connect(ws_url)
             
             # Wait for connection confirmation
