@@ -686,12 +686,21 @@ class SimulationRunner:
                     for meme_id, count in propagation_results.items():
                         propagation_events += count
                         if count > 0:
+                            target_agents = [a.agent_id for a in nearby_agents]
                             self.quantum_logger.log_meme_propagation(
                                 agent.agent_id,
                                 meme_id,
-                                [a.agent_id for a in nearby_agents],
+                                target_agents,
                                 count
                             )
+                            
+                            # Emit MEME_SPREAD event
+                            self._emit_event("MEME_SPREAD", {
+                                "source": agent.agent_id,
+                                "targets": target_agents,
+                                "meme_id": meme_id,
+                                "propagation_count": count
+                            })
             except Exception as e:
                 error_msg = f"Meme propagation failed for agent {agent.agent_id}: {str(e)}"
                 self.simulation_logger.log_error(error_msg)
