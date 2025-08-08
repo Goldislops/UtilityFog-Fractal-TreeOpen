@@ -184,6 +184,64 @@ class SimulationRunner:
         print(f"🔧 SimulationRunner initialized for: {config.test_name}")
         print(f"   Output directory: {output_dir}")
     
+    # SimBridge callback helper methods
+    def _emit_init_state(self, nodes: List[Dict], edges: List[Dict], config: Dict):
+        """Emit initial state to SimBridge."""
+        if self.on_init:
+            self.on_init({
+                "nodes": nodes,
+                "edges": edges,
+                "config": config
+            })
+    
+    def _emit_tick(self, agent_updates: List[Dict]):
+        """Emit tick with agent deltas to SimBridge."""
+        if self.on_tick:
+            self.on_tick({
+                "step": self.current_step,
+                "agent_updates": agent_updates,
+                "timestamp": time.time()
+            })
+    
+    def _emit_event(self, event_type: str, data: Dict):
+        """Emit event to SimBridge."""
+        if self.on_event:
+            self.on_event({
+                "event_type": event_type,
+                "data": data,
+                "step": self.current_step,
+                "timestamp": time.time()
+            })
+    
+    def _emit_stats(self, stats: Dict):
+        """Emit statistics to SimBridge."""
+        if self.on_stats:
+            self.on_stats({
+                "step": self.current_step,
+                "stats": stats,
+                "timestamp": time.time()
+            })
+    
+    def _emit_done(self, results: Dict):
+        """Emit completion to SimBridge."""
+        if self.on_done:
+            self.on_done({
+                "results": results,
+                "total_steps": self.current_step,
+                "duration": time.time() - self.simulation_start_time,
+                "timestamp": time.time()
+            })
+    
+    def _emit_error(self, error: str, details: Dict = None):
+        """Emit error to SimBridge."""
+        if self.on_error:
+            self.on_error({
+                "error": error,
+                "details": details or {},
+                "step": self.current_step,
+                "timestamp": time.time()
+            })
+    
     def run_simulation(self) -> Dict[str, Any]:
         """Run the complete simulation and return results."""
         print(f"\n⚡ Starting simulation: {self.config.test_name}")
