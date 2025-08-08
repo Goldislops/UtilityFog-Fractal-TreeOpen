@@ -183,7 +183,7 @@ export const SimBridgeProvider = ({ children }) => {
     lastJsonMessage,
     readyState,
     getWebSocket
-  } = useWebSocket(
+  } = useWebSocketHook(
     state.runId ? getWebSocketURL(state.runId) : null,
     {
       onOpen: () => {
