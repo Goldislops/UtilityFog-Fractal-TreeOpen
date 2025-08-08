@@ -2,8 +2,7 @@ import React from 'react';
 import { useSimBridge } from '../contexts/SimBridgeContext';
 
 const LoadingSpinner = () => {
-  const { isRunning, agents } = useSimulation();
-  const { isConnected } = useWebSocket();
+  const { isRunning, currentAgents, isConnected } = useSimBridge();
   
   // Determine loading state
   const shouldShow = !isConnected || (isRunning && agents.length === 0);
