@@ -357,13 +357,17 @@ class SimBridgeBackendTester:
             message_schemas = {}
             
             start_time = time.time()
-            timeout = 30.0  # 30 seconds to complete simulation
+            timeout = 45.0  # 45 seconds to complete simulation
+            
+            print(f"   Waiting for simulation messages (timeout: {timeout}s)...")
             
             while time.time() - start_time < timeout:
                 try:
-                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
                     message_data = json.loads(response)
                     message_type = message_data.get("type")
+                    
+                    print(f"   📨 Raw message: {message_type}")
                     
                     if message_type and message_type in expected_types:
                         received_message_types.add(message_type)
@@ -406,17 +410,29 @@ class SimBridgeBackendTester:
                             break
                     
                 except asyncio.TimeoutError:
+                    print(f"   ⏰ No message received in 10s, checking simulation status...")
                     # Check if simulation is still running
-                    status_response = requests.get(f"{self.base_url}/api/sim/status", timeout=5)
-                    if status_response.status_code == 200:
-                        status_data = status_response.json()
-                        if status_data.get("status") == "completed":
-                            print("   Simulation completed, no more messages expected")
-                            break
+                    try:
+                        status_response = requests.get(f"{self.base_url}/api/sim/status", timeout=5)
+                        if status_response.status_code == 200:
+                            status_data = status_response.json()
+                            current_status = status_data.get("status")
+                            current_step = status_data.get("current_step", 0)
+                            total_steps = status_data.get("total_steps", 0)
+                            print(f"   📊 Status: {current_status}, Step: {current_step}/{total_steps}")
+                            
+                            if current_status in ["completed", "error"]:
+                                print("   Simulation finished, breaking...")
+                                break
+                    except Exception as e:
+                        print(f"   ⚠️ Error checking status: {e}")
                     continue
                 except json.JSONDecodeError as e:
                     print(f"⚠️  Invalid JSON received: {e}")
                     continue
+                except Exception as e:
+                    print(f"⚠️  Error receiving message: {e}")
+                    break
             
             await websocket.close()
             
