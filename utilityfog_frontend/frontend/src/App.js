@@ -62,7 +62,7 @@ function App() {
             </Canvas>
             
             {/* Loading overlay */}
-            <LoadingSpinner />
+            <LoadingScreen />
           </div>
 
           {/* Side Panels */}
