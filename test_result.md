@@ -127,12 +127,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Test /api/status endpoint"
-    - "Test WebSocket connection to /ws"
-    - "Test simulation start via WebSocket message"
-    - "Test simulation data streaming"
-    - "Test simulation stop functionality"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
