@@ -107,6 +107,111 @@ backend:
         agent: "testing"
         comment: "✅ PASS - HTTP POST /api/stop_simulation endpoint working correctly. Returns status: stopped as expected"
 
+  - task: "Test UtilityFog SimBridge /api/health endpoint"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/api.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "New UtilityFog SimBridge backend on port 8003 needs health check testing"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - Health endpoint working correctly, returns status: healthy, timestamp, and sim_bridge_status fields as expected"
+
+  - task: "Test UtilityFog SimBridge /api/sim/status endpoint"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/api.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "SimBridge simulation status endpoint needs verification"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - Simulation status endpoint working correctly, returns run_id, status, current_step, total_steps, and connected_clients"
+
+  - task: "Test UtilityFog SimBridge /api/sim/start endpoint"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/api.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "SimBridge simulation start endpoint needs testing with proper configuration"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - Simulation start endpoint working correctly, accepts configuration and returns run_id with status: starting"
+
+  - task: "Test UtilityFog SimBridge /api/sim/stop endpoint"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/api.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "SimBridge simulation stop endpoint needs testing"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - Simulation stop endpoint working correctly, returns status: stopped when simulation is running, proper error handling when no simulation"
+
+  - task: "Test UtilityFog SimBridge WebSocket connection"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/ws_server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "SimBridge WebSocket connection with run_id parameter needs testing"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - WebSocket connection working correctly at /ws/ws?run_id=<run_id>, connection confirmation received, ping-pong and subscribe functionality working"
+
+  - task: "Test UtilityFog SimBridge full simulation flow"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/sim_bridge.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "Full simulation flow with exact message schemas needs verification: init_state, tick, event, stats, done"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - Full simulation flow working perfectly! Received 297 messages during simulation with all expected schemas: tick (agent_updates deltas), event (ENTANGLEMENT event_type), stats (population/health), done (completion). SimBridge callbacks verified working correctly."
+
+  - task: "Verify UtilityFog SimBridge integration"
+    implemented: true
+    working: true
+    file: "utilityfog_frontend/backend/sim_bridge.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: "NA"
+        agent: "testing"
+        comment: "SimBridge integration with SimulationRunner callbacks needs verification"
+      - working: true
+        agent: "testing"
+        comment: "✅ PASS - SimBridge integration fully verified: SimulationRunner callbacks working, agent updates tracked as deltas, event emission for entanglements confirmed, real-time WebSocket streaming functional with proper message flow"
+
 frontend:
   - task: "Frontend visualization integration"
     implemented: true
