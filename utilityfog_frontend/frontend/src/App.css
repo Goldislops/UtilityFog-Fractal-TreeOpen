@@ -54,11 +54,12 @@
   width: 350px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px;
+  gap: 20px;
+  padding: 20px;
   background: rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(10px);
   border-left: 1px solid rgba(255, 255, 255, 0.1);
+  overflow-y: auto;
 }
 
 .panel {
