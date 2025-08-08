@@ -7,7 +7,7 @@ import { SimBridgeProvider } from './contexts/SimBridgeContext';
 import Network3D from './components/Network3D';
 import SimulationControls from './components/SimulationControls';
 import StatsDashboard from './components/StatsDashboard';
-import LoadingSpinner from './components/LoadingSpinner';
+import LoadingScreen from './components/LoadingScreen';
 
 import './App.css';
 
