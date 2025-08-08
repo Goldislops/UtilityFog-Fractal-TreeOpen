@@ -7,7 +7,6 @@ import NetworkView2D from './components/NetworkView2D';
 const WS_URL = (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:8003/ws?run_id=dev';
 
 function App() {
-  const [client, setClient] = useState<SimBridgeClient | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'connecting' | 'disconnected'>('disconnected');
   const [lastUpdate, setLastUpdate] = useState<Date>();
   const [messages, setMessages] = useState<SimBridgeMessage[]>([]);
@@ -19,7 +18,6 @@ function App() {
     console.log('🔗 Connecting to:', WS_URL);
     
     const simClient = new SimBridgeClient(WS_URL);
-    setClient(simClient);
 
     // Connection status handlers
     simClient.on('connected', () => {
