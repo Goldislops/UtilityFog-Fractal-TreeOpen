@@ -134,7 +134,14 @@ class SimulationRunner:
         config,
         quantum_logger: Optional[QuantumMyelinLogger] = None,
         simulation_logger: Optional[SimulationLogger] = None,
-        output_dir: str = "simulation_output"
+        output_dir: str = "simulation_output",
+        # SimBridge callbacks
+        on_init=None,
+        on_tick=None,
+        on_event=None,
+        on_stats=None,
+        on_done=None,
+        on_error=None
     ):
         """Initialize the simulation runner with configuration."""
         self.config = config
@@ -143,6 +150,14 @@ class SimulationRunner:
         # Initialize loggers
         self.quantum_logger = quantum_logger or QuantumMyelinLogger()
         self.simulation_logger = simulation_logger or SimulationLogger()
+        
+        # SimBridge callbacks
+        self.on_init = on_init
+        self.on_tick = on_tick
+        self.on_event = on_event
+        self.on_stats = on_stats
+        self.on_done = on_done
+        self.on_error = on_error
         
         # Initialize simulation components
         self.agents: List[FogletAgent] = []
