@@ -2,9 +2,9 @@ import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Text, Line, Sphere, Html } from '@react-three/drei';
 import * as THREE from 'three';
-import { useSimulation } from '../contexts/SimulationContext';
+import { useSimBridge } from '../contexts/SimBridgeContext';
 
-// Agent Node Component
+// Agent Node Component for SimBridge data
 const AgentNode = ({ agent, position, onClick, isSelected }) => {
   const meshRef = useRef();
   const [hovered, setHovered] = useState(false);
@@ -21,9 +21,9 @@ const AgentNode = ({ agent, position, onClick, isSelected }) => {
   
   // Size based on active memes
   const nodeSize = useMemo(() => {
-    const basSize = 2;
+    const baseSize = 2;
     const memeCount = agent.active_memes || 0;
-    return basSize + (memeCount * 0.5);
+    return baseSize + (memeCount * 0.5);
   }, [agent.active_memes]);
   
   // Animation
@@ -88,13 +88,13 @@ const AgentNode = ({ agent, position, onClick, isSelected }) => {
   );
 };
 
-// Entanglement Arc Component
-const EntanglementArc = ({ entanglement, positions }) => {
+// Entanglement Arc Component for SimBridge events
+const EntanglementArc = ({ event, agentPositions }) => {
   const lineRef = useRef();
   const [currentOpacity, setCurrentOpacity] = useState(1.0);
   
-  const sourcePos = positions[entanglement.source];
-  const targetPos = positions[entanglement.target];
+  const sourcePos = agentPositions[event.data.source];
+  const targetPos = agentPositions[event.data.target];
   
   if (!sourcePos || !targetPos) return null;
   
@@ -115,22 +115,26 @@ const EntanglementArc = ({ entanglement, positions }) => {
   
   // Color based on entanglement strength
   const arcColor = useMemo(() => {
-    const strength = entanglement.strength || 0;
+    const strength = event.data.strength || 0;
     if (strength > 0.7) return '#8b5cf6'; // Strong - purple
     if (strength > 0.4) return '#06b6d4'; // Medium - cyan
     return '#10b981'; // Weak - green
-  }, [entanglement.strength]);
+  }, [event.data.strength]);
   
-  // Animate the arc
+  // Animate the arc (fade based on age)
   useFrame((state) => {
     if (lineRef.current && lineRef.current.material) {
+      // Calculate age-based opacity
+      const age = Date.now() - event.timestamp;
+      const maxAge = 5000; // 5 seconds
+      const ageOpacity = Math.max(0, 1 - (age / maxAge));
+      
       // Pulsing effect
       const pulse = Math.sin(state.clock.elapsedTime * 4) * 0.3 + 0.7;
-      const strength = entanglement.strength || 0;
-      const opacity = pulse * strength;
+      const finalOpacity = ageOpacity * pulse;
       
-      lineRef.current.material.opacity = opacity;
-      setCurrentOpacity(opacity);
+      lineRef.current.material.opacity = finalOpacity;
+      setCurrentOpacity(finalOpacity);
     }
   });
   
@@ -146,17 +150,72 @@ const EntanglementArc = ({ entanglement, positions }) => {
   );
 };
 
-// Main Network3D Component
+// Meme Spread Visualization
+const MemeSpreadArc = ({ event, agentPositions }) => {
+  const lineRef = useRef();
+  
+  const sourcePos = agentPositions[event.data.source];
+  const targets = event.data.targets || [];
+  
+  if (!sourcePos || targets.length === 0) return null;
+  
+  // Create arcs to all targets
+  const arcs = targets.map((targetId, index) => {
+    const targetPos = agentPositions[targetId];
+    if (!targetPos) return null;
+    
+    return (
+      <Line
+        key={`meme-${event.id}-${targetId}-${index}`}
+        points={[
+          [sourcePos.x, sourcePos.y, sourcePos.z],
+          [targetPos.x, targetPos.y, targetPos.z]
+        ]}
+        color="#f59e0b"
+        lineWidth={2}
+        transparent
+        opacity={0.6}
+        dashed
+      />
+    );
+  }).filter(Boolean);
+  
+  return <>{arcs}</>;
+};
+
+// Main Network3D Component for SimBridge
 const Network3D = () => {
   const {
-    agents,
-    agentPositions,
+    nodes,
+    edges,
+    currentAgents,
     entanglements,
-    network,
-    isRunning
-  } = useSimulation();
+    memeSpreads,
+    isRunning,
+    currentStep
+  } = useSimBridge();
   
   const [selectedAgent, setSelectedAgent] = useState(null);
+  
+  // Generate 3D positions for agents (fractal pattern)
+  const agentPositions = useMemo(() => {
+    const positions = {};
+    
+    currentAgents.forEach((agent, index) => {
+      // Create fractal spiral pattern
+      const angle = (index * 2.4) % (2 * Math.PI);
+      const level = Math.floor(Math.log(index + 1, 3)) + 1;
+      const radius = level * 30;
+      
+      positions[agent.id] = {
+        x: radius * Math.cos(angle) * Math.cos(index * 0.5),
+        y: radius * Math.sin(angle) * Math.cos(index * 0.5),
+        z: radius * Math.sin(index * 0.5) * 0.3
+      };
+    });
+    
+    return positions;
+  }, [currentAgents]);
   
   // Handle agent selection
   const handleAgentClick = (agent) => {
@@ -174,8 +233,8 @@ const Network3D = () => {
           rotation={[0, 0, 0]}
         />
         
-        {/* Fractal connection lines for network structure */}
-        {network?.edges?.map((edge, index) => {
+        {/* Network connection lines */}
+        {edges.map((edge, index) => {
           const sourcePos = agentPositions[edge.source];
           const targetPos = agentPositions[edge.target];
           
@@ -205,7 +264,7 @@ const Network3D = () => {
       <NetworkGrid />
       
       {/* Agent Nodes */}
-      {agents.map((agent) => {
+      {currentAgents.map((agent) => {
         const position = agentPositions[agent.id];
         if (!position) return null;
         
@@ -221,11 +280,20 @@ const Network3D = () => {
       })}
       
       {/* Entanglement Arcs */}
-      {entanglements.map((entanglement, index) => (
+      {entanglements.map((entanglement) => (
         <EntanglementArc
-          key={`entanglement-${index}-${entanglement.timestamp}`}
-          entanglement={entanglement}
-          positions={agentPositions}
+          key={`entanglement-${entanglement.id}`}
+          event={entanglement}
+          agentPositions={agentPositions}
+        />
+      ))}
+      
+      {/* Meme Spread Arcs */}
+      {memeSpreads.map((memeSpread) => (
+        <MemeSpreadArc
+          key={`meme-${memeSpread.id}`}
+          event={memeSpread}
+          agentPositions={agentPositions}
         />
       ))}
       
@@ -236,7 +304,6 @@ const Network3D = () => {
         color="#667eea"
         anchorX="center"
         anchorY="middle"
-        font="/fonts/Inter-Bold.woff"
       >
         UtilityFog Fractal Network
       </Text>
@@ -250,8 +317,33 @@ const Network3D = () => {
           anchorX="center"
           anchorY="middle"
         >
-          ● SIMULATION ACTIVE
+          ● SIMULATION ACTIVE - Step {currentStep}
         </Text>
+      )}
+      
+      {/* Agent Detail Panel */}
+      {selectedAgent && (
+        <Html position={[60, 40, 0]}>
+          <div className="agent-detail-panel bg-gray-900 p-4 rounded-lg border border-gray-600 text-white text-sm">
+            <h3 className="font-bold text-lg mb-2">Agent Details</h3>
+            <div className="space-y-1">
+              <div><strong>ID:</strong> {selectedAgent.id}</div>
+              <div><strong>Energy:</strong> {(selectedAgent.energy || 0).toFixed(3)}</div>
+              <div><strong>Health:</strong> {(selectedAgent.health || 1).toFixed(3)}</div>
+              <div><strong>Active Memes:</strong> {selectedAgent.active_memes || 0}</div>
+              <div><strong>Type:</strong> {selectedAgent.type || 'agent'}</div>
+              {selectedAgent.role && (
+                <div><strong>Role:</strong> {selectedAgent.role}</div>
+              )}
+            </div>
+            <button 
+              onClick={() => setSelectedAgent(null)}
+              className="mt-3 px-2 py-1 bg-blue-600 rounded text-xs hover:bg-blue-700"
+            >
+              Close
+            </button>
+          </div>
+        </Html>
       )}
     </group>
   );
