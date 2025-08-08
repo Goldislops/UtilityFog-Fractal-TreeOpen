@@ -21,7 +21,7 @@
     "d3-zoom": "^3.0.0",
     "recharts": "^2.8.0",
     "styled-components": "^6.1.1",
-    "use-websocket": "^4.5.0",
+    "react-use-websocket": "^4.5.0",
     "zustand": "^4.4.7",
     "leva": "^0.9.35"
   },
