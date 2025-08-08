@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { InitStateMessage, TickMessage, SimBridgeMessage } from '../ws/SimBridgeClient';
+import { InitStateMessage } from '../ws/SimBridgeClient';
 
 interface NetworkView2DProps {
   initState?: InitStateMessage;
