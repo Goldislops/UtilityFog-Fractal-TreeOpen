@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Text, Line, Sphere, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { useSimBridge } from '../contexts/SimBridgeContext';
 
