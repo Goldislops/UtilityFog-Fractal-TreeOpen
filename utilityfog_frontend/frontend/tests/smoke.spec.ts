@@ -18,7 +18,7 @@ test.describe('UtilityFog SimBridge Smoke Test', () => {
     
     // Check if we get connected (may take a few seconds)
     try {
-      await expect(connectionBadge).toContainText('Connected', { timeout: 15000 });
+      await expect(statusText).toContainText('Connected', { timeout: 15000 });
       console.log('✅ Successfully connected to SimBridge');
       
       // If connected, wait for at least one message in the event feed
