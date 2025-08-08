@@ -24,7 +24,7 @@ const LoadingSpinner = () => {
         {/* Loading Text */}
         <div className="loading-text">
           {!isConnected && <div className="loading-message">Connecting to simulation server...</div>}
-          {isConnected && isRunning && agents.length === 0 && (
+          {isConnected && isRunning && currentAgents.length === 0 && (
             <div className="loading-message">Initializing simulation...</div>
           )}
         </div>
