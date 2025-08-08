@@ -54,7 +54,7 @@ function App() {
                 />
                 
                 {/* Main 3D Network Visualization */}
-                <Network3D />
+                <SimpleNetwork3D />
                 
                 {/* Performance stats (dev mode) */}
                 {process.env.NODE_ENV === 'development' && <Stats />}
