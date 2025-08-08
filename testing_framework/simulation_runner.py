@@ -256,8 +256,13 @@ class SimulationRunner:
             # Phase 1: Initialize components
             self._initialize_simulation()
             
+            # Emit initial state via callback
+            nodes, edges = self._build_initial_network_data()
+            effective_config = self._get_effective_config()
+            self._emit_init_state(nodes, edges, effective_config)
+            
             # Phase 2: Run simulation steps
-            self._run_simulation_steps()
+            self._run_simulation_steps_with_callbacks()
             
             # Phase 3: Collect final metrics
             self._collect_final_metrics()
@@ -268,18 +273,23 @@ class SimulationRunner:
             total_time = time.time() - self.simulation_start_time
             print(f"✨ Simulation completed in {total_time:.2f}s")
             
+            # Emit completion
+            self._emit_done(results)
+            
             return results
             
         except Exception as e:
             error_msg = f"Simulation failed: {str(e)}"
             self.simulation_logger.log_error(error_msg)
+            self._emit_error(error_msg, {"exception": str(e)})
+            
             self.all_logs.append({
                 "timestamp": time.time(),
                 "level": "ERROR", 
-                "message": error_msg,
-                "component": "simulation_runner"
+                "message": error_msg
             })
-            raise
+            
+            raise Exception(error_msg)
     
     def _initialize_simulation(self):
         """Initialize all simulation components."""
