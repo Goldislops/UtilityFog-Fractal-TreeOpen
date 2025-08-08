@@ -215,8 +215,8 @@ class SimBridgeBackendTester:
             test_run_id = self.current_run_id
         
         try:
-            # Connect with run_id parameter
-            ws_url = f"{self.ws_base_url}/ws?run_id={test_run_id}"
+            # Connect with run_id parameter (WebSocket app is mounted at /ws, endpoint is /ws)
+            ws_url = f"{self.ws_base_url}/ws/ws?run_id={test_run_id}"
             self.websocket = await websockets.connect(ws_url)
             
             # Wait for connection confirmation
