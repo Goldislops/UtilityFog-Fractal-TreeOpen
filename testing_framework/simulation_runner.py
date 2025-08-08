@@ -613,7 +613,7 @@ class SimulationRunner:
                         agent_a.energy_level = max(0.0, min(1.0, simple_a.state))
                         agent_b.energy_level = max(0.0, min(1.0, simple_b.state))
                         
-                        # Log the entanglement
+                        # Log the entanglement and emit event
                         self.quantum_logger.log_entanglement(
                             agent_a.agent_id,
                             agent_b.agent_id,
@@ -625,6 +625,17 @@ class SimulationRunner:
                                 "agent_b_state_after": simple_b.state
                             }
                         )
+                        
+                        # Emit ENTANGLEMENT event
+                        self._emit_event("ENTANGLEMENT", {
+                            "source": agent_a.agent_id,
+                            "target": agent_b.agent_id,
+                            "strength": entanglement_strength,
+                            "state_changes": {
+                                "source_energy": simple_a.state,
+                                "target_energy": simple_b.state
+                            }
+                        })
                         
                         entanglement_count += 1
                         
