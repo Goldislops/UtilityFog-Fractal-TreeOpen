@@ -1,6 +1,5 @@
 import React from 'react';
-import { useSimulation } from '../contexts/SimulationContext';
-import { useWebSocket } from '../contexts/WebSocketContext';
+import { useSimBridge } from '../contexts/SimBridgeContext';
 
 const LoadingSpinner = () => {
   const { isRunning, agents } = useSimulation();
