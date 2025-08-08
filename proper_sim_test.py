@@ -128,7 +128,6 @@ async def test_simulation_flow_proper():
                 break
         
         await websocket.close()
-        await sim_task  # Wait for simulation task to complete
         
         print(f"\n📊 Results:")
         print(f"   Messages received: {message_count}")
