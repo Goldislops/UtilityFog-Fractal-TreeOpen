@@ -1,10 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { SimBridgeClient, SimBridgeMessage, InitStateMessage } from './ws/SimBridgeClient';
 import ConnectionBadge from './components/ConnectionBadge';
 import EventFeed from './components/EventFeed';
 import NetworkView2D from './components/NetworkView2D';
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8003/ws?run_id=dev';
+const WS_URL = (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:8003/ws?run_id=dev';
 
 function App() {
   const [client, setClient] = useState<SimBridgeClient | null>(null);
