@@ -4,7 +4,7 @@ import { OrbitControls, Grid, Stats } from '@react-three/drei';
 import { Suspense } from 'react';
 
 import { SimBridgeProvider } from './contexts/SimBridgeContext';
-import Network3D from './components/Network3D';
+import SimpleNetwork3D from './components/SimpleNetwork3D';
 import SimulationControls from './components/SimulationControls';
 import StatsDashboard from './components/StatsDashboard';
 import LoadingScreen from './components/LoadingScreen';
