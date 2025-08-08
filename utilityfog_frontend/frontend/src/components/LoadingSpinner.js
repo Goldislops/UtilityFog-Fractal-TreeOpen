@@ -5,7 +5,7 @@ const LoadingSpinner = () => {
   const { isRunning, currentAgents, isConnected } = useSimBridge();
   
   // Determine loading state
-  const shouldShow = !isConnected || (isRunning && agents.length === 0);
+  const shouldShow = !isConnected || (isRunning && currentAgents.length === 0);
   
   if (!shouldShow) {
     return null;
