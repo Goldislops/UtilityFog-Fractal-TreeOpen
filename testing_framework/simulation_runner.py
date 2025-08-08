@@ -291,6 +291,120 @@ class SimulationRunner:
             
             raise Exception(error_msg)
     
+    def _build_initial_network_data(self) -> Tuple[List[Dict], List[Dict]]:
+        """Build initial network data for SimBridge visualization."""
+        nodes = []
+        edges = []
+        
+        # Build nodes from agents
+        for agent in self.agents:
+            nodes.append({
+                "id": agent.agent_id,
+                "type": "agent",
+                "energy": agent.energy_level,
+                "health": agent.health,
+                "active_memes": len(agent.active_memes),
+                "role": getattr(agent, 'role', 'unknown')
+            })
+        
+        # Build edges from network topology (simplified)
+        if self.network:
+            for agent in self.agents:
+                node = self.network.get_node(agent.agent_id)
+                if hasattr(node, 'children_ids'):
+                    for child_id in node.children_ids:
+                        edges.append({
+                            "source": agent.agent_id,
+                            "target": child_id,
+                            "type": "network_connection"
+                        })
+        
+        return nodes, edges
+    
+    def _get_effective_config(self) -> Dict:
+        """Get effective configuration for SimBridge."""
+        return {
+            "test_name": self.config.test_name,
+            "num_agents": self.config.num_agents,
+            "simulation_steps": self.config.simulation_steps,
+            "network_depth": self.config.network_depth,
+            "branching_factor": self.config.branching_factor,
+            "enable_quantum_myelin": self.config.enable_quantum_myelin
+        }
+    
+    def _run_simulation_steps_with_callbacks(self):
+        """Run the main simulation loop with SimBridge callbacks."""
+        print(f"🎮 Running {self.config.simulation_steps} simulation steps...")
+        
+        for step in range(self.config.simulation_steps):
+            self.current_step = step
+            
+            # Create environment context
+            environment_context = {
+                "step": step,
+                "total_agents": len(self.agents),
+                "total_memes": len(self.meme_pool.memes),
+                "network_stats": self.network.get_network_stats()
+            }
+            
+            # Track agent updates for callbacks
+            agent_updates = []
+            
+            # Update all agents
+            for agent in self.agents:
+                old_energy = agent.energy_level
+                old_health = agent.health
+                old_memes = len(agent.active_memes)
+                
+                try:
+                    agent.update(1.0, environment_context)  # dt = 1.0
+                    
+                    # Track changes for callback
+                    if (agent.energy_level != old_energy or 
+                        agent.health != old_health or 
+                        len(agent.active_memes) != old_memes):
+                        agent_updates.append({
+                            "id": agent.agent_id,
+                            "energy": agent.energy_level,
+                            "health": agent.health,
+                            "active_memes": len(agent.active_memes)
+                        })
+                        
+                except Exception as e:
+                    error_msg = f"Agent {agent.agent_id} update failed: {str(e)}"
+                    self.simulation_logger.log_error(error_msg)
+            
+            # Process quantum myelin interactions if enabled
+            if self.config.enable_quantum_myelin:
+                self._process_quantum_myelin_interactions()
+            
+            # Process meme propagation
+            self._process_meme_propagation()
+            
+            # Emit tick with agent updates
+            if agent_updates:
+                self._emit_tick(agent_updates)
+            
+            # Collect metrics
+            if step % 5 == 0:  # Collect every 5 steps
+                self.metrics_system.collect_all_metrics(time.time())
+                
+                # Emit stats
+                stats = {
+                    "active_agents": len(self.agents),
+                    "total_memes": sum(len(agent.active_memes) for agent in self.agents),
+                    "average_energy": sum(a.energy_level for a in self.agents) / len(self.agents),
+                    "average_health": sum(a.health for a in self.agents) / len(self.agents)
+                }
+                self._emit_stats(stats)
+            
+            # Log progress
+            if step % 10 == 0:
+                active_memes = sum(len(agent.active_memes) for agent in self.agents)
+                print(f"   Step {step}: {len(self.agents)} agents, {active_memes} active memes")
+        
+        print(f"   ✅ Completed {self.config.simulation_steps} simulation steps")
+
     def _initialize_simulation(self):
         """Initialize all simulation components."""
         print("🏗️  Initializing simulation components...")
