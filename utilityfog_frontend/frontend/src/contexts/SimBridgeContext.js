@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useCallback, useReducer } from 'react';
-import useWebSocket, { ReadyState } from 'react-use-websocket';
+import useWebSocketHook, { ReadyState } from 'react-use-websocket';
 
 // SimBridge WebSocket Context for new message schemas
 const SimBridgeContext = createContext();
