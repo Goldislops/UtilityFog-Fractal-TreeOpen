@@ -5,15 +5,26 @@ import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
 import { SimBridgeClient } from './ws/SimBridgeClient'
 
+// WS URL resolution (works local + hosted)
+const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
+
+function computeDefaultWsUrl(): string {
+  // e.g. http://localhost:8003  -> ws://localhost:8003/ws?run_id=dev
+  //      https://XXXX.preview.abacusai.app -> wss://XXXX.preview.abacusai.app/ws?run_id=dev
+  const origin = window.location.origin; // http(s)://host[:port]
+  const wsOrigin = origin.replace(/^http/, 'ws');
+  return `${wsOrigin}/ws?run_id=dev`;
+}
+
+const WS_URL = envUrl && !envUrl.startsWith('ws://https://') ? envUrl : computeDefaultWsUrl();
+
 function App() {
   const [view, setView] = useState<'2d' | '3d'>('3d')
   const [isConnected, setIsConnected] = useState(false)
   const [simClient, setSimClient] = useState<SimBridgeClient | null>(null)
 
   useEffect(() => {
-    const client = new SimBridgeClient(
-      import.meta.env.VITE_WEBSOCKET_URL || 'ws://localhost:8003'
-    )
+    const client = new SimBridgeClient(WS_URL)
     
     client.on('connected', () => setIsConnected(true))
     client.on('disconnected', () => setIsConnected(false))
