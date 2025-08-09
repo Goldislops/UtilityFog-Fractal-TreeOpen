@@ -5,18 +5,20 @@ import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
 import { SimBridgeClient } from './ws/SimBridgeClient'
 
-// WS URL resolution (works local + hosted)
+// Robust WS URL computation
 const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
 
 function computeDefaultWsUrl(): string {
-  // e.g. http://localhost:8003  -> ws://localhost:8003/ws?run_id=dev
-  //      https://XXXX.preview.abacusai.app -> wss://XXXX.preview.abacusai.app/ws?run_id=dev
   const origin = window.location.origin; // http(s)://host[:port]
-  const wsOrigin = origin.replace(/^http/, 'ws');
+  const wsOrigin = origin.startsWith('https')
+    ? origin.replace(/^https/, 'wss')
+    : origin.replace(/^http/, 'ws');
   return `${wsOrigin}/ws?run_id=dev`;
 }
 
-const WS_URL = envUrl && !envUrl.startsWith('ws://https://') ? envUrl : computeDefaultWsUrl();
+const WS_URL = (envUrl && !envUrl.startsWith('ws://https://') && !envUrl.startsWith('wss://http://'))
+  ? envUrl
+  : computeDefaultWsUrl();
 
 function App() {
   const [view, setView] = useState<'2d' | '3d'>('3d')
