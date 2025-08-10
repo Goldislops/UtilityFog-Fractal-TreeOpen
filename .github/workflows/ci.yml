@@ -1,0 +1,11 @@
+name: CI
+on:
+  pull_request:
+  push:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Smoke check
+        run: echo "CI OK"

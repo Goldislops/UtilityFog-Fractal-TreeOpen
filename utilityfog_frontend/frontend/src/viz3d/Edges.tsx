@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Vector3, BufferGeometry, BufferAttribute } from 'three'
+import { BufferGeometry, BufferAttribute } from 'three'
 import { NetworkEdge, NetworkNode } from '../ws/SimBridgeClient'
 
 interface EdgesProps {
