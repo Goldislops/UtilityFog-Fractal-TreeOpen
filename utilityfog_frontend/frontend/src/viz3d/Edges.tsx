@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Vector3, BufferGeometry, Float32Array } from 'three'
+import { BufferGeometry, BufferAttribute } from 'three'
 import { NetworkEdge, NetworkNode } from '../ws/SimBridgeClient'
 
 interface EdgesProps {
@@ -35,8 +35,8 @@ export default function Edges({ edges, nodes }: EdgesProps) {
     })
 
     const geometry = new BufferGeometry()
-    geometry.setAttribute('position', new Float32Array(positions))
-    geometry.setAttribute('color', new Float32Array(colors))
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3))
+    geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3))
 
     return { geometry, colors }
   }, [edges, nodes])
@@ -46,9 +46,9 @@ export default function Edges({ edges, nodes }: EdgesProps) {
   }
 
   return (
-    <line>
+    <lineSegments>
       <primitive object={geometry} />
       <lineBasicMaterial vertexColors transparent opacity={0.6} />
-    </line>
+    </lineSegments>
   )
 }
