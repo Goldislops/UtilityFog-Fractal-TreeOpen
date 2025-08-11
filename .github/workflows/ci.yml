@@ -2,10 +2,63 @@ name: CI
 on:
   pull_request:
   push:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Smoke check
-        run: echo "CI OK"
+
+      - name: Detect Node project
+        id: detect
+        run: |
+          if [ -f package.json ]; then echo "has_node=true" >> $GITHUB_OUTPUT; else echo "has_node=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Setup Node
+        if: steps.detect.outputs.has_node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        if: steps.detect.outputs.has_node == 'true'
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if [ -f tsconfig.json ] || npx --yes tsc -v >/dev/null 2>&1; then
+            npx --yes tsc -noEmit
+          else
+            echo "No TypeScript config found; skipping"
+          fi
+
+      - name: Lint
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if npm run -s | grep -q "^  lint$"; then
+            npm run lint
+          else
+            echo "No lint script; skipping"
+          fi
+
+      - name: Build
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if npm run -s | grep -q "^  build$"; then
+            npm run build
+          else
+            echo "No build script; skipping"
+          fi
+
+      - name: Test
+        if: steps.detect.outputs.has_node == 'true'
+        run: |
+          if npm run -s | grep -q "^  test$"; then
+            npm test --silent -- --ci || npm test --silent
+          else
+            echo "No test script; skipping"
+          fi
