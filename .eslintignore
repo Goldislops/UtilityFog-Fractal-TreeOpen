@@ -1,8 +1,0 @@
-node_modules
-dist
-build
-coverage
-playwright-report
-test-results
-vendor
-*.log
