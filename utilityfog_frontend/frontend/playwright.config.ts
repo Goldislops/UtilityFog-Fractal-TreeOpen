@@ -1,51 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
 
-/**
- * @see https://playwright.dev/docs/test-configuration
- */
 export default defineConfig({
   testDir: './tests',
-  /* Run tests in files in parallel */
-  fullyParallel: true,
-  /* Fail the build on CI if you accidentally left test.only in the source code. */
-  forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
   retries: process.env.CI ? 2 : 0,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
-  /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: 'html',
-  /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
+  fullyParallel: true,
+  reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
   use: {
-    /* Base URL to use in actions like `await page.goto('/')`. */
-    baseURL: 'http://127.0.0.1:5173',
-
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
+    baseURL: 'http://localhost:4173',
     trace: 'on-first-retry',
+    video: 'retain-on-failure',
   },
-
-  /* Configure projects for major browsers */
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-
-    {
-      name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
-    },
-
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
-    },
-  ],
-
-  /* Run your local dev server before starting the tests */
   webServer: {
-    command: 'npm run dev',
-    url: 'http://127.0.0.1:5173',
+    command: 'npm run preview -- --port=4173',
+    cwd: 'utilityfog_frontend/frontend',
+    port: 4173,
     reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
   },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 });
