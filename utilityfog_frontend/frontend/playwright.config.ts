@@ -1,16 +1,24 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test'
+
+const PORT = process.env.PORT || 4173
+
 export default defineConfig({
   testDir: './tests',
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  reporter: [['html', { open: 'never' }]],
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:4173',
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    baseURL: `http://localhost:${PORT}`,
+    headless: true,
+    trace: 'on-first-retry',
   },
   webServer: {
-    command: 'npm run preview -- --port=4173',
-    url: 'http://localhost:4173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 60000
-  }
-});
+    command: 'npm run preview -- --port ' + PORT,
+    url: `http://localhost:${PORT}/`,
+    reuseExistingServer: true,
+    timeout: 120_000
+  },
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } }
+  ]
+})
