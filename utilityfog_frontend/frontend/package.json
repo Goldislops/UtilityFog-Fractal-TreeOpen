@@ -3,12 +3,16 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "preview": "vite preview",
-    "test": "playwright test"
+    "scripts": {
+  "dev": "vite",
+  "build": "tsc && vite build",
+  "preview": "vite preview --port 4173",
+  "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+  "test:ui": "playwright test",
+  "test:ui:headed": "playwright test --headed",
+  "test:ui:report": "npx playwright show-report"
+},
+
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -31,6 +35,7 @@
     "eslint-plugin-react-refresh": "^0.4.5",
     "typescript": "^5.2.2",
     "vite": "^5.0.8",
-    "@playwright/test": "^1.40.0"
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.11.0"
   }
 }
