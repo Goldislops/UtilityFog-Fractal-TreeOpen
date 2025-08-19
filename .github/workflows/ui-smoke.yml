@@ -1,29 +1,45 @@
 name: UI Smoke Tests
+
 on:
+  push:
+    branches: [ main, develop ]
+    paths: [ 'utilityfog_frontend/frontend/**' ]
   pull_request:
+    branches: [ main ]
+    paths: [ 'utilityfog_frontend/frontend/**' ]
+
 jobs:
   ui-smoke:
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: utilityfog_frontend/frontend
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Node
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
       - name: Install dependencies
         run: npm install
-      - name: Install Playwright Browsers
+
+      - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      - name: Build app
-        run: npm run build
-      - name: Run Playwright tests (uses webServer in config)
-        run: npx playwright test
-      - uses: actions/upload-artifact@v4
+
+      # No build step when using Vite dev server
+
+      - name: Run smoke tests
+        run: npm run test:ui
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playwright-report
           path: utilityfog_frontend/frontend/playwright-report/
-          retention-days: 30
+          retention-days: 7
