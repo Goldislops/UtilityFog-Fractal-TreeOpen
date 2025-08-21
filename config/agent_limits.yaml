@@ -1,0 +1,13 @@
+ttl: 3
+max_children: 5
+max_concurrency: 2
+rate_limit_per_minute: 30
+
+allow_domains:
+  - github.com
+  - api.github.com
+
+intents_allowlist:
+  - creative
+  - cooperative
+  - insightful
