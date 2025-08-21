@@ -1,0 +1,60 @@
+name: Agent Safety Suite
+on:
+  pull_request: { branches: [ main ] }
+  push:
+    branches: [ main ]
+    paths:
+      - 'policy/**'
+      - 'config/**'
+      - 'scripts/**'
+      - 'docs/agent-safety*'
+      - '.github/workflows/agent-safety.yml'
+
+jobs:
+  agent-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install js-yaml (YAML validation)
+        run: npm i -g js-yaml
+
+      - name: Validate YAML config
+        run: js-yaml config/agent_limits.yaml
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.57.0/opa_linux_amd64_static
+          chmod +x opa
+
+      - name: Static analysis (rego)
+        run: ./opa check policy/
+
+      - name: Create fixtures
+        run: |
+          mkdir -p fixtures
+          cat > fixtures/allow.json <<'EOF'
+          {"pause_before_propagate": true, "intent": "creative", "domain": "github.com",
+           "ttl": 1, "children": 0, "concurrency": 1, "rate": 10}
+          EOF
+          cat > fixtures/deny_intent.json <<'EOF'
+          {"pause_before_propagate": true, "intent": "malicious", "domain": "github.com",
+           "ttl": 1, "children": 0, "concurrency": 1, "rate": 10}
+          EOF
+          cat > fixtures/deny_limits.json <<'EOF'
+          {"pause_before_propagate": true, "intent": "creative", "domain": "github.com",
+           "ttl": 10, "children": 10, "concurrency": 5, "rate": 100}
+          EOF
+
+      - name: Policy checks
+        run: |
+          ./opa eval -d policy/agent_safety.rego -i fixtures/allow.json "data.agent.safety.allow" | grep true
+          ./opa eval -d policy/agent_safety.rego -i fixtures/deny_intent.json "data.agent.safety.allow" | grep false
+          ./opa eval -d policy/agent_safety.rego -i fixtures/deny_limits.json "data.agent.safety.allow" | grep false
+          echo "✅ OPA policy checks passed."
+
+      - name: Kill switch dry-run
+        run: |
+          chmod +x scripts/agent_kill_switch.sh
+          ./scripts/agent_kill_switch.sh --dry-run
