@@ -1,0 +1,9 @@
+{
+  "pause_before_propagate": true,
+  "intent": "creative",
+  "domain": "github.com",
+  "ttl": 1,
+  "children": 6,
+  "concurrency": 3,
+  "rate": 10
+}
