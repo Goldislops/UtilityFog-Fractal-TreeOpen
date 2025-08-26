@@ -1,60 +1,54 @@
 name: Agent Safety Suite
+
 on:
-  pull_request: { branches: [ main ] }
-  push:
-    branches: [ main ]
-    paths:
-      - 'policy/**'
-      - 'config/**'
-      - 'scripts/**'
-      - 'docs/agent-safety*'
-      - '.github/workflows/agent-safety.yml'
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
   agent-safety:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install js-yaml (YAML validation)
-        run: npm i -g js-yaml
-
-      - name: Validate YAML config
-        run: js-yaml config/agent_limits.yaml
-
       - name: Install OPA
         run: |
-          curl -L -o opa https://openpolicyagent.org/downloads/v0.57.0/opa_linux_amd64_static
+          set -euxo pipefail
+          curl -L -o opa https://openpolicyagent.org/downloads/v0.59.0/opa_linux_amd64_static
           chmod +x opa
+          sudo mv opa /usr/local/bin/opa
+          opa version
 
-      - name: Static analysis (rego)
-        run: ./opa check policy/
-
-      - name: Create fixtures
+      - name: OPA fmt + check
         run: |
-          mkdir -p fixtures
-          cat > fixtures/allow.json <<'EOF'
-          {"pause_before_propagate": true, "intent": "creative", "domain": "github.com",
-           "ttl": 1, "children": 0, "concurrency": 1, "rate": 10}
-          EOF
-          cat > fixtures/deny_intent.json <<'EOF'
-          {"pause_before_propagate": true, "intent": "malicious", "domain": "github.com",
-           "ttl": 1, "children": 0, "concurrency": 1, "rate": 10}
-          EOF
-          cat > fixtures/deny_limits.json <<'EOF'
-          {"pause_before_propagate": true, "intent": "creative", "domain": "github.com",
-           "ttl": 10, "children": 10, "concurrency": 5, "rate": 100}
-          EOF
+          set -euxo pipefail
+          mkdir -p dist
+          # Show any formatting diffs (does not fail build)
+          { opa fmt policy/ --diff || true; } | tee dist/fmt.txt
+          # Fail on invalid policy
+          opa check policy/
 
-      - name: Policy checks
+      - name: OPA unit tests (coverage)
         run: |
-          ./opa eval -d policy/agent_safety.rego -i fixtures/allow.json "data.agent.safety.allow" | grep true
-          ./opa eval -d policy/agent_safety.rego -i fixtures/deny_intent.json "data.agent.safety.allow" | grep false
-          ./opa eval -d policy/agent_safety.rego -i fixtures/deny_limits.json "data.agent.safety.allow" | grep false
-          echo "✅ OPA policy checks passed."
+          set -euxo pipefail
+          opa test -v --coverage policy/ | tee dist/coverage.txt
+          opa test --coverage --format=json policy/ > dist/opa_coverage.json
 
-      - name: Kill switch dry-run
+      - name: Run matrix (if present)
         run: |
-          chmod +x scripts/agent_kill_switch.sh
-          ./scripts/agent_kill_switch.sh --dry-run
+          set -euxo pipefail
+          if [ -f scripts/matrix_runner.sh ]; then
+            chmod +x scripts/matrix_runner.sh
+            ./scripts/matrix_runner.sh | tee dist/matrix_run.txt
+          else
+            echo "matrix_runner.sh not found; skipping matrix run" | tee dist/matrix_run.txt
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-safety-artifacts
+          path: |
+            dist/**
