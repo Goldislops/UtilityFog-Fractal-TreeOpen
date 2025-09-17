@@ -1,0 +1,69 @@
+--- a/agent_safety.rego
++++ b/agent_safety.rego
+@@ -1,6 +1,4 @@
+-package agent_safety
+-
+-import rego.v1
+-
+ package agent_safety
+ 
+ # Agent Safety Policy for UtilityFog-Fractal-TreeOpen
+@@ -25,7 +23,7 @@ allow := false {
+ 
+ # Check if request contains suspicious patterns
+ contains_suspicious_patterns(request) {
+-    some pattern in suspicious_patterns
++    some pattern
++    pattern in suspicious_patterns
+     contains(lower(request), pattern)
+ }
+ 
+@@ -33,7 +31,7 @@ contains_suspicious_patterns(request) {
+ contains_encoded_content(request) {
+     # Check for base64-like patterns (4+ chars, alphanumeric + / + =)
+     regex.match(`[A-Za-z0-9+/]{4,}={0,2}`, request)
+-    some keyword in ["eval", "exec", "system", "shell"]
++    some keyword
++    keyword in ["eval", "exec", "system", "shell"]
+     contains(lower(request), keyword)
+ }
+ 
+@@ -41,7 +39,7 @@ contains_encoded_content(request) {
+ contains_injection_attempts(request) {
+     lower_request := lower(request)
+     
+-    some pattern in injection_patterns
++    some pattern
++    pattern in injection_patterns
+     contains(lower_request, pattern)
+ }
+ 
+@@ -49,7 +47,7 @@ contains_injection_attempts(request) {
+ contains_privilege_escalation(request) {
+     lower_request := lower(request)
+     
+-    some pattern in privilege_escalation_patterns
++    some pattern
++    pattern in privilege_escalation_patterns
+     contains(lower_request, pattern)
+ }
+ 
+@@ -57,7 +55,7 @@ contains_privilege_escalation(request) {
+ contains_data_exfiltration(request) {
+     lower_request := lower(request)
+     
+-    some pattern in data_exfiltration_patterns
++    some pattern
++    pattern in data_exfiltration_patterns
+     contains(lower_request, pattern)
+ }
+ 
+@@ -65,7 +63,7 @@ contains_data_exfiltration(request) {
+ contains_system_manipulation(request) {
+     lower_request := lower(request)
+     
+-    some pattern in system_manipulation_patterns
++    some pattern
++    pattern in system_manipulation_patterns
+     contains(lower_request, pattern)
+ }
