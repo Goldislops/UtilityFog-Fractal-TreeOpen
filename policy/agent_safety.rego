@@ -17,6 +17,8 @@ allow {
   input.intent in wholesome_intents
   input.domain in safe_domains
   within_limits
+  ttl_guard
+  not encoded_payload_detected
 }
 
 within_limits {
@@ -24,6 +26,46 @@ within_limits {
   input.children   <= limits.max_children
   input.concurrency <= limits.max_concurrency
   input.rate       <= limits.rate_limit_per_minute
+}
+
+# TTL must be greater than 0
+ttl_guard {
+  input.ttl > 0
+}
+
+# Encoded payload detection (behind feature flag)
+encoded_payload_detected {
+  data.agent_limits.enforce_encoded_payload == true
+  input.payload
+  is_encoded_payload(input.payload)
+}
+
+# Check if payload contains encoded content
+is_encoded_payload(payload) {
+  is_base64_like(payload)
+}
+
+is_encoded_payload(payload) {
+  is_url_encoded(payload)
+}
+
+is_encoded_payload(payload) {
+  is_data_uri(payload)
+}
+
+# Base64 detection: 4+ chars, alphanumeric + / + =
+is_base64_like(payload) {
+  regex.match(`^[A-Za-z0-9+/]{4,}={0,2}$`, payload)
+}
+
+# URL encoding detection: contains %XX patterns
+is_url_encoded(payload) {
+  regex.match(`%[0-9A-Fa-f]{2}`, payload)
+}
+
+# Data URI detection: starts with data:
+is_data_uri(payload) {
+  startswith(payload, "data:")
 }
 
 # Happy-path allow (baseline within limits)
