@@ -25,8 +25,6 @@ within_limits {
   input.concurrency <= limits.max_concurrency
   input.rate       <= limits.rate_limit_per_minute
 }
-package agent.safety
-import rego.v1
 
 # Happy-path allow (baseline within limits)
 test_allow_creative_github_within_limits {
