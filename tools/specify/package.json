@@ -1,0 +1,58 @@
+{
+  "name": "@utilityfog/design-tokens",
+  "version": "1.0.0",
+  "description": "Design tokens tooling for UtilityFog-Fractal-TreeOpen project",
+  "main": "scripts/index.js",
+  "scripts": {
+    "tokens:fetch": "node scripts/fetch-tokens.js",
+    "tokens:transform": "node scripts/transform-tokens.js",
+    "tokens:validate": "node scripts/validate-tokens.js",
+    "tokens:publish": "node scripts/publish-tokens.js",
+    "tokens:build": "npm run tokens:fetch && npm run tokens:transform && npm run tokens:validate && npm run tokens:publish",
+    "tokens:build:safe": "npm run tokens:fetch && npm run tokens:transform && npm run tokens:validate",
+    "tokens:watch": "nodemon --watch config --exec 'npm run tokens:build:safe'",
+    "tokens:clean": "rm -rf output/* backups/*",
+    "tokens:backup": "node -e \"require('./scripts/publish-tokens.js').createBackups()\"",
+    "test": "node scripts/validate-tokens.js",
+    "lint": "echo 'Linting design token files...' && node -c scripts/*.js config/*.js",
+    "docs": "echo 'Generating token documentation...' && node scripts/generate-docs.js"
+  },
+  "keywords": [
+    "design-tokens",
+    "specify",
+    "css",
+    "scss",
+    "javascript",
+    "design-system",
+    "theming"
+  ],
+  "author": "UtilityFog Team",
+  "license": "MIT",
+  "dependencies": {
+    "handlebars": "^4.7.8"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen.git",
+    "directory": "tools/specify"
+  },
+  "bugs": {
+    "url": "https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues"
+  },
+  "homepage": "https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen#readme",
+  "files": [
+    "scripts/",
+    "config/",
+    "templates/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
