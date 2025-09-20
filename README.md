@@ -1,5 +1,11 @@
 # UtilityFog-Fractal-TreeOpen
 
+[![Policy Check](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ci.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ci.yml)
+[![Specify Design Tokens](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/specify-ci.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/specify-ci.yml)
+[![Agent Safety](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/agent-safety.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/agent-safety.yml)
+[![UI Smoke Tests](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ui-smoke.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ui-smoke.yml)
+
+
 A visionary framework to explore AI-embodied nanotechnology through utility fog, fractal tree embodiment, and programmable matter — combining evolutionary algorithms, distributed computing, and gamification for future machine intelligence design.
 
 ## Mission
