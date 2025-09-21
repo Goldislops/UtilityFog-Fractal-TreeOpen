@@ -104,7 +104,9 @@ class FailureInjector:
             # Check if rule applies to this message
             if rule.target_pattern:
                 import re
-                if not re.search(rule.target_pattern, str(message)):
+                # Search in message string representation and payload
+                message_text = str(message) + " " + str(message.payload)
+                if not re.search(rule.target_pattern, message_text):
                     continue
                     
             # Check probability

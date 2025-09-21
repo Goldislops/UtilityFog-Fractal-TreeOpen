@@ -166,7 +166,7 @@ class DeliveryTracker:
         
         for tracking_id, record in self.records.items():
             age = current_time - record.created_at
-            if age > max_age and record.status in [DeliveryStatus.DELIVERED, DeliveryStatus.FAILED]:
+            if age > max_age and record.status in [DeliveryStatus.DELIVERED, DeliveryStatus.FAILED, DeliveryStatus.EXPIRED]:
                 expired_ids.append(tracking_id)
                 
         for tracking_id in expired_ids:
@@ -186,6 +186,7 @@ class DeliveryTracker:
         )
         
         excess_count = len(self.records) - self.max_records + 100  # Remove extra for buffer
+        excess_count = min(excess_count, len(sorted_records))  # Don't exceed available records
         for i in range(excess_count):
             tracking_id, _ = sorted_records[i]
             del self.records[tracking_id]

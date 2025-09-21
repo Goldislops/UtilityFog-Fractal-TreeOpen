@@ -60,7 +60,8 @@ class ReliableMessageRouter(MessageRouter):
             max_queue_size: Maximum size of message queues.
             default_retry_policy: Default retry policy for messages.
         """
-        super().__init__(node, max_queue_size)
+        super().__init__(node)
+        self.max_queue_size = max_queue_size
         
         # Reliability configuration
         self.default_retry_policy = default_retry_policy or RetryPolicy()
