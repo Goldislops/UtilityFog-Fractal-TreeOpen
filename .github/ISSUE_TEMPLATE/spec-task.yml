@@ -1,0 +1,137 @@
+
+name: 📋 Spec Task
+description: Create a task issue linked to SpecKit specifications
+title: "[TASK-ID] Brief task description"
+labels: ["task", "planning"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## SpecKit Task Issue
+        
+        This template creates structured task issues that link directly to our specification-driven development workflow.
+        
+        **Before creating this issue:**
+        1. Ensure the task exists in the appropriate `tasks.*.md` file
+        2. Copy the exact Task ID from the specification
+        3. Reference the related specification documents
+
+  - type: input
+    id: task_id
+    attributes:
+      label: Task ID
+      description: Exact Task ID from the specification (e.g., FT-001, UI-042)
+      placeholder: "FT-001"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: specification
+    attributes:
+      label: Related Specification
+      description: Which specification does this task belong to?
+      options:
+        - fractal-tree-mvp
+        - utility-fog-core
+        - agent-coordination
+        - visualization-system
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Task priority from specification
+      options:
+        - P0 (Critical)
+        - P1 (High)
+        - P2 (Medium)
+        - P3 (Low)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort Estimate
+      description: Effort estimate from specification
+      options:
+        - S (1-2 days)
+        - M (3-5 days)
+        - L (1-2 weeks)
+        - XL (2-3 weeks)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Task Description
+      description: Detailed description from the specification
+      placeholder: "Copy the task description from the specification document..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Specific, testable conditions for task completion
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+        - [ ] Criterion 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Other tasks that must be completed first
+      placeholder: "List Task IDs that this task depends on (e.g., FT-001, FT-002)"
+
+  - type: textarea
+    id: technical_notes
+    attributes:
+      label: Technical Notes
+      description: Implementation hints, constraints, or technical considerations
+      placeholder: "Any technical details, constraints, or implementation notes..."
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-Implementation Checklist
+      description: Verify these items before starting implementation
+      options:
+        - label: Task exists in specification document
+          required: true
+        - label: Dependencies are clearly identified
+          required: true
+        - label: Acceptance criteria are testable
+          required: true
+        - label: Technical approach is understood
+          required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ## 📚 Related Documents
+        
+        - [SpecKit Framework](../specs/SPEC_README.md)
+        - [Specifications](../specs/)
+        - [Implementation Plans](../specs/plan.*.md)
+        - [Task Breakdowns](../specs/tasks.*.md)
+        
+        ## 🔗 Linking PRs
+        
+        When creating PRs for this task, include the Task ID in your commit messages:
+        ```
+        feat(task-id): implement feature X
+        
+        Implements Task ID: FT-001
+        Spec: fractal-tree-mvp
+        ```
+
