@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/VISUALIZATION/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>CLI Visualization System Documentation - UtilityFog Fractal TreeOpen</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "CLI Visualization System Documentation";
+        var mkdocs_page_input_path = "VISUALIZATION.md";
+        var mkdocs_page_url = "/UtilityFog-Fractal-TreeOpen/VISUALIZATION/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UtilityFog Fractal TreeOpen
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UtilityFog Fractal TreeOpen</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">CLI Visualization System Documentation</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="cli-visualization-system-documentation">CLI Visualization System Documentation<a class="headerlink" href="#cli-visualization-system-documentation" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>The UtilityFog CLI Visualization system provides comprehensive command-line tools for visualizing fractal tree structures, message flows, and state transitions. It supports multiple rendering modes, interactive visualization, and export to various formats including HTML, SVG, and JSON.</p>
+<h2 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h2>
+<h3 id="core-components">Core Components<a class="headerlink" href="#core-components" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Data Models</strong>: TreeNode, MessageFlow, StateTransition, VisualizationData</li>
+<li><strong>Renderers</strong>: TreeRenderer, FlowRenderer, StateRenderer, InteractiveRenderer</li>
+<li><strong>Exporters</strong>: HTMLExporter, SVGExporter, TextExporter, JSONExporter</li>
+<li><strong>CLI Interface</strong>: VisualizationCLI with command-line argument parsing</li>
+</ol>
+<h3 id="key-features">Key Features<a class="headerlink" href="#key-features" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Multiple Visualization Types</strong>: Tree structure, message flows, state transitions</li>
+<li><strong>Interactive Mode</strong>: Real-time visualization with keyboard navigation</li>
+<li><strong>Export Formats</strong>: HTML reports, SVG diagrams, plain text, JSON data</li>
+<li><strong>Customizable Display</strong>: Color schemes, dimensions, time windows</li>
+<li><strong>Demo Data Generation</strong>: Built-in sample data generator for testing</li>
+</ul>
+<h2 id="usage">Usage<a class="headerlink" href="#usage" title="Permanent link">&para;</a></h2>
+<h3 id="installation">Installation<a class="headerlink" href="#installation" title="Permanent link">&para;</a></h3>
+<p>The CLI visualization system is part of the UtilityFog frontend package:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Install dependencies</span>
+pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+
+<span class="c1"># Run from the project root</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>--help
+</code></pre></div>
+
+<h3 id="basic-commands">Basic Commands<a class="headerlink" href="#basic-commands" title="Permanent link">&para;</a></h3>
+<h4 id="tree-structure-visualization">Tree Structure Visualization<a class="headerlink" href="#tree-structure-visualization" title="Permanent link">&para;</a></h4>
+<p>Display the hierarchical structure of nodes:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Basic tree view</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>tree<span class="w"> </span>--input<span class="w"> </span>data.json
+
+<span class="c1"># Customized tree view</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>tree<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--width<span class="w"> </span><span class="m">120</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--height<span class="w"> </span><span class="m">40</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--color-scheme<span class="w"> </span>dark<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--show-ids
+</code></pre></div>
+
+<h4 id="message-flow-visualization">Message Flow Visualization<a class="headerlink" href="#message-flow-visualization" title="Permanent link">&para;</a></h4>
+<p>Display message flows between nodes:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Basic flow view</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>flow<span class="w"> </span>--input<span class="w"> </span>data.json
+
+<span class="c1"># Flow view with time window</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>flow<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--time-window<span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--color-scheme<span class="w"> </span>colorblind
+</code></pre></div>
+
+<h4 id="state-transition-visualization">State Transition Visualization<a class="headerlink" href="#state-transition-visualization" title="Permanent link">&para;</a></h4>
+<p>Display state changes over time:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Basic state view</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>state<span class="w"> </span>--input<span class="w"> </span>data.json
+
+<span class="c1"># State view with extended time window</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>state<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--time-window<span class="w"> </span><span class="m">600</span>
+</code></pre></div>
+
+<h4 id="interactive-mode">Interactive Mode<a class="headerlink" href="#interactive-mode" title="Permanent link">&para;</a></h4>
+<p>Real-time visualization with keyboard controls:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Interactive mode</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>interactive<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--refresh-rate<span class="w"> </span><span class="m">2</span>.0
+
+<span class="c1"># Controls:</span>
+<span class="c1"># [t] - Switch to tree view</span>
+<span class="c1"># [f] - Switch to flow view  </span>
+<span class="c1"># [s] - Switch to state view</span>
+<span class="c1"># [r] - Refresh data</span>
+<span class="c1"># [q] - Quit</span>
+</code></pre></div>
+
+<h3 id="export-functionality">Export Functionality<a class="headerlink" href="#export-functionality" title="Permanent link">&para;</a></h3>
+<h4 id="html-report-export">HTML Report Export<a class="headerlink" href="#html-report-export" title="Permanent link">&para;</a></h4>
+<p>Generate interactive HTML reports:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Basic HTML export</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>report.html<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--format<span class="w"> </span>html
+</code></pre></div>
+
+<p>The HTML export includes:
+- Interactive tabbed interface
+- Tree structure with expandable nodes
+- Message flow timeline
+- State transition history
+- Statistics dashboard
+- Responsive design with CSS styling</p>
+<h4 id="svg-diagram-export">SVG Diagram Export<a class="headerlink" href="#svg-diagram-export" title="Permanent link">&para;</a></h4>
+<p>Generate scalable vector graphics:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># SVG export with custom dimensions</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>diagram.svg<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--format<span class="w"> </span>svg<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--width<span class="w"> </span><span class="m">1200</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--height<span class="w"> </span><span class="m">800</span>
+</code></pre></div>
+
+<h4 id="text-report-export">Text Report Export<a class="headerlink" href="#text-report-export" title="Permanent link">&para;</a></h4>
+<p>Generate plain text reports:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Text export</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>report.txt<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--format<span class="w"> </span>text
+</code></pre></div>
+
+<h4 id="json-data-export">JSON Data Export<a class="headerlink" href="#json-data-export" title="Permanent link">&para;</a></h4>
+<p>Export processed visualization data:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># JSON export</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--input<span class="w"> </span>data.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>processed.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--format<span class="w"> </span>json
+</code></pre></div>
+
+<h3 id="demo-data-generation">Demo Data Generation<a class="headerlink" href="#demo-data-generation" title="Permanent link">&para;</a></h3>
+<p>Generate sample data for testing:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Generate demo data</span>
+python<span class="w"> </span>-m<span class="w"> </span>utilityfog_frontend.cli_viz<span class="w"> </span>demo<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--nodes<span class="w"> </span><span class="m">20</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--messages<span class="w"> </span><span class="m">50</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--transitions<span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>demo_data.json
+</code></pre></div>
+
+<h2 id="data-format">Data Format<a class="headerlink" href="#data-format" title="Permanent link">&para;</a></h2>
+<h3 id="input-json-structure">Input JSON Structure<a class="headerlink" href="#input-json-structure" title="Permanent link">&para;</a></h3>
+<p>The visualization system expects JSON data in the following format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632150000.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;nodes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;node_001&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;node_001&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Root Node&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;active&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;parent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;children&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;node_002&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;node_003&quot;</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mi">400</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;cpu_usage&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">45.2</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;memory_mb&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">512</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;last_updated&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632149900.0</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;messages&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;msg_001&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;source_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;node_001&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;target_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;node_002&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;message_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;coordination&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;content&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;heartbeat&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632149950.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;delivered&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;size_bytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">256</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;transitions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;node_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;node_002&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;from_state&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;inactive&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;to_state&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;active&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632149900.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;trigger&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;heartbeat&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;duration_ms&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">150</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;source&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;simulation&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="node-states">Node States<a class="headerlink" href="#node-states" title="Permanent link">&para;</a></h3>
+<p>Supported node states:
+- <code>active</code>: Node is operational and processing
+- <code>inactive</code>: Node is idle or offline
+- <code>processing</code>: Node is actively processing tasks
+- <code>error</code>: Node has encountered an error
+- <code>unknown</code>: Node state is undetermined</p>
+<h3 id="message-types">Message Types<a class="headerlink" href="#message-types" title="Permanent link">&para;</a></h3>
+<p>Supported message types:
+- <code>coordination</code>: Coordination protocol messages
+- <code>data</code>: Data transfer messages
+- <code>heartbeat</code>: Health check messages
+- <code>error</code>: Error notification messages
+- <code>control</code>: Control and command messages</p>
+<h2 id="rendering-options">Rendering Options<a class="headerlink" href="#rendering-options" title="Permanent link">&para;</a></h2>
+<h3 id="color-schemes">Color Schemes<a class="headerlink" href="#color-schemes" title="Permanent link">&para;</a></h3>
+<h4 id="default-scheme">Default Scheme<a class="headerlink" href="#default-scheme" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Active: Green</li>
+<li>Inactive: Gray</li>
+<li>Processing: Yellow</li>
+<li>Error: Red</li>
+<li>Unknown: Blue</li>
+</ul>
+<h4 id="dark-scheme">Dark Scheme<a class="headerlink" href="#dark-scheme" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Optimized for dark terminals</li>
+<li>High contrast colors</li>
+<li>Bright accent colors</li>
+</ul>
+<h4 id="colorblind-scheme">Colorblind Scheme<a class="headerlink" href="#colorblind-scheme" title="Permanent link">&para;</a></h4>
+<ul>
+<li>Colorblind-friendly palette</li>
+<li>Distinct patterns and symbols</li>
+<li>Accessible color combinations</li>
+</ul>
+<h3 id="display-customization">Display Customization<a class="headerlink" href="#display-customization" title="Permanent link">&para;</a></h3>
+<h4 id="tree-renderer-options">Tree Renderer Options<a class="headerlink" href="#tree-renderer-options" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>width</code>: Display width in characters (default: 80)</li>
+<li><code>height</code>: Display height in lines (default: 24)</li>
+<li><code>show_ids</code>: Show node IDs alongside names</li>
+<li><code>color_scheme</code>: Color scheme selection</li>
+</ul>
+<h4 id="flow-renderer-options">Flow Renderer Options<a class="headerlink" href="#flow-renderer-options" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>time_window</code>: Time window for message display (seconds)</li>
+<li>Message status indicators</li>
+<li>Flow direction arrows</li>
+<li>Timestamp information</li>
+</ul>
+<h4 id="state-renderer-options">State Renderer Options<a class="headerlink" href="#state-renderer-options" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>time_window</code>: Time window for transition display (seconds)</li>
+<li>State change indicators</li>
+<li>Transition triggers</li>
+<li>Duration information</li>
+</ul>
+<h2 id="integration">Integration<a class="headerlink" href="#integration" title="Permanent link">&para;</a></h2>
+<h3 id="system-integration">System Integration<a class="headerlink" href="#system-integration" title="Permanent link">&para;</a></h3>
+<p>The CLI visualization system integrates with other UtilityFog components:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.cli_viz</span><span class="w"> </span><span class="kn">import</span> <span class="n">VisualizationData</span><span class="p">,</span> <span class="n">TreeNode</span><span class="p">,</span> <span class="n">MessageFlow</span>
+
+<span class="c1"># Create visualization data</span>
+<span class="n">viz_data</span> <span class="o">=</span> <span class="n">VisualizationData</span><span class="p">()</span>
+
+<span class="c1"># Add nodes from coordination system</span>
+<span class="k">for</span> <span class="n">node_id</span><span class="p">,</span> <span class="n">node_info</span> <span class="ow">in</span> <span class="n">coordination_system</span><span class="o">.</span><span class="n">get_nodes</span><span class="p">():</span>
+    <span class="n">tree_node</span> <span class="o">=</span> <span class="n">TreeNode</span><span class="p">(</span>
+        <span class="nb">id</span><span class="o">=</span><span class="n">node_id</span><span class="p">,</span>
+        <span class="n">name</span><span class="o">=</span><span class="n">node_info</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+        <span class="n">state</span><span class="o">=</span><span class="n">NodeState</span><span class="p">(</span><span class="n">node_info</span><span class="o">.</span><span class="n">status</span><span class="p">),</span>
+        <span class="n">metadata</span><span class="o">=</span><span class="n">node_info</span><span class="o">.</span><span class="n">metrics</span>
+    <span class="p">)</span>
+    <span class="n">viz_data</span><span class="o">.</span><span class="n">add_node</span><span class="p">(</span><span class="n">tree_node</span><span class="p">)</span>
+
+<span class="c1"># Add messages from messaging system</span>
+<span class="k">for</span> <span class="n">message</span> <span class="ow">in</span> <span class="n">messaging_system</span><span class="o">.</span><span class="n">get_recent_messages</span><span class="p">():</span>
+    <span class="n">flow</span> <span class="o">=</span> <span class="n">MessageFlow</span><span class="p">(</span>
+        <span class="nb">id</span><span class="o">=</span><span class="n">message</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+        <span class="n">source_id</span><span class="o">=</span><span class="n">message</span><span class="o">.</span><span class="n">sender</span><span class="p">,</span>
+        <span class="n">target_id</span><span class="o">=</span><span class="n">message</span><span class="o">.</span><span class="n">receiver</span><span class="p">,</span>
+        <span class="n">message_type</span><span class="o">=</span><span class="n">MessageType</span><span class="p">(</span><span class="n">message</span><span class="o">.</span><span class="n">type</span><span class="p">),</span>
+        <span class="n">content</span><span class="o">=</span><span class="n">message</span><span class="o">.</span><span class="n">payload</span>
+    <span class="p">)</span>
+    <span class="n">viz_data</span><span class="o">.</span><span class="n">add_message</span><span class="p">(</span><span class="n">flow</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="telemetry-integration">Telemetry Integration<a class="headerlink" href="#telemetry-integration" title="Permanent link">&para;</a></h3>
+<p>Integration with the telemetry system (FT-008):</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry</span><span class="w"> </span><span class="kn">import</span> <span class="n">TelemetryCollector</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.cli_viz</span><span class="w"> </span><span class="kn">import</span> <span class="n">VisualizationData</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">create_viz_from_telemetry</span><span class="p">(</span><span class="n">collector</span><span class="p">:</span> <span class="n">TelemetryCollector</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">VisualizationData</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Create visualization data from telemetry collector.&quot;&quot;&quot;</span>
+    <span class="n">viz_data</span> <span class="o">=</span> <span class="n">VisualizationData</span><span class="p">()</span>
+
+    <span class="c1"># Extract node information from metrics</span>
+    <span class="n">snapshot</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">get_snapshot</span><span class="p">()</span>
+
+    <span class="c1"># Convert telemetry events to visualization events</span>
+    <span class="k">for</span> <span class="n">event</span> <span class="ow">in</span> <span class="n">collector</span><span class="o">.</span><span class="n">get_events</span><span class="p">():</span>
+        <span class="k">if</span> <span class="n">event</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;node_state_change&quot;</span><span class="p">:</span>
+            <span class="n">transition</span> <span class="o">=</span> <span class="n">StateTransition</span><span class="p">(</span>
+                <span class="n">node_id</span><span class="o">=</span><span class="n">event</span><span class="o">.</span><span class="n">value</span><span class="p">[</span><span class="s2">&quot;node_id&quot;</span><span class="p">],</span>
+                <span class="n">from_state</span><span class="o">=</span><span class="n">NodeState</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">value</span><span class="p">[</span><span class="s2">&quot;from_state&quot;</span><span class="p">]),</span>
+                <span class="n">to_state</span><span class="o">=</span><span class="n">NodeState</span><span class="p">(</span><span class="n">event</span><span class="o">.</span><span class="n">value</span><span class="p">[</span><span class="s2">&quot;to_state&quot;</span><span class="p">]),</span>
+                <span class="n">timestamp</span><span class="o">=</span><span class="n">event</span><span class="o">.</span><span class="n">timestamp</span><span class="p">,</span>
+                <span class="n">trigger</span><span class="o">=</span><span class="n">event</span><span class="o">.</span><span class="n">value</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;trigger&quot;</span><span class="p">,</span> <span class="s2">&quot;unknown&quot;</span><span class="p">)</span>
+            <span class="p">)</span>
+            <span class="n">viz_data</span><span class="o">.</span><span class="n">add_transition</span><span class="p">(</span><span class="n">transition</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">viz_data</span>
+</code></pre></div>
+
+<h2 id="advanced-features">Advanced Features<a class="headerlink" href="#advanced-features" title="Permanent link">&para;</a></h2>
+<h3 id="custom-renderers">Custom Renderers<a class="headerlink" href="#custom-renderers" title="Permanent link">&para;</a></h3>
+<p>Create custom renderers for specialized visualization needs:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.cli_viz.renderer</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseRenderer</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomRenderer</span><span class="p">(</span><span class="n">BaseRenderer</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Custom renderer for specialized visualization.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">render</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">:</span> <span class="n">VisualizationData</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Render custom visualization.&quot;&quot;&quot;</span>
+        <span class="n">lines</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;CUSTOM VISUALIZATION&quot;</span><span class="p">)</span>
+        <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;=&quot;</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">width</span><span class="p">)</span>
+
+        <span class="c1"># Custom rendering logic</span>
+        <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="n">data</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+            <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Node: </span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">value</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="custom-exporters">Custom Exporters<a class="headerlink" href="#custom-exporters" title="Permanent link">&para;</a></h3>
+<p>Create custom exporters for specialized output formats:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.cli_viz.exporters</span><span class="w"> </span><span class="kn">import</span> <span class="n">BaseExporter</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">CustomExporter</span><span class="p">(</span><span class="n">BaseExporter</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Custom exporter for specialized format.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">export</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">:</span> <span class="n">VisualizationData</span><span class="p">,</span> <span class="n">output_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Export to custom format.&quot;&quot;&quot;</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="c1"># Custom export logic</span>
+            <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="n">output_path</span><span class="p">,</span> <span class="s1">&#39;w&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+                <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;Custom format data</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+                <span class="k">for</span> <span class="n">node</span> <span class="ow">in</span> <span class="n">data</span><span class="o">.</span><span class="n">nodes</span><span class="o">.</span><span class="n">values</span><span class="p">():</span>
+                    <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2">,</span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">,</span><span class="si">{</span><span class="n">node</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">value</span><span class="si">}</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">True</span>
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Export error: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="kc">False</span>
+</code></pre></div>
+
+<h3 id="programmatic-usage">Programmatic Usage<a class="headerlink" href="#programmatic-usage" title="Permanent link">&para;</a></h3>
+<p>Use the visualization system programmatically:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">asyncio</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.cli_viz</span><span class="w"> </span><span class="kn">import</span> <span class="n">VisualizationCLI</span>
+
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">automated_visualization</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Automated visualization workflow.&quot;&quot;&quot;</span>
+    <span class="n">cli</span> <span class="o">=</span> <span class="n">VisualizationCLI</span><span class="p">()</span>
+
+    <span class="c1"># Generate demo data</span>
+    <span class="n">demo_args</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="s1">&#39;Args&#39;</span><span class="p">,</span> <span class="p">(),</span> <span class="p">{</span>
+        <span class="s1">&#39;nodes&#39;</span><span class="p">:</span> <span class="mi">15</span><span class="p">,</span>
+        <span class="s1">&#39;messages&#39;</span><span class="p">:</span> <span class="mi">30</span><span class="p">,</span>
+        <span class="s1">&#39;transitions&#39;</span><span class="p">:</span> <span class="mi">20</span><span class="p">,</span>
+        <span class="s1">&#39;output&#39;</span><span class="p">:</span> <span class="s1">&#39;auto_demo.json&#39;</span>
+    <span class="p">})()</span>
+    <span class="n">cli</span><span class="o">.</span><span class="n">cmd_demo</span><span class="p">(</span><span class="n">demo_args</span><span class="p">)</span>
+
+    <span class="c1"># Export HTML report</span>
+    <span class="n">export_args</span> <span class="o">=</span> <span class="nb">type</span><span class="p">(</span><span class="s1">&#39;Args&#39;</span><span class="p">,</span> <span class="p">(),</span> <span class="p">{</span>
+        <span class="s1">&#39;input&#39;</span><span class="p">:</span> <span class="s1">&#39;auto_demo.json&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;output&#39;</span><span class="p">:</span> <span class="s1">&#39;auto_report.html&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;format&#39;</span><span class="p">:</span> <span class="s1">&#39;html&#39;</span><span class="p">,</span>
+        <span class="s1">&#39;width&#39;</span><span class="p">:</span> <span class="mi">800</span><span class="p">,</span>
+        <span class="s1">&#39;height&#39;</span><span class="p">:</span> <span class="mi">600</span>
+    <span class="p">})()</span>
+    <span class="n">cli</span><span class="o">.</span><span class="n">cmd_export</span><span class="p">(</span><span class="n">export_args</span><span class="p">)</span>
+
+    <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Automated visualization complete&quot;</span><span class="p">)</span>
+
+<span class="c1"># Run automated workflow</span>
+<span class="n">asyncio</span><span class="o">.</span><span class="n">run</span><span class="p">(</span><span class="n">automated_visualization</span><span class="p">())</span>
+</code></pre></div>
+
+<h2 id="performance-considerations">Performance Considerations<a class="headerlink" href="#performance-considerations" title="Permanent link">&para;</a></h2>
+<h3 id="memory-usage">Memory Usage<a class="headerlink" href="#memory-usage" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Node data is kept in memory for fast access</li>
+<li>Message and transition history is limited (configurable)</li>
+<li>Large datasets may require data streaming or pagination</li>
+</ul>
+<h3 id="rendering-performance">Rendering Performance<a class="headerlink" href="#rendering-performance" title="Permanent link">&para;</a></h3>
+<ul>
+<li>ASCII rendering is optimized for terminal display</li>
+<li>SVG generation scales with node count</li>
+<li>HTML export includes embedded CSS/JS for self-contained reports</li>
+</ul>
+<h3 id="interactive-mode_1">Interactive Mode<a class="headerlink" href="#interactive-mode_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Refresh rate affects CPU usage</li>
+<li>Terminal I/O may have platform-specific limitations</li>
+<li>Large datasets may cause display lag</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<h3 id="common-issues">Common Issues<a class="headerlink" href="#common-issues" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Import Errors</strong>: Ensure all dependencies are installed</li>
+<li><strong>File Not Found</strong>: Check input file paths and permissions</li>
+<li><strong>Display Issues</strong>: Verify terminal size and color support</li>
+<li><strong>Interactive Mode</strong>: Requires Unix-like system with termios</li>
+</ol>
+<h3 id="debug-mode">Debug Mode<a class="headerlink" href="#debug-mode" title="Permanent link">&para;</a></h3>
+<p>Enable debug output for troubleshooting:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s1">&#39;utilityfog_frontend.cli_viz&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="performance-tuning">Performance Tuning<a class="headerlink" href="#performance-tuning" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Reduce time windows for large datasets</li>
+<li>Use appropriate display dimensions</li>
+<li>Limit node metadata for better performance</li>
+</ul>
+<h2 id="api-reference">API Reference<a class="headerlink" href="#api-reference" title="Permanent link">&para;</a></h2>
+<h3 id="core-classes">Core Classes<a class="headerlink" href="#core-classes" title="Permanent link">&para;</a></h3>
+<h4 id="visualizationdata">VisualizationData<a class="headerlink" href="#visualizationdata" title="Permanent link">&para;</a></h4>
+<p>Container for all visualization data.</p>
+<p><strong>Methods:</strong>
+- <code>add_node(node)</code>: Add a tree node
+- <code>add_message(message)</code>: Add a message flow
+- <code>add_transition(transition)</code>: Add a state transition
+- <code>get_active_nodes()</code>: Get nodes in active state
+- <code>get_recent_messages(seconds)</code>: Get recent messages
+- <code>get_node_hierarchy()</code>: Get hierarchical structure</p>
+<h4 id="treenode">TreeNode<a class="headerlink" href="#treenode" title="Permanent link">&para;</a></h4>
+<p>Represents a node in the fractal tree.</p>
+<p><strong>Properties:</strong>
+- <code>id</code>: Unique node identifier
+- <code>name</code>: Display name
+- <code>state</code>: Current node state
+- <code>parent_id</code>: Parent node ID
+- <code>children</code>: List of child node IDs
+- <code>metadata</code>: Additional node data</p>
+<h4 id="messageflow">MessageFlow<a class="headerlink" href="#messageflow" title="Permanent link">&para;</a></h4>
+<p>Represents a message between nodes.</p>
+<p><strong>Properties:</strong>
+- <code>source_id</code>: Source node ID
+- <code>target_id</code>: Target node ID
+- <code>message_type</code>: Type of message
+- <code>content</code>: Message content
+- <code>status</code>: Delivery status</p>
+<h4 id="statetransition">StateTransition<a class="headerlink" href="#statetransition" title="Permanent link">&para;</a></h4>
+<p>Represents a state change event.</p>
+<p><strong>Properties:</strong>
+- <code>node_id</code>: Node that changed state
+- <code>from_state</code>: Previous state
+- <code>to_state</code>: New state
+- <code>trigger</code>: What caused the transition</p>
+<h3 id="renderers">Renderers<a class="headerlink" href="#renderers" title="Permanent link">&para;</a></h3>
+<h4 id="treerenderer">TreeRenderer<a class="headerlink" href="#treerenderer" title="Permanent link">&para;</a></h4>
+<p>Renders hierarchical tree structure.</p>
+<h4 id="flowrenderer">FlowRenderer<a class="headerlink" href="#flowrenderer" title="Permanent link">&para;</a></h4>
+<p>Renders message flows between nodes.</p>
+<h4 id="staterenderer">StateRenderer<a class="headerlink" href="#staterenderer" title="Permanent link">&para;</a></h4>
+<p>Renders state transitions over time.</p>
+<h4 id="interactiverenderer">InteractiveRenderer<a class="headerlink" href="#interactiverenderer" title="Permanent link">&para;</a></h4>
+<p>Provides interactive real-time visualization.</p>
+<h3 id="exporters">Exporters<a class="headerlink" href="#exporters" title="Permanent link">&para;</a></h3>
+<h4 id="htmlexporter">HTMLExporter<a class="headerlink" href="#htmlexporter" title="Permanent link">&para;</a></h4>
+<p>Exports interactive HTML reports.</p>
+<h4 id="svgexporter">SVGExporter<a class="headerlink" href="#svgexporter" title="Permanent link">&para;</a></h4>
+<p>Exports scalable vector graphics.</p>
+<h4 id="textexporter">TextExporter<a class="headerlink" href="#textexporter" title="Permanent link">&para;</a></h4>
+<p>Exports plain text reports.</p>
+<h4 id="jsonexporter">JSONExporter<a class="headerlink" href="#jsonexporter" title="Permanent link">&para;</a></h4>
+<p>Exports structured JSON data.</p>
+<h2 id="future-enhancements">Future Enhancements<a class="headerlink" href="#future-enhancements" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>3D Visualization</strong>: WebGL-based 3D tree rendering</li>
+<li><strong>Real-time Streaming</strong>: Live data feed integration</li>
+<li><strong>Advanced Analytics</strong>: Statistical analysis and pattern detection</li>
+<li><strong>Custom Themes</strong>: User-defined color schemes and layouts</li>
+<li><strong>Plugin System</strong>: Extensible renderer and exporter plugins</li>
+<li><strong>Performance Optimization</strong>: Lazy loading and data virtualization</li>
+<li><strong>Mobile Support</strong>: Responsive design for mobile devices</li>
+<li><strong>Collaboration Features</strong>: Shared visualization sessions</li>
+</ul>
+              
+            </div>
+          </div><footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

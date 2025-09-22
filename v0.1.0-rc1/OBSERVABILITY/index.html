@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/OBSERVABILITY/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>FT-010: Observability System Documentation - UtilityFog Fractal TreeOpen</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "FT-010: Observability System Documentation";
+        var mkdocs_page_input_path = "OBSERVABILITY.md";
+        var mkdocs_page_url = "/UtilityFog-Fractal-TreeOpen/OBSERVABILITY/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UtilityFog Fractal TreeOpen
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UtilityFog Fractal TreeOpen</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">FT-010: Observability System Documentation</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="ft-010-observability-system-documentation">FT-010: Observability System Documentation<a class="headerlink" href="#ft-010-observability-system-documentation" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>The FT-010 Observability System provides comprehensive structured logging, distributed tracing, and telemetry integration for the UtilityFog-Fractal-TreeOpen simulation system. This system enables deep visibility into simulation operations, performance monitoring, and debugging capabilities.</p>
+<h2 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h2>
+<h3 id="structured-logging">🔍 Structured Logging<a class="headerlink" href="#structured-logging" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>JSON-formatted logs</strong> with consistent schema</li>
+<li><strong>Contextual metadata</strong> automatically attached to log entries</li>
+<li><strong>Multiple log levels</strong> (DEBUG, INFO, WARNING, ERROR, CRITICAL)</li>
+<li><strong>Thread-safe logging</strong> for concurrent operations</li>
+</ul>
+<h3 id="distributed-tracing">🔗 Distributed Tracing<a class="headerlink" href="#distributed-tracing" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Trace ID propagation</strong> across operations and threads</li>
+<li><strong>Operation lifecycle tracking</strong> (start, complete, error)</li>
+<li><strong>Performance metrics</strong> collection per operation</li>
+<li><strong>Context managers</strong> and decorators for easy integration</li>
+</ul>
+<h3 id="rate-limited-error-logging">📊 Rate-Limited Error Logging<a class="headerlink" href="#rate-limited-error-logging" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Intelligent error suppression</strong> to prevent log spam</li>
+<li><strong>Configurable rate limits</strong> per error type</li>
+<li><strong>Automatic rate limit reset</strong> after time windows</li>
+<li><strong>Summary logging</strong> when rate limits are exceeded</li>
+</ul>
+<h3 id="event-logging-system">📈 Event Logging System<a class="headerlink" href="#event-logging-system" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Structured event tracking</strong> for simulation events</li>
+<li><strong>Event counting</strong> and aggregation</li>
+<li><strong>Flexible event data</strong> with arbitrary metadata</li>
+<li><strong>Integration with telemetry system</strong></li>
+</ul>
+<h3 id="telemetry-integration">🔧 Telemetry Integration<a class="headerlink" href="#telemetry-integration" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Enhanced TelemetryCollector</strong> with observability hooks</li>
+<li><strong>Performance metric collection</strong> with tracing</li>
+<li><strong>Simulation metrics</strong> with structured logging</li>
+<li><strong>Export capabilities</strong> for external monitoring systems</li>
+</ul>
+<h2 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h2>
+<div class="codehilite"><pre><span></span><code>┌─────────────────────────────────────────────────────────────┐
+│                 ObservabilityManager                        │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
+│  │ StructuredLogger│  │  TraceContext   │  │ EventLogger  │ │
+│  └─────────────────┘  └─────────────────┘  └──────────────┘ │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────┐ │
+│  │RateLimitedLogger│  │TracingDecorator │  │ Metrics      │ │
+│  └─────────────────┘  └─────────────────┘  └──────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 TelemetryCollector                          │
+├─────────────────────────────────────────────────────────────┤
+│  • Performance Metrics      • Simulation Metrics           │
+│  • Historical Data          • Export Capabilities          │
+│  • Thread-Safe Operations   • Observability Integration    │
+└─────────────────────────────────────────────────────────────┘
+</code></pre></div>
+
+<h2 id="usage-guide">Usage Guide<a class="headerlink" href="#usage-guide" title="Permanent link">&para;</a></h2>
+<h3 id="basic-setup">Basic Setup<a class="headerlink" href="#basic-setup" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">initialize_observability</span><span class="p">,</span> <span class="n">get_observability_manager</span>
+
+<span class="c1"># Initialize the observability system</span>
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">initialize_observability</span><span class="p">(</span><span class="n">log_level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>
+
+<span class="c1"># Or get the global instance</span>
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">get_observability_manager</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="structured-logging_1">Structured Logging<a class="headerlink" href="#structured-logging_1" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_observability_manager</span>
+
+<span class="n">obs</span> <span class="o">=</span> <span class="n">get_observability_manager</span><span class="p">()</span>
+
+<span class="c1"># Basic logging with metadata</span>
+<span class="n">obs</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;Simulation started&quot;</span><span class="p">,</span> 
+                 <span class="n">agents_count</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> 
+                 <span class="n">environment</span><span class="o">=</span><span class="s2">&quot;test&quot;</span><span class="p">)</span>
+
+<span class="c1"># Error logging with context</span>
+<span class="n">obs</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;Agent collision detected&quot;</span><span class="p">,</span>
+                  <span class="n">agent_id</span><span class="o">=</span><span class="mi">123</span><span class="p">,</span>
+                  <span class="n">position</span><span class="o">=</span><span class="p">[</span><span class="mi">10</span><span class="p">,</span> <span class="mi">20</span><span class="p">,</span> <span class="mi">30</span><span class="p">],</span>
+                  <span class="n">severity</span><span class="o">=</span><span class="s2">&quot;high&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="distributed-tracing_1">Distributed Tracing<a class="headerlink" href="#distributed-tracing_1" title="Permanent link">&para;</a></h3>
+<h4 id="using-context-manager">Using Context Manager<a class="headerlink" href="#using-context-manager" title="Permanent link">&para;</a></h4>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">trace_operation</span>
+
+<span class="c1"># Trace an operation</span>
+<span class="k">with</span> <span class="n">trace_operation</span><span class="p">(</span><span class="s2">&quot;agent_movement_calculation&quot;</span><span class="p">,</span> <span class="n">agent_id</span><span class="o">=</span><span class="mi">123</span><span class="p">)</span> <span class="k">as</span> <span class="n">trace_id</span><span class="p">:</span>
+    <span class="c1"># Your operation code here</span>
+    <span class="n">calculate_agent_movement</span><span class="p">()</span>
+
+    <span class="c1"># Nested operations inherit the trace ID</span>
+    <span class="k">with</span> <span class="n">trace_operation</span><span class="p">(</span><span class="s2">&quot;collision_detection&quot;</span><span class="p">):</span>
+        <span class="n">detect_collisions</span><span class="p">()</span>
+</code></pre></div>
+
+<h4 id="using-decorator">Using Decorator<a class="headerlink" href="#using-decorator" title="Permanent link">&para;</a></h4>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">trace_function</span>
+
+<span class="nd">@trace_function</span><span class="p">(</span><span class="s2">&quot;complex_simulation_step&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">run_simulation_step</span><span class="p">(</span><span class="n">agents</span><span class="p">,</span> <span class="n">environment</span><span class="p">):</span>
+    <span class="c1"># Function automatically traced</span>
+    <span class="c1"># Start and completion logged</span>
+    <span class="c1"># Errors automatically captured</span>
+    <span class="k">return</span> <span class="n">process_simulation</span><span class="p">(</span><span class="n">agents</span><span class="p">,</span> <span class="n">environment</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="event-logging">Event Logging<a class="headerlink" href="#event-logging" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">log_simulation_event</span>
+
+<span class="c1"># Log simulation events</span>
+<span class="n">log_simulation_event</span><span class="p">(</span><span class="s2">&quot;agent_created&quot;</span><span class="p">,</span> 
+                     <span class="n">agent_id</span><span class="o">=</span><span class="mi">456</span><span class="p">,</span>
+                     <span class="n">agent_type</span><span class="o">=</span><span class="s2">&quot;explorer&quot;</span><span class="p">,</span>
+                     <span class="n">initial_position</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">])</span>
+
+<span class="n">log_simulation_event</span><span class="p">(</span><span class="s2">&quot;environment_changed&quot;</span><span class="p">,</span>
+                     <span class="n">change_type</span><span class="o">=</span><span class="s2">&quot;temperature&quot;</span><span class="p">,</span>
+                     <span class="n">old_value</span><span class="o">=</span><span class="mf">20.5</span><span class="p">,</span>
+                     <span class="n">new_value</span><span class="o">=</span><span class="mf">25.3</span><span class="p">,</span>
+                     <span class="n">affected_area</span><span class="o">=</span><span class="s2">&quot;sector_7&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="rate-limited-error-logging_1">Rate-Limited Error Logging<a class="headerlink" href="#rate-limited-error-logging_1" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">log_rate_limited_error</span>
+
+<span class="c1"># Errors are automatically rate-limited by error key</span>
+<span class="k">for</span> <span class="n">agent</span> <span class="ow">in</span> <span class="n">problematic_agents</span><span class="p">:</span>
+    <span class="n">log_rate_limited_error</span><span class="p">(</span>
+        <span class="n">error_key</span><span class="o">=</span><span class="s2">&quot;agent_pathfinding_error&quot;</span><span class="p">,</span>
+        <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Agent </span><span class="si">{</span><span class="n">agent</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2"> pathfinding failed&quot;</span><span class="p">,</span>
+        <span class="n">agent_id</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+        <span class="n">error_count</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">error_count</span>
+    <span class="p">)</span>
+</code></pre></div>
+
+<h3 id="telemetry-integration_1">Telemetry Integration<a class="headerlink" href="#telemetry-integration_1" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.telemetry_collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_telemetry_collector</span>
+
+<span class="n">collector</span> <span class="o">=</span> <span class="n">get_telemetry_collector</span><span class="p">()</span>
+
+<span class="c1"># Collect performance metrics (automatically traced)</span>
+<span class="n">collector</span><span class="o">.</span><span class="n">collect_performance_metric</span><span class="p">(</span><span class="s2">&quot;agent_update&quot;</span><span class="p">,</span> <span class="n">duration</span><span class="o">=</span><span class="mf">0.05</span><span class="p">,</span> <span class="n">success</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># Collect simulation metrics</span>
+<span class="n">collector</span><span class="o">.</span><span class="n">collect_simulation_metrics</span><span class="p">({</span>
+    <span class="s2">&quot;active_agents&quot;</span><span class="p">:</span> <span class="mi">150</span><span class="p">,</span>
+    <span class="s2">&quot;average_speed&quot;</span><span class="p">:</span> <span class="mf">2.3</span><span class="p">,</span>
+    <span class="s2">&quot;collision_rate&quot;</span><span class="p">:</span> <span class="mf">0.02</span>
+<span class="p">})</span>
+
+<span class="c1"># Get comprehensive metrics including observability data</span>
+<span class="n">metrics</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">get_current_metrics</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Observability metrics: </span><span class="si">{</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;observability&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<h3 id="log-levels">Log Levels<a class="headerlink" href="#log-levels" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">initialize_observability</span>
+
+<span class="c1"># Configure different log levels</span>
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">initialize_observability</span><span class="p">(</span><span class="n">log_level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>  <span class="c1"># Verbose</span>
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">initialize_observability</span><span class="p">(</span><span class="n">log_level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">INFO</span><span class="p">)</span>   <span class="c1"># Standard</span>
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">initialize_observability</span><span class="p">(</span><span class="n">log_level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">WARNING</span><span class="p">)</span> <span class="c1"># Minimal</span>
+</code></pre></div>
+
+<h3 id="rate-limiting">Rate Limiting<a class="headerlink" href="#rate-limiting" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">ObservabilityManager</span><span class="p">,</span> <span class="n">RateLimitedErrorLogger</span>
+
+<span class="n">obs_manager</span> <span class="o">=</span> <span class="n">ObservabilityManager</span><span class="p">()</span>
+
+<span class="c1"># Configure custom rate limits</span>
+<span class="n">rate_limiter</span> <span class="o">=</span> <span class="n">RateLimitedErrorLogger</span><span class="p">(</span>
+    <span class="n">obs_manager</span><span class="o">.</span><span class="n">logger</span><span class="p">,</span> 
+    <span class="n">max_errors_per_minute</span><span class="o">=</span><span class="mi">5</span>  <span class="c1"># Allow 5 errors per minute per error key</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="telemetry-history">Telemetry History<a class="headerlink" href="#telemetry-history" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.telemetry_collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">initialize_telemetry</span>
+
+<span class="c1"># Configure telemetry history size</span>
+<span class="n">collector</span> <span class="o">=</span> <span class="n">initialize_telemetry</span><span class="p">(</span><span class="n">max_history_size</span><span class="o">=</span><span class="mi">5000</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="log-format">Log Format<a class="headerlink" href="#log-format" title="Permanent link">&para;</a></h2>
+<p>All logs are output in structured JSON format:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2025-09-21T16:30:45.123456Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;level&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;INFO&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;logger&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ufog.observability&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Starting traced operation: agent_movement&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;module&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;main_simulation&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;function&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;run_simulation_step&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;line&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;trace_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;trace_a1b2c3d4e5f6g7h8&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;agent_movement&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;operation_phase&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;start&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;agent_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">123</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">10.5</span><span class="p">,</span><span class="w"> </span><span class="mf">20.3</span><span class="p">,</span><span class="w"> </span><span class="mf">15.7</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="metrics-and-monitoring">Metrics and Monitoring<a class="headerlink" href="#metrics-and-monitoring" title="Permanent link">&para;</a></h2>
+<h3 id="observability-metrics">Observability Metrics<a class="headerlink" href="#observability-metrics" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_metrics_summary</span>
+
+<span class="n">metrics</span> <span class="o">=</span> <span class="n">get_metrics_summary</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Operations completed: </span><span class="si">{</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;operations&#39;</span><span class="p">][</span><span class="s1">&#39;operations_completed&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Average duration: </span><span class="si">{</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;average_operation_duration&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Current trace ID: </span><span class="si">{</span><span class="n">metrics</span><span class="p">[</span><span class="s1">&#39;current_trace_id&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="performance-monitoring">Performance Monitoring<a class="headerlink" href="#performance-monitoring" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.telemetry_collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_telemetry_collector</span>
+
+<span class="n">collector</span> <span class="o">=</span> <span class="n">get_telemetry_collector</span><span class="p">()</span>
+<span class="n">performance</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">get_performance_summary</span><span class="p">()</span>
+
+<span class="k">for</span> <span class="n">operation</span><span class="p">,</span> <span class="n">stats</span> <span class="ow">in</span> <span class="n">performance</span><span class="p">[</span><span class="s1">&#39;performance_metrics&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">stats</span><span class="p">[</span><span class="s1">&#39;success_rate&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.2%</span><span class="si">}</span><span class="s2"> success rate&quot;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  Average duration: </span><span class="si">{</span><span class="n">stats</span><span class="p">[</span><span class="s1">&#39;current_duration&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">s&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="integration-with-existing-code">Integration with Existing Code<a class="headerlink" href="#integration-with-existing-code" title="Permanent link">&para;</a></h2>
+<h3 id="minimal-integration">Minimal Integration<a class="headerlink" href="#minimal-integration" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Add to existing functions</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">trace_function</span>
+
+<span class="nd">@trace_function</span><span class="p">()</span>  <span class="c1"># Uses function name as operation name</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">existing_function</span><span class="p">():</span>
+    <span class="c1"># Existing code unchanged</span>
+    <span class="k">pass</span>
+</code></pre></div>
+
+<h3 id="comprehensive-integration">Comprehensive Integration<a class="headerlink" href="#comprehensive-integration" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">trace_operation</span><span class="p">,</span> <span class="n">log_simulation_event</span><span class="p">,</span> 
+    <span class="n">log_rate_limited_error</span><span class="p">,</span> <span class="n">get_observability_manager</span>
+<span class="p">)</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">enhanced_simulation_step</span><span class="p">():</span>
+    <span class="k">with</span> <span class="n">trace_operation</span><span class="p">(</span><span class="s2">&quot;simulation_step&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">trace_id</span><span class="p">:</span>
+        <span class="n">log_simulation_event</span><span class="p">(</span><span class="s2">&quot;step_started&quot;</span><span class="p">,</span> <span class="n">step_id</span><span class="o">=</span><span class="n">current_step</span><span class="p">)</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="c1"># Existing simulation logic</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">run_step_logic</span><span class="p">()</span>
+
+            <span class="n">log_simulation_event</span><span class="p">(</span><span class="s2">&quot;step_completed&quot;</span><span class="p">,</span> 
+                                 <span class="n">step_id</span><span class="o">=</span><span class="n">current_step</span><span class="p">,</span>
+                                 <span class="n">agents_processed</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">agents</span><span class="p">))</span>
+            <span class="k">return</span> <span class="n">result</span>
+
+        <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="n">log_rate_limited_error</span><span class="p">(</span><span class="s2">&quot;simulation_step_error&quot;</span><span class="p">,</span>
+                                   <span class="sa">f</span><span class="s2">&quot;Step </span><span class="si">{</span><span class="n">current_step</span><span class="si">}</span><span class="s2"> failed: </span><span class="si">{</span><span class="n">e</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="k">raise</span>
+</code></pre></div>
+
+<h2 id="best-practices">Best Practices<a class="headerlink" href="#best-practices" title="Permanent link">&para;</a></h2>
+<h3 id="1-use-appropriate-log-levels">1. Use Appropriate Log Levels<a class="headerlink" href="#1-use-appropriate-log-levels" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>DEBUG</strong>: Detailed diagnostic information</li>
+<li><strong>INFO</strong>: General operational messages</li>
+<li><strong>WARNING</strong>: Potentially problematic situations</li>
+<li><strong>ERROR</strong>: Error conditions that don't stop execution</li>
+<li><strong>CRITICAL</strong>: Serious errors that may stop execution</li>
+</ul>
+<h3 id="2-include-relevant-context">2. Include Relevant Context<a class="headerlink" href="#2-include-relevant-context" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Good: Rich context</span>
+<span class="n">obs</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;Agent state changed&quot;</span><span class="p">,</span>
+                 <span class="n">agent_id</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+                 <span class="n">old_state</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">previous_state</span><span class="p">,</span>
+                 <span class="n">new_state</span><span class="o">=</span><span class="n">agent</span><span class="o">.</span><span class="n">current_state</span><span class="p">,</span>
+                 <span class="n">trigger</span><span class="o">=</span><span class="s2">&quot;collision_detected&quot;</span><span class="p">)</span>
+
+<span class="c1"># Avoid: Minimal context</span>
+<span class="n">obs</span><span class="o">.</span><span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s2">&quot;State changed&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="3-use-trace-operations-for-performance-critical-code">3. Use Trace Operations for Performance-Critical Code<a class="headerlink" href="#3-use-trace-operations-for-performance-critical-code" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Trace expensive operations</span>
+<span class="k">with</span> <span class="n">trace_operation</span><span class="p">(</span><span class="s2">&quot;pathfinding_calculation&quot;</span><span class="p">,</span> <span class="n">agent_count</span><span class="o">=</span><span class="nb">len</span><span class="p">(</span><span class="n">agents</span><span class="p">)):</span>
+    <span class="n">paths</span> <span class="o">=</span> <span class="n">calculate_all_paths</span><span class="p">(</span><span class="n">agents</span><span class="p">,</span> <span class="n">environment</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="4-leverage-rate-limited-logging-for-frequent-errors">4. Leverage Rate-Limited Logging for Frequent Errors<a class="headerlink" href="#4-leverage-rate-limited-logging-for-frequent-errors" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># For errors that might occur frequently</span>
+<span class="k">for</span> <span class="n">agent</span> <span class="ow">in</span> <span class="n">agents</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">agent</span><span class="o">.</span><span class="n">has_error</span><span class="p">():</span>
+        <span class="n">log_rate_limited_error</span><span class="p">(</span>
+            <span class="n">error_key</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;agent_error_</span><span class="si">{</span><span class="n">agent</span><span class="o">.</span><span class="n">error_type</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Agent </span><span class="si">{</span><span class="n">agent</span><span class="o">.</span><span class="n">id</span><span class="si">}</span><span class="s2"> error: </span><span class="si">{</span><span class="n">agent</span><span class="o">.</span><span class="n">error_message</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">)</span>
+</code></pre></div>
+
+<h3 id="5-use-event-logging-for-state-changes">5. Use Event Logging for State Changes<a class="headerlink" href="#5-use-event-logging-for-state-changes" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Track important state changes</span>
+<span class="n">log_simulation_event</span><span class="p">(</span><span class="s2">&quot;phase_transition&quot;</span><span class="p">,</span>
+                     <span class="n">from_phase</span><span class="o">=</span><span class="s2">&quot;initialization&quot;</span><span class="p">,</span>
+                     <span class="n">to_phase</span><span class="o">=</span><span class="s2">&quot;simulation&quot;</span><span class="p">,</span>
+                     <span class="n">duration</span><span class="o">=</span><span class="n">init_duration</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<h3 id="common-issues">Common Issues<a class="headerlink" href="#common-issues" title="Permanent link">&para;</a></h3>
+<h4 id="1-missing-trace-ids">1. Missing Trace IDs<a class="headerlink" href="#1-missing-trace-ids" title="Permanent link">&para;</a></h4>
+<p><strong>Problem</strong>: Logs don't contain trace IDs
+<strong>Solution</strong>: Ensure operations are wrapped with <code>trace_operation</code> or <code>@trace_function</code></p>
+<h4 id="2-performance-impact">2. Performance Impact<a class="headerlink" href="#2-performance-impact" title="Permanent link">&para;</a></h4>
+<p><strong>Problem</strong>: Logging affects simulation performance
+<strong>Solution</strong>: Use appropriate log levels and consider async logging for high-frequency operations</p>
+<h4 id="3-log-volume">3. Log Volume<a class="headerlink" href="#3-log-volume" title="Permanent link">&para;</a></h4>
+<p><strong>Problem</strong>: Too many logs generated
+<strong>Solution</strong>: Use rate-limited logging and adjust log levels</p>
+<h3 id="debugging">Debugging<a class="headerlink" href="#debugging" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Enable debug logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">agent.observability</span><span class="w"> </span><span class="kn">import</span> <span class="n">initialize_observability</span>
+
+<span class="n">obs</span> <span class="o">=</span> <span class="n">initialize_observability</span><span class="p">(</span><span class="n">log_level</span><span class="o">=</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+
+<span class="c1"># Check current configuration</span>
+<span class="n">metrics</span> <span class="o">=</span> <span class="n">obs</span><span class="o">.</span><span class="n">get_metrics_summary</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Current configuration: </span><span class="si">{</span><span class="n">metrics</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="performance-considerations">Performance Considerations<a class="headerlink" href="#performance-considerations" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Structured logging</strong> has minimal overhead (~1-2% in typical scenarios)</li>
+<li><strong>Trace ID propagation</strong> uses thread-local storage for efficiency</li>
+<li><strong>Rate limiting</strong> prevents log spam without losing important information</li>
+<li><strong>JSON formatting</strong> is optimized for both human readability and machine parsing</li>
+</ul>
+<h2 id="future-enhancements">Future Enhancements<a class="headerlink" href="#future-enhancements" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Distributed tracing</strong> across multiple processes/services</li>
+<li><strong>Metrics export</strong> to external monitoring systems (Prometheus, etc.)</li>
+<li><strong>Log aggregation</strong> and analysis tools integration</li>
+<li><strong>Real-time dashboards</strong> for simulation monitoring</li>
+<li><strong>Alerting</strong> based on error rates and performance thresholds</li>
+</ul>
+<h2 id="api-reference">API Reference<a class="headerlink" href="#api-reference" title="Permanent link">&para;</a></h2>
+<h3 id="core-classes">Core Classes<a class="headerlink" href="#core-classes" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>ObservabilityManager</code>: Main orchestrator for all observability features</li>
+<li><code>StructuredLogger</code>: JSON-formatted logging with trace propagation</li>
+<li><code>TraceContext</code>: Thread-local trace ID management</li>
+<li><code>RateLimitedErrorLogger</code>: Intelligent error rate limiting</li>
+<li><code>EventLogger</code>: Structured event tracking</li>
+<li><code>TracingDecorator</code>: Function tracing decorator</li>
+<li><code>TelemetryCollector</code>: Enhanced telemetry with observability integration</li>
+</ul>
+<h3 id="global-functions">Global Functions<a class="headerlink" href="#global-functions" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>get_observability_manager()</code>: Get global observability manager</li>
+<li><code>initialize_observability(log_level)</code>: Initialize observability system</li>
+<li><code>trace_operation(name, **context)</code>: Context manager for tracing</li>
+<li><code>log_simulation_event(event_type, **data)</code>: Log simulation events</li>
+<li><code>log_rate_limited_error(key, message, **kwargs)</code>: Rate-limited error logging</li>
+<li><code>trace_function(operation_name)</code>: Function tracing decorator</li>
+<li><code>get_metrics_summary()</code>: Get comprehensive metrics summary</li>
+</ul>
+<p>For detailed API documentation, see the inline docstrings in the source code.</p>
+              
+            </div>
+          </div><footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

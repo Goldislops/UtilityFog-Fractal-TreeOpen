@@ -1,0 +1,49 @@
+Metadata-Version: 2.1
+Name: utilityfog-fractal-treeopen
+Version: 0.1.0rc1
+Summary: Advanced utility fog simulation with fractal tree structures and comprehensive observability
+Home-page: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen
+Author: UtilityFog-Fractal-TreeOpen Project
+Author-email: contact@utilityfog.org
+License: UNKNOWN
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: Scientific/Engineering :: Visualization
+Classifier: Topic :: System :: Monitoring
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Provides-Extra: telemetry
+Provides-Extra: visualization
+
+# UtilityFog-Fractal-TreeOpen
+
+A visionary framework to explore AI-embodied nanotechnology through utility fog, fractal tree embodiment, and programmable matter — combining evolutionary algorithms, distributed computing, and gamification for future machine intelligence design.
+
+## Mission
+To create a path toward programmable matter and self-healing nanotech structures using:
+- Utility fog / programmable matter concepts
+- Fractal tree embodiment (trillions of self-repairing branches that coordinate foglets)
+- Evolutionary machines based on digital ecology
+- Distributed computing on internet-scale resources
+- Gamification strategies powered by compelling memes (inspired by Susan Blackmore’s work)
+
+## Structure
+See `/docs` for project milestones and protocols  
+See `/drafts` for evolving design documents  
+See `/agent` for agent-related instructions and activation plans  
+
+## Contact
+This repository is overseen by Kevin Brims (vision-setter) and Jacko (AI integrator + planner).
+
+

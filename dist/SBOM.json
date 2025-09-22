@@ -1,0 +1,32 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "serialNumber": "urn:uuid:63cd260e-3529-42d2-a3f6-96fe61195fd7",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2025-09-22T01:06:51Z",
+    "tools": [
+      {
+        "vendor": "UtilityFog",
+        "name": "release-builder",
+        "version": "0.1.0-rc1"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "utilityfog-fractal-treeopen@0.1.0-rc1",
+      "name": "utilityfog-fractal-treeopen",
+      "version": "0.1.0-rc1",
+      "description": "UtilityFog Fractal TreeOpen - Phase 3 Release Candidate"
+    }
+  },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "utilityfog-fractal-treeopen@0.1.0-rc1",
+      "name": "utilityfog-fractal-treeopen",
+      "version": "0.1.0-rc1",
+      "description": "UtilityFog Fractal TreeOpen with comprehensive observability, telemetry, and visualization"
+    }
+  ]
+}

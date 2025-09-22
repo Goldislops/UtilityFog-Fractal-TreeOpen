@@ -1,0 +1,4 @@
+[console_scripts]
+utilityfog-sim = UtilityFog_Agent_Package.agent.main_simulation:main
+utilityfog-viz = utilityfog_frontend.cli_viz:main
+

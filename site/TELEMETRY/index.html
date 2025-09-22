@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/TELEMETRY/" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Telemetry System Documentation - UtilityFog Fractal TreeOpen</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Telemetry System Documentation";
+        var mkdocs_page_input_path = "TELEMETRY.md";
+        var mkdocs_page_url = "/UtilityFog-Fractal-TreeOpen/TELEMETRY/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> UtilityFog Fractal TreeOpen
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">UtilityFog Fractal TreeOpen</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Telemetry System Documentation</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="telemetry-system-documentation">Telemetry System Documentation<a class="headerlink" href="#telemetry-system-documentation" title="Permanent link">&para;</a></h1>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>The UtilityFog telemetry system provides comprehensive metrics collection and export capabilities for monitoring system performance, behavior, and health across the fractal tree network.</p>
+<h2 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h2>
+<h3 id="core-components">Core Components<a class="headerlink" href="#core-components" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>TelemetryCollector</strong>: Central hub for metrics collection and event recording</li>
+<li><strong>MetricsExporter</strong>: Abstract interface for exporting metrics in various formats</li>
+<li><strong>PrometheusAdapter</strong>: Prometheus-compatible metrics export</li>
+<li><strong>Metric Types</strong>: Counter, Gauge, and Histogram implementations</li>
+</ol>
+<h3 id="key-features">Key Features<a class="headerlink" href="#key-features" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Real-time Metrics</strong>: Live collection of system performance data</li>
+<li><strong>Event Recording</strong>: Structured event logging with metadata</li>
+<li><strong>Multiple Export Formats</strong>: Prometheus, JSON, and extensible format support</li>
+<li><strong>System Integration</strong>: Built-in hooks for coordination, messaging, and health systems</li>
+<li><strong>Thread-Safe</strong>: Concurrent access support with proper locking</li>
+<li><strong>Configurable</strong>: Flexible collection intervals and export options</li>
+</ul>
+<h2 id="usage">Usage<a class="headerlink" href="#usage" title="Permanent link">&para;</a></h2>
+<h3 id="basic-setup">Basic Setup<a class="headerlink" href="#basic-setup" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry</span><span class="w"> </span><span class="kn">import</span> <span class="n">TelemetryCollector</span><span class="p">,</span> <span class="n">PrometheusAdapter</span>
+
+<span class="c1"># Create collector</span>
+<span class="n">collector</span> <span class="o">=</span> <span class="n">TelemetryCollector</span><span class="p">(</span><span class="n">collection_interval</span><span class="o">=</span><span class="mf">30.0</span><span class="p">)</span>
+
+<span class="c1"># Register metrics</span>
+<span class="n">counter</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_counter</span><span class="p">(</span><span class="s2">&quot;requests_total&quot;</span><span class="p">,</span> <span class="s2">&quot;Total HTTP requests&quot;</span><span class="p">)</span>
+<span class="n">gauge</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_gauge</span><span class="p">(</span><span class="s2">&quot;active_connections&quot;</span><span class="p">,</span> <span class="s2">&quot;Active connections&quot;</span><span class="p">)</span>
+<span class="n">histogram</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_histogram</span><span class="p">(</span><span class="s2">&quot;request_duration_seconds&quot;</span><span class="p">,</span> <span class="s2">&quot;Request duration&quot;</span><span class="p">)</span>
+
+<span class="c1"># Start collection</span>
+<span class="k">await</span> <span class="n">collector</span><span class="o">.</span><span class="n">start_collection</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="recording-metrics">Recording Metrics<a class="headerlink" href="#recording-metrics" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Increment counter</span>
+<span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">()</span>
+<span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">(</span><span class="mf">5.0</span><span class="p">)</span>
+
+<span class="c1"># Set gauge value</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="mi">42</span><span class="p">)</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">increment</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">decrement</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+<span class="c1"># Record histogram observations</span>
+<span class="n">histogram</span><span class="o">.</span><span class="n">observe</span><span class="p">(</span><span class="mf">0.123</span><span class="p">)</span>
+<span class="n">histogram</span><span class="o">.</span><span class="n">observe</span><span class="p">(</span><span class="mf">0.456</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="event-recording">Event Recording<a class="headerlink" href="#event-recording" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Record structured events</span>
+<span class="n">collector</span><span class="o">.</span><span class="n">record_event</span><span class="p">(</span><span class="s2">&quot;user_login&quot;</span><span class="p">,</span> <span class="p">{</span>
+    <span class="s2">&quot;user_id&quot;</span><span class="p">:</span> <span class="s2">&quot;12345&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;timestamp&quot;</span><span class="p">:</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="p">},</span> <span class="n">labels</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="s2">&quot;web&quot;</span><span class="p">})</span>
+
+<span class="n">collector</span><span class="o">.</span><span class="n">record_event</span><span class="p">(</span><span class="s2">&quot;error_occurred&quot;</span><span class="p">,</span> <span class="p">{</span>
+    <span class="s2">&quot;error_type&quot;</span><span class="p">:</span> <span class="s2">&quot;connection_timeout&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;details&quot;</span><span class="p">:</span> <span class="s2">&quot;Failed to connect to database&quot;</span>
+<span class="p">})</span>
+</code></pre></div>
+
+<h3 id="exporting-metrics">Exporting Metrics<a class="headerlink" href="#exporting-metrics" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Prometheus export</span>
+<span class="n">prometheus_exporter</span> <span class="o">=</span> <span class="n">PrometheusAdapter</span><span class="p">(</span><span class="s2">&quot;/tmp/metrics.prom&quot;</span><span class="p">)</span>
+<span class="k">await</span> <span class="n">prometheus_exporter</span><span class="o">.</span><span class="n">export_metrics</span><span class="p">(</span><span class="n">collector</span><span class="p">)</span>
+
+<span class="c1"># JSON export</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry.exporter</span><span class="w"> </span><span class="kn">import</span> <span class="n">JSONExporter</span>
+<span class="n">json_exporter</span> <span class="o">=</span> <span class="n">JSONExporter</span><span class="p">(</span><span class="s2">&quot;/tmp/metrics.json&quot;</span><span class="p">)</span>
+<span class="k">await</span> <span class="n">json_exporter</span><span class="o">.</span><span class="n">export_metrics</span><span class="p">(</span><span class="n">collector</span><span class="p">)</span>
+</code></pre></div>
+
+<h2 id="system-integration">System Integration<a class="headerlink" href="#system-integration" title="Permanent link">&para;</a></h2>
+<h3 id="coordination-system-hooks">Coordination System Hooks<a class="headerlink" href="#coordination-system-hooks" title="Permanent link">&para;</a></h3>
+<p>The telemetry system automatically integrates with the coordination system:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry.collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">setup_coordination_hooks</span>
+
+<span class="n">setup_coordination_hooks</span><span class="p">(</span><span class="n">collector</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Metrics Registered:</strong>
+- <code>coordination_messages_total</code>: Total coordination messages
+- <code>coordination_active_nodes</code>: Number of active coordination nodes<br />
+- <code>coordination_message_latency_seconds</code>: Coordination message latency</p>
+<h3 id="messaging-system-hooks">Messaging System Hooks<a class="headerlink" href="#messaging-system-hooks" title="Permanent link">&para;</a></h3>
+<p>Integration with the messaging system:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry.collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">setup_messaging_hooks</span>
+
+<span class="n">setup_messaging_hooks</span><span class="p">(</span><span class="n">collector</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Metrics Registered:</strong>
+- <code>messages_sent_total</code>: Total messages sent
+- <code>messages_received_total</code>: Total messages received
+- <code>message_queue_size</code>: Current message queue size
+- <code>message_processing_duration_seconds</code>: Message processing duration</p>
+<h3 id="health-system-hooks">Health System Hooks<a class="headerlink" href="#health-system-hooks" title="Permanent link">&para;</a></h3>
+<p>Integration with health monitoring:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry.collector</span><span class="w"> </span><span class="kn">import</span> <span class="n">setup_health_hooks</span>
+
+<span class="n">setup_health_hooks</span><span class="p">(</span><span class="n">collector</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Metrics Registered:</strong>
+- <code>health_status</code>: Current health status (0=unknown, 1=healthy, 2=degraded, 3=unhealthy)
+- <code>health_checks_total</code>: Total health checks performed
+- <code>health_check_duration_seconds</code>: Health check duration</p>
+<h2 id="metric-types">Metric Types<a class="headerlink" href="#metric-types" title="Permanent link">&para;</a></h2>
+<h3 id="counter">Counter<a class="headerlink" href="#counter" title="Permanent link">&para;</a></h3>
+<p>Monotonically increasing values (e.g., request counts, error counts):</p>
+<div class="codehilite"><pre><span></span><code><span class="n">counter</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_counter</span><span class="p">(</span><span class="s2">&quot;http_requests_total&quot;</span><span class="p">,</span> <span class="s2">&quot;Total HTTP requests&quot;</span><span class="p">)</span>
+<span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">()</span>        <span class="c1"># Increment by 1</span>
+<span class="n">counter</span><span class="o">.</span><span class="n">increment</span><span class="p">(</span><span class="mf">5.0</span><span class="p">)</span>     <span class="c1"># Increment by 5</span>
+</code></pre></div>
+
+<h3 id="gauge">Gauge<a class="headerlink" href="#gauge" title="Permanent link">&para;</a></h3>
+<p>Values that can increase or decrease (e.g., memory usage, active connections):</p>
+<div class="codehilite"><pre><span></span><code><span class="n">gauge</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_gauge</span><span class="p">(</span><span class="s2">&quot;memory_usage_bytes&quot;</span><span class="p">,</span> <span class="s2">&quot;Memory usage in bytes&quot;</span><span class="p">)</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">set</span><span class="p">(</span><span class="mi">1024000</span><span class="p">)</span>         <span class="c1"># Set absolute value</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">increment</span><span class="p">(</span><span class="mi">100</span><span class="p">)</span>       <span class="c1"># Increase by 100</span>
+<span class="n">gauge</span><span class="o">.</span><span class="n">decrement</span><span class="p">(</span><span class="mi">50</span><span class="p">)</span>        <span class="c1"># Decrease by 50</span>
+</code></pre></div>
+
+<h3 id="histogram">Histogram<a class="headerlink" href="#histogram" title="Permanent link">&para;</a></h3>
+<p>Distribution of values (e.g., request durations, response sizes):</p>
+<div class="codehilite"><pre><span></span><code><span class="n">histogram</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_histogram</span><span class="p">(</span>
+    <span class="s2">&quot;request_duration_seconds&quot;</span><span class="p">,</span> 
+    <span class="s2">&quot;HTTP request duration&quot;</span><span class="p">,</span>
+    <span class="n">buckets</span><span class="o">=</span><span class="p">[</span><span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">,</span> <span class="mf">10.0</span><span class="p">]</span>
+<span class="p">)</span>
+<span class="n">histogram</span><span class="o">.</span><span class="n">observe</span><span class="p">(</span><span class="mf">0.234</span><span class="p">)</span>   <span class="c1"># Record observation</span>
+</code></pre></div>
+
+<h2 id="export-formats">Export Formats<a class="headerlink" href="#export-formats" title="Permanent link">&para;</a></h2>
+<h3 id="prometheus-format">Prometheus Format<a class="headerlink" href="#prometheus-format" title="Permanent link">&para;</a></h3>
+<p>Standard Prometheus text format for scraping:</p>
+<div class="codehilite"><pre><span></span><code><span class="gh">#</span> HELP http_requests_total Total HTTP requests
+<span class="gh">#</span> TYPE http_requests_total counter
+http_requests_total 1027
+
+<span class="gh">#</span> HELP memory_usage_bytes Memory usage in bytes
+<span class="gh">#</span> TYPE memory_usage_bytes gauge
+memory_usage_bytes 1048576
+</code></pre></div>
+
+<h3 id="json-format">JSON Format<a class="headerlink" href="#json-format" title="Permanent link">&para;</a></h3>
+<p>Structured JSON for programmatic consumption:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632150000.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;metrics&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;http_requests_total&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;value&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1027</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;labels&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span>
+<span class="w">      </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1632150000.0</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;events_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">150</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;running&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<h3 id="collection-interval">Collection Interval<a class="headerlink" href="#collection-interval" title="Permanent link">&para;</a></h3>
+<p>Configure how often metrics are collected:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">collector</span> <span class="o">=</span> <span class="n">TelemetryCollector</span><span class="p">(</span><span class="n">collection_interval</span><span class="o">=</span><span class="mf">60.0</span><span class="p">)</span>  <span class="c1"># 60 seconds</span>
+</code></pre></div>
+
+<h3 id="custom-buckets">Custom Buckets<a class="headerlink" href="#custom-buckets" title="Permanent link">&para;</a></h3>
+<p>Configure histogram buckets for your use case:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">histogram</span> <span class="o">=</span> <span class="n">collector</span><span class="o">.</span><span class="n">register_histogram</span><span class="p">(</span>
+    <span class="s2">&quot;api_response_time&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;API response time distribution&quot;</span><span class="p">,</span>
+    <span class="n">buckets</span><span class="o">=</span><span class="p">[</span><span class="mf">0.001</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">5.0</span><span class="p">]</span>  <span class="c1"># Custom buckets</span>
+<span class="p">)</span>
+</code></pre></div>
+
+<h3 id="periodic-export">Periodic Export<a class="headerlink" href="#periodic-export" title="Permanent link">&para;</a></h3>
+<p>Set up automatic periodic export:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">utilityfog_frontend.telemetry.exporter</span><span class="w"> </span><span class="kn">import</span> <span class="n">PeriodicExporter</span>
+
+<span class="n">exporter</span> <span class="o">=</span> <span class="n">PrometheusAdapter</span><span class="p">(</span><span class="s2">&quot;/var/metrics/prometheus.txt&quot;</span><span class="p">)</span>
+<span class="n">periodic_exporter</span> <span class="o">=</span> <span class="n">PeriodicExporter</span><span class="p">(</span><span class="n">exporter</span><span class="p">,</span> <span class="n">collector</span><span class="p">,</span> <span class="n">interval</span><span class="o">=</span><span class="mf">30.0</span><span class="p">)</span>
+
+<span class="k">await</span> <span class="n">periodic_exporter</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="best-practices">Best Practices<a class="headerlink" href="#best-practices" title="Permanent link">&para;</a></h2>
+<h3 id="metric-naming">Metric Naming<a class="headerlink" href="#metric-naming" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Use descriptive names with units: <code>request_duration_seconds</code>, <code>memory_usage_bytes</code></li>
+<li>Follow Prometheus naming conventions: <code>subsystem_metric_unit</code></li>
+<li>Use consistent labeling: <code>{method="GET", status="200"}</code></li>
+</ul>
+<h3 id="performance-considerations">Performance Considerations<a class="headerlink" href="#performance-considerations" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Use appropriate metric types for your data</li>
+<li>Avoid high-cardinality labels (many unique values)</li>
+<li>Configure reasonable collection intervals</li>
+<li>Monitor memory usage with many metrics</li>
+</ul>
+<h3 id="error-handling">Error Handling<a class="headerlink" href="#error-handling" title="Permanent link">&para;</a></h3>
+<p>The telemetry system is designed to be resilient:</p>
+<ul>
+<li>Failed metric operations are logged but don't crash the system</li>
+<li>Export failures are retried automatically</li>
+<li>Thread-safe operations prevent data corruption</li>
+</ul>
+<h2 id="monitoring-and-alerting">Monitoring and Alerting<a class="headerlink" href="#monitoring-and-alerting" title="Permanent link">&para;</a></h2>
+<h3 id="key-metrics-to-monitor">Key Metrics to Monitor<a class="headerlink" href="#key-metrics-to-monitor" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>telemetry_collection_runs_total</code>: Collection health</li>
+<li><code>telemetry_collection_duration_seconds</code>: Collection performance</li>
+<li><code>telemetry_metrics_count</code>: Number of registered metrics</li>
+<li><code>telemetry_events_total</code>: Event recording rate</li>
+</ul>
+<h3 id="sample-alerts">Sample Alerts<a class="headerlink" href="#sample-alerts" title="Permanent link">&para;</a></h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Prometheus alerting rules</span>
+<span class="nt">groups</span><span class="p">:</span>
+<span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">telemetry</span>
+<span class="w">  </span><span class="nt">rules</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TelemetryCollectionFailed</span>
+<span class="w">    </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">increase(telemetry_collection_runs_total[5m]) == 0</span>
+<span class="w">    </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2m</span>
+<span class="w">    </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Telemetry</span><span class="nv"> </span><span class="s">collection</span><span class="nv"> </span><span class="s">has</span><span class="nv"> </span><span class="s">stopped&quot;</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">HighTelemetryCollectionDuration</span>
+<span class="w">    </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">telemetry_collection_duration_seconds &gt; 10</span>
+<span class="w">    </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1m</span>
+<span class="w">    </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Telemetry</span><span class="nv"> </span><span class="s">collection</span><span class="nv"> </span><span class="s">taking</span><span class="nv"> </span><span class="s">too</span><span class="nv"> </span><span class="s">long&quot;</span>
+</code></pre></div>
+
+<h2 id="api-reference">API Reference<a class="headerlink" href="#api-reference" title="Permanent link">&para;</a></h2>
+<h3 id="telemetrycollector">TelemetryCollector<a class="headerlink" href="#telemetrycollector" title="Permanent link">&para;</a></h3>
+<p>Main class for metrics collection and management.</p>
+<h4 id="methods">Methods<a class="headerlink" href="#methods" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>register_counter(name, description, labels)</code>: Register a counter metric</li>
+<li><code>register_gauge(name, description, labels)</code>: Register a gauge metric  </li>
+<li><code>register_histogram(name, description, buckets, labels)</code>: Register a histogram metric</li>
+<li><code>get_metric(name)</code>: Retrieve a registered metric</li>
+<li><code>record_event(name, value, labels, metadata)</code>: Record a telemetry event</li>
+<li><code>add_hook(hook_type, callback)</code>: Add event hook</li>
+<li><code>start_collection()</code>: Start periodic collection</li>
+<li><code>stop_collection()</code>: Stop periodic collection</li>
+<li><code>get_snapshot()</code>: Get current telemetry snapshot</li>
+</ul>
+<h3 id="metricsexporter">MetricsExporter<a class="headerlink" href="#metricsexporter" title="Permanent link">&para;</a></h3>
+<p>Abstract base class for metrics exporters.</p>
+<h4 id="implementations">Implementations<a class="headerlink" href="#implementations" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>PrometheusAdapter</code>: Prometheus text format export</li>
+<li><code>JSONExporter</code>: JSON format export</li>
+<li><code>MultiExporter</code>: Multiple format export</li>
+<li><code>PeriodicExporter</code>: Automatic periodic export</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting<a class="headerlink" href="#troubleshooting" title="Permanent link">&para;</a></h2>
+<h3 id="common-issues">Common Issues<a class="headerlink" href="#common-issues" title="Permanent link">&para;</a></h3>
+<ol>
+<li><strong>Metrics not updating</strong>: Check if collection is started with <code>start_collection()</code></li>
+<li><strong>Export failures</strong>: Verify file permissions and disk space</li>
+<li><strong>High memory usage</strong>: Review metric cardinality and event retention</li>
+<li><strong>Thread safety issues</strong>: Use the provided thread-safe metric operations</li>
+</ol>
+<h3 id="debug-information">Debug Information<a class="headerlink" href="#debug-information" title="Permanent link">&para;</a></h3>
+<p>Enable debug logging to troubleshoot issues:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s1">&#39;utilityfog_frontend.telemetry&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="performance-tuning">Performance Tuning<a class="headerlink" href="#performance-tuning" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Adjust collection interval based on your needs</li>
+<li>Use appropriate histogram buckets for your data distribution</li>
+<li>Limit event retention with reasonable buffer sizes</li>
+<li>Monitor system resource usage</li>
+</ul>
+<h2 id="future-enhancements">Future Enhancements<a class="headerlink" href="#future-enhancements" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Remote Export</strong>: HTTP endpoints for metrics scraping</li>
+<li><strong>Alerting Integration</strong>: Built-in alerting rules and notifications</li>
+<li><strong>Dashboard Integration</strong>: Grafana dashboard templates</li>
+<li><strong>Advanced Analytics</strong>: Statistical analysis and anomaly detection</li>
+<li><strong>Distributed Tracing</strong>: OpenTelemetry integration for request tracing</li>
+</ul>
+              
+            </div>
+          </div><footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

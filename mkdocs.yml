@@ -1,0 +1,17 @@
+site_name: UtilityFog Fractal TreeOpen
+site_description: UtilityFog Fractal TreeOpen - Phase 3 Release Documentation
+site_url: https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/
+
+nav:
+  - Home: index.md
+
+theme: readthedocs
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+
+docs_dir: docs
+site_dir: site
