@@ -1,0 +1,206 @@
+
+name: "Documentation Deploy"
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-docs:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for version detection
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install documentation dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mkdocs mkdocs-material mkdocs-mermaid2-plugin
+        pip install mkdocs-git-revision-date-localized-plugin
+        pip install mkdocs-minify-plugin mkdocs-redirects
+
+    - name: Configure Git for version detection
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Detect version and setup docs structure
+      run: |
+        # Detect current version
+        if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "Building docs for release: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "IS_RELEASE=true" >> $GITHUB_ENV
+        else
+          VERSION="latest"
+          echo "Building docs for latest"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "IS_RELEASE=false" >> $GITHUB_ENV
+        fi
+
+    - name: Create MkDocs configuration
+      run: |
+        cat > mkdocs.yml << 'EOF'
+        site_name: UtilityFog-Fractal-TreeOpen
+        site_description: Advanced UtilityFog simulation system with comprehensive telemetry, visualization, and observability capabilities
+        site_url: https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/
+        repo_url: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen
+        repo_name: Goldislops/UtilityFog-Fractal-TreeOpen
+        
+        theme:
+          name: material
+          palette:
+            - scheme: default
+              primary: blue
+              accent: light-blue
+              toggle:
+                icon: material/brightness-7
+                name: Switch to dark mode
+            - scheme: slate
+              primary: blue
+              accent: light-blue
+              toggle:
+                icon: material/brightness-4
+                name: Switch to light mode
+          features:
+            - navigation.tabs
+            - navigation.sections
+            - navigation.expand
+            - navigation.top
+            - search.highlight
+            - content.code.copy
+        
+        nav:
+          - Home: index.md
+          - Quick Start: quickstart.md
+          - Features:
+            - Telemetry: TELEMETRY.md
+            - Visualization: VISUALIZATION.md
+            - Observability: OBSERVABILITY.md
+          - Documentation:
+            - Agent Safety: agent-safety-policy.md
+            - Versioning: versioning.md
+            - Troubleshooting: troubleshooting.md
+        
+        plugins:
+          - search
+          - git-revision-date-localized:
+              type: date
+          - minify:
+              minify_html: true
+        
+        markdown_extensions:
+          - admonition
+          - pymdownx.details
+          - pymdownx.superfences:
+              custom_fences:
+                - name: mermaid
+                  class: mermaid
+                  format: !!python/name:pymdownx.superfences.fence_code_format
+          - pymdownx.highlight:
+              anchor_linenums: true
+          - pymdownx.inlinehilite
+          - pymdownx.snippets
+          - attr_list
+          - md_in_html
+        EOF
+
+    - name: Prepare documentation files
+      run: |
+        # Create docs directory structure
+        mkdir -p site_build/docs
+        
+        # Copy main README as index
+        cp README.md site_build/docs/index.md
+        
+        # Copy all documentation files
+        cp -r docs/* site_build/docs/ 2>/dev/null || true
+        
+        # Ensure all required files exist
+        if [ ! -f "site_build/docs/quickstart.md" ]; then
+          echo "# Quick Start Guide" > site_build/docs/quickstart.md
+          echo "Documentation coming soon..." >> site_build/docs/quickstart.md
+        fi
+
+    - name: Build documentation
+      run: |
+        # Set docs directory
+        sed -i 's/^docs_dir:.*/docs_dir: site_build\/docs/' mkdocs.yml
+        
+        # Build the site
+        mkdocs build --site-dir site_output
+
+    - name: Setup version structure
+      run: |
+        mkdir -p final_site
+        
+        if [ "$IS_RELEASE" = "true" ]; then
+          # For releases, create versioned directory
+          mkdir -p "final_site/$VERSION"
+          cp -r site_output/* "final_site/$VERSION/"
+          
+          # Create/update latest symlink content
+          cp -r site_output/* final_site/
+        else
+          # For main branch, update latest
+          cp -r site_output/* final_site/
+        fi
+        
+        # Create index redirect if needed
+        if [ ! -f "final_site/index.html" ]; then
+          cat > final_site/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta http-equiv="refresh" content="0; url=./latest/">
+          <title>Redirecting...</title>
+        </head>
+        <body>
+          <p>Redirecting to <a href="./latest/">latest documentation</a>...</p>
+        </body>
+        </html>
+        EOF
+        fi
+
+    - name: Upload Pages artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: final_site
+
+  deploy-docs:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: build-docs
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
