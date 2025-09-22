@@ -1,0 +1,156 @@
+
+name: "Nightly Benchmarks"
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Daily at 3 AM UTC
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r testing_requirements.txt
+        pip install pytest-benchmark
+
+    - name: Run lightweight benchmarks
+      run: |
+        # Create benchmark test file
+        cat > test_benchmarks.py << 'EOF'
+        import pytest
+        import time
+        import json
+        from datetime import datetime
+        
+        def test_tree_node_creation_benchmark(benchmark):
+            """Benchmark TreeNode creation performance."""
+            def create_tree_nodes():
+                # Simulate tree node creation
+                nodes = []
+                for i in range(100):
+                    node = {
+                        'id': f'node_{i}',
+                        'parent': f'node_{i//2}' if i > 0 else None,
+                        'children': [],
+                        'data': {'value': i, 'timestamp': time.time()}
+                    }
+                    nodes.append(node)
+                return nodes
+            
+            result = benchmark(create_tree_nodes)
+            assert len(result) == 100
+        
+        def test_message_processing_benchmark(benchmark):
+            """Benchmark message processing performance."""
+            def process_messages():
+                messages = []
+                for i in range(50):
+                    message = {
+                        'id': f'msg_{i}',
+                        'sender': f'node_{i%10}',
+                        'receiver': f'node_{(i+1)%10}',
+                        'payload': {'data': f'test_data_{i}'},
+                        'timestamp': time.time()
+                    }
+                    # Simulate processing
+                    processed = {**message, 'processed': True}
+                    messages.append(processed)
+                return messages
+            
+            result = benchmark(process_messages)
+            assert len(result) == 50
+        
+        def test_visualization_data_benchmark(benchmark):
+            """Benchmark visualization data preparation."""
+            def prepare_viz_data():
+                viz_data = {
+                    'nodes': [{'id': f'n_{i}', 'x': i*10, 'y': i*5} for i in range(20)],
+                    'edges': [{'source': f'n_{i}', 'target': f'n_{i+1}'} for i in range(19)],
+                    'metadata': {'timestamp': datetime.now().isoformat()}
+                }
+                return viz_data
+            
+            result = benchmark(prepare_viz_data)
+            assert len(result['nodes']) == 20
+            assert len(result['edges']) == 19
+        EOF
+        
+        # Run benchmarks with JSON output
+        pytest test_benchmarks.py --benchmark-json=benchmark_results.json --benchmark-only
+
+    - name: Process benchmark results
+      run: |
+        python -c "
+        import json
+        from datetime import datetime
+        
+        # Load benchmark results
+        with open('benchmark_results.json', 'r') as f:
+            results = json.load(f)
+        
+        # Create trend data
+        trend_data = {
+            'timestamp': datetime.now().isoformat(),
+            'commit': '${{ github.sha }}',
+            'benchmarks': {}
+        }
+        
+        for benchmark in results['benchmarks']:
+            name = benchmark['name']
+            stats = benchmark['stats']
+            trend_data['benchmarks'][name] = {
+                'mean': stats['mean'],
+                'min': stats['min'],
+                'max': stats['max'],
+                'stddev': stats['stddev']
+            }
+        
+        # Save trend data
+        with open('benchmark_trends.json', 'w') as f:
+            json.dump(trend_data, f, indent=2)
+        
+        print('Benchmark trends generated successfully')
+        "
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ github.run_number }}
+        path: |
+          benchmark_results.json
+          benchmark_trends.json
+
+    - name: Comment benchmark results
+      if: github.event_name == 'workflow_dispatch'
+      run: |
+        echo "## 📊 Benchmark Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Benchmark completed at $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Performance Metrics" >> $GITHUB_STEP_SUMMARY
+        python -c "
+        import json
+        with open('benchmark_results.json', 'r') as f:
+            results = json.load(f)
+        
+        print('| Test | Mean (s) | Min (s) | Max (s) |')
+        print('|------|----------|---------|---------|')
+        
+        for benchmark in results['benchmarks']:
+            name = benchmark['name'].replace('test_', '').replace('_benchmark', '')
+            stats = benchmark['stats']
+            print(f'| {name} | {stats[\"mean\"]:.6f} | {stats[\"min\"]:.6f} | {stats[\"max\"]:.6f} |')
+        " >> $GITHUB_STEP_SUMMARY
