@@ -1,0 +1,91 @@
+name: CI Seeder
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Base branch to seed from'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  seed:
+    name: Restore 8 CI workflows and open PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create working branch
+        run: |
+          BR="ci/restore-workflows-v2"
+          git switch -c "$BR" || git switch "$BR" || git checkout -b "$BR"
+          echo "BRANCH=$BR" >> $GITHUB_ENV
+
+      - name: Ensure .github/workflows exists
+        run: mkdir -p .github/workflows
+
+      - name: Upsert workflow stubs (only if missing)
+        shell: bash
+        run: |
+          mk() { f=".github/workflows/$1"; if [ ! -f "$f" ]; then cat > "$f" <<'YAML'
+          name: PLACEHOLDER
+          on: { workflow_dispatch: {} }
+          jobs:
+            just-echo:
+              runs-on: ubuntu-latest
+              steps:
+                - run: echo "Stub workflow: $GITHUB_WORKFLOW ($GITHUB_RUN_ID)"
+          YAML
+          echo "created $f"
+          else
+            echo "kept    $f (exists)"
+          fi; }
+
+          mk codeql.yml
+          mk container.yml
+          mk docs-deploy.yml
+          mk nightly-bench.yml
+          mk pypi-publish.yml
+          mk release-smoke.yml
+          mk sbom.yml
+          mk scorecard.yml
+
+      - name: Commit & push
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/workflows
+            git commit -m "ci: restore workflows (seeded stubs)"
+            git push -u origin "$BRANCH"
+          fi
+
+      - name: Create or update PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ github.token }}
+          branch: ${{ env.BRANCH }}
+          title: "ci: restore workflows (seeded stubs)"
+          body: |
+            This PR restores 8 CI workflow stubs (safe, manual-run only):
+            - codeql.yml
+            - container.yml
+            - docs-deploy.yml
+            - nightly-bench.yml
+            - pypi-publish.yml
+            - release-smoke.yml
+            - sbom.yml
+            - scorecard.yml
+
+            Each stub is `workflow_dispatch` only with a single echo job.
+            Replace contents later with real logic.
+          draft: false
+          delete-branch: false
