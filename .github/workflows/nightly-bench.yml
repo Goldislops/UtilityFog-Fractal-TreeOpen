@@ -1,0 +1,10 @@
+name: nightly-bench
+on:
+  workflow_dispatch: {}
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Stub workflow nightly-bench running."
