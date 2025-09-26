@@ -1,11 +1,23 @@
 
 # UtilityFog-Fractal-TreeOpen
 
-[![Tests](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/phase3-ci.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/phase3-ci.yml)
-[![Coverage](https://files.readme.io/8192810-codecov_uploader.png)
+<!-- Status Badges -->
+[![Tests](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ci.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/codeql.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/codeql.yml)
+[![Release Smoke](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/release-smoke.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/release-smoke.yml)
+[![Nightly Benchmarks](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/nightly-bench.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/nightly-bench.yml)
+[![OSSF Scorecard](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/scorecard.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/scorecard.yml)
+[![Documentation](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/docs-deploy.yml/badge.svg)](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/docs-deploy.yml)
+
+<!-- Project Badges -->
 [![Python 3.9+](https://upload.wikimedia.org/wikipedia/commons/thumb/1/1b/Blue_Python_3.9_Shield_Badge.svg/1280px-Blue_Python_3.9_Shield_Badge.svg.png)
 [![License](https://i.ytimg.com/vi/4cgpu9L2AE8/maxresdefault.jpg)
-[![Phase 3](https://upload.wikimedia.org/wikipedia/en/thumb/0/03/Flag_of_Italy.svg/330px-Flag_of_Italy.svg.png)
+[![Latest Release](https://i.ytimg.com/vi/acIwQO1eOtw/sddefault.jpg)
+[![SBOM](https://scribesecurity.com/wp-content/uploads/2022/01/sbom-components-scribe-security-1024x602.webp)
+
+<!-- Security & Quality Badges -->
+[![OpenSSF Scorecard](https://lh7-us.googleusercontent.com/cXEJ6b5vKmme8Paj7UuLaLucbskRDKDXOhkY7PwCjTDqD1rQK-is0FSs1AlWPGKKYfqC6IET-GLr_IeU7poBDs_lQi7pMahp-BJ_bHZCb5j-AOBXENFOJdLkse9AIAEP1NwyEzC8qGx_Ez77qUOKL-A)
+[![Supply Chain Security](https://upload.wikimedia.org/wikipedia/commons/thumb/6/67/SD_Cards.svg/794px-SD_Cards.svg.png)
 
 Advanced UtilityFog simulation system with comprehensive telemetry, visualization, and observability capabilities.
 
@@ -50,323 +62,90 @@ UtilityFog-Fractal-TreeOpen
     └── Multi-Python Version Support
 ```
 
-## 🛠️ Quick Start
+## 🛡️ Security & Supply Chain
 
-### Installation
+This project implements comprehensive security measures:
 
-```bash
-# Clone the repository
-git clone https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen.git
-cd UtilityFog-Fractal-TreeOpen
-
-# Install dependencies
-make install
-
-# Run tests to verify installation
-make test
-```
-
-### Basic Usage
-
-```bash
-# Run simulation with all Phase 3 features
-make run-sim
-
-# Test individual components
-make telemetry    # Test telemetry system
-make viz          # Test visualization
-make observe      # Test observability
-make bench        # Run performance benchmarks
-```
-
-### Development Workflow
-
-```bash
-# Setup development environment
-make dev-setup
-
-# Run all quality checks
-make check-all
-
-# Generate coverage report
-make coverage-html
-```
-
-## 📋 Available Commands
-
-### Core Operations
-- `make install` - Install dependencies and setup environment
-- `make test` - Run all tests
-- `make coverage` - Run tests with coverage reporting
-- `make run-sim` - Run main simulation with Phase 3 features
-
-### Phase 3 Components
-- `make telemetry` - Test and demonstrate telemetry system
-- `make viz` - Test and demonstrate visualization capabilities
-- `make observe` - Test and demonstrate observability features
-- `make bench` - Run performance benchmarks
-
-### Code Quality
-- `make lint` - Run code linting (ruff)
-- `make format` - Format code automatically
-- `make type-check` - Run type checking (mypy)
-
-### Maintenance
-- `make clean` - Clean build artifacts
-- `make help` - Show all available commands
-
-## ⚙️ Configuration
-
-### Feature Flags
-
-Control Phase 3 components via `config/feature_flags.json`:
-
-```json
-{
-  "enable_telemetry": true,
-  "enable_visualization": true,
-  "enable_observability": true,
-  "telemetry_max_history": 1000,
-  "observability_log_level": "INFO",
-  "viz_real_time_updates": true
-}
-```
-
-### Environment Variables
-
-Override settings with environment variables:
-
-```bash
-# Disable telemetry
-UFOG_ENABLE_TELEMETRY=false make run-sim
-
-# Set debug logging
-UFOG_OBSERVABILITY_LOG_LEVEL=DEBUG make observe
-
-# Configure telemetry history
-UFOG_TELEMETRY_MAX_HISTORY=5000 make telemetry
-```
-
-## 📊 Usage Examples
-
-### Telemetry Collection
-
-```python
-from agent.telemetry_collector import get_telemetry_collector
-
-collector = get_telemetry_collector()
-
-# Collect metrics
-collector.collect_metric("agent_count", 150)
-collector.collect_performance_metric("simulation_step", 0.05, success=True)
-
-# Get current metrics
-metrics = collector.get_current_metrics()
-print(f"Collected {len(metrics['metrics'])} metrics")
-```
-
-### Observability Tracing
-
-```python
-from agent.observability import trace_operation, log_simulation_event
-
-# Trace operations
-with trace_operation("agent_movement", agent_id=123):
-    # Your simulation code here
-    calculate_agent_movement()
-
-# Log events
-log_simulation_event("collision_detected", 
-                     agents=[123, 456], 
-                     severity="high")
-```
-
-### Feature Flag Usage
-
-```python
-from agent.feature_flags import is_telemetry_enabled, get_telemetry_config
-
-if is_telemetry_enabled():
-    config = get_telemetry_config()
-    print(f"Telemetry configured with {config['max_history']} max history")
-```
-
-## 🧪 Testing
-
-### Test Coverage
-
-- **Overall Coverage**: ≥90% across all Phase 3 components
-- **Observability**: 94% coverage (180 statements, 10 missed)
-- **Telemetry**: 98% coverage (98 statements, 2 missed)
-- **Feature Flags**: 100% coverage
-
-### Running Tests
-
-```bash
-# All tests
-make test
-
-# Specific component tests
-make test-observability
-make test-telemetry
-
-# Coverage with HTML report
-make coverage-html
-```
-
-### Continuous Integration
-
-The project uses GitHub Actions for:
-- Multi-Python version testing (3.9, 3.10, 3.11)
-- Code quality checks (linting, type checking)
-- Security scanning
-- Coverage reporting
-- Integration testing of all Phase 3 components
+- **CodeQL Security Analysis**: Automated vulnerability scanning
+- **OSSF Scorecard**: Supply chain security assessment
+- **SBOM Generation**: Software Bill of Materials with attestations
+- **Dependency Updates**: Automated via Dependabot
+- **Branch Protection**: Enforced code review and status checks
 
 ## 📚 Documentation
 
-### Component Documentation
-- **[Observability System](docs/OBSERVABILITY.md)** - Comprehensive guide to structured logging and tracing
-- **[Feature Flags](config/feature_flags.json)** - Configuration options and defaults
-- **[Makefile](Makefile)** - All available development commands
+- **[Quick Start Guide](docs/quickstart.md)** - Get up and running quickly
+- **[Telemetry Documentation](docs/TELEMETRY.md)** - Metrics and monitoring
+- **[Visualization Guide](docs/VISUALIZATION.md)** - CLI visualization tools
+- **[Observability](docs/OBSERVABILITY.md)** - Logging and tracing
+- **[API Documentation](https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/)** - Full API reference
 
-### API Reference
-- **Observability**: `UtilityFog_Agent_Package/agent/observability.py`
-- **Telemetry**: `UtilityFog_Agent_Package/agent/telemetry_collector.py`
-- **Feature Flags**: `UtilityFog_Agent_Package/agent/feature_flags.py`
-
-## 🔧 Development
-
-### Project Structure
-
-```
-UtilityFog-Fractal-TreeOpen/
-├── UtilityFog_Agent_Package/
-│   └── agent/
-│       ├── observability.py          # FT-010: Observability system
-│       ├── telemetry_collector.py    # FT-008: Enhanced telemetry
-│       ├── feature_flags.py          # Phase 3: Feature management
-│       ├── main_simulation.py        # Core simulation
-│       ├── foglet_agent.py          # Agent system
-│       └── ...
-├── tests/
-│   ├── test_observability.py        # Observability tests (25 tests)
-│   └── ...
-├── docs/
-│   ├── OBSERVABILITY.md             # Observability documentation
-│   └── ...
-├── config/
-│   ├── feature_flags.json           # Feature flag configuration
-│   └── agent_limits.yaml           # Agent configuration
-├── .github/workflows/
-│   └── phase3-ci.yml               # CI/CD pipeline
-├── Makefile                        # Development commands
-└── README.md                       # This file
-```
-
-### Contributing
-
-1. **Setup Development Environment**
-   ```bash
-   make dev-setup
-   ```
-
-2. **Make Changes**
-   - Follow existing code patterns
-   - Add tests for new functionality
-   - Update documentation as needed
-
-3. **Quality Checks**
-   ```bash
-   make check-all  # Runs lint, type-check, test, coverage
-   ```
-
-4. **Submit Pull Request**
-   - Ensure all CI checks pass
-   - Include comprehensive description
-   - Reference related issues
-
-### Code Quality Standards
-
-- **Test Coverage**: ≥90% for all new code
-- **Type Hints**: Required for all public APIs
-- **Documentation**: Comprehensive docstrings and README updates
-- **Linting**: Code must pass ruff linting
-- **Formatting**: Use ruff format for consistent style
-
-## 🚀 Deployment
-
-### Production Readiness
-
-The system is designed for production deployment with:
-- **Configurable feature flags** for gradual rollout
-- **Comprehensive monitoring** and observability
-- **Performance benchmarks** and optimization
-- **Multi-environment support** (dev, staging, prod)
-
-### Deployment Commands
+## 🚀 Quick Start
 
 ```bash
-# Validate deployment readiness
-make validate-phase3
+# Install from PyPI (when available)
+pip install utilityfog-fractal-tree
 
-# Run full test suite
-make ci-test
+# Or install from source
+git clone https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen.git
+cd UtilityFog-Fractal-TreeOpen
+pip install -e .
 
-# Generate deployment artifacts
-make clean-all && make coverage-html
+# Run diagnostics
+ufog-diagnose --json --fail-on-warn
 ```
 
-## 📈 Performance
-
-### Benchmarks
-
-- **Observability Overhead**: ~1-2% in typical scenarios
-- **Telemetry Collection**: >1000 metrics/second
-- **Trace Propagation**: Minimal overhead using thread-local storage
-- **Memory Usage**: Configurable history limits prevent memory leaks
-
-### Optimization Features
-
-- **Rate-limited logging** prevents log spam
-- **Efficient JSON serialization** for structured logs
-- **Thread-safe operations** for concurrent simulations
-- **Configurable buffer sizes** for telemetry collection
-
-## 🤝 Support
-
-### Getting Help
-
-- **Issues**: [GitHub Issues](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues)
-- **Documentation**: See `docs/` directory
-- **Examples**: Run `make help` for command examples
-
-### Troubleshooting
+## 🧪 Development
 
 ```bash
-# Check system status
-make validate-phase3
+# Install development dependencies
+pip install -r testing_requirements.txt
 
-# Debug with verbose logging
-UFOG_OBSERVABILITY_LOG_LEVEL=DEBUG make observe
+# Run tests
+python -m pytest
 
-# Reset to clean state
-make clean-all && make install
+# Run benchmarks
+python -m pytest test_benchmarks.py --benchmark-only
+
+# Generate documentation
+make docs
 ```
+
+## 📊 Performance
+
+Nightly benchmarks track performance across key operations:
+- Tree node creation and manipulation
+- Message processing throughput
+- Visualization data preparation
+- Memory usage patterns
+
+View latest benchmark results in [GitHub Actions](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/actions/workflows/nightly-bench.yml).
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+All contributions are subject to:
+- Code review requirements
+- Automated testing and quality checks
+- Security scanning and compliance
+- Documentation updates
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## 🔗 Links
 
-- **Phase 3 Integration**: Complete implementation of telemetry, visualization, and observability
-- **Comprehensive Testing**: ≥90% coverage across all components
-- **Production Ready**: Feature flags, CI/CD, and deployment automation
-- **Developer Experience**: Rich Makefile, documentation, and tooling
+- **Documentation**: https://goldislops.github.io/UtilityFog-Fractal-TreeOpen/
+- **Issues**: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues
+- **Discussions**: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/discussions
+- **Security**: [SECURITY.md](SECURITY.md)
 
 ---
 
-**Ready for production deployment with comprehensive Phase 3 capabilities!** 🚀
-
-For detailed component documentation, see the `docs/` directory. For development commands, run `make help`.
+**Built with ❤️ for the UtilityFog community**
