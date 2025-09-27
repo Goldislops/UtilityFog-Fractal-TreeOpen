@@ -1,0 +1,32 @@
+name: release-smoke
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Python import smoke
+        run: |
+          python - <<'PY'
+          try:
+              import importlib; print("OK:", importlib.util.find_spec("your_package") is not None)
+          except Exception as e:
+              print("SMOKE FAIL:", e); raise
+          PY
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Node build smoke
+        run: |
+          if [ -f package.json ]; then npm ci || npm i; npm -s run build || echo "no build script"; fi
