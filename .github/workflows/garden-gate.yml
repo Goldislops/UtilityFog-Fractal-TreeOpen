@@ -1,0 +1,111 @@
+name: garden-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gate:
+    name: Garden Gate • Lint • Types • Tests (py+node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- PYTHON ----------
+      - name: Detect Python project
+        id: py_detect
+        run: |
+          has_setup=""
+          for f in pyproject.toml setup.cfg setup.py requirements.txt; do
+            test -f "$f" && has_setup=1 && break
+          done
+          echo "present=${has_setup:-}" >> $GITHUB_OUTPUT
+
+      - name: Setup Python
+        if: steps.py_detect.outputs.present == '1'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps (best-effort)
+        if: steps.py_detect.outputs.present == '1'
+        run: |
+          python -m pip install --upgrade pip
+          # project deps
+          if [ -f requirements.txt ]; then pip install -r requirements.txt || true; fi
+          # tooling
+          pip install ruff mypy pytest hypothesis pytest-cov || true
+
+      - name: Python lint (ruff)
+        if: steps.py_detect.outputs.present == '1'
+        run: |
+          ruff --version
+          ruff check . || (echo "::error ::Ruff found issues"; exit 1)
+
+      - name: Python types (mypy)
+        if: steps.py_detect.outputs.present == '1'
+        run: |
+          mypy --version
+          # be tolerant if no config/module roots; mypy returns 2 when nothing to check
+          mypy . || (code=$?; if [ $code -eq 2 ]; then echo "mypy: nothing to check, skipping"; exit 0; else exit $code; fi)
+
+      - name: Python tests (pytest + property)
+        if: steps.py_detect.outputs.present == '1'
+        run: |
+          pytest -q --maxfail=1 --disable-warnings --cov --cov-report=term-missing || exit 1
+
+      # ---------- NODE ----------
+      - name: Detect Node project
+        id: node_detect
+        run: |
+          if [ -f package.json ]; then echo "present=1" >> $GITHUB_OUTPUT; fi
+
+      - name: Setup Node
+        if: steps.node_detect.outputs.present == '1'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Node deps
+        if: steps.node_detect.outputs.present == '1'
+        run: |
+          npm ci || npm i
+
+      - name: Node lint (eslint if available)
+        if: steps.node_detect.outputs.present == '1'
+        run: |
+          if npm run | grep -q "lint"; then npm run lint; \
+          elif npx --yes eslint --version >/dev/null 2>&1; then npx --yes eslint . || (echo "::error ::ESLint found issues"; exit 1); \
+          else echo "No eslint configured; skipping"; fi
+
+      - name: TypeScript typecheck (if tsconfig present)
+        if: steps.node_detect.outputs.present == '1'
+        run: |
+          if [ -f tsconfig.json ]; then npx --yes tsc --noEmit; else echo "No tsconfig.json; skipping"; fi
+
+      - name: Node tests (if configured)
+        if: steps.node_detect.outputs.present == '1'
+        run: |
+          if npm run | grep -q "test"; then npm test --silent; else echo "No test script; skipping"; fi
+
+      # ---------- SARIF UPLOADS (best-effort) ----------
+      - name: Upload Ruff SARIF (if present)
+        if: hashFiles('ruff.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ruff.sarif
+
+      # ---------- SUMMARY ----------
+      - name: Summarize
+        run: |
+          echo "✅ Garden gate completed." >> $GITHUB_STEP_SUMMARY
+          echo "- Python present: ${{ steps.py_detect.outputs.present == '1' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Node present: ${{ steps.node_detect.outputs.present == '1' }}" >> $GITHUB_STEP_SUMMARY
