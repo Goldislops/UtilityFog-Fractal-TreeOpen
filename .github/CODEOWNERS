@@ -1,0 +1,12 @@
+# Global ownership
+* @Goldislops
+
+# Specification ownership
+/spec/* @Goldislops
+
+# Workflow ownership
+/.github/workflows/* @Goldislops
+
+# Documentation ownership
+/docs/* @Goldislops
+/README.md @Goldislops
