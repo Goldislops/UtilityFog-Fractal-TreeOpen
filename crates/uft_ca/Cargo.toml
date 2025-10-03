@@ -1,0 +1,27 @@
+[package]
+name = "uft_ca"
+version = "0.1.0"
+edition = "2021"
+authors = ["UtilityFog Team"]
+description = "Cellular automata kernel for 3D lattices and arbitrary graphs"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+rayon = "1.8"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+default = ["python"]
+python = ["pyo3"]
+
+[[bench]]
+name = "stepping"
+harness = false
