@@ -1,0 +1,158 @@
+# UtilityFog Fractal Tree MVP - Implementation Plan
+
+project:
+  name: "UtilityFog Fractal Tree MVP"
+  version: "0.1.0"
+  description: "Minimum viable product for fractal tree generation and cellular automata"
+  repository: "Goldislops/UtilityFog-Fractal-TreeOpen"
+
+milestones:
+  - id: "foundations"
+    name: "Foundations"
+    description: "Core infrastructure and foundational components"
+    status: "complete"
+  
+  - id: "ca-alpha"
+    name: "CA Alpha"
+    description: "Cellular automata core with stable rule execution"
+    status: "in_progress"
+  
+  - id: "fractal-mvp"
+    name: "Fractal Tree MVP"
+    description: "Basic fractal tree generation and visualization"
+    status: "planned"
+
+phases:
+  1_infrastructure:
+    name: "Infrastructure & Tooling"
+    tasks:
+      - "1.1 Repository setup"
+      - "1.2 CI/CD pipelines"
+      - "1.3 Development environment"
+      - "1.4 Documentation framework"
+  
+  2_ca_core:
+    name: "Cellular Automata Core"
+    tasks:
+      - "2.1 Rust CA kernel (lattice)"
+      - "2.2 Graph adjacency support"
+      - "2.3 PyO3 bindings"
+      - "2.4 Rule specification format"
+      - "2.5 Unit tests and benchmarks"
+  
+  3_orchestration:
+    name: "Python Orchestration"
+    tasks:
+      - "3.1 Experiment runner"
+      - "3.2 Metrics computation"
+      - "3.3 Rules & experiments loader"
+      - "3.4 Artifact generation"
+  
+  4_rule_search:
+    name: "Rule Search Harness"
+    tasks:
+      - "4.1 GitHub Actions workflow"
+      - "4.2 Matrix parallelization"
+      - "4.3 Lambda runner integration"
+      - "4.4 Result aggregation"
+  
+  5_fractal_tree:
+    name: "Fractal Tree Generation"
+    tasks:
+      - "5.1 Tree structure representation"
+      - "5.2 Branching algorithms"
+      - "5.3 CA-driven growth"
+      - "5.4 Visualization (3D)"
+
+tracks:
+  ca_track:
+    name: "Cellular Automata Track"
+    description: "Graph-based CA engine for self-organizing structures"
+    phases: ["2_ca_core", "3_orchestration", "4_rule_search"]
+    milestone: "ca-alpha"
+    priority: "high"
+    status: "in_progress"
+    components:
+      - "crates/uft_ca"
+      - "src/uft_orch/ca"
+      - "ca/rules"
+      - "ca/experiments"
+      - ".github/workflows/ca-search.yml"
+  
+  fractal_track:
+    name: "Fractal Tree Track"
+    description: "Fractal tree generation and visualization"
+    phases: ["5_fractal_tree"]
+    milestone: "fractal-mvp"
+    priority: "medium"
+    status: "planned"
+    components:
+      - "src/fractal_tree"
+      - "visualization"
+
+deliverables:
+  - name: "CA Kernel"
+    description: "Rust crate for high-performance CA stepping"
+    path: "crates/uft_ca"
+    status: "in_progress"
+    tests_required: true
+  
+  - name: "Python Orchestrator"
+    description: "Python layer for experiment management"
+    path: "src/uft_orch/ca"
+    status: "in_progress"
+    tests_required: true
+  
+  - name: "Rule Search Workflow"
+    description: "CI/CD pipeline for distributed rule search"
+    path: ".github/workflows/ca-search.yml"
+    status: "in_progress"
+    tests_required: false
+  
+  - name: "Documentation"
+    description: "Comprehensive CA and fractal tree documentation"
+    path: "ca/docs"
+    status: "in_progress"
+    tests_required: false
+
+metrics:
+  success_criteria:
+    - "CA kernel passes all unit tests"
+    - "Branching factor converges to 1.0-2.0 (edge of chaos)"
+    - "Connectivity > 0.8 for stable structures"
+    - "Rule search completes in < 30 minutes for 10 repeats"
+    - "Documentation covers all major components"
+  
+  performance_targets:
+    - "CA stepping: > 1M cells/second"
+    - "Experiment runtime: < 5 minutes for 500 steps on 64^3 lattice"
+    - "Workflow parallelism: 5-10 concurrent jobs"
+
+risks:
+  - id: "R1"
+    description: "Rule discovery may not converge to stable patterns"
+    mitigation: "Start with known stable rules (Conway-3D), iterate"
+    severity: "medium"
+  
+  - id: "R2"
+    description: "Performance bottlenecks in Python orchestration"
+    mitigation: "Profile and optimize hot paths, consider Rust migration"
+    severity: "low"
+  
+  - id: "R3"
+    description: "Lambda runner costs may exceed budget"
+    mitigation: "Use GitHub-hosted runners initially, monitor costs"
+    severity: "medium"
+
+next_steps:
+  - "Complete CA kernel implementation"
+  - "Add graph adjacency stepping"
+  - "Implement rulespec parser and validator"
+  - "Run branching-3 experiment locally"
+  - "Deploy ca-search workflow to CI"
+  - "Begin fractal tree track planning"
+
+# Cross-references
+# - SpecKit specifications: ../specs/
+# - Milestones: ./milestones.md
+# - GitHub Issues: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues
