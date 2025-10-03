@@ -1,0 +1,11 @@
+{
+  "name": "random-sparse",
+  "description": "Random sparse initialization (1% density)",
+  "lattice_size": [64, 64, 64],
+  "seed_type": "random",
+  "density": 0.01,
+  "state_distribution": {
+    "VOID": 0.99,
+    "STRUCTURAL": 0.01
+  }
+}
