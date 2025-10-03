@@ -10,12 +10,12 @@ milestones:
   - id: "foundations"
     name: "Foundations"
     description: "Core infrastructure and foundational components"
-    status: "in_progress"
+    status: "complete"
   
   - id: "ca-alpha"
     name: "CA Alpha"
     description: "Cellular automata core with stable rule execution"
-    status: "planned"
+    status: "in_progress"
   
   - id: "fractal-mvp"
     name: "Fractal Tree MVP"
@@ -136,18 +136,24 @@ risks:
   
   - id: "R2"
     description: "Performance bottlenecks in Python orchestration"
-    mitigation: "Profile and optimize hot paths, consider Rust migration"
+    mitigation: "Profile and optimize hot paths, consider Rust extensions"
     severity: "low"
   
   - id: "R3"
-    description: "Lambda runner costs may exceed budget"
-    mitigation: "Use GitHub-hosted runners initially, monitor costs"
+    description: "GitHub Actions runner costs for large-scale searches"
+    mitigation: "Use self-hosted runners or AWS Lambda for cost control"
     severity: "medium"
 
 next_steps:
-  - "Complete CA kernel implementation"
-  - "Add graph adjacency stepping"
-  - "Implement rulespec parser and validator"
-  - "Run branching-3 experiment locally"
-  - "Deploy ca-search workflow to CI"
-  - "Begin fractal tree track planning"
+  ca_track:
+    - "Complete CA kernel implementation (lattice + graph)"
+    - "Implement Python orchestration layer"
+    - "Create rule search workflow"
+    - "Run initial experiments (branching3_v1, branching3_v1b)"
+    - "Document CA architecture and usage"
+  
+  fractal_track:
+    - "Design tree structure representation"
+    - "Implement basic branching algorithms"
+    - "Integrate with CA engine for growth dynamics"
+    - "Create 3D visualization pipeline"
