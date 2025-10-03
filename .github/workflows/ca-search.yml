@@ -1,0 +1,181 @@
+name: CA Rule Search
+
+on:
+  workflow_dispatch:
+    inputs:
+      experiment_path:
+        description: 'Path to experiment YAML file'
+        required: true
+        default: 'ca/experiments/branching-3.yaml'
+      repeats:
+        description: 'Number of experiment repeats'
+        required: true
+        default: '10'
+      parallelism:
+        description: 'Number of parallel jobs'
+        required: true
+        default: '5'
+      runner_label:
+        description: 'Runner label (default or remote for Lambda)'
+        required: false
+        default: 'ubuntu-latest'
+
+jobs:
+  ca-search:
+    runs-on: ${{ github.event.inputs.runner_label }}
+    strategy:
+      matrix:
+        repeat: ${{ fromJson(format('[{0}]', join(range(1, fromJson(github.event.inputs.repeats) + 1), ','))) }}
+      max-parallel: ${{ fromJson(github.event.inputs.parallelism) }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            crates/uft_ca/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      
+      - name: Build uft_ca crate
+        run: |
+          cd crates/uft_ca
+          cargo build --release --features python
+          cargo test --release
+      
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r src/uft_orch/ca/requirements.txt
+          pip install maturin
+      
+      - name: Build Python bindings
+        run: |
+          cd crates/uft_ca
+          maturin develop --release
+      
+      - name: Run CA experiment
+        run: |
+          python -m uft_orch.ca.runner ${{ github.event.inputs.experiment_path }}
+        env:
+          EXPERIMENT_REPEAT: ${{ matrix.repeat }}
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ca-results-repeat-${{ matrix.repeat }}
+          path: |
+            artifacts/**/*.csv
+            artifacts/**/*.npy
+          retention-days: 30
+      
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## CA Experiment Results (Repeat ${{ matrix.repeat }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Experiment**: ${{ github.event.inputs.experiment_path }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Repeat**: ${{ matrix.repeat }} / ${{ github.event.inputs.repeats }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f artifacts/*/metrics.csv ]; then
+            echo "### Metrics Summary" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            tail -n 5 artifacts/*_metrics.csv >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  aggregate-results:
+    needs: ca-search
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install analysis dependencies
+        run: |
+          pip install pandas matplotlib seaborn numpy
+      
+      - name: Aggregate and analyze results
+        run: |
+          python -c "
+import pandas as pd
+import glob
+import os
+
+# Find all CSV files
+csv_files = glob.glob('all-results/**/*_metrics.csv', recursive=True)
+print(f'Found {len(csv_files)} result files')
+
+if csv_files:
+    # Combine all results
+    dfs = []
+    for i, f in enumerate(csv_files):
+        df = pd.read_csv(f)
+        df['repeat'] = i + 1
+        dfs.append(df)
+    
+    combined = pd.concat(dfs, ignore_index=True)
+    
+    # Compute statistics
+    print('\\n=== Aggregate Statistics ===')
+    print(combined.groupby('step')[['branching_factor', 'connectivity', 'survival']].agg(['mean', 'std']))
+    
+    # Save combined results
+    combined.to_csv('combined_results.csv', index=False)
+    print('\\nSaved combined results to combined_results.csv')
+else:
+    print('No results found')
+          "
+      
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ca-combined-results
+          path: combined_results.csv
+          retention-days: 90
+      
+      - name: Generate final summary
+        if: always()
+        run: |
+          echo "## 🔬 CA Rule Search Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Experiment**: ${{ github.event.inputs.experiment_path }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Total Repeats**: ${{ github.event.inputs.repeats }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Parallelism**: ${{ github.event.inputs.parallelism }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Individual run results: \`ca-results-repeat-*\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Combined analysis: \`ca-combined-results\`" >> $GITHUB_STEP_SUMMARY
