@@ -136,6 +136,27 @@ risks:
   
   - id: "R2"
     description: "Performance bottlenecks in Python orchestration"
+    mitigation: "Profile and optimize hot paths, consider Rust extensions"
+    severity: "low"
+  
+  - id: "R3"
+    description: "GitHub Actions runner costs for large-scale searches"
+    mitigation: "Use self-hosted runners or AWS Lambda for cost control"
+    severity: "medium"
+
+next_steps:
+  ca_track:
+    - "Complete CA kernel implementation (lattice + graph)"
+    - "Implement Python orchestration layer"
+    - "Create rule search workflow"
+    - "Run initial experiments (branching3_v1, branching3_v1b)"
+    - "Document CA architecture and usage"
+  
+  fractal_track:
+    - "Design tree structure representation"
+    - "Implement basic branching algorithms"
+    - "Integrate with CA engine for growth dynamics"
+    - "Create 3D visualization pipeline"
     mitigation: "Profile and optimize hot paths, consider Rust migration"
     severity: "low"
   

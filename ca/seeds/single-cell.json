@@ -1,0 +1,9 @@
+{
+  "name": "single-cell",
+  "description": "Single STRUCTURAL cell at center of lattice",
+  "lattice_size": [64, 64, 64],
+  "states": [],
+  "seed_type": "single",
+  "seed_position": [32, 32, 32],
+  "seed_state": 1
+}

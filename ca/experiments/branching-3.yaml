@@ -1,0 +1,25 @@
+# Branching-3 Experiment: Test fractal branching growth
+
+experiment:
+  name: "branching-3"
+  rule: "ca/rules/example.toml"
+  seed: "ca/seeds/single-cell.json"
+  steps: 500
+  lattice_size: [64, 64, 64]  # 64^3 lattice
+  metrics:
+    - branching_factor
+    - connectivity
+    - survival
+    - density
+  output_dir: "artifacts/branching-3"
+
+# Experiment metadata
+meta:
+  description: "Test multi-state branching growth on 3D lattice"
+  hypothesis: "Rule should produce stable branching structures with lambda ~1.5"
+  expected_outcomes:
+    - "Branching factor converges to 1.0-2.0 (edge of chaos)"
+    - "Connectivity remains > 0.8 (highly connected)"
+    - "Survival > 0.5 (stable structures)"
+  author: "UtilityFog Team"
+  version: "0.1.0"

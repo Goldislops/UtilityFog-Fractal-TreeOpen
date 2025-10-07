@@ -1,0 +1,33 @@
+# Example CA rule: Branching growth with multiple states
+
+[rule]
+name = "branching-growth"
+states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
+neighborhood = "moore-3d"
+transition = "outer-totalistic"
+
+[params]
+# Outer-totalistic transitions based on neighbor count
+# Format: current_state = { neighbor_count = next_state }
+
+[params.transitions]
+# VOID cells become STRUCTURAL with 4-6 neighbors
+VOID = { 4 = "STRUCTURAL", 5 = "STRUCTURAL", 6 = "STRUCTURAL" }
+
+# STRUCTURAL cells evolve based on density
+STRUCTURAL = { 2 = "STRUCTURAL", 3 = "STRUCTURAL", 4 = "COMPUTE", 5 = "COMPUTE" }
+
+# COMPUTE cells can become ENERGY or SENSOR
+COMPUTE = { 2 = "COMPUTE", 3 = "ENERGY", 4 = "SENSOR" }
+
+# ENERGY cells are stable
+ENERGY = { 2 = "ENERGY", 3 = "ENERGY", 4 = "ENERGY" }
+
+# SENSOR cells are stable
+SENSOR = { 2 = "SENSOR", 3 = "SENSOR", 4 = "SENSOR" }
+
+[params.meta]
+description = "Multi-state branching growth rule for fractal structures"
+author = "UtilityFog Team"
+version = "0.1.0"
+target_lambda = 1.5  # Target branching factor (edge of chaos)

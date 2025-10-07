@@ -13,6 +13,9 @@ This document tracks the major milestones for the UtilityFog Fractal Tree MVP, i
 
 ## Milestone 1: Foundations
 
+**Status**: 🟡 In Progress  
+**Target Date**: Q1 2026  
+**Owner**: Core Team
 **Status**: ✅ Complete  
 **Target Date**: Q1 2026  
 **Owner**: Core Team  
@@ -25,6 +28,16 @@ Establish core infrastructure and foundational components for the project.
 ### Deliverables
 
 - [x] Repository setup and structure
+- [x] CI/CD pipelines (basic)
+- [ ] Development environment documentation
+- [ ] SpecKit framework integration
+- [ ] GitHub templates (issues, PRs)
+
+### Success Criteria
+
+- All developers can clone and build the project
+- CI runs on every PR
+- Documentation is accessible and up-to-date
 - [x] SpecKit framework integration (PR #35)
 - [x] CI/CD pipelines (basic)
 - [x] Development environment documentation
@@ -43,6 +56,7 @@ Establish core infrastructure and foundational components for the project.
 
 **Status**: 🟡 In Progress  
 **Target Date**: Q1 2026  
+**Owner**: CA Track Team
 **Owner**: CA Track Team  
 **PR**: #81  
 **Epic**: #82
@@ -87,6 +101,16 @@ Deliver a working cellular automata engine with stable rule execution on both 3D
 
 ### Success Criteria
 
+- ✅ CA kernel passes all unit tests
+- ✅ Branching-3 experiment runs successfully
+- ✅ Branching factor converges to 1.0-2.0 (edge of chaos)
+- ✅ Connectivity > 0.8 for stable structures
+- ✅ Rule search completes in < 30 minutes for 10 repeats
+- ✅ At least one stable rule documented
+
+### Tasks
+
+See [GitHub Issues](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues) for detailed task tracking.
 - ⏳ CA kernel passes all unit tests
 - ⏳ Branching-3 experiment runs successfully
 - ⏳ Branching factor converges to 1.0-2.0 (edge of chaos)
@@ -140,6 +164,11 @@ Implement basic fractal tree generation using CA-driven growth patterns and prov
 
 ### Success Criteria
 
+- ✅ Generate fractal trees from CA patterns
+- ✅ Visualize trees in 3D with interactive controls
+- ✅ Export tree metrics (branching factor, depth, connectivity)
+- ✅ Document tree generation algorithms
+- ✅ Provide example tree configurations
 - ⏳ Generate fractal trees from CA patterns
 - ⏳ Visualize trees in 3D with interactive controls
 - ⏳ Export tree metrics (branching factor, depth, connectivity)
@@ -189,6 +218,11 @@ Public release of the UtilityFog Fractal Tree MVP with complete documentation an
 
 ### Success Criteria
 
+- ✅ All tests passing
+- ✅ Documentation complete and reviewed
+- ✅ Examples run successfully
+- ✅ Community feedback incorporated
+- ✅ Performance targets met
 - ⏳ All tests passing
 - ⏳ Documentation complete and reviewed
 - ⏳ Examples run successfully
@@ -202,6 +236,11 @@ Public release of the UtilityFog Fractal Tree MVP with complete documentation an
 ```
 Q1 2026          Q2 2026          Q3 2026
 |----------------|----------------|----------------|
+Foundations      CA Alpha         Fractal MVP      MVP Release
+  • Repo setup     • CA kernel       • Tree gen        • Documentation
+  • CI/CD          • Rules           • Visualization   • Examples
+  • Docs           • Orchestrator    • Integration     • Release
+                  • Rule search
 Foundations ✅   CA Alpha 🟡     Fractal MVP ⚪   MVP Release ⚪
   • Repo setup     • CA kernel       • Tree gen        • Documentation
   • SpecKit        • Rules           • Visualization   • Examples
