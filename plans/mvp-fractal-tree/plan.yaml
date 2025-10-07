@@ -157,3 +157,23 @@ next_steps:
     - "Implement basic branching algorithms"
     - "Integrate with CA engine for growth dynamics"
     - "Create 3D visualization pipeline"
+    mitigation: "Profile and optimize hot paths, consider Rust migration"
+    severity: "low"
+  
+  - id: "R3"
+    description: "Lambda runner costs may exceed budget"
+    mitigation: "Use GitHub-hosted runners initially, monitor costs"
+    severity: "medium"
+
+next_steps:
+  - "Complete CA kernel implementation"
+  - "Add graph adjacency stepping"
+  - "Implement rulespec parser and validator"
+  - "Run branching-3 experiment locally"
+  - "Deploy ca-search workflow to CI"
+  - "Begin fractal tree track planning"
+
+# Cross-references
+# - SpecKit specifications: ../specs/
+# - Milestones: ./milestones.md
+# - GitHub Issues: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues
