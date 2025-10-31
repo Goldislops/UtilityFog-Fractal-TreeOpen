@@ -73,7 +73,7 @@ class VisualizationServer:
     """Main visualization WebSocket server."""
     
     def __init__(self):
-        self.app = FastAPI(title="UtilityFog Visualization Server", version="0.1.0")
+        self.app = FastAPI(title="UtilityFog Visualization Server", version="0.1.0-rc1")
         self.connection_manager = ConnectionManager()
         self.simulation_streamer = None
         self.current_simulation_task = None

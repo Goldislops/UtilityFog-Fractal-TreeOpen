@@ -1,0 +1,86 @@
+site_name: UtilityFog-Fractal-TreeOpen Documentation
+site_description: Advanced utility fog simulation with fractal tree structures and comprehensive observability
+site_author: UtilityFog-Fractal-TreeOpen Project
+site_url: https://goldislops.github.io/UtilityFog-Fractal-TreeOpen
+
+repo_name: Goldislops/UtilityFog-Fractal-TreeOpen
+repo_url: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.share
+    - content.code.annotate
+    - content.code.copy
+
+plugins:
+  - search
+  - git-revision-date-localized:
+      enable_creation_date: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+  - Phase 3 Features:
+    - Telemetry System: phase3/telemetry.md
+    - Visualization: phase3/visualization.md
+    - Observability: phase3/observability.md
+    - Feature Flags: phase3/feature-flags.md
+  - Development:
+    - Development Setup: development/setup.md
+    - Testing: development/testing.md
+    - Contributing: development/contributing.md
+  - API Reference:
+    - Core API: api/core.md
+    - Telemetry API: api/telemetry.md
+    - Visualization API: api/visualization.md
+  - Deployment:
+    - Production Setup: deployment/production.md
+    - Monitoring: deployment/monitoring.md
+    - Troubleshooting: deployment/troubleshooting.md
+  - Release Notes: CHANGELOG.md
+
+extra:
+  version:
+    provider: mike
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen

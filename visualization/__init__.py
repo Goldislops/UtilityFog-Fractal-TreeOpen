@@ -12,4 +12,4 @@ Author: UtilityFog-Fractal-TreeOpen Project
 License: MIT
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.0-rc1"
