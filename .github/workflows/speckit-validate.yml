@@ -1,0 +1,80 @@
+name: speckit-validate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "spec/**"
+      - ".github/workflows/speckit-validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "spec/**"
+      - ".github/workflows/speckit-validate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-specs:
+    name: Validate specs in /spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect /spec presence
+        id: detect
+        run: |
+          if [ -d spec ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Short-circuit when /spec is absent (non-failing)
+        if: steps.detect.outputs.present == 'false'
+        run: |
+          echo "::notice title=No /spec directory::Skipping Speckit validation."
+          exit 0
+
+      - name: Setup runtimes (Python + Node)
+        if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        if: steps.detect.outputs.present == 'true'
+        with:
+          node-version: "20"
+
+      - name: Try Node speckit script (if present)
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          set -e
+          if [ -f package.json ] && jq -e '.scripts["speckit:validate"]' package.json >/dev/null; then
+            npm ci || npm i
+            npm run speckit:validate
+            echo "mode=node" >> $GITHUB_ENV
+          else
+            echo "mode=node-missing" >> $GITHUB_ENV
+          fi
+
+      - name: Try Python speckit CLI (fallback)
+        if: steps.detect.outputs.present == 'true' && env.mode == 'node-missing'
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install speckit || (echo "::error::Python package 'speckit' not found." && exit 1)
+          speckit validate
+
+      - name: Upload validation artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speckit-results
+          path: |
+            spec/**/results*.json
+            spec/**/reports/**
+          if-no-files-found: ignore
