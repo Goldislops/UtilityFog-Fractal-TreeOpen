@@ -7,12 +7,16 @@
 //! - Multiple cell states (VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR)
 //! - Multi-state transition rules for utility fog physics
 //! - Parallel stepping via Rayon
+//! - Fractal topology generators (Sierpinski tetrahedron, Menger sponge, octahedral fog lattice)
+//! - Auto-threshold smart stepper (parallel when nodes >= 10K)
 
 use std::collections::HashMap;
 use rayon::prelude::*;
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+
+const PAR_THRESHOLD: usize = 10_000;
 
 /// Cell states for the CA
 #[repr(u8)]
@@ -137,25 +141,20 @@ impl MultiStateRule {
     pub fn utility_fog_default() -> Self {
         let mut rule = MultiStateRule::new();
 
-        // Void transitions
         rule.add_transition(CellState::Void, CellState::Energy, 2, usize::MAX, CellState::Energy);
         rule.add_transition(CellState::Void, CellState::Structural, 3, usize::MAX, CellState::Structural);
         rule.set_default(CellState::Void, CellState::Void);
 
-        // Energy transitions
         rule.add_transition(CellState::Energy, CellState::Compute, 1, usize::MAX, CellState::Compute);
         rule.add_transition(CellState::Energy, CellState::Energy, 1, usize::MAX, CellState::Energy);
         rule.set_default(CellState::Energy, CellState::Void);
 
-        // Compute transitions
         rule.add_transition(CellState::Compute, CellState::Energy, 1, usize::MAX, CellState::Compute);
         rule.set_default(CellState::Compute, CellState::Void);
 
-        // Structural transitions
         rule.add_transition(CellState::Structural, CellState::Structural, 1, usize::MAX, CellState::Structural);
         rule.set_default(CellState::Structural, CellState::Void);
 
-        // Sensor transitions
         rule.add_transition(CellState::Sensor, CellState::Compute, 2, usize::MAX, CellState::Compute);
         rule.set_default(CellState::Sensor, CellState::Sensor);
 
@@ -324,6 +323,194 @@ impl GraphState {
             adjacency: self.adjacency.clone(),
         }
     }
+
+    pub fn step_auto(&self, rule: &MultiStateRule) -> GraphState {
+        if self.nodes.len() >= PAR_THRESHOLD {
+            self.step_multi_par(rule)
+        } else {
+            self.step_multi(rule)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fractal topology generators
+// ---------------------------------------------------------------------------
+
+pub struct SierpinskiTetrahedron;
+
+impl SierpinskiTetrahedron {
+    pub fn generate(depth: usize, initial_state: CellState) -> GraphState {
+        if depth == 0 {
+            return GraphState::new(
+                vec![u8::from(initial_state); 4],
+                vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]],
+            );
+        }
+
+        let sub = Self::generate(depth - 1, initial_state);
+        let sub_n = sub.nodes.len();
+        let total = sub_n * 4;
+
+        let mut nodes = Vec::with_capacity(total);
+        let mut adjacency: Vec<Vec<usize>> = Vec::with_capacity(total);
+
+        for copy in 0..4usize {
+            let offset = copy * sub_n;
+            nodes.extend_from_slice(&sub.nodes);
+            for adj_list in &sub.adjacency {
+                adjacency.push(adj_list.iter().map(|&n| n + offset).collect());
+            }
+        }
+
+        let tips: [(usize, usize); 6] = [
+            (0, 1), (0, 2), (0, 3),
+            (1, 2), (1, 3), (2, 3),
+        ];
+        let tip_nodes: [usize; 4] = [0, 1, 2, 3];
+        for &(a, b) in &tips {
+            let node_a = a * sub_n + tip_nodes[b];
+            let node_b = b * sub_n + tip_nodes[a];
+            adjacency[node_a].push(node_b);
+            adjacency[node_b].push(node_a);
+        }
+
+        GraphState::new(nodes, adjacency)
+    }
+
+    pub fn node_count(depth: usize) -> usize {
+        4usize.pow(depth as u32) * 4
+    }
+}
+
+pub struct MengerSponge;
+
+impl MengerSponge {
+    fn is_removed(x: usize, y: usize, z: usize, side: usize) -> bool {
+        if side <= 1 {
+            return false;
+        }
+        let mut s = side;
+        let mut cx = x;
+        let mut cy = y;
+        let mut cz = z;
+        while s > 1 {
+            let third = s / 3;
+            if third == 0 { break; }
+            let bx = cx / third;
+            let by = cy / third;
+            let bz = cz / third;
+            let center_count = (bx == 1) as u8 + (by == 1) as u8 + (bz == 1) as u8;
+            if center_count >= 2 {
+                return true;
+            }
+            cx %= third;
+            cy %= third;
+            cz %= third;
+            s = third;
+        }
+        false
+    }
+
+    pub fn generate(depth: usize, initial_state: CellState) -> GraphState {
+        let side = 3usize.pow(depth as u32);
+        let mut coord_to_id: HashMap<(usize, usize, usize), usize> = HashMap::new();
+        let mut coords: Vec<(usize, usize, usize)> = Vec::new();
+
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    if !Self::is_removed(x, y, z, side) {
+                        let id = coords.len();
+                        coord_to_id.insert((x, y, z), id);
+                        coords.push((x, y, z));
+                    }
+                }
+            }
+        }
+
+        let n = coords.len();
+        let nodes = vec![u8::from(initial_state); n];
+        let mut adjacency = vec![Vec::new(); n];
+
+        let dirs: [(isize, isize, isize); 6] = [
+            (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
+        ];
+
+        for (i, &(x, y, z)) in coords.iter().enumerate() {
+            for &(dx, dy, dz) in &dirs {
+                let nx = x as isize + dx;
+                let ny = y as isize + dy;
+                let nz = z as isize + dz;
+                if nx >= 0 && ny >= 0 && nz >= 0 {
+                    if let Some(&neighbor_id) = coord_to_id.get(&(nx as usize, ny as usize, nz as usize)) {
+                        adjacency[i].push(neighbor_id);
+                    }
+                }
+            }
+        }
+
+        GraphState::new(nodes, adjacency)
+    }
+
+    pub fn node_count(depth: usize) -> usize {
+        let side = 3usize.pow(depth as u32);
+        let mut count = 0;
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    if !Self::is_removed(x, y, z, side) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+}
+
+pub struct OctahedralFogLattice;
+
+impl OctahedralFogLattice {
+    pub fn generate(side: usize, initial_state: CellState) -> GraphState {
+        let n = side * side * side;
+        let nodes = vec![u8::from(initial_state); n];
+        let mut adjacency = vec![Vec::new(); n];
+
+        let idx = |x: usize, y: usize, z: usize| -> usize {
+            z * side * side + y * side + x
+        };
+
+        let dirs: [(isize, isize, isize); 12] = [
+            (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
+            (1,1,0), (-1,-1,0), (1,0,1), (-1,0,-1), (0,1,1), (0,-1,-1),
+        ];
+
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    let i = idx(x, y, z);
+                    for &(dx, dy, dz) in &dirs {
+                        let nx = x as isize + dx;
+                        let ny = y as isize + dy;
+                        let nz = z as isize + dz;
+                        if nx >= 0 && (nx as usize) < side
+                            && ny >= 0 && (ny as usize) < side
+                            && nz >= 0 && (nz as usize) < side
+                        {
+                            adjacency[i].push(idx(nx as usize, ny as usize, nz as usize));
+                        }
+                    }
+                }
+            }
+        }
+
+        GraphState::new(nodes, adjacency)
+    }
+
+    pub fn node_count(side: usize) -> usize {
+        side * side * side
+    }
 }
 
 /// Outer-totalistic rule: next state depends on current state and neighbor count
@@ -444,6 +631,33 @@ impl MultiStateGraphLattice {
         }
     }
 
+    #[staticmethod]
+    fn sierpinski(depth: usize, initial_state: u8) -> Self {
+        let gs = SierpinskiTetrahedron::generate(depth, CellState::from(initial_state));
+        Self {
+            state: gs,
+            rule: MultiStateRule::utility_fog_default(),
+        }
+    }
+
+    #[staticmethod]
+    fn menger(depth: usize, initial_state: u8) -> Self {
+        let gs = MengerSponge::generate(depth, CellState::from(initial_state));
+        Self {
+            state: gs,
+            rule: MultiStateRule::utility_fog_default(),
+        }
+    }
+
+    #[staticmethod]
+    fn octahedral(side: usize, initial_state: u8) -> Self {
+        let gs = OctahedralFogLattice::generate(side, CellState::from(initial_state));
+        Self {
+            state: gs,
+            rule: MultiStateRule::utility_fog_default(),
+        }
+    }
+
     fn step(&mut self) -> Vec<u8> {
         let next = self.state.step_multi(&self.rule);
         self.state = next;
@@ -452,6 +666,22 @@ impl MultiStateGraphLattice {
 
     fn get_states(&self) -> Vec<u8> {
         self.state.nodes.clone()
+    }
+
+    fn node_count(&self) -> usize {
+        self.state.nodes.len()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.state.adjacency.iter().map(|a| a.len()).sum::<usize>() / 2
+    }
+
+    fn avg_degree(&self) -> f64 {
+        if self.state.nodes.is_empty() {
+            return 0.0;
+        }
+        let total: usize = self.state.adjacency.iter().map(|a| a.len()).sum();
+        total as f64 / self.state.nodes.len() as f64
     }
 
     fn step_n(&mut self, n: usize) -> Vec<u8> {
@@ -475,12 +705,29 @@ impl MultiStateGraphLattice {
         }
         self.state.nodes.clone()
     }
+
+    fn step_auto(&mut self) -> Vec<u8> {
+        let next = self.state.step_auto(&self.rule);
+        self.state = next;
+        self.state.nodes.clone()
+    }
+
+    fn step_auto_n(&mut self, n: usize) -> Vec<u8> {
+        for _ in 0..n {
+            let next = self.state.step_auto(&self.rule);
+            self.state = next;
+        }
+        self.state.nodes.clone()
+    }
+
+    fn set_states(&mut self, states: Vec<u8>) {
+        self.state.nodes = states;
+    }
 }
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
-    /// Step a 3D lattice CA
     #[pyfn(m)]
     fn step_lattice_py(
         width: usize,
@@ -492,10 +739,24 @@ fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
         Ok(step_lattice_3d(&lattice, &states, conway_3d_rule))
     }
 
-    /// Create a graph CA
     #[pyfn(m)]
     fn create_graph(num_nodes: usize) -> PyResult<Vec<u8>> {
         Ok(vec![0; num_nodes])
+    }
+
+    #[pyfn(m)]
+    fn sierpinski_node_count(depth: usize) -> PyResult<usize> {
+        Ok(SierpinskiTetrahedron::node_count(depth))
+    }
+
+    #[pyfn(m)]
+    fn menger_node_count(depth: usize) -> PyResult<usize> {
+        Ok(MengerSponge::node_count(depth))
+    }
+
+    #[pyfn(m)]
+    fn octahedral_node_count(side: usize) -> PyResult<usize> {
+        Ok(OctahedralFogLattice::node_count(side))
     }
 
     m.add_class::<GraphLattice>()?;
@@ -895,5 +1156,169 @@ mod tests {
         let gs = GraphState::new(vec![3, 3], adjacency.clone());
         let par = gs.step_multi_par(&rule);
         assert_eq!(par.adjacency, adjacency);
+    }
+
+    // --- Fractal topology generator tests ---
+
+    #[test]
+    fn test_sierpinski_depth_0() {
+        let gs = SierpinskiTetrahedron::generate(0, CellState::Void);
+        assert_eq!(gs.nodes.len(), 4);
+        for i in 0..4 {
+            assert_eq!(gs.adjacency[i].len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_sierpinski_depth_1() {
+        let gs = SierpinskiTetrahedron::generate(1, CellState::Energy);
+        assert_eq!(gs.nodes.len(), 16);
+        assert_eq!(SierpinskiTetrahedron::node_count(1), 16);
+        for node in &gs.nodes {
+            assert_eq!(CellState::from(*node), CellState::Energy);
+        }
+    }
+
+    #[test]
+    fn test_sierpinski_depth_2_count() {
+        assert_eq!(SierpinskiTetrahedron::node_count(2), 64);
+        let gs = SierpinskiTetrahedron::generate(2, CellState::Structural);
+        assert_eq!(gs.nodes.len(), 64);
+    }
+
+    #[test]
+    fn test_sierpinski_adjacency_symmetric() {
+        let gs = SierpinskiTetrahedron::generate(1, CellState::Void);
+        for (i, neighbors) in gs.adjacency.iter().enumerate() {
+            for &j in neighbors {
+                assert!(gs.adjacency[j].contains(&i),
+                    "edge {}->{} but no reverse", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sierpinski_stepping() {
+        let gs = SierpinskiTetrahedron::generate(1, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let next = gs.step_multi(&rule);
+        assert_eq!(next.nodes.len(), 16);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(next.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_menger_depth_0() {
+        let gs = MengerSponge::generate(0, CellState::Void);
+        assert_eq!(gs.nodes.len(), 1);
+    }
+
+    #[test]
+    fn test_menger_depth_1() {
+        let gs = MengerSponge::generate(1, CellState::Structural);
+        assert_eq!(gs.nodes.len(), 20);
+        assert_eq!(MengerSponge::node_count(1), 20);
+    }
+
+    #[test]
+    fn test_menger_depth_1_adjacency_symmetric() {
+        let gs = MengerSponge::generate(1, CellState::Void);
+        for (i, neighbors) in gs.adjacency.iter().enumerate() {
+            for &j in neighbors {
+                assert!(gs.adjacency[j].contains(&i),
+                    "menger edge {}->{} but no reverse", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_menger_depth_2_count() {
+        let expected = MengerSponge::node_count(2);
+        let gs = MengerSponge::generate(2, CellState::Void);
+        assert_eq!(gs.nodes.len(), expected);
+        assert!(expected > 20);
+    }
+
+    #[test]
+    fn test_menger_stepping() {
+        let gs = MengerSponge::generate(1, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let next = gs.step_multi(&rule);
+        assert_eq!(next.nodes.len(), 20);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(next.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_octahedral_side_2() {
+        let gs = OctahedralFogLattice::generate(2, CellState::Void);
+        assert_eq!(gs.nodes.len(), 8);
+        assert_eq!(OctahedralFogLattice::node_count(2), 8);
+    }
+
+    #[test]
+    fn test_octahedral_side_3() {
+        let gs = OctahedralFogLattice::generate(3, CellState::Sensor);
+        assert_eq!(gs.nodes.len(), 27);
+        for node in &gs.nodes {
+            assert_eq!(CellState::from(*node), CellState::Sensor);
+        }
+    }
+
+    #[test]
+    fn test_octahedral_adjacency_symmetric() {
+        let gs = OctahedralFogLattice::generate(3, CellState::Void);
+        for (i, neighbors) in gs.adjacency.iter().enumerate() {
+            for &j in neighbors {
+                assert!(gs.adjacency[j].contains(&i),
+                    "octahedral edge {}->{} but no reverse", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_octahedral_center_degree() {
+        let gs = OctahedralFogLattice::generate(3, CellState::Void);
+        let center = 1 * 9 + 1 * 3 + 1;
+        assert_eq!(gs.adjacency[center].len(), 12);
+    }
+
+    #[test]
+    fn test_octahedral_stepping() {
+        let gs = OctahedralFogLattice::generate(3, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let next = gs.step_multi(&rule);
+        assert_eq!(next.nodes.len(), 27);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(next.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_step_auto_small_uses_seq() {
+        let rule = MultiStateRule::utility_fog_default();
+        let gs = SierpinskiTetrahedron::generate(0, CellState::Energy);
+        assert!(gs.nodes.len() < PAR_THRESHOLD);
+        let auto = gs.step_auto(&rule);
+        let seq = gs.step_multi(&rule);
+        assert_eq!(auto.nodes, seq.nodes);
+    }
+
+    #[test]
+    fn test_step_auto_large_uses_par() {
+        let rule = MultiStateRule::utility_fog_default();
+        let gs = OctahedralFogLattice::generate(22, CellState::Energy);
+        assert!(gs.nodes.len() >= PAR_THRESHOLD);
+        let auto = gs.step_auto(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(auto.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_octahedral_large_par_correctness() {
+        let gs = OctahedralFogLattice::generate(22, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
     }
 }
