@@ -6,8 +6,10 @@
 //! - Synchronous and asynchronous stepping
 //! - Multiple cell states (VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR)
 //! - Multi-state transition rules for utility fog physics
+//! - Parallel stepping via Rayon
 
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
@@ -185,18 +187,15 @@ impl Lattice3D {
     /// Get Moore neighborhood (26 neighbors in 3D)
     pub fn moore_neighbors(&self, x: usize, y: usize, z: usize) -> Vec<usize> {
         let mut neighbors = Vec::with_capacity(26);
-        
         for dz in -1..=1 {
             for dy in -1..=1 {
                 for dx in -1..=1 {
                     if dx == 0 && dy == 0 && dz == 0 {
                         continue;
                     }
-                    
                     let nx = x as isize + dx;
                     let ny = y as isize + dy;
                     let nz = z as isize + dz;
-                    
                     if nx >= 0 && nx < self.width as isize
                         && ny >= 0 && ny < self.height as isize
                         && nz >= 0 && nz < self.depth as isize
@@ -206,7 +205,6 @@ impl Lattice3D {
                 }
             }
         }
-        
         neighbors
     }
 }
@@ -269,16 +267,13 @@ impl GraphState {
 
     pub fn step(&self, rule: &Rule) -> GraphState {
         let mut next_nodes = vec![0u8; self.nodes.len()];
-
         for i in 0..self.nodes.len() {
             let live_count = self.adjacency[i]
                 .iter()
                 .filter(|&&neighbor| neighbor < self.nodes.len() && self.nodes[neighbor] == 1)
                 .count();
-
             next_nodes[i] = rule.apply(self.nodes[i], live_count);
         }
-
         GraphState {
             nodes: next_nodes,
             adjacency: self.adjacency.clone(),
@@ -303,14 +298,27 @@ impl GraphState {
 
     pub fn step_multi(&self, rule: &MultiStateRule) -> GraphState {
         let mut next_nodes = vec![0u8; self.nodes.len()];
-
         for i in 0..self.nodes.len() {
             let current = CellState::from(self.nodes[i]);
             let counts = self.count_neighbors(i);
             let next = rule.apply(current, &counts);
             next_nodes[i] = u8::from(next);
         }
+        GraphState {
+            nodes: next_nodes,
+            adjacency: self.adjacency.clone(),
+        }
+    }
 
+    pub fn step_multi_par(&self, rule: &MultiStateRule) -> GraphState {
+        let next_nodes: Vec<u8> = (0..self.nodes.len())
+            .into_par_iter()
+            .map(|i| {
+                let current = CellState::from(self.nodes[i]);
+                let counts = self.count_neighbors(i);
+                u8::from(rule.apply(current, &counts))
+            })
+            .collect();
         GraphState {
             nodes: next_nodes,
             adjacency: self.adjacency.clone(),
@@ -328,7 +336,6 @@ pub fn step_lattice_3d(
     rule: OuterTotalisticRule,
 ) -> Vec<u8> {
     let mut next_states = vec![0; states.len()];
-    
     for z in 0..lattice.depth {
         for y in 0..lattice.height {
             for x in 0..lattice.width {
@@ -337,12 +344,10 @@ pub fn step_lattice_3d(
                 let neighbor_count = neighbors.iter()
                     .filter(|&&n| states[n] != 0)
                     .count();
-                
                 next_states[idx] = rule(states[idx], neighbor_count);
             }
         }
     }
-    
     next_states
 }
 
@@ -352,16 +357,13 @@ pub fn step_graph(
     rule: OuterTotalisticRule,
 ) -> Vec<u8> {
     let mut next_states = vec![0; graph.states.len()];
-    
     for node in 0..graph.states.len() {
         let neighbors = graph.get_neighbors(node);
         let neighbor_count = neighbors.iter()
             .filter(|&&n| graph.states[n] != 0)
             .count();
-        
         next_states[node] = rule(graph.states[node], neighbor_count);
     }
-    
     next_states
 }
 
@@ -459,6 +461,20 @@ impl MultiStateGraphLattice {
         }
         self.state.nodes.clone()
     }
+
+    fn step_par(&mut self) -> Vec<u8> {
+        let next = self.state.step_multi_par(&self.rule);
+        self.state = next;
+        self.state.nodes.clone()
+    }
+
+    fn step_par_n(&mut self, n: usize) -> Vec<u8> {
+        for _ in 0..n {
+            let next = self.state.step_multi_par(&self.rule);
+            self.state = next;
+        }
+        self.state.nodes.clone()
+    }
 }
 
 #[cfg(feature = "python")]
@@ -484,7 +500,6 @@ fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
 
     m.add_class::<GraphLattice>()?;
     m.add_class::<MultiStateGraphLattice>()?;
-
     Ok(())
 }
 
@@ -516,13 +531,11 @@ mod tests {
     fn test_step_lattice() {
         let lattice = Lattice3D::new(3, 3, 3);
         let mut states = vec![0; lattice.size()];
-        // Set center cell and some neighbors
         states[lattice.index(1, 1, 1)] = 1;
         states[lattice.index(0, 1, 1)] = 1;
         states[lattice.index(2, 1, 1)] = 1;
         states[lattice.index(1, 0, 1)] = 1;
         states[lattice.index(1, 2, 1)] = 1;
-        
         let next = step_lattice_3d(&lattice, &states, conway_3d_rule);
         assert_eq!(next.len(), states.len());
     }
@@ -535,10 +548,8 @@ mod tests {
         graph.add_edge(1, 2);
         graph.add_edge(2, 3);
         graph.add_edge(3, 4);
-
         graph.states[0] = 1;
         graph.states[1] = 1;
-
         let next = step_graph(&graph, conway_3d_rule);
         assert_eq!(next.len(), 5);
     }
@@ -593,7 +604,6 @@ mod tests {
 
     #[test]
     fn test_neighbor_count() {
-        // Triangle: node0=Energy(3), node1=Compute(2), node2=Void(0)
         let nodes = vec![3, 2, 0];
         let adjacency = vec![
             vec![1, 2],
@@ -605,7 +615,6 @@ mod tests {
         assert_eq!(c0.compute, 1);
         assert_eq!(c0.void_n, 1);
         assert_eq!(c0.energy, 0);
-
         let c2 = gs.count_neighbors(2);
         assert_eq!(c2.energy, 1);
         assert_eq!(c2.compute, 1);
@@ -614,7 +623,6 @@ mod tests {
 
     #[test]
     fn test_multi_state_energy_powers_compute() {
-        // Energy(3) next to Compute(2) should become Compute
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![3, 2, 0];
         let adjacency = vec![
@@ -624,17 +632,13 @@ mod tests {
         ];
         let gs = GraphState::new(nodes, adjacency);
         let next = gs.step_multi(&rule);
-        // node0: Energy, sees 1 Compute neighbor -> becomes Compute
         assert_eq!(CellState::from(next.nodes[0]), CellState::Compute);
-        // node1: Compute, sees 1 Energy neighbor -> stays Compute
         assert_eq!(CellState::from(next.nodes[1]), CellState::Compute);
-        // node2: Void, sees 1 Energy + 1 Compute -> not enough Energy(need 2) or Structural(need 3)
         assert_eq!(CellState::from(next.nodes[2]), CellState::Void);
     }
 
     #[test]
     fn test_multi_state_energy_dissipates() {
-        // Isolated Energy node with only Void neighbors -> dissipates to Void
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![3, 0, 0];
         let adjacency = vec![
@@ -649,7 +653,6 @@ mod tests {
 
     #[test]
     fn test_multi_state_energy_chain() {
-        // Two Energy nodes adjacent sustain each other
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![3, 3, 0];
         let adjacency = vec![
@@ -659,17 +662,13 @@ mod tests {
         ];
         let gs = GraphState::new(nodes, adjacency);
         let next = gs.step_multi(&rule);
-        // node0: Energy, sees 1 Energy neighbor -> stays Energy
         assert_eq!(CellState::from(next.nodes[0]), CellState::Energy);
-        // node1: Energy, sees 1 Energy neighbor -> stays Energy
         assert_eq!(CellState::from(next.nodes[1]), CellState::Energy);
-        // node2: Void, sees 2 Energy neighbors -> becomes Energy (void->energy needs >=2)
         assert_eq!(CellState::from(next.nodes[2]), CellState::Energy);
     }
 
     #[test]
     fn test_multi_state_structural_crystallization() {
-        // 3 Structural neighbors cause Void to become Structural
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![0, 1, 1, 1];
         let adjacency = vec![
@@ -680,9 +679,7 @@ mod tests {
         ];
         let gs = GraphState::new(nodes, adjacency);
         let next = gs.step_multi(&rule);
-        // node0: Void with 3 Structural neighbors -> becomes Structural
         assert_eq!(CellState::from(next.nodes[0]), CellState::Structural);
-        // node1-3: Structural with 2 Structural neighbors each -> stay Structural
         assert_eq!(CellState::from(next.nodes[1]), CellState::Structural);
         assert_eq!(CellState::from(next.nodes[2]), CellState::Structural);
         assert_eq!(CellState::from(next.nodes[3]), CellState::Structural);
@@ -690,7 +687,6 @@ mod tests {
 
     #[test]
     fn test_multi_state_unpowered_compute_dies() {
-        // Compute with no Energy neighbors -> dies to Void
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![2, 0, 1];
         let adjacency = vec![
@@ -705,7 +701,6 @@ mod tests {
 
     #[test]
     fn test_multi_state_sensor_fires() {
-        // Sensor with 2+ Compute neighbors -> becomes Compute
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![4, 2, 2];
         let adjacency = vec![
@@ -715,13 +710,11 @@ mod tests {
         ];
         let gs = GraphState::new(nodes, adjacency);
         let next = gs.step_multi(&rule);
-        // node0: Sensor, sees 2 Compute -> fires, becomes Compute
         assert_eq!(CellState::from(next.nodes[0]), CellState::Compute);
     }
 
     #[test]
     fn test_multi_state_sensor_waits() {
-        // Sensor with only 1 Compute neighbor -> stays Sensor
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![4, 2, 0];
         let adjacency = vec![
@@ -737,11 +730,9 @@ mod tests {
     #[test]
     fn test_multi_state_custom_rule() {
         let mut rule = MultiStateRule::new();
-        // Custom: Energy becomes Sensor if it sees any Sensor
         rule.add_transition(CellState::Energy, CellState::Sensor, 1, usize::MAX, CellState::Sensor);
         rule.set_default(CellState::Energy, CellState::Void);
         rule.set_default(CellState::Sensor, CellState::Sensor);
-
         let nodes = vec![3, 4];
         let adjacency = vec![vec![1], vec![0]];
         let gs = GraphState::new(nodes, adjacency);
@@ -761,7 +752,6 @@ mod tests {
 
     #[test]
     fn test_multi_step_convergence() {
-        // Energy chain of 3 should sustain over multiple steps
         let rule = MultiStateRule::utility_fog_default();
         let nodes = vec![3, 3, 3];
         let adjacency = vec![
@@ -773,9 +763,137 @@ mod tests {
         let step1 = gs.step_multi(&rule);
         let step2 = step1.step_multi(&rule);
         let step3 = step2.step_multi(&rule);
-        // All should remain Energy (each sees 2 Energy neighbors)
         for i in 0..3 {
             assert_eq!(CellState::from(step3.nodes[i]), CellState::Energy);
         }
+    }
+
+    #[test]
+    fn test_par_matches_sequential_triangle() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![3, 2, 0];
+        let adjacency = vec![
+            vec![1, 2],
+            vec![0, 2],
+            vec![0, 1],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_matches_sequential_energy_chain() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![3, 3, 0];
+        let adjacency = vec![
+            vec![1, 2],
+            vec![0, 2],
+            vec![0, 1],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_matches_sequential_structural_crystal() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![0, 1, 1, 1];
+        let adjacency = vec![
+            vec![1, 2, 3],
+            vec![0, 2, 3],
+            vec![0, 1, 3],
+            vec![0, 1, 2],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_matches_sequential_sensor_fires() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![4, 2, 2];
+        let adjacency = vec![
+            vec![1, 2],
+            vec![0, 2],
+            vec![0, 1],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_matches_sequential_all_states() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![0, 1, 2, 3, 4];
+        let adjacency = vec![
+            vec![1, 2, 3, 4],
+            vec![0, 2, 3, 4],
+            vec![0, 1, 3, 4],
+            vec![0, 1, 2, 4],
+            vec![0, 1, 2, 3],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_matches_sequential_multi_step() {
+        let rule = MultiStateRule::utility_fog_default();
+        let nodes = vec![3, 3, 3];
+        let adjacency = vec![
+            vec![1, 2],
+            vec![0, 2],
+            vec![0, 1],
+        ];
+        let gs = GraphState::new(nodes, adjacency);
+        let mut seq = gs.clone();
+        let mut par = gs;
+        for _ in 0..10 {
+            seq = seq.step_multi(&rule);
+            par = par.step_multi_par(&rule);
+            assert_eq!(seq.nodes, par.nodes);
+        }
+    }
+
+    #[test]
+    fn test_par_large_graph_correctness() {
+        let rule = MultiStateRule::utility_fog_default();
+        let n = 1000;
+        let mut nodes = vec![0u8; n];
+        for i in 0..n {
+            nodes[i] = (i % 5) as u8;
+        }
+        let mut adjacency = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut neighbors = Vec::new();
+            if i > 0 { neighbors.push(i - 1); }
+            if i + 1 < n { neighbors.push(i + 1); }
+            if i + 10 < n { neighbors.push(i + 10); }
+            if i >= 10 { neighbors.push(i - 10); }
+            adjacency.push(neighbors);
+        }
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.step_multi(&rule);
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(seq.nodes, par.nodes);
+    }
+
+    #[test]
+    fn test_par_preserves_adjacency() {
+        let rule = MultiStateRule::utility_fog_default();
+        let adjacency = vec![vec![1], vec![0]];
+        let gs = GraphState::new(vec![3, 3], adjacency.clone());
+        let par = gs.step_multi_par(&rule);
+        assert_eq!(par.adjacency, adjacency);
     }
 }
