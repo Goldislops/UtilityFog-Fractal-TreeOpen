@@ -9,6 +9,7 @@
 //! - Parallel stepping via Rayon
 //! - Fractal topology generators (Sierpinski tetrahedron, Menger sponge, octahedral fog lattice)
 //! - Auto-threshold smart stepper (parallel when nodes >= 10K)
+//! - State observation: census, spatial queries, time-series recording, snapshot/replay
 
 use std::collections::HashMap;
 use rayon::prelude::*;
@@ -18,7 +19,6 @@ use pyo3::prelude::*;
 
 const PAR_THRESHOLD: usize = 10_000;
 
-/// Cell states for the CA
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CellState {
@@ -48,7 +48,6 @@ impl From<CellState> for u8 {
     }
 }
 
-/// Tally of each CellState type in a node's neighborhood
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NeighborCount {
     pub void_n: usize,
@@ -74,7 +73,35 @@ impl NeighborCount {
     }
 }
 
-/// A single transition condition: if (min <= neighbor_count_of[watch_state] <= max) then become target_state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateCensus {
+    pub void_count: usize,
+    pub structural: usize,
+    pub compute: usize,
+    pub energy: usize,
+    pub sensor: usize,
+}
+
+impl StateCensus {
+    pub fn total(&self) -> usize {
+        self.void_count + self.structural + self.compute + self.energy + self.sensor
+    }
+
+    pub fn get(&self, state: CellState) -> usize {
+        match state {
+            CellState::Void => self.void_count,
+            CellState::Structural => self.structural,
+            CellState::Compute => self.compute,
+            CellState::Energy => self.energy,
+            CellState::Sensor => self.sensor,
+        }
+    }
+
+    pub fn as_array(&self) -> [usize; 5] {
+        [self.void_count, self.structural, self.compute, self.energy, self.sensor]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub watch_state: CellState,
@@ -94,7 +121,6 @@ impl Transition {
     }
 }
 
-/// Multi-state transition rule: maps each CellState to an ordered list of transitions (first match wins)
 #[derive(Debug, Clone)]
 pub struct MultiStateRule {
     pub transitions: HashMap<CellState, Vec<Transition>>,
@@ -162,7 +188,6 @@ impl MultiStateRule {
     }
 }
 
-/// 3D lattice dimensions
 #[derive(Debug, Clone, Copy)]
 pub struct Lattice3D {
     pub width: usize,
@@ -183,7 +208,6 @@ impl Lattice3D {
         z * (self.width * self.height) + y * self.width + x
     }
 
-    /// Get Moore neighborhood (26 neighbors in 3D)
     pub fn moore_neighbors(&self, x: usize, y: usize, z: usize) -> Vec<usize> {
         let mut neighbors = Vec::with_capacity(26);
         for dz in -1..=1 {
@@ -208,7 +232,6 @@ impl Lattice3D {
     }
 }
 
-/// Graph-based CA using adjacency lists
 pub struct GraphCA {
     pub adjacency: HashMap<usize, Vec<usize>>,
     pub states: Vec<u8>,
@@ -231,7 +254,6 @@ impl GraphCA {
     }
 }
 
-/// Birth/survival rule specification
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub birth: Vec<usize>,
@@ -252,7 +274,6 @@ impl Rule {
     }
 }
 
-/// Graph state for adjacency-based stepping
 #[derive(Debug, Clone)]
 pub struct GraphState {
     pub nodes: Vec<u8>,
@@ -331,6 +352,110 @@ impl GraphState {
             self.step_multi(rule)
         }
     }
+
+    pub fn census(&self) -> StateCensus {
+        let mut c = StateCensus { void_count: 0, structural: 0, compute: 0, energy: 0, sensor: 0 };
+        for &s in &self.nodes {
+            match CellState::from(s) {
+                CellState::Void => c.void_count += 1,
+                CellState::Structural => c.structural += 1,
+                CellState::Compute => c.compute += 1,
+                CellState::Energy => c.energy += 1,
+                CellState::Sensor => c.sensor += 1,
+            }
+        }
+        c
+    }
+
+    pub fn census_par(&self) -> StateCensus {
+        let counts: Vec<[usize; 5]> = self.nodes.par_chunks(1024)
+            .map(|chunk| {
+                let mut c = [0usize; 5];
+                for &s in chunk {
+                    let idx = (s.min(4)) as usize;
+                    c[idx] += 1;
+                }
+                c
+            })
+            .collect();
+        let mut result = StateCensus { void_count: 0, structural: 0, compute: 0, energy: 0, sensor: 0 };
+        for c in counts {
+            result.void_count += c[0];
+            result.structural += c[1];
+            result.compute += c[2];
+            result.energy += c[3];
+            result.sensor += c[4];
+        }
+        result
+    }
+
+    pub fn census_auto(&self) -> StateCensus {
+        if self.nodes.len() >= PAR_THRESHOLD {
+            self.census_par()
+        } else {
+            self.census()
+        }
+    }
+
+    pub fn run_and_record(&self, rule: &MultiStateRule, steps: usize) -> (GraphState, Vec<[usize; 5]>) {
+        let mut history = Vec::with_capacity(steps + 1);
+        history.push(self.census_auto().as_array());
+        let mut current = self.clone();
+        for _ in 0..steps {
+            current = current.step_auto(rule);
+            history.push(current.census_auto().as_array());
+        }
+        (current, history)
+    }
+
+    pub fn snapshot(&self) -> Vec<u8> {
+        let n = self.nodes.len();
+        let mut buf = Vec::with_capacity(8 + n + n * 20);
+        buf.extend_from_slice(b"UFT\0");
+        buf.extend_from_slice(&(n as u32).to_le_bytes());
+        buf.extend_from_slice(&self.nodes);
+        for adj in &self.adjacency {
+            buf.extend_from_slice(&(adj.len() as u32).to_le_bytes());
+            for &neighbor in adj {
+                buf.extend_from_slice(&(neighbor as u32).to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    pub fn from_snapshot(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 8 {
+            return Err("snapshot too short".to_string());
+        }
+        if &data[0..4] != b"UFT\0" {
+            return Err("invalid snapshot magic".to_string());
+        }
+        let n = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        if data.len() < 8 + n {
+            return Err("snapshot truncated at nodes".to_string());
+        }
+        let nodes = data[8..8 + n].to_vec();
+        let mut offset = 8 + n;
+        let mut adjacency = Vec::with_capacity(n);
+        for _ in 0..n {
+            if offset + 4 > data.len() {
+                return Err("snapshot truncated at adjacency".to_string());
+            }
+            let adj_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if offset + adj_len * 4 > data.len() {
+                return Err("snapshot truncated at neighbor list".to_string());
+            }
+            let mut neighbors = Vec::with_capacity(adj_len);
+            for _ in 0..adj_len {
+                let neighbor = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                neighbors.push(neighbor);
+                offset += 4;
+            }
+            adjacency.push(neighbors);
+        }
+        Ok(GraphState::new(nodes, adjacency))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +472,11 @@ impl SierpinskiTetrahedron {
                 vec![vec![1,2,3], vec![0,2,3], vec![0,1,3], vec![0,1,2]],
             );
         }
-
         let sub = Self::generate(depth - 1, initial_state);
         let sub_n = sub.nodes.len();
         let total = sub_n * 4;
-
         let mut nodes = Vec::with_capacity(total);
         let mut adjacency: Vec<Vec<usize>> = Vec::with_capacity(total);
-
         for copy in 0..4usize {
             let offset = copy * sub_n;
             nodes.extend_from_slice(&sub.nodes);
@@ -362,7 +484,6 @@ impl SierpinskiTetrahedron {
                 adjacency.push(adj_list.iter().map(|&n| n + offset).collect());
             }
         }
-
         let tips: [(usize, usize); 6] = [
             (0, 1), (0, 2), (0, 3),
             (1, 2), (1, 3), (2, 3),
@@ -374,12 +495,40 @@ impl SierpinskiTetrahedron {
             adjacency[node_a].push(node_b);
             adjacency[node_b].push(node_a);
         }
-
         GraphState::new(nodes, adjacency)
     }
 
     pub fn node_count(depth: usize) -> usize {
         4usize.pow(depth as u32) * 4
+    }
+
+    pub fn coords(depth: usize) -> Vec<(f64, f64, f64)> {
+        let base = [
+            (1.0, 1.0, 1.0),
+            (1.0, -1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+        ];
+        Self::coords_inner(depth, &base)
+    }
+
+    fn coords_inner(depth: usize, verts: &[(f64, f64, f64); 4]) -> Vec<(f64, f64, f64)> {
+        if depth == 0 {
+            return verts.to_vec();
+        }
+        let mut all = Vec::new();
+        for copy in 0..4usize {
+            let mut sub = [(0.0, 0.0, 0.0); 4];
+            for i in 0..4 {
+                sub[i] = (
+                    (verts[i].0 + verts[copy].0) / 2.0,
+                    (verts[i].1 + verts[copy].1) / 2.0,
+                    (verts[i].2 + verts[copy].2) / 2.0,
+                );
+            }
+            all.extend(Self::coords_inner(depth - 1, &sub));
+        }
+        all
     }
 }
 
@@ -416,7 +565,6 @@ impl MengerSponge {
         let side = 3usize.pow(depth as u32);
         let mut coord_to_id: HashMap<(usize, usize, usize), usize> = HashMap::new();
         let mut coords: Vec<(usize, usize, usize)> = Vec::new();
-
         for z in 0..side {
             for y in 0..side {
                 for x in 0..side {
@@ -428,15 +576,12 @@ impl MengerSponge {
                 }
             }
         }
-
         let n = coords.len();
         let nodes = vec![u8::from(initial_state); n];
         let mut adjacency = vec![Vec::new(); n];
-
         let dirs: [(isize, isize, isize); 6] = [
             (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
         ];
-
         for (i, &(x, y, z)) in coords.iter().enumerate() {
             for &(dx, dy, dz) in &dirs {
                 let nx = x as isize + dx;
@@ -449,7 +594,6 @@ impl MengerSponge {
                 }
             }
         }
-
         GraphState::new(nodes, adjacency)
     }
 
@@ -467,6 +611,22 @@ impl MengerSponge {
         }
         count
     }
+
+    pub fn coords(depth: usize) -> Vec<(f64, f64, f64)> {
+        let side = 3usize.pow(depth as u32);
+        let scale = if side > 0 { 1.0 / side as f64 } else { 1.0 };
+        let mut result = Vec::new();
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    if !Self::is_removed(x, y, z, side) {
+                        result.push((x as f64 * scale, y as f64 * scale, z as f64 * scale));
+                    }
+                }
+            }
+        }
+        result
+    }
 }
 
 pub struct OctahedralFogLattice;
@@ -476,16 +636,13 @@ impl OctahedralFogLattice {
         let n = side * side * side;
         let nodes = vec![u8::from(initial_state); n];
         let mut adjacency = vec![Vec::new(); n];
-
         let idx = |x: usize, y: usize, z: usize| -> usize {
             z * side * side + y * side + x
         };
-
         let dirs: [(isize, isize, isize); 12] = [
             (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
             (1,1,0), (-1,-1,0), (1,0,1), (-1,0,-1), (0,1,1), (0,-1,-1),
         ];
-
         for z in 0..side {
             for y in 0..side {
                 for x in 0..side {
@@ -504,19 +661,29 @@ impl OctahedralFogLattice {
                 }
             }
         }
-
         GraphState::new(nodes, adjacency)
     }
 
     pub fn node_count(side: usize) -> usize {
         side * side * side
     }
+
+    pub fn coords(side: usize) -> Vec<(f64, f64, f64)> {
+        let scale = if side > 0 { 1.0 / side as f64 } else { 1.0 };
+        let mut result = Vec::with_capacity(side * side * side);
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    result.push((x as f64 * scale, y as f64 * scale, z as f64 * scale));
+                }
+            }
+        }
+        result
+    }
 }
 
-/// Outer-totalistic rule: next state depends on current state and neighbor count
 pub type OuterTotalisticRule = fn(u8, usize) -> u8;
 
-/// Step the CA on a 3D lattice with Moore neighborhood
 pub fn step_lattice_3d(
     lattice: &Lattice3D,
     states: &[u8],
@@ -538,7 +705,6 @@ pub fn step_lattice_3d(
     next_states
 }
 
-/// Step the CA on an arbitrary graph
 pub fn step_graph(
     graph: &GraphCA,
     rule: OuterTotalisticRule,
@@ -554,12 +720,11 @@ pub fn step_graph(
     next_states
 }
 
-/// Example rule: Conway's Game of Life adapted for 3D
 pub fn conway_3d_rule(current: u8, neighbor_count: usize) -> u8 {
     match (current, neighbor_count) {
-        (0, 4..=7) => 1,  // Birth
-        (1, 4..=7) => 1,  // Survival
-        _ => 0,            // Death
+        (0, 4..=7) => 1,
+        (1, 4..=7) => 1,
+        _ => 0,
     }
 }
 
@@ -597,6 +762,7 @@ impl GraphLattice {
 pub struct MultiStateGraphLattice {
     state: GraphState,
     rule: MultiStateRule,
+    coords: Option<Vec<(f64, f64, f64)>>,
 }
 
 #[cfg(feature = "python")]
@@ -620,6 +786,7 @@ impl MultiStateGraphLattice {
         Self {
             state: GraphState::new(states, adjacency),
             rule,
+            coords: None,
         }
     }
 
@@ -628,33 +795,40 @@ impl MultiStateGraphLattice {
         Self {
             state: GraphState::new(states, adjacency),
             rule: MultiStateRule::utility_fog_default(),
+            coords: None,
         }
     }
 
     #[staticmethod]
     fn sierpinski(depth: usize, initial_state: u8) -> Self {
         let gs = SierpinskiTetrahedron::generate(depth, CellState::from(initial_state));
+        let coords = SierpinskiTetrahedron::coords(depth);
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_default(),
+            coords: Some(coords),
         }
     }
 
     #[staticmethod]
     fn menger(depth: usize, initial_state: u8) -> Self {
         let gs = MengerSponge::generate(depth, CellState::from(initial_state));
+        let coords = MengerSponge::coords(depth);
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_default(),
+            coords: Some(coords),
         }
     }
 
     #[staticmethod]
     fn octahedral(side: usize, initial_state: u8) -> Self {
         let gs = OctahedralFogLattice::generate(side, CellState::from(initial_state));
+        let coords = OctahedralFogLattice::coords(side);
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_default(),
+            coords: Some(coords),
         }
     }
 
@@ -723,6 +897,127 @@ impl MultiStateGraphLattice {
     fn set_states(&mut self, states: Vec<u8>) {
         self.state.nodes = states;
     }
+
+    fn census(&self) -> HashMap<u8, usize> {
+        let c = self.state.census_auto();
+        let mut map = HashMap::new();
+        map.insert(0, c.void_count);
+        map.insert(1, c.structural);
+        map.insert(2, c.compute);
+        map.insert(3, c.energy);
+        map.insert(4, c.sensor);
+        map
+    }
+
+    fn census_region(&self, min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> Option<HashMap<u8, usize>> {
+        let coords = self.coords.as_ref()?;
+        let mut counts = [0usize; 5];
+        for (i, &(x, y, z)) in coords.iter().enumerate() {
+            if x >= min_x && x <= max_x && y >= min_y && y <= max_y && z >= min_z && z <= max_z {
+                let s = self.state.nodes[i].min(4) as usize;
+                counts[s] += 1;
+            }
+        }
+        let mut map = HashMap::new();
+        for j in 0..5 {
+            map.insert(j as u8, counts[j]);
+        }
+        Some(map)
+    }
+
+    fn census_sphere(&self, cx: f64, cy: f64, cz: f64, radius: f64) -> Option<HashMap<u8, usize>> {
+        let coords = self.coords.as_ref()?;
+        let r2 = radius * radius;
+        let mut counts = [0usize; 5];
+        for (i, &(x, y, z)) in coords.iter().enumerate() {
+            let dx = x - cx;
+            let dy = y - cy;
+            let dz = z - cz;
+            if dx * dx + dy * dy + dz * dz <= r2 {
+                let s = self.state.nodes[i].min(4) as usize;
+                counts[s] += 1;
+            }
+        }
+        let mut map = HashMap::new();
+        for j in 0..5 {
+            map.insert(j as u8, counts[j]);
+        }
+        Some(map)
+    }
+
+    fn run_and_record(&mut self, steps: usize) -> Vec<HashMap<u8, usize>> {
+        let (final_state, history) = self.state.run_and_record(&self.rule, steps);
+        self.state = final_state;
+        history.iter().map(|arr| {
+            let mut map = HashMap::new();
+            for j in 0..5 {
+                map.insert(j as u8, arr[j]);
+            }
+            map
+        }).collect()
+    }
+
+    fn run_and_record_flat(&mut self, steps: usize) -> Vec<Vec<usize>> {
+        let (final_state, history) = self.state.run_and_record(&self.rule, steps);
+        self.state = final_state;
+        history.iter().map(|arr| arr.to_vec()).collect()
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        let mut data = self.state.snapshot();
+        if let Some(ref coords) = self.coords {
+            data.push(1);
+            for &(x, y, z) in coords {
+                data.extend_from_slice(&x.to_le_bytes());
+                data.extend_from_slice(&y.to_le_bytes());
+                data.extend_from_slice(&z.to_le_bytes());
+            }
+        } else {
+            data.push(0);
+        }
+        data
+    }
+
+    #[staticmethod]
+    fn from_snapshot(data: Vec<u8>) -> PyResult<Self> {
+        let gs = GraphState::from_snapshot(&data)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        let n = gs.nodes.len();
+        let mut offset = 8 + n;
+        for adj in &gs.adjacency {
+            offset += 4 + adj.len() * 4;
+        }
+        let coords = if offset < data.len() && data[offset] == 1 {
+            offset += 1;
+            let mut coords = Vec::with_capacity(n);
+            for _ in 0..n {
+                if offset + 24 > data.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err("snapshot truncated at coords"));
+                }
+                let x = f64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                let y = f64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+                let z = f64::from_le_bytes(data[offset + 16..offset + 24].try_into().unwrap());
+                coords.push((x, y, z));
+                offset += 24;
+            }
+            Some(coords)
+        } else {
+            None
+        };
+        Ok(Self {
+            state: gs,
+            rule: MultiStateRule::utility_fog_default(),
+            coords,
+        })
+    }
+
+    fn get_coords(&self) -> Option<Vec<(f64, f64, f64)>> {
+        self.coords.clone()
+    }
+
+    fn has_coords(&self) -> bool {
+        self.coords.is_some()
+    }
 }
 
 #[cfg(feature = "python")]
@@ -761,6 +1056,7 @@ fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
 
     m.add_class::<GraphLattice>()?;
     m.add_class::<MultiStateGraphLattice>()?;
+
     Ok(())
 }
 
@@ -1320,5 +1616,167 @@ mod tests {
         let seq = gs.step_multi(&rule);
         let par = gs.step_multi_par(&rule);
         assert_eq!(seq.nodes, par.nodes);
+    }
+
+    // --- State observation tests ---
+
+    #[test]
+    fn test_census_basic() {
+        let gs = GraphState::new(
+            vec![3, 3, 0, 1, 2],
+            vec![vec![1], vec![0], vec![3], vec![2, 4], vec![3]],
+        );
+        let c = gs.census();
+        assert_eq!(c.energy, 2);
+        assert_eq!(c.void_count, 1);
+        assert_eq!(c.structural, 1);
+        assert_eq!(c.compute, 1);
+        assert_eq!(c.sensor, 0);
+        assert_eq!(c.total(), 5);
+    }
+
+    #[test]
+    fn test_census_all_energy() {
+        let gs = OctahedralFogLattice::generate(3, CellState::Energy);
+        let c = gs.census();
+        assert_eq!(c.energy, 27);
+        assert_eq!(c.void_count, 0);
+        assert_eq!(c.total(), 27);
+    }
+
+    #[test]
+    fn test_census_par_matches_seq() {
+        let n = 2000;
+        let mut nodes = vec![0u8; n];
+        for i in 0..n {
+            nodes[i] = (i % 5) as u8;
+        }
+        let adjacency = vec![Vec::new(); n];
+        let gs = GraphState::new(nodes, adjacency);
+        let seq = gs.census();
+        let par = gs.census_par();
+        assert_eq!(seq, par);
+    }
+
+    #[test]
+    fn test_census_as_array() {
+        let gs = GraphState::new(
+            vec![0, 1, 2, 3, 4],
+            vec![vec![], vec![], vec![], vec![], vec![]],
+        );
+        let arr = gs.census().as_array();
+        assert_eq!(arr, [1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_run_and_record_length() {
+        let gs = SierpinskiTetrahedron::generate(0, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let (_, history) = gs.run_and_record(&rule, 5);
+        assert_eq!(history.len(), 6);
+    }
+
+    #[test]
+    fn test_run_and_record_initial_census() {
+        let gs = GraphState::new(
+            vec![3, 3, 3],
+            vec![vec![1, 2], vec![0, 2], vec![0, 1]],
+        );
+        let rule = MultiStateRule::utility_fog_default();
+        let (_, history) = gs.run_and_record(&rule, 3);
+        assert_eq!(history[0], [0, 0, 0, 3, 0]);
+    }
+
+    #[test]
+    fn test_run_and_record_advances_state() {
+        let gs = MengerSponge::generate(1, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let (final_state, history) = gs.run_and_record(&rule, 10);
+        assert_eq!(final_state.nodes.len(), 20);
+        assert_eq!(history.len(), 11);
+        let last = history[10];
+        let fc = final_state.census();
+        assert_eq!(last, fc.as_array());
+    }
+
+    #[test]
+    fn test_snapshot_round_trip() {
+        let gs = GraphState::new(
+            vec![3, 2, 0, 1, 4],
+            vec![vec![1, 2], vec![0, 2, 3], vec![0, 1], vec![1, 4], vec![3]],
+        );
+        let data = gs.snapshot();
+        let restored = GraphState::from_snapshot(&data).unwrap();
+        assert_eq!(restored.nodes, gs.nodes);
+        assert_eq!(restored.adjacency, gs.adjacency);
+    }
+
+    #[test]
+    fn test_snapshot_round_trip_large() {
+        let gs = OctahedralFogLattice::generate(5, CellState::Energy);
+        let data = gs.snapshot();
+        let restored = GraphState::from_snapshot(&data).unwrap();
+        assert_eq!(restored.nodes, gs.nodes);
+        assert_eq!(restored.adjacency, gs.adjacency);
+    }
+
+    #[test]
+    fn test_snapshot_invalid_magic() {
+        let data = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let result = GraphState::from_snapshot(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("magic"));
+    }
+
+    #[test]
+    fn test_snapshot_too_short() {
+        let data = vec![0, 1, 2];
+        let result = GraphState::from_snapshot(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sierpinski_coords_count() {
+        for depth in 0..3 {
+            let coords = SierpinskiTetrahedron::coords(depth);
+            assert_eq!(coords.len(), SierpinskiTetrahedron::node_count(depth));
+        }
+    }
+
+    #[test]
+    fn test_menger_coords_count() {
+        for depth in 0..3 {
+            let coords = MengerSponge::coords(depth);
+            assert_eq!(coords.len(), MengerSponge::node_count(depth));
+        }
+    }
+
+    #[test]
+    fn test_octahedral_coords_count() {
+        for side in [2, 3, 5, 10] {
+            let coords = OctahedralFogLattice::coords(side);
+            assert_eq!(coords.len(), OctahedralFogLattice::node_count(side));
+        }
+    }
+
+    #[test]
+    fn test_octahedral_coords_range() {
+        let coords = OctahedralFogLattice::coords(10);
+        for &(x, y, z) in &coords {
+            assert!(x >= 0.0 && x < 1.0);
+            assert!(y >= 0.0 && y < 1.0);
+            assert!(z >= 0.0 && z < 1.0);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_stepped_state() {
+        let gs = SierpinskiTetrahedron::generate(1, CellState::Energy);
+        let rule = MultiStateRule::utility_fog_default();
+        let stepped = gs.step_multi(&rule);
+        let data = stepped.snapshot();
+        let restored = GraphState::from_snapshot(&data).unwrap();
+        assert_eq!(restored.nodes, stepped.nodes);
+        assert_eq!(restored.adjacency, stepped.adjacency);
     }
 }
