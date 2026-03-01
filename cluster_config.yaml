@@ -1,0 +1,165 @@
+cluster:
+  name: "Vanguard SOC Cluster"
+  subnet: "192.168.86.0/24"
+  gateway: "192.168.86.1"
+  mcp_version: "0.1.0"
+  heartbeat_interval_secs: 10
+  task_timeout_secs: 300
+  max_task_retries: 3
+
+nodes:
+  - id: "mega"
+    hostname: "Mega"
+    ip: "192.168.86.29"
+    grpc_port: 50051
+    role: "head"
+    status: "active"
+    cpu: "AMD/Intel Desktop"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 5090"
+        vram_mb: 32768
+        compute_weight: 2.5
+    services:
+      - vanguard-mcp
+      - vanguard-node
+      - vanguard-watchdog
+      - boinc
+      - folding-at-home
+
+  - id: "amdmsix870e-1"
+    hostname: "AMDMSIX870E-1"
+    ip: "192.168.86.16"
+    grpc_port: 50052
+    role: "compute"
+    status: "active"
+    cpu: "AMD MSI X870E"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 5090"
+        vram_mb: 32768
+        compute_weight: 2.5
+    services:
+      - vanguard-node
+      - boinc
+      - folding-at-home
+
+  - id: "amdmsix870e-2"
+    hostname: "AMDMSIX870E-2"
+    ip: "192.168.86.22"
+    grpc_port: 50053
+    role: "compute"
+    status: "active"
+    cpu: "AMD MSI X870E"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 5090"
+        vram_mb: 32768
+        compute_weight: 2.5
+    services:
+      - vanguard-node
+      - boinc
+      - folding-at-home
+
+  - id: "dell-ultracore9"
+    hostname: "DellUltracore9"
+    ip: "192.168.86.3"
+    grpc_port: 50054
+    role: "compute"
+    status: "active"
+    cpu: "Dell Ultra Core 9 285"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 4090"
+        vram_mb: 24576
+        compute_weight: 1.5
+    services:
+      - vanguard-node
+      - boinc
+      - folding-at-home
+
+  - id: "aurora-ian"
+    hostname: "aurora-ian"
+    ip: null
+    grpc_port: 50055
+    role: "compute"
+    status: "placeholder"
+    cpu: "Intel i9-14900KF"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 4090"
+        vram_mb: 24576
+        compute_weight: 1.5
+    services:
+      - vanguard-node
+      - boinc
+      - folding-at-home
+
+  - id: "node-6-tbd"
+    hostname: null
+    ip: null
+    grpc_port: 50056
+    role: "compute"
+    status: "placeholder"
+    cpu: "Intel i9-14900K"
+    gpus:
+      - id: "gpu-0"
+        model: "RTX 4080 Super"
+        vram_mb: 16384
+        compute_weight: 1.2
+    services:
+      - vanguard-node
+      - boinc
+      - folding-at-home
+
+resource_policy:
+  normal_mode:
+    boinc_gpu_pct: 15.0
+    folding_gpu_pct: 10.0
+    utilityfog_gpu_pct: 75.0
+  grokking_run:
+    boinc_gpu_pct: 0.0
+    folding_gpu_pct: 0.0
+    utilityfog_gpu_pct: 100.0
+    boinc_action: "pause"      # boinccmd --set_gpu_mode never
+    folding_action: "pause"    # FAHClient --pause
+    restore_on_end: true
+
+routing:
+  default_strategy: "LeastLoaded"
+  gpu_temp_threshold_c: 85.0
+  gpu_temp_resume_c: 80.0
+  strategies:
+    - LeastLoaded
+    - RoundRobin
+    - VramCapacity
+    - AffinityFirst
+
+  affinity_rules:
+    fractal_step:
+      prefer: "RTX 5090"
+      min_vram_mb: 16384
+    ising_tempering:
+      prefer: "any"
+      distribute: "all_nodes"
+      min_vram_mb: 8192
+    visualization:
+      prefer: "any"
+      min_vram_mb: 4096
+
+grokking_run:
+  max_duration_secs: 3600
+  default_duration_secs: 600
+  priority: 10
+  pause_boinc_cmd: "boinccmd --set_gpu_mode never"
+  resume_boinc_cmd: "boinccmd --set_gpu_mode auto"
+  pause_folding_cmd: "FAHClient --send-pause"
+  resume_folding_cmd: "FAHClient --send-unpause"
+
+monitoring:
+  heartbeat_interval_secs: 10
+  gpu_poll_interval_secs: 5
+  log_level: "info"
+  log_targets:
+    - journalctl
+    - discord_webhook
