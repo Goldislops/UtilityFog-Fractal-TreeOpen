@@ -1,0 +1,125 @@
+syntax = "proto3";
+package utilityfog.cluster;
+
+service ClusterService {
+  rpc SubmitTask (TaskRequest) returns (TaskReceipt);
+  rpc GetTaskStatus (TaskId) returns (TaskStatus);
+  rpc StreamResults (TaskId) returns (stream TaskResult);
+  rpc RegisterNode (NodeInfo) returns (RegistrationAck);
+  rpc Heartbeat (HeartbeatPing) returns (HeartbeatPong);
+  rpc ListNodes (Empty) returns (NodeList);
+  rpc SetGpuAffinity (GpuAffinityRequest) returns (GpuAffinityResponse);
+}
+
+message Empty {}
+
+message TaskRequest {
+  string task_type = 1;
+  bytes payload = 2;
+  GpuPreference gpu_preference = 3;
+  uint32 priority = 4;
+  string branch_id = 5;
+}
+
+enum GpuPreference {
+  GPU_ANY = 0;
+  GPU_5090_ONLY = 1;
+  GPU_4090_ONLY = 2;
+  GPU_PREFER_5090 = 3;
+  GPU_PREFER_4090 = 4;
+}
+
+message TaskReceipt {
+  string task_id = 1;
+  string assigned_node = 2;
+  string assigned_gpu = 3;
+  uint64 queued_at_ms = 4;
+}
+
+message TaskId {
+  string task_id = 1;
+}
+
+message TaskStatus {
+  string task_id = 1;
+  State state = 2;
+  float progress = 3;
+  string node_id = 4;
+  string gpu_id = 5;
+  uint64 started_at_ms = 6;
+  uint64 elapsed_ms = 7;
+
+  enum State {
+    QUEUED = 0;
+    RUNNING = 1;
+    COMPLETE = 2;
+    FAILED = 3;
+    CANCELLED = 4;
+  }
+}
+
+message TaskResult {
+  string task_id = 1;
+  bytes result_payload = 2;
+  float progress = 3;
+  bool is_final = 4;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string hostname = 2;
+  string ip_address = 3;
+  uint32 grpc_port = 4;
+  repeated GpuInfo gpus = 5;
+  uint64 total_vram_mb = 6;
+  string cpu_model = 7;
+}
+
+message GpuInfo {
+  string gpu_id = 1;
+  string model = 2;
+  uint64 vram_mb = 3;
+  float utilization = 4;
+  float temperature_c = 5;
+  float power_watts = 6;
+  bool available = 7;
+}
+
+message RegistrationAck {
+  bool accepted = 1;
+  string cluster_id = 2;
+  string message = 3;
+}
+
+message HeartbeatPing {
+  string node_id = 1;
+  repeated GpuInfo gpu_status = 2;
+  float cpu_utilization = 3;
+  uint64 free_ram_mb = 4;
+  uint32 active_tasks = 5;
+}
+
+message HeartbeatPong {
+  bool acknowledged = 1;
+  uint64 server_time_ms = 2;
+  repeated PendingAssignment pending = 3;
+}
+
+message PendingAssignment {
+  string task_id = 1;
+  string gpu_id = 2;
+}
+
+message NodeList {
+  repeated NodeInfo nodes = 1;
+}
+
+message GpuAffinityRequest {
+  string task_type = 1;
+  GpuPreference preference = 2;
+}
+
+message GpuAffinityResponse {
+  bool applied = 1;
+  string message = 2;
+}
