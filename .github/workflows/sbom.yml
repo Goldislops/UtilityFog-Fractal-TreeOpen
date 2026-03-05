@@ -1,0 +1,42 @@
+name: sbom
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+  security-events: write
+
+jobs:
+  generate-sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Python SBOM (CycloneDX)
+        run: |
+          pip install cyclonedx-bom
+          if [ -f requirements.txt ]; then cyclonedx-py -i requirements.txt -o sbom-python.json; fi
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Node SBOM (CycloneDX)
+        run: |
+          if [ -f package-lock.json ] || [ -f package.json ]; then
+            npx --yes @cyclonedx/cyclonedx-npm --output-file sbom-node.json --output-format json
+          fi
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sboms
+          path: |
+            sbom-python.json
+            sbom-node.json
+          if-no-files-found: ignore
