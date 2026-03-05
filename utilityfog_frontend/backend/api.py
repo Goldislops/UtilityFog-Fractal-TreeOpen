@@ -24,7 +24,7 @@ from .sim_bridge import SimBridge
 sim_bridge = SimBridge()
 
 # FastAPI app
-app = FastAPI(title="UtilityFog Simulation API", version="1.0.0")
+app = FastAPI(title="UtilityFog Simulation API", version="0.1.0-rc1")
 
 # Request models
 class SimulationStartRequest(BaseModel):
