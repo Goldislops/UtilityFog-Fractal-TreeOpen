@@ -17,6 +17,7 @@ throttle 85 °C, pause 88 °C).  This script does NOT duplicate that logic.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import json
@@ -89,8 +90,55 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # 3-D Moore neighbourhood CA step (pure-numpy, no Rust kernel needed)
 # ====================================================================
 
-def _init_lattice() -> np.ndarray:
-    """Seed: single STRUCTURAL cell at centre of 64^3 lattice."""
+def generate_primordial_seed_cube(cube_size: int = 3) -> np.ndarray:
+    """Generate a dense primordial seed cube centred in the lattice.
+
+    A single cell cannot bootstrap growth because VOID->STRUCTURAL
+    requires 4-6 active Moore neighbours and one cell can only provide
+    a neighbour count of 1 to its adjacent voxels.  A filled N^3 cube
+    of STRUCTURAL cells provides the critical mass needed for the
+    outer-totalistic rules to ignite cascading growth.
+
+    Args:
+        cube_size: side length of the seed cube (default 3 -> 27 cells).
+                   Must be >= 2 to exceed the 4-neighbour ignition
+                   threshold.
+
+    Returns:
+        64x64x64 uint8 lattice with the seed cube placed at centre.
+    """
+    if cube_size < 2:
+        raise ValueError(
+            f"cube_size must be >= 2 for ignition (got {cube_size}). "
+            "A single cell cannot reach the 4-neighbour threshold."
+        )
+
+    lattice = np.zeros((LATTICE_W, LATTICE_H, LATTICE_D), dtype=np.uint8)
+
+    cx, cy, cz = LATTICE_W // 2, LATTICE_H // 2, LATTICE_D // 2
+    half = cube_size // 2
+
+    x0, x1 = cx - half, cx - half + cube_size
+    y0, y1 = cy - half, cy - half + cube_size
+    z0, z1 = cz - half, cz - half + cube_size
+
+    # Fill the cube with STRUCTURAL (state 1)
+    lattice[x0:x1, y0:y1, z0:z1] = 1
+
+    return lattice
+
+
+def _init_lattice(cube_size: int = 1) -> np.ndarray:
+    """Initialise the lattice with either a single cell or a primordial cube.
+
+    Args:
+        cube_size: if >= 2 use generate_primordial_seed_cube(); otherwise
+                   fall back to the legacy single-cell seed.
+    """
+    if cube_size >= 2:
+        return generate_primordial_seed_cube(cube_size)
+
+    # Legacy single-cell seed (will collapse to VOID)
     lattice = np.zeros((LATTICE_W, LATTICE_H, LATTICE_D), dtype=np.uint8)
     cx, cy, cz = LATTICE_W // 2, LATTICE_H // 2, LATTICE_D // 2
     lattice[cx, cy, cz] = 1  # STRUCTURAL seed
@@ -239,20 +287,49 @@ def _save_branch_primitive(lattice: np.ndarray, generation: int, step: int) -> P
 # Main infinite loop
 # ====================================================================
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Continuous Evolution -- Infinite Long-Run Evolution Loop",
+    )
+    parser.add_argument(
+        "--seed-cube-size",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Side-length of the primordial STRUCTURAL seed cube placed at "
+            "the lattice centre. Must be >= 2 for ignition (default: 1, "
+            "legacy single-cell — will collapse to VOID)."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
     global _running
+
+    args = _parse_args()
+    cube_sz = args.seed_cube_size
+
+    seed_desc = (
+        f"Primordial {cube_sz}^3 cube ({cube_sz**3} cells)"
+        if cube_sz >= 2
+        else "Single cell (legacy — will collapse)"
+    )
+
     print("=" * 72)
     print("  CONTINUOUS EVOLUTION — Infinite Long-Run")
     print("  Lattice: {}x{}x{}  |  Population: {}".format(
         LATTICE_W, LATTICE_H, LATTICE_D, POPULATION_SIZE))
+    print(f"  Seed:   {seed_desc}")
     print("  Status every {} s  |  Snapshot every {} s".format(
         STATUS_INTERVAL, SNAPSHOT_INTERVAL))
     print("=" * 72)
 
     rng = np.random.default_rng(seed=42)
 
-    # Initialise lattice
-    lattice = _init_lattice()
+    # Initialise lattice with primordial seed cube (or legacy single cell)
+    lattice = _init_lattice(cube_size=cube_sz)
     prev_active = int(np.sum(lattice > 0))
 
     # Initialise meme population
