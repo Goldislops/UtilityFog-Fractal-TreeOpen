@@ -182,16 +182,35 @@ def _random_genome(rng: np.random.Generator) -> np.ndarray:
 
 
 def _fitness(genome: np.ndarray, lattice_metrics: dict) -> float:
-    """Fitness = blend of genome traits weighted by lattice health."""
+    """Fitness with Shannon entropy bonus & structural-dominance penalty.
+
+    The fog is mathematically forced to differentiate its STRUCTURAL cells
+    into a diverse mix of COMPUTE, ENERGY, and SENSOR nodes:
+      - entropy bonus:  rewards heterogeneous cell-type distributions
+      - struct penalty:  punishes monolithic STRUCTURAL blobs
+
+    Final fitness = base_score + 0.25 * entropy - 0.20 * struct_dom
+    """
     dominance, virality, stability, compat, thresh = genome
     branching = lattice_metrics.get("branching_ratio", 1.0)
     density = lattice_metrics.get("density", 0.0)
+    entropy = lattice_metrics.get("entropy", 0.0)
+    struct_dom = lattice_metrics.get("structural_dominance", 1.0)
+
     # Reward balance: branching near 1.5, moderate density, high stability
     target_br = 1.5
     br_score = max(0, 1.0 - abs(branching - target_br))
     density_score = min(density * 2, 1.0)
-    gene_score = 0.3 * dominance + 0.2 * virality + 0.3 * stability + 0.1 * compat + 0.1 * (1 - thresh)
-    return 0.4 * gene_score + 0.35 * br_score + 0.25 * density_score
+    gene_score = (0.3 * dominance + 0.2 * virality + 0.3 * stability
+                  + 0.1 * compat + 0.1 * (1 - thresh))
+
+    base_score = 0.35 * gene_score + 0.25 * br_score + 0.15 * density_score
+
+    # --- Jack's Differentiation Physics ---
+    entropy_bonus = 0.25 * entropy            # max +0.25 for perfect diversity
+    dominance_penalty = 0.20 * struct_dom     # max -0.20 for pure STRUCTURAL
+
+    return max(0.0, base_score + entropy_bonus - dominance_penalty)
 
 
 def _tournament_select(pop: np.ndarray, fits: np.ndarray, k: int, rng: np.random.Generator) -> int:
@@ -244,6 +263,36 @@ def _evolve_population(pop: np.ndarray, lattice_metrics: dict, rng: np.random.Ge
 # Lattice metrics
 # ====================================================================
 
+def _shannon_entropy(lattice: np.ndarray, active: int) -> float:
+    """Normalized Shannon entropy over non-VOID cell types.
+
+    H = -sum(p_i * ln(p_i)) for each active state i in {STRUCTURAL,
+    COMPUTE, ENERGY, SENSOR}.  Normalized to [0, 1] by dividing by
+    ln(NUM_STATES - 1) so that a perfectly uniform mix scores 1.0
+    and a monolithic blob scores 0.0.
+    """
+    if active == 0:
+        return 0.0
+    counts = np.bincount(lattice.ravel(), minlength=NUM_STATES)[1:]  # skip VOID
+    probs = counts / active
+    probs = probs[probs > 0]  # avoid log(0)
+    H = -float(np.sum(probs * np.log(probs)))
+    H_max = np.log(NUM_STATES - 1)  # ln(4) for 4 active states
+    return H / H_max if H_max > 0 else 0.0
+
+
+def _structural_dominance(lattice: np.ndarray, active: int) -> float:
+    """Fraction of active cells that are STRUCTURAL (state 1).
+
+    Returns 0.0 when no active cells exist, or a value in [0, 1].
+    A value near 1.0 means the fog is a boring monolithic blob.
+    """
+    if active == 0:
+        return 0.0
+    structural_count = int(np.sum(lattice == 1))
+    return structural_count / active
+
+
 def _compute_metrics(lattice: np.ndarray, prev_active: int) -> dict:
     active = int(np.sum(lattice > 0))
     total = int(lattice.size)
@@ -260,6 +309,10 @@ def _compute_metrics(lattice: np.ndarray, prev_active: int) -> dict:
     else:
         m = 0.0
 
+    # --- Jack's Differentiation Physics ---
+    entropy = _shannon_entropy(lattice, active)
+    struct_dom = _structural_dominance(lattice, active)
+
     return {
         "active_cells": active,
         "total_cells": total,
@@ -267,6 +320,8 @@ def _compute_metrics(lattice: np.ndarray, prev_active: int) -> dict:
         "branching_ratio": branching_ratio,
         "mean_energy": mean_energy,
         "abs_m": m,
+        "entropy": entropy,
+        "structural_dominance": struct_dom,
     }
 
 
@@ -318,10 +373,11 @@ def main():
     )
 
     print("=" * 72)
-    print("  CONTINUOUS EVOLUTION — Infinite Long-Run")
+    print("  CONTINUOUS EVOLUTION — The Era of Differentiation")
     print("  Lattice: {}x{}x{}  |  Population: {}".format(
         LATTICE_W, LATTICE_H, LATTICE_D, POPULATION_SIZE))
     print(f"  Seed:   {seed_desc}")
+    print("  Physics: Shannon entropy bonus + structural-dominance penalty")
     print("  Status every {} s  |  Snapshot every {} s".format(
         STATUS_INTERVAL, SNAPSHOT_INTERVAL))
     print("=" * 72)
@@ -361,6 +417,13 @@ def main():
         if t_now - last_status >= STATUS_INTERVAL:
             elapsed = timedelta(seconds=int(t_now - start_time))
             fits_now = np.array([_fitness(g, metrics) for g in population], dtype=np.float32)
+            # Per-state census for differentiation tracking
+            state_counts = np.bincount(lattice.ravel(), minlength=NUM_STATES)
+            census_str = "  ".join(
+                f"{STATE_NAMES[i]}={state_counts[i]}"
+                for i in range(NUM_STATES)
+            )
+
             print("-" * 72)
             print(f"  STATUS @ {datetime.now().isoformat()}  (uptime {elapsed})")
             print(f"  Generation: {generation}  |  CA step: {ca_step_count}")
@@ -369,6 +432,9 @@ def main():
             print(f"  Branching Ratio: {metrics['branching_ratio']:.6f}")
             print(f"  Density:         {metrics['density']:.6f}")
             print(f"  Active cells:    {metrics['active_cells']}/{metrics['total_cells']}")
+            print(f"  Shannon Entropy: {metrics['entropy']:.6f}  (0=mono, 1=diverse)")
+            print(f"  Struct Dominance:{metrics['structural_dominance']:.6f}  (penalty target)")
+            print(f"  Cell census:     {census_str}")
             print(f"  Pop fitness:     best={fits_now.max():.4f}  mean={fits_now.mean():.4f}  std={fits_now.std():.4f}")
             print("-" * 72)
             sys.stdout.flush()
