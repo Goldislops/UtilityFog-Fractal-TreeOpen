@@ -47,14 +47,19 @@ NUM_CELLS = LATTICE_W * LATTICE_H * LATTICE_D
 STATE_NAMES = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 NUM_STATES = len(STATE_NAMES)
 
-# Outer-totalistic transitions (from ca/rules/example.toml)
+# Outer-totalistic transitions v0.2.0 — Jack's Differentiation Overhaul
+# Smashes the STRUCTURAL bottleneck with:
+#   - Easier VOID nucleation (3 neighbours)
+#   - Earlier STRUCTURAL -> COMPUTE differentiation (3-4 nbrs)
+#   - Direct high-density STRUCTURAL -> ENERGY (5,7) / SENSOR (6,8) channels
+#   - Lower-threshold COMPUTE -> ENERGY/SENSOR transitions
 # { current_state: { active_neighbour_count: next_state } }
 TRANSITIONS = {
-    0: {4: 1, 5: 1, 6: 1},          # VOID -> STRUCTURAL
-    1: {2: 1, 3: 1, 4: 2, 5: 2},    # STRUCTURAL -> COMPUTE
-    2: {2: 2, 3: 3, 4: 4},          # COMPUTE -> ENERGY / SENSOR
-    3: {2: 3, 3: 3, 4: 3},          # ENERGY (stable)
-    4: {2: 4, 3: 4, 4: 4},          # SENSOR (stable)
+    0: {3: 1, 4: 1, 5: 1, 6: 1},                    # VOID -> STRUCTURAL (easier nucleation)
+    1: {2: 1, 3: 2, 4: 2, 5: 3, 6: 4, 7: 3, 8: 4},  # STRUCTURAL -> COMPUTE(3-4), ENERGY(5,7), SENSOR(6,8)
+    2: {2: 3, 3: 3, 4: 4, 5: 4},                     # COMPUTE -> ENERGY(2-3), SENSOR(4-5) — faster specialisation
+    3: {2: 3, 3: 3, 4: 3, 5: 3},                     # ENERGY (stable under moderate support)
+    4: {2: 4, 3: 4, 4: 4, 5: 4},                     # SENSOR (stable under moderate support)
 }
 
 # ---------------------------------------------------------------------------
