@@ -47,20 +47,25 @@ NUM_CELLS = LATTICE_W * LATTICE_H * LATTICE_D
 STATE_NAMES = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 NUM_STATES = len(STATE_NAMES)
 
-# Outer-totalistic transitions v0.2.0 — Jack's Differentiation Overhaul
-# Smashes the STRUCTURAL bottleneck with:
-#   - Easier VOID nucleation (3 neighbours)
-#   - Earlier STRUCTURAL -> COMPUTE differentiation (3-4 nbrs)
-#   - Direct high-density STRUCTURAL -> ENERGY (5,7) / SENSOR (6,8) channels
-#   - Lower-threshold COMPUTE -> ENERGY/SENSOR transitions
+# Outer-totalistic transitions v0.3.0 — Chaos & Decay
+# Builds on v0.2.0 with:
+#   - REMOVED 2-neighbour STRUCTURAL safety net (no more hiding!)
+#   - Stochastic transition probability for non-deterministic differentiation
+#   - Inactivity decay: STRUCTURAL cells decay to VOID after DECAY_THRESHOLD
+#     steps without differentiating, forcing turnover and fresh growth
 # { current_state: { active_neighbour_count: next_state } }
 TRANSITIONS = {
     0: {3: 1, 4: 1, 5: 1, 6: 1},                    # VOID -> STRUCTURAL (easier nucleation)
-    1: {2: 1, 3: 2, 4: 2, 5: 3, 6: 4, 7: 3, 8: 4},  # STRUCTURAL -> COMPUTE(3-4), ENERGY(5,7), SENSOR(6,8)
-    2: {2: 3, 3: 3, 4: 4, 5: 4},                     # COMPUTE -> ENERGY(2-3), SENSOR(4-5) — faster specialisation
+    1: {3: 2, 4: 2, 5: 3, 6: 4, 7: 3, 8: 4},        # STRUCTURAL -> COMPUTE(3-4), ENERGY(5,7), SENSOR(6,8) — NO 2-nbr safety net!
+    2: {2: 3, 3: 3, 4: 4, 5: 4},                     # COMPUTE -> ENERGY(2-3), SENSOR(4-5)
     3: {2: 3, 3: 3, 4: 3, 5: 3},                     # ENERGY (stable under moderate support)
     4: {2: 4, 3: 4, 4: 4, 5: 4},                     # SENSOR (stable under moderate support)
 }
+
+# v0.3.0 Stochastic & Decay parameters
+STOCHASTIC_RATE = 0.02     # 2% chance per STRUCTURAL cell per step to randomly differentiate
+DECAY_THRESHOLD = 50       # STRUCTURAL cells decay to VOID after this many steps unchanged
+DECAY_ENABLED = True       # Toggle inactivity decay
 
 # ---------------------------------------------------------------------------
 # Evolution engine parameters
@@ -150,14 +155,9 @@ def _init_lattice(cube_size: int = 1) -> np.ndarray:
     return lattice
 
 
-def _ca_step(lattice: np.ndarray) -> np.ndarray:
-    """One outer-totalistic CA tick using 3-D Moore neighbourhood (26 nbrs).
-
-    Active neighbour = any cell with state > 0 (non-VOID).
-    """
+def _count_neighbours(lattice: np.ndarray) -> np.ndarray:
+    """Count active (non-VOID) Moore neighbours for each cell in the 3D lattice."""
     active = (lattice > 0).astype(np.int32)
-
-    # Sum over 26 Moore neighbours via shifted additions (periodic boundary)
     neighbour_count = np.zeros_like(active)
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
@@ -167,14 +167,70 @@ def _ca_step(lattice: np.ndarray) -> np.ndarray:
                 neighbour_count += np.roll(
                     np.roll(np.roll(active, dx, axis=0), dy, axis=1), dz, axis=2
                 )
+    return neighbour_count
 
+
+def _ca_step(lattice: np.ndarray, rng: np.random.Generator,
+             inactivity: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """One CA tick with stochastic transitions and inactivity decay (v0.3.0).
+
+    Returns (next_lattice, updated_inactivity_counter).
+
+    New mechanics:
+      - Stochastic: STRUCTURAL cells have STOCHASTIC_RATE chance per step
+        to randomly differentiate into COMPUTE, ENERGY, or SENSOR.
+      - Decay: STRUCTURAL cells that remain STRUCTURAL for DECAY_THRESHOLD
+        consecutive steps decay to VOID, freeing space for fresh growth.
+    """
+    neighbour_count = _count_neighbours(lattice)
+
+    # --- Standard deterministic transitions ---
     next_lattice = np.zeros_like(lattice)
     for state, transitions in TRANSITIONS.items():
         mask = lattice == state
         for ncount, nxt in transitions.items():
             next_lattice[mask & (neighbour_count == ncount)] = nxt
 
-    return next_lattice
+    # --- v0.3.0: Stochastic random differentiation ---
+    # STRUCTURAL cells that didn't transition get a random chance to specialise
+    structural_mask = (lattice == 1)
+    still_structural = structural_mask & (next_lattice == 1)
+    undecided = structural_mask & (next_lattice == 0)  # no rule matched
+    stochastic_targets = still_structural | undecided
+
+    if STOCHASTIC_RATE > 0 and np.any(stochastic_targets):
+        n_targets = int(np.sum(stochastic_targets))
+        rolls = rng.random(n_targets)
+        hit = rolls < STOCHASTIC_RATE
+        if np.any(hit):
+            # Randomly assign COMPUTE(2), ENERGY(3), or SENSOR(4)
+            new_states = rng.choice([2, 3, 4], size=int(np.sum(hit)))
+            coords = np.argwhere(stochastic_targets)
+            hit_coords = coords[hit]
+            for idx, (x, y, z) in enumerate(hit_coords):
+                next_lattice[x, y, z] = new_states[idx]
+
+    # --- v0.3.0: Inactivity decay ---
+    if inactivity is None:
+        inactivity = np.zeros_like(lattice, dtype=np.int16)
+
+    if DECAY_ENABLED:
+        # Increment counter for cells that stayed STRUCTURAL
+        stayed_structural = (lattice == 1) & (next_lattice == 1)
+        inactivity[stayed_structural] += 1
+
+        # Reset counter for cells that changed state
+        changed = lattice != next_lattice
+        inactivity[changed] = 0
+
+        # Decay: STRUCTURAL cells past threshold -> VOID
+        decay_mask = (next_lattice == 1) & (inactivity >= DECAY_THRESHOLD)
+        next_lattice[decay_mask] = 0  # VOID
+        inactivity[decay_mask] = 0
+    else:
+        inactivity = np.zeros_like(lattice, dtype=np.int16)
+
+    return next_lattice, inactivity
 
 
 # ====================================================================
@@ -378,11 +434,12 @@ def main():
     )
 
     print("=" * 72)
-    print("  CONTINUOUS EVOLUTION — The Era of Differentiation")
+    print("  CONTINUOUS EVOLUTION v0.3.0 — Chaos & Decay")
     print("  Lattice: {}x{}x{}  |  Population: {}".format(
         LATTICE_W, LATTICE_H, LATTICE_D, POPULATION_SIZE))
     print(f"  Seed:   {seed_desc}")
-    print("  Physics: Shannon entropy bonus + structural-dominance penalty")
+    print("  Physics: entropy bonus + struct penalty + stochastic + decay")
+    print(f"  Stochastic rate: {STOCHASTIC_RATE}  |  Decay threshold: {DECAY_THRESHOLD} steps")
     print("  Status every {} s  |  Snapshot every {} s".format(
         STATUS_INTERVAL, SNAPSHOT_INTERVAL))
     print("=" * 72)
@@ -392,12 +449,14 @@ def main():
     # Initialise lattice with primordial seed cube (or legacy single cell)
     lattice = _init_lattice(cube_size=cube_sz)
     prev_active = int(np.sum(lattice > 0))
+    inactivity = np.zeros_like(lattice, dtype=np.int16)  # v0.3.0 decay counter
 
     # Initialise meme population
     population = np.array([_random_genome(rng) for _ in range(POPULATION_SIZE)], dtype=np.float32)
 
     generation = 0
     ca_step_count = 0
+    total_decayed = 0  # cumulative cells decayed to VOID
     start_time = time.monotonic()
     last_status = start_time
     last_snapshot = start_time
@@ -407,9 +466,12 @@ def main():
     while _running:
         t_now = time.monotonic()
 
-        # --- CA step ---
-        lattice = _ca_step(lattice)
+        # --- CA step (v0.3.0: stochastic + decay) ---
+        prev_structural = int(np.sum(lattice == 1))
+        lattice, inactivity = _ca_step(lattice, rng, inactivity)
         ca_step_count += 1
+        new_structural = int(np.sum(lattice == 1))
+        decayed_this_step = max(0, prev_structural - new_structural - int(np.sum((lattice > 1) & (lattice <= 4))))
         metrics = _compute_metrics(lattice, prev_active)
         prev_active = metrics["active_cells"]
 
@@ -440,6 +502,8 @@ def main():
             print(f"  Shannon Entropy: {metrics['entropy']:.6f}  (0=mono, 1=diverse)")
             print(f"  Struct Dominance:{metrics['structural_dominance']:.6f}  (penalty target)")
             print(f"  Cell census:     {census_str}")
+            decaying_soon = int(np.sum((inactivity > DECAY_THRESHOLD * 0.7) & (lattice == 1)))
+            print(f"  Decay pressure:  {decaying_soon} STRUCTURAL cells near decay threshold")
             print(f"  Pop fitness:     best={fits_now.max():.4f}  mean={fits_now.mean():.4f}  std={fits_now.std():.4f}")
             print("-" * 72)
             sys.stdout.flush()

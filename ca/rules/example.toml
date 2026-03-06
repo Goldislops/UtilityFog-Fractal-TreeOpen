@@ -1,28 +1,28 @@
-# CA Rule v0.2.0 — Jack's Differentiation Overhaul
+# CA Rule v0.3.0 — Chaos & Decay
 #
-# Breaks the STRUCTURAL bottleneck by opening direct specialisation
-# channels at higher neighbour counts and lowering thresholds for
-# COMPUTE -> ENERGY / SENSOR transitions.
+# Breaks deterministic lock-in with stochastic transitions and
+# inactivity-driven decay. STRUCTURAL cells that fail to differentiate
+# decay back to VOID, forcing continuous turnover and fresh growth.
 
 [rule]
-name = "branching-growth-differentiation"
+name = "chaos-and-decay"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
 # Outer-totalistic transitions based on neighbor count
-# Format: current_state = { neighbor_count = next_state }
+# v0.3.0: REMOVED 2-neighbour STRUCTURAL safety net
 
 [params.transitions]
-# VOID cells nucleate into STRUCTURAL with 3-6 neighbours (was 4-6)
+# VOID cells nucleate into STRUCTURAL with 3-6 neighbours
 VOID = { 3 = "STRUCTURAL", 4 = "STRUCTURAL", 5 = "STRUCTURAL", 6 = "STRUCTURAL" }
 
-# STRUCTURAL differentiates early: COMPUTE at 3-4, plus direct
-# high-density channels to ENERGY (5,7) and SENSOR (6,8)
-STRUCTURAL = { 2 = "STRUCTURAL", 3 = "COMPUTE", 4 = "COMPUTE", 5 = "ENERGY", 6 = "SENSOR", 7 = "ENERGY", 8 = "SENSOR" }
+# STRUCTURAL: NO 2-nbr safety net! Must differentiate or decay.
+# COMPUTE at 3-4, direct ENERGY (5,7), direct SENSOR (6,8)
+STRUCTURAL = { 3 = "COMPUTE", 4 = "COMPUTE", 5 = "ENERGY", 6 = "SENSOR", 7 = "ENERGY", 8 = "SENSOR" }
 
-# COMPUTE specialises faster: ENERGY at 2-3, SENSOR at 4-5
+# COMPUTE specialises: ENERGY at 2-3, SENSOR at 4-5
 COMPUTE = { 2 = "ENERGY", 3 = "ENERGY", 4 = "SENSOR", 5 = "SENSOR" }
 
 # ENERGY stable under moderate support (2-5 neighbours)
@@ -31,8 +31,19 @@ ENERGY = { 2 = "ENERGY", 3 = "ENERGY", 4 = "ENERGY", 5 = "ENERGY" }
 # SENSOR stable under moderate support (2-5 neighbours)
 SENSOR = { 2 = "SENSOR", 3 = "SENSOR", 4 = "SENSOR", 5 = "SENSOR" }
 
+[params.stochastic]
+# Per-step probability that a STRUCTURAL cell randomly differentiates
+# into COMPUTE, ENERGY, or SENSOR (uniform random choice)
+rate = 0.02
+
+[params.decay]
+# STRUCTURAL cells that remain unchanged for this many consecutive
+# steps decay back to VOID, freeing space for fresh growth
+enabled = true
+threshold = 50
+
 [params.meta]
-description = "Differentiation-focused rule — breaks STRUCTURAL bottleneck with direct specialisation channels"
-author = "Jack (GPT-5.4) + UtilityFog Team"
-version = "0.2.0"
-target_lambda = 1.5  # Target branching factor (edge of chaos)
+description = "Chaos & Decay — stochastic transitions + inactivity decay break deterministic lock-in"
+author = "Jack (GPT-5.4) + Claude + UtilityFog Team"
+version = "0.3.0"
+target_lambda = 1.5
