@@ -13,61 +13,58 @@ transition = "outer-totalistic"
 [params]
 # Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
-[params.transitions]
+# --- Transitions: { neighbour_count = "TARGET_STATE" } ---
+
+[params.transitions.VOID]
 # Re-nucleation retained, but narrower than prior versions.
-VOID = {
-  4 = "STRUCTURAL",
-  5 = "STRUCTURAL",
-  6 = "STRUCTURAL"
-}
+4 = "STRUCTURAL"
+5 = "STRUCTURAL"
+6 = "STRUCTURAL"
 
+[params.transitions.STRUCTURAL]
 # Remove low-neighbor structural comfort zones to weaken scaffold lock-in.
-STRUCTURAL = {
-  1 = "COMPUTE",
-  2 = "COMPUTE",
-  3 = "COMPUTE",
-  4 = "ENERGY",
-  5 = "ENERGY",
-  6 = "SENSOR",
-  7 = "SENSOR",
-  8 = "SENSOR"
-}
+# STRUCTURAL at ANY neighbour count differentiates.
+1 = "COMPUTE"
+2 = "COMPUTE"
+3 = "COMPUTE"
+4 = "ENERGY"
+5 = "ENERGY"
+6 = "SENSOR"
+7 = "SENSOR"
+8 = "SENSOR"
 
+[params.transitions.COMPUTE]
 # Compute quickly funnels into energetic/sensory roles.
-COMPUTE = {
-  1 = "COMPUTE",
-  2 = "ENERGY",
-  3 = "ENERGY",
-  4 = "SENSOR",
-  5 = "SENSOR",
-  6 = "SENSOR"
-}
+1 = "COMPUTE"
+2 = "ENERGY"
+3 = "ENERGY"
+4 = "SENSOR"
+5 = "SENSOR"
+6 = "SENSOR"
 
+[params.transitions.ENERGY]
 # Asymmetric stability: ENERGY persists across a broad support window.
-ENERGY = {
-  0 = "ENERGY",
-  1 = "ENERGY",
-  2 = "ENERGY",
-  3 = "ENERGY",
-  4 = "ENERGY",
-  5 = "ENERGY",
-  6 = "SENSOR",
-  7 = "SENSOR",
-  8 = "SENSOR"
-}
+0 = "ENERGY"
+1 = "ENERGY"
+2 = "ENERGY"
+3 = "ENERGY"
+4 = "ENERGY"
+5 = "ENERGY"
+6 = "SENSOR"
+7 = "SENSOR"
+8 = "SENSOR"
 
+[params.transitions.SENSOR]
 # Asymmetric stability: SENSOR is hardest to collapse.
-SENSOR = {
-  0 = "SENSOR",
-  1 = "SENSOR",
-  2 = "SENSOR",
-  3 = "SENSOR",
-  4 = "SENSOR",
-  5 = "SENSOR",
-  6 = "SENSOR",
-  7 = "SENSOR",
-  8 = "SENSOR"
-}
+0 = "SENSOR"
+1 = "SENSOR"
+2 = "SENSOR"
+3 = "SENSOR"
+4 = "SENSOR"
+5 = "SENSOR"
+6 = "SENSOR"
+7 = "SENSOR"
+8 = "SENSOR"
 
 [params.contagion]
 enabled = true
