@@ -1,49 +1,107 @@
-# CA Rule v0.3.0 — Chaos & Decay
+# CA Rule v0.4.0 — Contagion & Asymmetric Stability
 #
-# Breaks deterministic lock-in with stochastic transitions and
-# inactivity-driven decay. STRUCTURAL cells that fail to differentiate
-# decay back to VOID, forcing continuous turnover and fresh growth.
+# State-aware contagion + asymmetric stability + 8% chaos to break
+# structural equilibrium.  STRUCTURAL cells at ANY neighbour count
+# differentiate.  ENERGY/SENSOR nearly indestructible.
 
 [rule]
-name = "chaos-and-decay"
+name = "branching-growth-v0.4"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
-# Outer-totalistic transitions based on neighbor count
-# v0.3.0: REMOVED 2-neighbour STRUCTURAL safety net
+# Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
 [params.transitions]
-# VOID cells nucleate into STRUCTURAL with 3-6 neighbours
-VOID = { 3 = "STRUCTURAL", 4 = "STRUCTURAL", 5 = "STRUCTURAL", 6 = "STRUCTURAL" }
+# Re-nucleation retained, but narrower than prior versions.
+VOID = {
+  4 = "STRUCTURAL",
+  5 = "STRUCTURAL",
+  6 = "STRUCTURAL"
+}
 
-# STRUCTURAL: NO 2-nbr safety net! Must differentiate or decay.
-# COMPUTE at 3-4, direct ENERGY (5,7), direct SENSOR (6,8)
-STRUCTURAL = { 3 = "COMPUTE", 4 = "COMPUTE", 5 = "ENERGY", 6 = "SENSOR", 7 = "ENERGY", 8 = "SENSOR" }
+# Remove low-neighbor structural comfort zones to weaken scaffold lock-in.
+STRUCTURAL = {
+  1 = "COMPUTE",
+  2 = "COMPUTE",
+  3 = "COMPUTE",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# COMPUTE specialises: ENERGY at 2-3, SENSOR at 4-5
-COMPUTE = { 2 = "ENERGY", 3 = "ENERGY", 4 = "SENSOR", 5 = "SENSOR" }
+# Compute quickly funnels into energetic/sensory roles.
+COMPUTE = {
+  1 = "COMPUTE",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
 
-# ENERGY stable under moderate support (2-5 neighbours)
-ENERGY = { 2 = "ENERGY", 3 = "ENERGY", 4 = "ENERGY", 5 = "ENERGY" }
+# Asymmetric stability: ENERGY persists across a broad support window.
+ENERGY = {
+  0 = "ENERGY",
+  1 = "ENERGY",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# SENSOR stable under moderate support (2-5 neighbours)
-SENSOR = { 2 = "SENSOR", 3 = "SENSOR", 4 = "SENSOR", 5 = "SENSOR" }
+# Asymmetric stability: SENSOR is hardest to collapse.
+SENSOR = {
+  0 = "SENSOR",
+  1 = "SENSOR",
+  2 = "SENSOR",
+  3 = "SENSOR",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
+
+[params.contagion]
+enabled = true
+# State-aware neighbor influence thresholds.
+energy_neighbor_threshold = 4
+sensor_neighbor_threshold = 4
+# STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
+structural_energy_conversion_prob = 0.42
+structural_sensor_conversion_prob = 0.34
+compute_energy_conversion_prob = 0.36
+compute_sensor_conversion_prob = 0.30
 
 [params.stochastic]
-# Per-step probability that a STRUCTURAL cell randomly differentiates
-# into COMPUTE, ENERGY, or SENSOR (uniform random choice)
-rate = 0.02
+enabled = true
+# Cranked chaos baseline (requested: 8%).
+baseline_transition_prob = 0.08
+# Direct stochastic specialization from scaffold and compute states.
+structural_to_energy_prob = 0.08
+structural_to_sensor_prob = 0.08
+compute_to_energy_prob = 0.10
+compute_to_sensor_prob = 0.10
+# Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
+structural_to_void_decay_prob = 0.045
+energy_to_void_decay_prob = 0.004
+sensor_to_void_decay_prob = 0.003
 
 [params.decay]
-# STRUCTURAL cells that remain unchanged for this many consecutive
-# steps decay back to VOID, freeing space for fresh growth
 enabled = true
-threshold = 50
+# Structural cells with low support decay quickly, forcing turnover.
+inactivity_neighbor_threshold = 1
+structural_inactive_steps_to_decay = 4
 
 [params.meta]
-description = "Chaos & Decay — stochastic transitions + inactivity decay break deterministic lock-in"
+description = "v0.4 contagion + asymmetric stability + 8% chaos to break structural equilibrium"
 author = "Jack (GPT-5.4) + Claude + UtilityFog Team"
-version = "0.3.0"
-target_lambda = 1.5
+version = "0.4.0"
+target_lambda = 1.7
