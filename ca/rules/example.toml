@@ -1,7 +1,7 @@
 # Example CA rule: Branching growth with multiple states
 
 [rule]
-name = "branching-growth-v0.4"
+name = "branching-growth-v0.5"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
@@ -10,36 +10,38 @@ transition = "outer-totalistic"
 # Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
 [params.transitions]
-# Re-nucleation retained, but narrower than prior versions.
+# Widen re-nucleation to maintain scaffold regeneration.
 VOID = {
+  3 = "STRUCTURAL",
   4 = "STRUCTURAL",
   5 = "STRUCTURAL",
   6 = "STRUCTURAL"
 }
 
-# Remove low-neighbor structural comfort zones to weaken scaffold lock-in.
+# Buff STRUCTURAL: preserve low-density scaffold before differentiation.
 STRUCTURAL = {
-  1 = "COMPUTE",
-  2 = "COMPUTE",
+  0 = "STRUCTURAL",
+  1 = "STRUCTURAL",
+  2 = "STRUCTURAL",
   3 = "COMPUTE",
-  4 = "ENERGY",
+  4 = "COMPUTE",
   5 = "ENERGY",
   6 = "SENSOR",
   7 = "SENSOR",
   8 = "SENSOR"
 }
 
-# Compute quickly funnels into energetic/sensory roles.
+# Buff COMPUTE: wider stability band so it can accumulate as an intermediary.
 COMPUTE = {
   1 = "COMPUTE",
-  2 = "ENERGY",
-  3 = "ENERGY",
-  4 = "SENSOR",
+  2 = "COMPUTE",
+  3 = "COMPUTE",
+  4 = "ENERGY",
   5 = "SENSOR",
   6 = "SENSOR"
 }
 
-# Asymmetric stability: ENERGY persists across a broad support window.
+# ENERGY remains robust but can still route to SENSOR at higher density.
 ENERGY = {
   0 = "ENERGY",
   1 = "ENERGY",
@@ -52,7 +54,7 @@ ENERGY = {
   8 = "SENSOR"
 }
 
-# Asymmetric stability: SENSOR is hardest to collapse.
+# Nerf SENSOR: vulnerable at extreme densities (7-8 no longer stable mapping).
 SENSOR = {
   0 = "SENSOR",
   1 = "SENSOR",
@@ -60,9 +62,7 @@ SENSOR = {
   3 = "SENSOR",
   4 = "SENSOR",
   5 = "SENSOR",
-  6 = "SENSOR",
-  7 = "SENSOR",
-  8 = "SENSOR"
+  6 = "SENSOR"
 }
 
 [params.contagion]
@@ -71,9 +71,9 @@ enabled = true
 energy_neighbor_threshold = 4
 sensor_neighbor_threshold = 4
 # STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
-structural_energy_conversion_prob = 0.42
+structural_energy_conversion_prob = 0.34
 structural_sensor_conversion_prob = 0.34
-compute_energy_conversion_prob = 0.36
+compute_energy_conversion_prob = 0.30
 compute_sensor_conversion_prob = 0.30
 
 [params.stochastic]
@@ -86,7 +86,7 @@ structural_to_sensor_prob = 0.08
 compute_to_energy_prob = 0.10
 compute_to_sensor_prob = 0.10
 # Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
-structural_to_void_decay_prob = 0.045
+structural_to_void_decay_prob = 0.025
 energy_to_void_decay_prob = 0.004
 sensor_to_void_decay_prob = 0.003
 
@@ -94,10 +94,10 @@ sensor_to_void_decay_prob = 0.003
 enabled = true
 # Structural cells with low support decay quickly, forcing turnover.
 inactivity_neighbor_threshold = 1
-structural_inactive_steps_to_decay = 4
+structural_inactive_steps_to_decay = 6
 
 [params.meta]
-description = "v0.4 contagion + asymmetric stability + 8% chaos to break structural equilibrium"
+description = "v0.5 rebalanced contagion physics for heterogeneous multi-state equilibrium"
 author = "UtilityFog Team"
-version = "0.4.0"
+version = "0.5.0"
 target_lambda = 1.7
