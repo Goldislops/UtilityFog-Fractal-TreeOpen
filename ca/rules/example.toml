@@ -1,11 +1,16 @@
-# CA Rule v0.4.0 — Contagion & Asymmetric Stability
+# CA Rule v0.5.0 — The Great Rebalancing
 #
-# State-aware contagion + asymmetric stability + 8% chaos to break
-# structural equilibrium.  STRUCTURAL cells at ANY neighbour count
-# differentiate.  ENERGY/SENSOR nearly indestructible.
+# v0.4.0 overshot into SENSOR monoculture (92.9% SENSOR, H=0.19).
+# v0.5.0 rebalances the ecosystem:
+#   - STRUCTURAL gets a survival window at 0-2 neighbours
+#   - COMPUTE gets a wider stable band (1-3) to actually accumulate
+#   - SENSOR nerfed: stable 0-6 only (loses 7-8 invincibility)
+#   - VOID nucleation widened to 3-6 for better scaffold regeneration
+#   - Contagion symmetrized: ENERGY/SENSOR recruit equally
+#   - Decay gentled: 2.5% structural decay, 6-step inactivity threshold
 
 [rule]
-name = "branching-growth-v0.4"
+name = "branching-growth-v0.5"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
@@ -16,34 +21,37 @@ transition = "outer-totalistic"
 # --- Transitions: { neighbour_count = "TARGET_STATE" } ---
 
 [params.transitions.VOID]
-# Re-nucleation retained, but narrower than prior versions.
+# Wider nucleation window (added 3) for better scaffold regeneration.
+3 = "STRUCTURAL"
 4 = "STRUCTURAL"
 5 = "STRUCTURAL"
 6 = "STRUCTURAL"
 
 [params.transitions.STRUCTURAL]
-# Remove low-neighbor structural comfort zones to weaken scaffold lock-in.
-# STRUCTURAL at ANY neighbour count differentiates.
-1 = "COMPUTE"
-2 = "COMPUTE"
+# BUFFED: Survival at 0-2 neighbours gives scaffold breathing room.
+# Still differentiates at higher counts to prevent lock-in.
+0 = "STRUCTURAL"
+1 = "STRUCTURAL"
+2 = "STRUCTURAL"
 3 = "COMPUTE"
-4 = "ENERGY"
+4 = "COMPUTE"
 5 = "ENERGY"
 6 = "SENSOR"
 7 = "SENSOR"
 8 = "SENSOR"
 
 [params.transitions.COMPUTE]
-# Compute quickly funnels into energetic/sensory roles.
+# BUFFED: Wider accumulation band (1-3) so COMPUTE actually persists.
 1 = "COMPUTE"
-2 = "ENERGY"
-3 = "ENERGY"
-4 = "SENSOR"
+2 = "COMPUTE"
+3 = "COMPUTE"
+4 = "ENERGY"
 5 = "SENSOR"
 6 = "SENSOR"
 
 [params.transitions.ENERGY]
 # Asymmetric stability: ENERGY persists across a broad support window.
+# (Unchanged from v0.4.0 — ENERGY was not the problem.)
 0 = "ENERGY"
 1 = "ENERGY"
 2 = "ENERGY"
@@ -55,7 +63,8 @@ transition = "outer-totalistic"
 8 = "SENSOR"
 
 [params.transitions.SENSOR]
-# Asymmetric stability: SENSOR is hardest to collapse.
+# NERFED: Removed stability at 7-8 neighbours.
+# SENSOR can now be overwhelmed in very dense clusters.
 0 = "SENSOR"
 1 = "SENSOR"
 2 = "SENSOR"
@@ -63,42 +72,40 @@ transition = "outer-totalistic"
 4 = "SENSOR"
 5 = "SENSOR"
 6 = "SENSOR"
-7 = "SENSOR"
-8 = "SENSOR"
 
 [params.contagion]
 enabled = true
 # State-aware neighbor influence thresholds.
 energy_neighbor_threshold = 4
 sensor_neighbor_threshold = 4
-# STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
-structural_energy_conversion_prob = 0.42
+# SYMMETRIZED: ENERGY and SENSOR recruit equally from STRUCTURAL/COMPUTE.
+structural_energy_conversion_prob = 0.34
 structural_sensor_conversion_prob = 0.34
-compute_energy_conversion_prob = 0.36
+compute_energy_conversion_prob = 0.30
 compute_sensor_conversion_prob = 0.30
 
 [params.stochastic]
 enabled = true
-# Cranked chaos baseline (requested: 8%).
+# Cranked chaos baseline (retained: 8%).
 baseline_transition_prob = 0.08
 # Direct stochastic specialization from scaffold and compute states.
 structural_to_energy_prob = 0.08
 structural_to_sensor_prob = 0.08
 compute_to_energy_prob = 0.10
 compute_to_sensor_prob = 0.10
-# Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
-structural_to_void_decay_prob = 0.045
+# GENTLED: STRUCTURAL decay halved from 4.5% to 2.5%.
+structural_to_void_decay_prob = 0.025
 energy_to_void_decay_prob = 0.004
 sensor_to_void_decay_prob = 0.003
 
 [params.decay]
 enabled = true
-# Structural cells with low support decay quickly, forcing turnover.
+# GENTLED: 6-step threshold (up from 4) gives STRUCTURAL more time to differentiate.
 inactivity_neighbor_threshold = 1
-structural_inactive_steps_to_decay = 4
+structural_inactive_steps_to_decay = 6
 
 [params.meta]
-description = "v0.4 contagion + asymmetric stability + 8% chaos to break structural equilibrium"
-author = "Jack (GPT-5.4) + Claude + UtilityFog Team"
-version = "0.4.0"
+description = "v0.5 Great Rebalancing — cure the SENSOR monoculture, restore heterogeneous harmony"
+author = "Jack (GPT-5.4) + AURA (Gemini) + Claude + UtilityFog Team"
+version = "0.5.0"
 target_lambda = 1.7
