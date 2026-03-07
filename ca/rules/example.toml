@@ -1,33 +1,103 @@
 # Example CA rule: Branching growth with multiple states
 
 [rule]
-name = "branching-growth"
+name = "branching-growth-v0.4"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
-# Outer-totalistic transitions based on neighbor count
-# Format: current_state = { neighbor_count = next_state }
+# Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
 [params.transitions]
-# VOID cells become STRUCTURAL with 4-6 neighbors
-VOID = { 4 = "STRUCTURAL", 5 = "STRUCTURAL", 6 = "STRUCTURAL" }
+# Re-nucleation retained, but narrower than prior versions.
+VOID = {
+  4 = "STRUCTURAL",
+  5 = "STRUCTURAL",
+  6 = "STRUCTURAL"
+}
 
-# STRUCTURAL cells evolve based on density
-STRUCTURAL = { 2 = "STRUCTURAL", 3 = "STRUCTURAL", 4 = "COMPUTE", 5 = "COMPUTE" }
+# Remove low-neighbor structural comfort zones to weaken scaffold lock-in.
+STRUCTURAL = {
+  1 = "COMPUTE",
+  2 = "COMPUTE",
+  3 = "COMPUTE",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# COMPUTE cells can become ENERGY or SENSOR
-COMPUTE = { 2 = "COMPUTE", 3 = "ENERGY", 4 = "SENSOR" }
+# Compute quickly funnels into energetic/sensory roles.
+COMPUTE = {
+  1 = "COMPUTE",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
 
-# ENERGY cells are stable
-ENERGY = { 2 = "ENERGY", 3 = "ENERGY", 4 = "ENERGY" }
+# Asymmetric stability: ENERGY persists across a broad support window.
+ENERGY = {
+  0 = "ENERGY",
+  1 = "ENERGY",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# SENSOR cells are stable
-SENSOR = { 2 = "SENSOR", 3 = "SENSOR", 4 = "SENSOR" }
+# Asymmetric stability: SENSOR is hardest to collapse.
+SENSOR = {
+  0 = "SENSOR",
+  1 = "SENSOR",
+  2 = "SENSOR",
+  3 = "SENSOR",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
+
+[params.contagion]
+enabled = true
+# State-aware neighbor influence thresholds.
+energy_neighbor_threshold = 4
+sensor_neighbor_threshold = 4
+# STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
+structural_energy_conversion_prob = 0.42
+structural_sensor_conversion_prob = 0.34
+compute_energy_conversion_prob = 0.36
+compute_sensor_conversion_prob = 0.30
+
+[params.stochastic]
+enabled = true
+# Cranked chaos baseline (requested: 8%).
+baseline_transition_prob = 0.08
+# Direct stochastic specialization from scaffold and compute states.
+structural_to_energy_prob = 0.08
+structural_to_sensor_prob = 0.08
+compute_to_energy_prob = 0.10
+compute_to_sensor_prob = 0.10
+# Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
+structural_to_void_decay_prob = 0.045
+energy_to_void_decay_prob = 0.004
+sensor_to_void_decay_prob = 0.003
+
+[params.decay]
+enabled = true
+# Structural cells with low support decay quickly, forcing turnover.
+inactivity_neighbor_threshold = 1
+structural_inactive_steps_to_decay = 4
 
 [params.meta]
-description = "Multi-state branching growth rule for fractal structures"
+description = "v0.4 contagion + asymmetric stability + 8% chaos to break structural equilibrium"
 author = "UtilityFog Team"
-version = "0.1.0"
-target_lambda = 1.5  # Target branching factor (edge of chaos)
+version = "0.4.0"
+target_lambda = 1.7
