@@ -1,57 +1,66 @@
-# CA Rule v0.5.0 — The Great Rebalancing
+# CA Rule v0.6.0 — The COMPUTE Awakening
 #
-# v0.4.0 overshot into SENSOR monoculture (92.9% SENSOR, H=0.19).
-# v0.5.0 rebalances the ecosystem:
-#   - STRUCTURAL gets a survival window at 0-2 neighbours
-#   - COMPUTE gets a wider stable band (1-3) to actually accumulate
-#   - SENSOR nerfed: stable 0-6 only (loses 7-8 invincibility)
-#   - VOID nucleation widened to 3-6 for better scaffold regeneration
-#   - Contagion symmetrized: ENERGY/SENSOR recruit equally
-#   - Decay gentled: 2.5% structural decay, 6-step inactivity threshold
+# v0.5.0 achieved stable 4-state equilibrium (H=0.669) but COMPUTE stuck at 1%.
+# v0.6.0 breaks the COMPUTE bottleneck:
+#   - STRUCTURAL differentiates to COMPUTE at 3-6 neighbours (was 3-4)
+#   - STRUCTURAL survives at 0-2 AND 7-8 (high-density survival restored)
+#   - COMPUTE survival widened to 0-5 (was 1-3)
+#   - Contagion pressure on COMPUTE halved (15% vs 30%)
+#   - Stochastic COMPUTE drain slashed (3% vs 10%)
+#   - Density-targeting: adaptive probability curve targets 25% COMPUTE
+#   - VOID can nucleate directly to ENERGY (new pathway)
+#
+# Nemo (Kimi K2.5): density-targeting probability curve mathematics
+# Jack (GPT-5.4): Rust core integration + safety review
+# Claude (Opus 4.6): Python engine integration + QA
 
 [rule]
-name = "branching-growth-v0.5"
+name = "branching-growth-v0.6"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
-# Deterministic backbone; stochastic/contagion sections introduce non-determinism.
+# Deterministic backbone; stochastic/contagion/density-targeting introduce non-determinism.
 
 # --- Transitions: { neighbour_count = "TARGET_STATE" } ---
 
 [params.transitions.VOID]
-# Wider nucleation window (added 3) for better scaffold regeneration.
+# Wider nucleation: STRUCTURAL at 3-6 (unchanged) + ENERGY at 2 (NEW pathway)
+2 = "ENERGY"
 3 = "STRUCTURAL"
 4 = "STRUCTURAL"
 5 = "STRUCTURAL"
 6 = "STRUCTURAL"
 
 [params.transitions.STRUCTURAL]
-# BUFFED: Survival at 0-2 neighbours gives scaffold breathing room.
-# Still differentiates at higher counts to prevent lock-in.
+# WIDENED COMPUTE WINDOW: 3-6 → COMPUTE (was 3-4 only)
+# High-density survival at 7-8 restored (was SENSOR in v0.5.0)
+# This is the primary lever for COMPUTE production.
 0 = "STRUCTURAL"
 1 = "STRUCTURAL"
 2 = "STRUCTURAL"
 3 = "COMPUTE"
 4 = "COMPUTE"
-5 = "ENERGY"
-6 = "SENSOR"
-7 = "SENSOR"
-8 = "SENSOR"
+5 = "COMPUTE"
+6 = "COMPUTE"
+7 = "STRUCTURAL"
+8 = "STRUCTURAL"
 
 [params.transitions.COMPUTE]
-# BUFFED: Wider accumulation band (1-3) so COMPUTE actually persists.
+# WIDENED survival: 0-5 (was 1-3). COMPUTE now persists in moderate density.
+# Only converts at 6+ neighbours (extreme crowding).
+0 = "COMPUTE"
 1 = "COMPUTE"
 2 = "COMPUTE"
 3 = "COMPUTE"
-4 = "ENERGY"
-5 = "SENSOR"
-6 = "SENSOR"
+4 = "COMPUTE"
+5 = "COMPUTE"
+6 = "ENERGY"
 
 [params.transitions.ENERGY]
-# Asymmetric stability: ENERGY persists across a broad support window.
-# (Unchanged from v0.4.0 — ENERGY was not the problem.)
+# Asymmetric stability: ENERGY persists 0-5, routes to SENSOR at 6-8.
+# (Unchanged from v0.5.0 — ENERGY was not the problem.)
 0 = "ENERGY"
 1 = "ENERGY"
 2 = "ENERGY"
@@ -63,8 +72,7 @@ transition = "outer-totalistic"
 8 = "SENSOR"
 
 [params.transitions.SENSOR]
-# NERFED: Removed stability at 7-8 neighbours.
-# SENSOR can now be overwhelmed in very dense clusters.
+# SENSOR stable 0-6 (unchanged from v0.5.0).
 0 = "SENSOR"
 1 = "SENSOR"
 2 = "SENSOR"
@@ -75,37 +83,48 @@ transition = "outer-totalistic"
 
 [params.contagion]
 enabled = true
-# State-aware neighbor influence thresholds.
-energy_neighbor_threshold = 4
-sensor_neighbor_threshold = 4
-# SYMMETRIZED: ENERGY and SENSOR recruit equally from STRUCTURAL/COMPUTE.
+# State-aware neighbor influence thresholds — raised to reduce pressure.
+energy_neighbor_threshold = 5
+sensor_neighbor_threshold = 5
+# STRUCTURAL contagion unchanged (these convert to ENERGY/SENSOR).
 structural_energy_conversion_prob = 0.34
 structural_sensor_conversion_prob = 0.34
-compute_energy_conversion_prob = 0.30
-compute_sensor_conversion_prob = 0.30
+# COMPUTE contagion HALVED — let COMPUTE survive near ENERGY/SENSOR clusters.
+compute_energy_conversion_prob = 0.15
+compute_sensor_conversion_prob = 0.15
 
 [params.stochastic]
 enabled = true
-# Cranked chaos baseline (retained: 8%).
+# Baseline chaos rate retained at 8%.
 baseline_transition_prob = 0.08
-# Direct stochastic specialization from scaffold and compute states.
-structural_to_energy_prob = 0.08
-structural_to_sensor_prob = 0.08
-compute_to_energy_prob = 0.10
-compute_to_sensor_prob = 0.10
-# GENTLED: STRUCTURAL decay halved from 4.5% to 2.5%.
+# STRUCTURAL stochastic specialization (retained).
+structural_to_energy_prob = 0.06
+structural_to_sensor_prob = 0.06
+# COMPUTE stochastic drain SLASHED from 10% to 3% each.
+compute_to_energy_prob = 0.03
+compute_to_sensor_prob = 0.03
+# Decay rates.
 structural_to_void_decay_prob = 0.025
 energy_to_void_decay_prob = 0.004
 sensor_to_void_decay_prob = 0.003
 
+[params.density_targeting]
+# Nemo's density-targeting probability curve (THE KEY v0.6.0 INNOVATION).
+# When COMPUTE fraction < target, boost STRUCTURAL→COMPUTE creation rate.
+# When COMPUTE fraction >= target, suppress it to prevent overshoot.
+enabled = true
+compute_target_fraction = 0.25
+boost_probability = 0.85
+suppress_probability = 0.35
+
 [params.decay]
 enabled = true
-# GENTLED: 6-step threshold (up from 4) gives STRUCTURAL more time to differentiate.
+# 6-step inactivity threshold (unchanged from v0.5.0).
 inactivity_neighbor_threshold = 1
 structural_inactive_steps_to_decay = 6
 
 [params.meta]
-description = "v0.5 Great Rebalancing — cure the SENSOR monoculture, restore heterogeneous harmony"
-author = "Jack (GPT-5.4) + AURA (Gemini) + Claude + UtilityFog Team"
-version = "0.5.0"
+description = "v0.6 The COMPUTE Awakening — density-targeting + wider windows break the 1% bottleneck"
+author = "Nemo (Kimi K2.5) + Jack (GPT-5.4) + Claude (Opus 4.6) + AURA (Gemini)"
+version = "0.6.0"
 target_lambda = 1.7

@@ -12,6 +12,8 @@
 //! - State observation: census, spatial queries, time-series recording, snapshot/replay
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use rayon::prelude::*;
 
 #[cfg(feature = "python")]
@@ -186,6 +188,63 @@ impl MultiStateRule {
 
         rule
     }
+
+    pub fn utility_fog_optimized_v060() -> Self {
+        let mut rule = MultiStateRule::new();
+
+        // VOID transitions: broader nucleation window
+        rule.add_transition(CellState::Void, CellState::Energy, 2, usize::MAX, CellState::Energy);
+        rule.add_transition(CellState::Void, CellState::Structural, 3, usize::MAX, CellState::Structural);
+        rule.set_default(CellState::Void, CellState::Void);
+
+        // ENERGY transitions: enhanced stability with COMPUTE coupling
+        rule.add_transition(CellState::Energy, CellState::Compute, 1, usize::MAX, CellState::Compute);
+        rule.add_transition(CellState::Energy, CellState::Energy, 1, usize::MAX, CellState::Energy);
+        rule.set_default(CellState::Energy, CellState::Void);
+
+        // COMPUTE transitions: density-preserving with ENERGY dependency
+        rule.add_transition(CellState::Compute, CellState::Energy, 1, usize::MAX, CellState::Compute);
+        rule.add_transition(CellState::Compute, CellState::Compute, 2, 4, CellState::Compute);
+        rule.set_default(CellState::Compute, CellState::Void);
+
+        // STRUCTURAL transitions
+        rule.add_transition(CellState::Structural, CellState::Structural, 1, 2, CellState::Structural);
+        rule.add_transition(CellState::Structural, CellState::Structural, 3, 6, CellState::Compute);
+        rule.add_transition(CellState::Structural, CellState::Structural, 7, usize::MAX, CellState::Structural);
+        rule.set_default(CellState::Structural, CellState::Void);
+
+        // SENSOR transitions
+        rule.add_transition(CellState::Sensor, CellState::Compute, 2, usize::MAX, CellState::Compute);
+        rule.set_default(CellState::Sensor, CellState::Sensor);
+
+        rule
+    }
+
+    /// Stochastic transition with density-targeting probability curve.
+    pub fn apply_stochastic(&self, current: CellState, counts: &NeighborCount, rng_seed: u64) -> CellState {
+        let mut hasher = DefaultHasher::new();
+        rng_seed.hash(&mut hasher);
+        (counts.structural as u64).hash(&mut hasher);
+        (counts.compute as u64).hash(&mut hasher);
+        (counts.energy as u64).hash(&mut hasher);
+        let hash_val = hasher.finish();
+
+        let base_state = self.apply(current, counts);
+
+        if current == CellState::Structural && base_state == CellState::Compute {
+            let prob_factor = (hash_val % 100) as f64 / 100.0;
+            let compute_density = counts.compute as f64 / 26.0;
+            let target_prob = if compute_density < 0.25 { 0.85 } else { 0.35 };
+
+            if prob_factor < target_prob {
+                CellState::Compute
+            } else {
+                CellState::Structural
+            }
+        } else {
+            base_state
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -330,6 +389,20 @@ impl GraphState {
         }
     }
 
+    pub fn step_multi_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_stochastic(current, &counts, i as u64);
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState {
+            nodes: next_nodes,
+            adjacency: self.adjacency.clone(),
+        }
+    }
+
     pub fn step_multi_par(&self, rule: &MultiStateRule) -> GraphState {
         let next_nodes: Vec<u8> = (0..self.nodes.len())
             .into_par_iter()
@@ -345,11 +418,34 @@ impl GraphState {
         }
     }
 
+    pub fn step_multi_par_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        let next_nodes: Vec<u8> = (0..self.nodes.len())
+            .into_par_iter()
+            .map(|i| {
+                let current = CellState::from(self.nodes[i]);
+                let counts = self.count_neighbors(i);
+                u8::from(rule.apply_stochastic(current, &counts, i as u64))
+            })
+            .collect();
+        GraphState {
+            nodes: next_nodes,
+            adjacency: self.adjacency.clone(),
+        }
+    }
+
     pub fn step_auto(&self, rule: &MultiStateRule) -> GraphState {
         if self.nodes.len() >= PAR_THRESHOLD {
             self.step_multi_par(rule)
         } else {
             self.step_multi(rule)
+        }
+    }
+
+    pub fn step_auto_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        if self.nodes.len() >= PAR_THRESHOLD {
+            self.step_multi_par_stochastic(rule)
+        } else {
+            self.step_multi_stochastic(rule)
         }
     }
 
@@ -794,7 +890,7 @@ impl MultiStateGraphLattice {
     fn with_fog_rules(states: Vec<u8>, adjacency: Vec<Vec<usize>>) -> Self {
         Self {
             state: GraphState::new(states, adjacency),
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: None,
         }
     }
@@ -805,7 +901,7 @@ impl MultiStateGraphLattice {
         let coords = SierpinskiTetrahedron::coords(depth);
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
         }
     }
@@ -816,7 +912,7 @@ impl MultiStateGraphLattice {
         let coords = MengerSponge::coords(depth);
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
         }
     }
@@ -827,13 +923,13 @@ impl MultiStateGraphLattice {
         let coords = OctahedralFogLattice::coords(side);
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
         }
     }
 
     fn step(&mut self) -> Vec<u8> {
-        let next = self.state.step_multi(&self.rule);
+        let next = self.state.step_multi_stochastic(&self.rule);
         self.state = next;
         self.state.nodes.clone()
     }
@@ -860,35 +956,35 @@ impl MultiStateGraphLattice {
 
     fn step_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_multi(&self.rule);
+            let next = self.state.step_multi_stochastic(&self.rule);
             self.state = next;
         }
         self.state.nodes.clone()
     }
 
     fn step_par(&mut self) -> Vec<u8> {
-        let next = self.state.step_multi_par(&self.rule);
+        let next = self.state.step_multi_par_stochastic(&self.rule);
         self.state = next;
         self.state.nodes.clone()
     }
 
     fn step_par_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_multi_par(&self.rule);
+            let next = self.state.step_multi_par_stochastic(&self.rule);
             self.state = next;
         }
         self.state.nodes.clone()
     }
 
     fn step_auto(&mut self) -> Vec<u8> {
-        let next = self.state.step_auto(&self.rule);
+        let next = self.state.step_auto_stochastic(&self.rule);
         self.state = next;
         self.state.nodes.clone()
     }
 
     fn step_auto_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_auto(&self.rule);
+            let next = self.state.step_auto_stochastic(&self.rule);
             self.state = next;
         }
         self.state.nodes.clone()
@@ -1006,7 +1102,7 @@ impl MultiStateGraphLattice {
         };
         Ok(Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords,
         })
     }

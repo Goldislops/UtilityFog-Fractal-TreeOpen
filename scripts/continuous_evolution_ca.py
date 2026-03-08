@@ -133,6 +133,21 @@ class ContagionConfig:
     compute_sensor_conversion_prob: float = 0.30
 
 
+@dataclass
+class DensityTargetingConfig:
+    """v0.6.0 Nemo's density-targeting probability curve.
+
+    When COMPUTE fraction is below target, STRUCTURAL→COMPUTE transitions
+    are boosted to `boost_probability`. When at or above target, they are
+    suppressed to `suppress_probability`. This creates a self-regulating
+    feedback loop that drives COMPUTE toward the target density.
+    """
+    enabled: bool = True
+    compute_target_fraction: float = 0.25
+    boost_probability: float = 0.85
+    suppress_probability: float = 0.35
+
+
 # ====================================================================
 # Rule spec loading (TOML)
 # ====================================================================
@@ -190,6 +205,16 @@ def _load_contagion_config(rule_spec: Mapping[str, Any]) -> ContagionConfig:
         structural_sensor_conversion_prob=float(contagion.get("structural_sensor_conversion_prob", 0.34)),
         compute_energy_conversion_prob=float(contagion.get("compute_energy_conversion_prob", 0.36)),
         compute_sensor_conversion_prob=float(contagion.get("compute_sensor_conversion_prob", 0.30)),
+    )
+
+
+def _load_density_targeting_config(rule_spec: Mapping[str, Any]) -> DensityTargetingConfig:
+    dt = rule_spec.get("params", {}).get("density_targeting", {})
+    return DensityTargetingConfig(
+        enabled=bool(dt.get("enabled", False)),
+        compute_target_fraction=float(dt.get("compute_target_fraction", 0.25)),
+        boost_probability=float(dt.get("boost_probability", 0.85)),
+        suppress_probability=float(dt.get("suppress_probability", 0.35)),
     )
 
 
@@ -317,15 +342,65 @@ def _apply_stochastic_overrides(
     return out
 
 
+def _apply_density_targeting(
+    next_state: np.ndarray,
+    prev_state: np.ndarray,
+    rng: np.random.Generator,
+    dt: DensityTargetingConfig,
+) -> np.ndarray:
+    """Phase 5 (v0.6.0): Nemo's density-targeting probability curve.
+
+    Adaptively modulates STRUCTURAL→COMPUTE transition probability based on
+    current COMPUTE density. When COMPUTE is below target (25%), transitions
+    are boosted to 85%. When at or above target, they're suppressed to 35%.
+    This creates a self-regulating feedback loop.
+    """
+    if not dt.enabled:
+        return next_state
+
+    out = next_state.copy()
+
+    # Measure current COMPUTE density among active cells
+    active_total = int(np.sum(out > 0))
+    if active_total == 0:
+        return out
+    compute_count = int(np.sum(out == STATE_NAME_TO_ID["COMPUTE"]))
+    compute_fraction = compute_count / active_total
+
+    # Find cells that just transitioned from STRUCTURAL to COMPUTE
+    was_structural = prev_state == STATE_NAME_TO_ID["STRUCTURAL"]
+    now_compute = out == STATE_NAME_TO_ID["COMPUTE"]
+    newly_compute = was_structural & now_compute
+
+    if not np.any(newly_compute):
+        return out
+
+    # Apply density-dependent gate
+    if compute_fraction < dt.compute_target_fraction:
+        # Below target: boost — keep most transitions (85% survive)
+        revert_prob = 1.0 - dt.boost_probability
+    else:
+        # At/above target: suppress — revert most transitions (only 35% survive)
+        revert_prob = 1.0 - dt.suppress_probability
+
+    # Stochastically revert some COMPUTE→STRUCTURAL transitions
+    revert_mask = newly_compute & (rng.random(out.shape) < revert_prob)
+    out[revert_mask] = STATE_NAME_TO_ID["STRUCTURAL"]
+
+    return out
+
+
 def step_ca_lattice(
     state: np.ndarray,
     rule_spec: Mapping[str, Any],
     rng: np.random.Generator,
     inactivity_steps: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-    """Single CA step with deterministic + contagion + stochastic + decay dynamics.
+    """Single CA step with deterministic + contagion + stochastic + decay + density-targeting.
 
     Returns (next_state, inactivity_steps, metrics_dict).
+
+    v0.6.0 adds Phase 5: Nemo's density-targeting probability curve.
     """
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
@@ -334,6 +409,7 @@ def step_ca_lattice(
     decay = _load_decay_config(rule_spec)
     stoch = _load_stochastic_config(rule_spec)
     contagion = _load_contagion_config(rule_spec)
+    density_targeting = _load_density_targeting_config(rule_spec)
 
     # Per-state neighbour counting (the v0.4.0 core innovation)
     neighbor_counts = _count_neighbors_by_state(state)
@@ -359,6 +435,9 @@ def step_ca_lattice(
 
     # Phase 4: Stochastic overrides
     next_state = _apply_stochastic_overrides(next_state, rng, stoch)
+
+    # Phase 5 (v0.6.0): Density-targeting — Nemo's adaptive COMPUTE regulation
+    next_state = _apply_density_targeting(next_state, state, rng, density_targeting)
 
     # Compute metrics
     counts = np.bincount(next_state.ravel(), minlength=5)
