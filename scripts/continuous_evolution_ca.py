@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""3D CA stepping utilities with state-aware contagion, stochasticity, and decay.
-
-This module provides v0.4.0 CA physics for continuous evolution:
-- deterministic outer-totalistic transitions
-- state-aware contagion (neighbor-type influenced conversion)
-- asymmetric stability (fragile STRUCTURAL, resilient ENERGY/SENSOR)
-- turnover via inactivity and stochastic decay
-"""
+"""3D CA stepping utilities with state-aware contagion, stochasticity, decay, and voxel memory."""
 
 from __future__ import annotations
 
@@ -57,16 +50,34 @@ class ContagionConfig:
     compute_sensor_conversion_prob: float = 0.25
 
 
+@dataclass
+class VoxelMemoryParams:
+    age_young_threshold: int = 50
+    age_mature_threshold: int = 200
+    resistance_max: float = 0.75
+    reverse_contagion_threshold: int = 5
+    reverse_contagion_base_prob: float = 0.15
+    reverse_contagion_boost: float = 0.08
+    rag_query_radius: int = 3
+    rag_memory_decay: float = 0.02
+    rag_reinforcement_boost: float = 1.35
+    rag_entropy_weight: float = 0.15
+    energy_to_compute_prob: float = 0.12
+
+
 def load_rule_spec(rule_path: str | Path) -> Dict[str, Any]:
     with Path(rule_path).open("rb") as f:
         return tomli.load(f)
 
 
-def _count_neighbors_by_state(state: np.ndarray) -> np.ndarray:
-    """Return per-state Moore-3D neighbor counts with fixed VOID boundary.
+def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
+    """Memory grid channels: [compute_age, last_active_gen, memory_strength]."""
+    grid = np.zeros((3,) + shape, dtype=np.float32)
+    grid[2, :, :, :] = 1.0
+    return grid
 
-    Output shape: [num_states, *state.shape], where axis 0 indexes state IDs.
-    """
+
+def _count_neighbors_by_state(state: np.ndarray) -> np.ndarray:
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
 
@@ -138,65 +149,58 @@ def _load_contagion_config(rule_spec: Mapping[str, Any]) -> ContagionConfig:
     )
 
 
-def _apply_deterministic_transitions(
-    state: np.ndarray,
-    active_neighbors: np.ndarray,
-    table: Mapping[int, Mapping[int, int]],
-) -> np.ndarray:
+def _apply_deterministic_transitions(state: np.ndarray, active_neighbors: np.ndarray, table: Mapping[int, Mapping[int, int]]) -> np.ndarray:
     next_state = np.zeros_like(state)
     for src, mapping in table.items():
         src_mask = state == src
         if not np.any(src_mask):
             continue
         for n_count, target in mapping.items():
-            mask = src_mask & (active_neighbors == n_count)
-            next_state[mask] = target
+            next_state[src_mask & (active_neighbors == n_count)] = target
     return next_state
 
 
-def _apply_contagion_overrides(
-    next_state: np.ndarray,
-    neighbor_counts_by_state: np.ndarray,
-    rng: np.random.Generator,
-    contagion: ContagionConfig,
-) -> np.ndarray:
+def _reverse_contagion_probability(compute_neighbors: np.ndarray, mem: VoxelMemoryParams) -> np.ndarray:
+    excess = np.maximum(0, compute_neighbors - mem.reverse_contagion_threshold)
+    prob = mem.reverse_contagion_base_prob + mem.reverse_contagion_boost * excess.astype(np.float32)
+    prob[compute_neighbors < mem.reverse_contagion_threshold] = 0.0
+    return np.minimum(prob, 0.95)
+
+
+def _apply_contagion_overrides(next_state: np.ndarray, neighbor_counts_by_state: np.ndarray, rng: np.random.Generator, contagion: ContagionConfig, memory_grid: np.ndarray, mem: VoxelMemoryParams) -> np.ndarray:
     if not contagion.enabled:
         return next_state
 
     out = next_state.copy()
     energy_n = neighbor_counts_by_state[STATE_NAME_TO_ID["ENERGY"]]
     sensor_n = neighbor_counts_by_state[STATE_NAME_TO_ID["SENSOR"]]
+    compute_n = neighbor_counts_by_state[STATE_NAME_TO_ID["COMPUTE"]]
 
     structural = out == STATE_NAME_TO_ID["STRUCTURAL"]
     compute = out == STATE_NAME_TO_ID["COMPUTE"]
 
-    se_mask = structural & (energy_n >= contagion.energy_neighbor_threshold)
-    out[se_mask & (rng.random(out.shape) < contagion.structural_energy_conversion_prob)] = STATE_NAME_TO_ID["ENERGY"]
-
+    out[structural & (energy_n >= contagion.energy_neighbor_threshold) & (rng.random(out.shape) < contagion.structural_energy_conversion_prob)] = STATE_NAME_TO_ID["ENERGY"]
     structural = out == STATE_NAME_TO_ID["STRUCTURAL"]
-    ss_mask = structural & (sensor_n >= contagion.sensor_neighbor_threshold)
-    out[ss_mask & (rng.random(out.shape) < contagion.structural_sensor_conversion_prob)] = STATE_NAME_TO_ID["SENSOR"]
+    out[structural & (sensor_n >= contagion.sensor_neighbor_threshold) & (rng.random(out.shape) < contagion.structural_sensor_conversion_prob)] = STATE_NAME_TO_ID["SENSOR"]
 
-    ce_mask = compute & (energy_n >= contagion.energy_neighbor_threshold)
-    out[ce_mask & (rng.random(out.shape) < contagion.compute_energy_conversion_prob)] = STATE_NAME_TO_ID["ENERGY"]
-
+    out[compute & (energy_n >= contagion.energy_neighbor_threshold) & (rng.random(out.shape) < contagion.compute_energy_conversion_prob)] = STATE_NAME_TO_ID["ENERGY"]
     compute = out == STATE_NAME_TO_ID["COMPUTE"]
-    cs_mask = compute & (sensor_n >= contagion.sensor_neighbor_threshold)
-    out[cs_mask & (rng.random(out.shape) < contagion.compute_sensor_conversion_prob)] = STATE_NAME_TO_ID["SENSOR"]
+    out[compute & (sensor_n >= contagion.sensor_neighbor_threshold) & (rng.random(out.shape) < contagion.compute_sensor_conversion_prob)] = STATE_NAME_TO_ID["SENSOR"]
+
+    # Reverse contagion: dense COMPUTE neighborhoods recruit nearby STRUCTURAL cells.
+    structural = out == STATE_NAME_TO_ID["STRUCTURAL"]
+    rc_prob = _reverse_contagion_probability(compute_n, mem)
+    rc_prob = np.minimum(0.95, rc_prob * np.maximum(0.25, memory_grid[2]))
+    out[structural & (rng.random(out.shape) < rc_prob)] = STATE_NAME_TO_ID["COMPUTE"]
 
     return out
 
 
-def _apply_stochastic_overrides(
-    next_state: np.ndarray,
-    rng: np.random.Generator,
-    stoch: StochasticConfig,
-) -> np.ndarray:
+def _apply_stochastic_overrides(next_state: np.ndarray, rng: np.random.Generator, stoch: StochasticConfig) -> np.ndarray:
     if not stoch.enabled:
         return next_state
 
     out = next_state.copy()
-
     structural = out == STATE_NAME_TO_ID["STRUCTURAL"]
     compute = out == STATE_NAME_TO_ID["COMPUTE"]
     energy = out == STATE_NAME_TO_ID["ENERGY"]
@@ -218,26 +222,71 @@ def _apply_stochastic_overrides(
     return out
 
 
+def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray, current_gen: int, mem: VoxelMemoryParams, rng: np.random.Generator) -> np.ndarray:
+    out = next_state.copy()
+    compute = out == STATE_NAME_TO_ID["COMPUTE"]
+
+    # Update compute age + active generation + strengthening.
+    memory_grid[0][compute] = np.minimum(memory_grid[0][compute] + 1.0, 65535.0)
+    memory_grid[1][compute] = float(current_gen)
+    memory_grid[2][compute] = np.minimum(memory_grid[2][compute] * mem.rag_reinforcement_boost, 2.0)
+
+    # Decay memory for inactive voxels.
+    inactive = ~compute
+    generations_inactive = np.maximum(0.0, float(current_gen) - memory_grid[1])
+    memory_grid[2][inactive] *= np.power(1.0 - mem.rag_memory_decay, generations_inactive[inactive])
+    memory_grid[2] = np.maximum(memory_grid[2], 0.01)
+
+    # Memory-based decay resistance for compute cells that drifted to VOID.
+    dropped_compute = (next_state == STATE_NAME_TO_ID["VOID"]) & (memory_grid[0] > 0)
+    age = memory_grid[0]
+    resistance = np.zeros_like(memory_grid[2])
+    young = age <= mem.age_young_threshold
+    mature = (age > mem.age_young_threshold) & (age <= mem.age_mature_threshold)
+    old = age > mem.age_mature_threshold
+
+    resistance[young] = (age[young] / max(1.0, float(mem.age_young_threshold))) * mem.resistance_max
+    resistance[mature] = mem.resistance_max
+    resistance[old] = mem.resistance_max * np.exp(-(age[old] - mem.age_mature_threshold) / 500.0)
+    resistance *= np.minimum(memory_grid[2], 1.5)
+
+    out[dropped_compute & (rng.random(out.shape) < resistance)] = STATE_NAME_TO_ID["COMPUTE"]
+
+    # Energy->compute economy bridge.
+    energy = out == STATE_NAME_TO_ID["ENERGY"]
+    out[energy & (rng.random(out.shape) < mem.energy_to_compute_prob)] = STATE_NAME_TO_ID["COMPUTE"]
+
+    # reset age if not compute after final reinforcement
+    memory_grid[0][out != STATE_NAME_TO_ID["COMPUTE"]] = 0.0
+    return out
+
+
 def step_ca_lattice(
     state: np.ndarray,
     rule_spec: Mapping[str, Any],
     rng: np.random.Generator,
     inactivity_steps: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-    """Single CA step with deterministic + contagion + stochastic + decay dynamics."""
+    memory_grid: Optional[np.ndarray] = None,
+    current_gen: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+    """Single CA step with deterministic + contagion + stochastic + decay + memory dynamics."""
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
+
+    if memory_grid is None:
+        memory_grid = init_memory_grid(state.shape)
 
     table = _compile_transition_table(rule_spec)
     decay = _load_decay_config(rule_spec)
     stoch = _load_stochastic_config(rule_spec)
     contagion = _load_contagion_config(rule_spec)
+    mem = VoxelMemoryParams()
 
     neighbor_counts = _count_neighbors_by_state(state)
     active_neighbors = np.sum(neighbor_counts[1:], axis=0)
 
     next_state = _apply_deterministic_transitions(state, active_neighbors, table)
-    next_state = _apply_contagion_overrides(next_state, neighbor_counts, rng, contagion)
+    next_state = _apply_contagion_overrides(next_state, neighbor_counts, rng, contagion, memory_grid, mem)
 
     if inactivity_steps is None:
         inactivity_steps = np.zeros_like(state, dtype=np.int16)
@@ -246,11 +295,11 @@ def step_ca_lattice(
         structural = next_state == STATE_NAME_TO_ID["STRUCTURAL"]
         low_support = active_neighbors <= decay.inactivity_neighbor_threshold
         inactivity_steps = np.where(structural & low_support, inactivity_steps + 1, 0)
-        decay_mask = structural & (inactivity_steps >= decay.structural_inactive_steps_to_decay)
-        next_state[decay_mask] = STATE_NAME_TO_ID["VOID"]
+        next_state[structural & (inactivity_steps >= decay.structural_inactive_steps_to_decay)] = STATE_NAME_TO_ID["VOID"]
         inactivity_steps[~structural] = 0
 
     next_state = _apply_stochastic_overrides(next_state, rng, stoch)
+    next_state = _apply_memory_reinforcement(next_state, memory_grid, current_gen, mem, rng)
 
     counts = np.bincount(next_state.ravel(), minlength=5)
     non_void_total = int(np.sum(counts[1:]))
@@ -267,4 +316,4 @@ def step_ca_lattice(
         "energy_ratio": float(counts[3] / max(1, np.prod(next_state.shape))),
         "sensor_ratio": float(counts[4] / max(1, np.prod(next_state.shape))),
     }
-    return next_state.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), metrics
+    return next_state.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), memory_grid.astype(np.float32, copy=False), metrics

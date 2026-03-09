@@ -1,6 +1,6 @@
 import numpy as np
 
-from scripts.continuous_evolution_ca import step_ca_lattice
+from scripts.continuous_evolution_ca import init_memory_grid, step_ca_lattice
 
 
 def _rule_spec_for_tests():
@@ -50,9 +50,10 @@ def test_stochastic_transition_promotes_structural_to_energy() -> None:
     rule["params"]["contagion"]["enabled"] = False
 
     rng = np.random.default_rng(7)
-    nxt, inactivity, _ = step_ca_lattice(state, rule, rng)
+    nxt, inactivity, memory, _ = step_ca_lattice(state, rule, rng, memory_grid=init_memory_grid(state.shape), current_gen=1)
 
     assert inactivity.shape == state.shape
+    assert memory.shape[0] == 3
     assert nxt[2, 2, 2] == 3
 
 
@@ -67,7 +68,7 @@ def test_contagion_promotes_structural_with_energy_neighbors() -> None:
     rule["params"]["stochastic"]["enabled"] = False
 
     rng = np.random.default_rng(19)
-    nxt, _, _ = step_ca_lattice(state, rule, rng)
+    nxt, _, _, _ = step_ca_lattice(state, rule, rng, memory_grid=init_memory_grid(state.shape), current_gen=1)
 
     assert nxt[2, 2, 2] == 3
 
@@ -83,9 +84,9 @@ def test_decay_recycles_inactive_structural_cells() -> None:
     rng = np.random.default_rng(11)
     inactivity = np.zeros_like(state, dtype=np.int16)
 
-    nxt, inactivity, _ = step_ca_lattice(state, rule, rng, inactivity)
+    nxt, inactivity, memory, _ = step_ca_lattice(state, rule, rng, inactivity, init_memory_grid(state.shape), 1)
     assert nxt[2, 2, 2] == 1
-    nxt2, inactivity2, _ = step_ca_lattice(nxt, rule, rng, inactivity)
+    nxt2, inactivity2, memory2, _ = step_ca_lattice(nxt, rule, rng, inactivity, memory, 2)
 
     assert inactivity2[2, 2, 2] >= 2
     assert nxt2[2, 2, 2] == 0
@@ -111,6 +112,6 @@ def test_asymmetric_stability_keeps_energy_cells_alive() -> None:
     state[2, 2, 2] = 3  # ENERGY
 
     rng = np.random.default_rng(31)
-    nxt, _, _ = step_ca_lattice(state, rule, rng)
+    nxt, _, _, _ = step_ca_lattice(state, rule, rng, memory_grid=init_memory_grid(state.shape), current_gen=1)
 
     assert nxt[2, 2, 2] == 3
