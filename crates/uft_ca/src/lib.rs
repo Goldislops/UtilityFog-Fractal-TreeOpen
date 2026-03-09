@@ -75,6 +75,80 @@ impl NeighborCount {
     }
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoxelMemory {
+    pub compute_age: u16,
+    pub last_active_gen: u32,
+    pub memory_strength: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VoxelMemoryParams {
+    pub age_young_threshold: u16,
+    pub age_mature_threshold: u16,
+    pub resistance_max: f32,
+    pub reverse_contagion_threshold: usize,
+    pub reverse_contagion_base_prob: f32,
+    pub reverse_contagion_boost: f32,
+    pub rag_query_radius: usize,
+    pub rag_memory_decay: f32,
+    pub rag_reinforcement_boost: f32,
+    pub rag_entropy_weight: f32,
+    pub energy_to_compute_prob: f32,
+}
+
+pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
+    age_young_threshold: 50,
+    age_mature_threshold: 200,
+    resistance_max: 0.75,
+    reverse_contagion_threshold: 5,
+    reverse_contagion_base_prob: 0.15,
+    reverse_contagion_boost: 0.08,
+    rag_query_radius: 3,
+    rag_memory_decay: 0.02,
+    rag_reinforcement_boost: 1.35,
+    rag_entropy_weight: 0.15,
+    energy_to_compute_prob: 0.12,
+};
+
+impl VoxelMemory {
+    pub fn new() -> Self {
+        Self { compute_age: 0, last_active_gen: 0, memory_strength: 1.0 }
+    }
+
+    pub fn decay_resistance(&self) -> f32 {
+        let age = self.compute_age;
+        let p = &VOXEL_MEMORY_PARAMS;
+
+        if age <= p.age_young_threshold {
+            (age as f32 / p.age_young_threshold as f32) * p.resistance_max
+        } else if age <= p.age_mature_threshold {
+            p.resistance_max
+        } else {
+            p.resistance_max * (-((age - p.age_mature_threshold) as f32) / 500.0).exp()
+        }
+    }
+
+    pub fn decay_memory(&mut self, current_gen: u32) {
+        let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
+        let p = &VOXEL_MEMORY_PARAMS;
+        self.memory_strength *= (1.0 - p.rag_memory_decay).powi(generations_inactive as i32);
+        self.memory_strength = self.memory_strength.max(0.01);
+    }
+}
+
+pub fn reverse_contagion_probability(compute_neighbors: usize) -> f32 {
+    let p = &VOXEL_MEMORY_PARAMS;
+    if compute_neighbors < p.reverse_contagion_threshold {
+        0.0
+    } else {
+        let excess = (compute_neighbors - p.reverse_contagion_threshold) as f32;
+        let prob = p.reverse_contagion_base_prob + p.reverse_contagion_boost * excess;
+        prob.min(0.95)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateCensus {
     pub void_count: usize,
@@ -245,6 +319,71 @@ impl MultiStateRule {
             base_state
         }
     }
+
+    pub fn apply_with_memory(
+        &self,
+        current: CellState,
+        counts: &NeighborCount,
+        memory: &mut VoxelMemory,
+        current_gen: u32,
+        rng_seed: u64,
+    ) -> CellState {
+        let mut next = self.apply_stochastic(current, counts, rng_seed);
+
+        if current == CellState::Compute {
+            memory.compute_age = memory.compute_age.saturating_add(1);
+            memory.last_active_gen = current_gen;
+            memory.memory_strength = (memory.memory_strength + 0.05).min(2.0);
+        } else {
+            memory.decay_memory(current_gen);
+        }
+
+        if current == CellState::Compute && next == CellState::Void {
+            let mut hasher = DefaultHasher::new();
+            (rng_seed.wrapping_add(7)).hash(&mut hasher);
+            (counts.compute as u64).hash(&mut hasher);
+            (counts.energy as u64).hash(&mut hasher);
+            let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+            let resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
+            if roll < resistance {
+                next = CellState::Compute;
+            }
+        }
+
+        if current == CellState::Energy {
+            let mut hasher = DefaultHasher::new();
+            rng_seed.hash(&mut hasher);
+            (counts.compute as u64).hash(&mut hasher);
+            let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+            let prob = VOXEL_MEMORY_PARAMS.energy_to_compute_prob;
+            if roll < prob {
+                next = CellState::Compute;
+                memory.compute_age = memory.compute_age.saturating_add(1);
+                memory.last_active_gen = current_gen;
+            }
+        }
+
+        if current == CellState::Structural {
+            let rc_prob = reverse_contagion_probability(counts.compute);
+            if rc_prob > 0.0 {
+                let mut hasher = DefaultHasher::new();
+                (rng_seed.wrapping_add(13)).hash(&mut hasher);
+                (counts.compute as u64).hash(&mut hasher);
+                let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+                if roll < rc_prob {
+                    next = CellState::Compute;
+                    memory.compute_age = memory.compute_age.saturating_add(1);
+                    memory.last_active_gen = current_gen;
+                }
+            }
+        }
+
+        if next != CellState::Compute {
+            memory.compute_age = 0;
+        }
+
+        next
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -403,6 +542,23 @@ impl GraphState {
         }
     }
 
+
+
+    pub fn step_multi_with_memory(
+        &self,
+        rule: &MultiStateRule,
+        memory_grid: &mut [VoxelMemory],
+        current_gen: u32,
+    ) -> GraphState {
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_with_memory(current, &counts, &mut memory_grid[i], current_gen, i as u64);
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
+    }
     pub fn step_multi_par(&self, rule: &MultiStateRule) -> GraphState {
         let next_nodes: Vec<u8> = (0..self.nodes.len())
             .into_par_iter()
@@ -859,6 +1015,8 @@ pub struct MultiStateGraphLattice {
     state: GraphState,
     rule: MultiStateRule,
     coords: Option<Vec<(f64, f64, f64)>>,
+    memory_grid: Vec<VoxelMemory>,
+    generation: u32,
 }
 
 #[cfg(feature = "python")]
@@ -879,19 +1037,25 @@ impl MultiStateGraphLattice {
         for (from, default) in defaults {
             rule.set_default(CellState::from(from), CellState::from(default));
         }
+        let node_count = states.len();
         Self {
             state: GraphState::new(states, adjacency),
             rule,
             coords: None,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
     #[staticmethod]
     fn with_fog_rules(states: Vec<u8>, adjacency: Vec<Vec<usize>>) -> Self {
+        let node_count = states.len();
         Self {
             state: GraphState::new(states, adjacency),
             rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: None,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -899,10 +1063,13 @@ impl MultiStateGraphLattice {
     fn sierpinski(depth: usize, initial_state: u8) -> Self {
         let gs = SierpinskiTetrahedron::generate(depth, CellState::from(initial_state));
         let coords = SierpinskiTetrahedron::coords(depth);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -910,10 +1077,13 @@ impl MultiStateGraphLattice {
     fn menger(depth: usize, initial_state: u8) -> Self {
         let gs = MengerSponge::generate(depth, CellState::from(initial_state));
         let coords = MengerSponge::coords(depth);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -921,16 +1091,20 @@ impl MultiStateGraphLattice {
     fn octahedral(side: usize, initial_state: u8) -> Self {
         let gs = OctahedralFogLattice::generate(side, CellState::from(initial_state));
         let coords = OctahedralFogLattice::coords(side);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
             rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
     fn step(&mut self) -> Vec<u8> {
-        let next = self.state.step_multi_stochastic(&self.rule);
+        let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
@@ -956,8 +1130,9 @@ impl MultiStateGraphLattice {
 
     fn step_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_multi_stochastic(&self.rule);
+            let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
@@ -965,6 +1140,7 @@ impl MultiStateGraphLattice {
     fn step_par(&mut self) -> Vec<u8> {
         let next = self.state.step_multi_par_stochastic(&self.rule);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
@@ -972,6 +1148,7 @@ impl MultiStateGraphLattice {
         for _ in 0..n {
             let next = self.state.step_multi_par_stochastic(&self.rule);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
@@ -979,6 +1156,7 @@ impl MultiStateGraphLattice {
     fn step_auto(&mut self) -> Vec<u8> {
         let next = self.state.step_auto_stochastic(&self.rule);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
@@ -986,12 +1164,17 @@ impl MultiStateGraphLattice {
         for _ in 0..n {
             let next = self.state.step_auto_stochastic(&self.rule);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
 
     fn set_states(&mut self, states: Vec<u8>) {
         self.state.nodes = states;
+        if self.memory_grid.len() != self.state.nodes.len() {
+            self.memory_grid = vec![VoxelMemory::new(); self.state.nodes.len()];
+            self.generation = 0;
+        }
     }
 
     fn census(&self) -> HashMap<u8, usize> {
@@ -1100,10 +1283,13 @@ impl MultiStateGraphLattice {
         } else {
             None
         };
+        let node_count = gs.nodes.len();
         Ok(Self {
             state: gs,
             rule: MultiStateRule::utility_fog_optimized_v060(),
             coords,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         })
     }
 

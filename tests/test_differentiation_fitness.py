@@ -1,16 +1,8 @@
-"""Tests for v0.4.0 differentiation scoring in DefaultFitnessEvaluator."""
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from agent.evolution_engine import DefaultFitnessEvaluator
 from agent.meme_structure import Meme, MemeGenes
 
 
 def _neutral_meme() -> Meme:
-    """Create a meme with neutral genes for fitness testing."""
     meme = Meme(genes=MemeGenes(
         dominance=0.0,
         virality=0.0,
@@ -24,7 +16,6 @@ def _neutral_meme() -> Meme:
 
 
 def test_entropy_bonus_rewards_heterogeneous_state_mix() -> None:
-    """A diverse fog should score higher than a monolithic one."""
     evaluator = DefaultFitnessEvaluator()
     meme = _neutral_meme()
 
@@ -52,7 +43,6 @@ def test_entropy_bonus_rewards_heterogeneous_state_mix() -> None:
 
 
 def test_structural_dominance_penalty_applies_after_target_threshold() -> None:
-    """Structural dominance above 55% target should incur penalty."""
     evaluator = DefaultFitnessEvaluator()
     meme = _neutral_meme()
 
@@ -63,7 +53,6 @@ def test_structural_dominance_penalty_applies_after_target_threshold() -> None:
 
 
 def test_list_state_vector_is_supported() -> None:
-    """State counts passed as a list [VOID, STRUCT, COMPUTE, ENERGY, SENSOR] should work."""
     evaluator = DefaultFitnessEvaluator()
     meme = _neutral_meme()
 
