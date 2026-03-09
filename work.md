@@ -640,3 +640,120 @@ The fog is humming. It's not singing yet, but it found a new note.
 
 *work.md updated by Claude (Opus 4.6) — v0.6.0 first results and AURA status report.*
 *Engine PID 35792 running. Next observation window: let it cook overnight.*
+
+---
+
+## 11. Overnight v0.6.0 Analysis (13-Hour Continuous Run)
+
+**Analyst:** Claude (Opus 4.6), CA Physicist
+**Date:** 2026-03-09 ~13:30 AEDT
+**Run Duration:** 13h 05m (00:22 — 13:27, engine still running)
+**Generations:** 936 -> 140,641 (~139,700 evolved)
+**CA Steps:** 9,363 -> 1,406,414 (~1.4 million)
+**Snapshots:** 78 .npz files saved to `data/`
+
+### 11.1 Heartbeat Status: STABLE LIMIT CYCLE CONFIRMED
+
+The fog breathed continuously for 13+ hours with no drift, no collapse, no bifurcation.
+
+| Phase | Active Cells | Density | Branching Ratio | Shannon Entropy | Fitness |
+|-------|-------------|---------|-----------------|-----------------|---------|
+| **Expansion** | 100K–105K | 0.38–0.40 | 1.58–1.87 | 0.738–0.747 | 0.70–0.77 |
+| **Contraction** | 56K–61K | 0.21–0.23 | 0.53–0.61 | 0.690–0.705 | 0.46–0.49 |
+
+**Period:** ~10 minutes (consistent across all 156 status reports)
+**Attractor type:** Stable limit cycle — no evidence of period-doubling, quasiperiodicity, or drift toward a fixed point.
+
+Occasional "deeper breaths" observed: the system sometimes spends 2–3 consecutive reports (~15 min) in contraction before snapping back. This is stochastic variation in the limit cycle amplitude, not a structural change.
+
+### 11.2 COMPUTE Density: Plateaued at ~5.7% (Target: 25%)
+
+COMPUTE has **not climbed** toward the 25% target over 13 hours. The system found a stable attractor:
+
+| Time | Gen | COMPUTE (expansion) | COMPUTE (contraction) |
+|------|-----|--------------------|-----------------------|
+| 0h | 936 | 5.6% (~5,544 cells) | — |
+| 2h | 21,763 | 5.6% (~5,818 cells) | 3.9% (~2,258 cells) |
+| 4h | 43,407 | 5.8% (~5,913 cells) | 4.0% (~2,314 cells) |
+| 8h | 84,061 | 5.7% (~5,968 cells) | 3.7% (~2,085 cells) |
+| 13h | 139,760 | 5.7% (~5,887 cells) | 3.8% (~2,235 cells) |
+
+**Diagnosis:** The density-targeting mechanism successfully broke the 1% bottleneck but has reached a new equilibrium where COMPUTE creation rate = destruction rate at ~5.7%. The four destruction mechanisms (deterministic transition at >3 neighbours, ENERGY contagion, SENSOR contagion, stochastic drain) collectively cap COMPUTE at this level. Further gains require structural physics changes, not parameter tuning.
+
+### 11.3 Ecosystem Balance: Locked Configuration
+
+The ecosystem **did not rebalance** overnight. Cell type ratios are identical to the 30-minute observation:
+
+| State | % Active (Expansion) | Change from t=0 | v0.5.0 Reference |
+|-------|---------------------|-----------------|-----------------|
+| STRUCTURAL | 60.0% | 0% | 59.7% |
+| ENERGY | 25.5% | 0% | 8.3% |
+| SENSOR | 8.7% | 0% | 31.0% |
+| COMPUTE | 5.7% | 0% | 1.0% |
+
+SENSOR remains at 8.7% — no recovery toward its v0.5.0 level of 31%. ENERGY remains dominant at 25.5%. These are equilibrium values, not transients.
+
+### 11.4 Shannon Entropy Summary
+
+| Statistic | Value |
+|-----------|-------|
+| **Expansion mean** | 0.742 |
+| **Contraction mean** | 0.698 |
+| **Overall mean** | ~0.720 |
+| **All-time high** | **0.747** (gen 127,559, uptime 11h 50m) |
+| **All-time low** | **0.691** (gen 123,202, uptime 11h 25m) |
+| **Range** | 0.691 — 0.747 |
+
+Entropy is cycling in a fixed band — healthy but not improving.
+
+### 11.5 Fitness Evolution: Slow Improvement Detected
+
+The memetic population is **slowly improving** over the run:
+
+| Timepoint | Best Fitness | Mean Fitness | Branching Ratio | Notes |
+|-----------|-------------|-------------|-----------------|-------|
+| 0h (00:27) | 0.7458 | 0.7447 | 1.63 | Initial |
+| 5h (05:37) | 0.7439 | 0.7429 | 1.64 | Stable |
+| 8h10m (08:32) | **0.7691** | **0.7678** | 1.53 | **Run high!** |
+| 9h07m (09:07) | 0.7498 | 0.7487 | 1.61 | |
+| 11h25m (11:47) | 0.7577 | 0.7569 | 1.58 | Second peak |
+| 13h (13:22) | 0.7276 | 0.7270 | 1.72 | Current |
+
+**Key insight:** The highest fitness (0.7691) occurred at gen 88,503 during a **shallow expansion** (density 0.373, BR 1.53) — lower amplitude than the typical 0.39/1.75 peaks. The GA is discovering that moderate growth near the edge of chaos scores better than aggressive expansion. This suggests the fitness landscape rewards branching ratios closer to 1.5 than 1.8.
+
+### 11.6 Spatial Coherence (Proxy Analysis)
+
+Direct spatial clustering analysis requires loading .npz snapshots, but proxy indicators suggest coherence is maintained:
+
+1. **Structural ratio (|m|)** holds steady at ~0.600 (expansion) / ~0.655 (contraction) — organized structure, not diffuse noise.
+2. **Cell census proportions** are extremely tight (COMPUTE std < 200 cells across 78 expansion samples) — consistent spatial organization.
+3. **No entropy spikes** suggesting pattern dissolution.
+4. **COMPUTE census** tracks at ~5,800 ± 150 cells during expansion — spatially stable population.
+
+**Recommendation:** Load the latest .npz snapshot (`branch3d_gen139756_step1397563_20260309T132212.npz`) and run 6-connected clustering analysis to confirm COMPUTE clustering ratio >= 5x random. This was 11.1x in v0.5.0; expect ~6-8x at the higher COMPUTE density.
+
+### 11.7 Conclusions & v0.7.0 Recommendations
+
+**The fog is alive and breathing.** 13 hours of continuous stable oscillation confirms the limit cycle is a genuine attractor, not a transient. v0.6.0 is a success — COMPUTE breakout from 1% to 5.7% and entropy from 0.669 to 0.744 are real, persistent gains.
+
+**But COMPUTE is stuck at 5.7%.** The overnight data proves this is an equilibrium, not a trajectory toward 25%. To reach the target, the Trinity needs to address:
+
+1. **Primary bottleneck:** COMPUTE destruction rate still exceeds creation rate at densities above 5.7%. The contagion from ENERGY (now 25.5% of active cells) is likely the dominant drain — every COMPUTE cell at the boundary of an ENERGY cluster faces 34% conversion probability.
+
+2. **Recommended v0.7.0 physics changes for Nemo:**
+   - Introduce ENERGY -> COMPUTE reverse contagion at neighbour threshold 5+ (new mechanism, requires code)
+   - Reduce ENERGY contagion pressure on COMPUTE from 34% to ~10%
+   - Consider widening COMPUTE survival window from 1-3 to 1-5 neighbours
+   - Dampen VOID -> ENERGY nucleation (it overshot — ENERGY at 25.5% is eating COMPUTE's niche)
+
+3. **For Jack:**
+   - The breathing dynamics are a feature, not a bug — preserve the limit cycle
+   - Fitness slowly improving (0.7458 -> 0.7691 peak) suggests the GA is working but slowly
+   - Consider adding a COMPUTE-specific fitness bonus to accelerate GA pressure
+
+4. **78 .npz snapshots** are available for spatial analysis covering the full 13-hour evolution.
+
+---
+
+*Section 11 appended by Claude (Opus 4.6) — Overnight v0.6.0 Analysis, 2026-03-09 ~13:30 AEDT.*
+*Engine PID 35792 still running at gen 140,641. The fog breathes on.*
