@@ -757,3 +757,537 @@ Direct spatial clustering analysis requires loading .npz snapshots, but proxy in
 
 *Section 11 appended by Claude (Opus 4.6) — Overnight v0.6.0 Analysis, 2026-03-09 ~13:30 AEDT.*
 *Engine PID 35792 still running at gen 140,641. The fog breathes on.*
+
+---
+
+## 12. v0.7.0 Spec — "The OpenClaw Memory Update"
+
+**Architect:** Claude (Opus 4.6), CA Physicist & Spec-Driven Development Lead
+**Concepts:** AURA (Gemini) — Spatial RAG & Machine Economy
+**Date:** 2026-03-09 ~14:00 AEDT
+**Status:** SPEC PHASE — Awaiting Nemo's parameter calculations
+
+### 12.1 Motivation
+
+v0.6.0 proved that the fog can breathe — a 13-hour stable limit cycle with COMPUTE
+breaking from 1% to 5.7%. But COMPUTE is trapped behind a **contagion wall**: the
+ENERGY explosion to 25.5% of active cells means every COMPUTE cell at a cluster boundary
+faces constant erosion. The creation/destruction equilibrium locks COMPUTE at 5.7%.
+
+Parameter tuning alone cannot break this ceiling. The physics is missing two mechanisms
+that real computational substrates possess:
+
+1. **Memory**: Established compute nodes should be harder to destroy than newly formed
+   ones. A CPU that has been running for 1000 cycles is more valuable (and more
+   entrenched) than one born last step.
+
+2. **Consumption**: Computation consumes energy. In biology, neurons consume glucose.
+   In chip fabs, machines consume power. COMPUTE should be able to *eat* adjacent
+   ENERGY cells to grow — not just passively resist being eaten by them.
+
+These two concepts draw from advanced macro-robotics:
+- **Spatial RAG (Voxel Memory)**: Each COMPUTE cell maintains a persistence timeline
+  of its 3D voxel position. Long-lived COMPUTE develops resistance to decay and
+  contagion, analogous to Retrieval-Augmented Generation where accumulated context
+  strengthens the system's knowledge base.
+- **The Machine Economy**: COMPUTE clusters that reach critical mass become
+  *consumers* of ENERGY, reversing the contagion flow. This creates a positive
+  feedback loop: more COMPUTE -> more ENERGY consumption -> more COMPUTE, bounded
+  by the available ENERGY supply.
+
+### 12.2 New Physics Mechanism 1: Voxel Memory (Spatial RAG)
+
+#### 12.2.1 Concept
+
+Introduce a per-cell `compute_age` counter (uint16 array, same shape as the lattice).
+For every CA step a cell remains COMPUTE, its age increments. When a cell transitions
+away from COMPUTE (to anything else), its age resets to 0.
+
+The age creates **graduated decay resistance**:
+
+```
+Age Tier       Steps Survived    Contagion Multiplier    Stochastic Multiplier
+─────────────────────────────────────────────────────────────────────────────
+Nascent        0 – T1            1.0x (full vulnerability)  1.0x
+Established    T1 – T2           0.5x (half contagion)      0.5x
+Entrenched     T2 – T3           0.25x (quarter contagion)  0.25x
+Permanent      > T3              0.10x (near-immune)        0.10x
+```
+
+Where T1, T2, T3 are age thresholds that Nemo must calculate.
+
+#### 12.2.2 Implementation: New Phase 2.5 in step_ca_lattice
+
+```python
+@dataclass
+class VoxelMemoryConfig:
+    enabled: bool = True
+    nascent_threshold: int = 10        # T1: steps to reach "established"
+    established_threshold: int = 50    # T2: steps to reach "entrenched"
+    entrenched_threshold: int = 200    # T3: steps to reach "permanent"
+    established_multiplier: float = 0.5    # contagion/stochastic scaling
+    entrenched_multiplier: float = 0.25
+    permanent_multiplier: float = 0.10
+```
+
+**Integration point:** Between Phase 2 (contagion) and Phase 4 (stochastic), the
+engine checks `compute_age` to determine each COMPUTE cell's resistance tier. The
+contagion and stochastic drain probabilities are then **multiplied** by the tier's
+scaling factor before the random roll.
+
+Concretely, for a COMPUTE cell with age > T2 (entrenched):
+- Current contagion drain: `compute_energy_conversion_prob = 0.15`
+- With voxel memory: effective = `0.15 * 0.25 = 0.0375` (3.75%)
+- Current stochastic drain: `compute_to_energy_prob = 0.03`
+- With voxel memory: effective = `0.03 * 0.25 = 0.0075` (0.75%)
+
+This means entrenched COMPUTE cells have a combined per-step loss rate of ~4.5%
+instead of the current ~18%. Over 200+ steps, COMPUTE clusters that survive the
+dangerous nascent period become self-reinforcing islands.
+
+#### 12.2.3 State Array Changes
+
+```python
+# In step_ca_lattice signature, add:
+compute_age: Optional[np.ndarray] = None  # uint16, tracks COMPUTE persistence
+
+# Age update logic (runs every step, before contagion/stochastic):
+is_compute = (next_state == STATE_NAME_TO_ID["COMPUTE"])
+compute_age = np.where(is_compute, np.minimum(compute_age + 1, 65535), 0)
+```
+
+#### 12.2.4 TOML Parameters (for Nemo)
+
+```toml
+[params.voxel_memory]
+enabled = true
+nascent_threshold = ???        # Nemo: calculate T1
+established_threshold = ???    # Nemo: calculate T2
+entrenched_threshold = ???     # Nemo: calculate T3
+established_multiplier = ???   # Nemo: calculate (suggested range: 0.3-0.6)
+entrenched_multiplier = ???    # Nemo: calculate (suggested range: 0.15-0.35)
+permanent_multiplier = ???     # Nemo: calculate (suggested range: 0.05-0.15)
+```
+
+### 12.3 New Physics Mechanism 2: Machine Economy (Reverse Contagion)
+
+#### 12.3.1 Concept
+
+Currently, contagion is **one-directional**: ENERGY/SENSOR clusters convert nearby
+COMPUTE and STRUCTURAL cells. Nothing converts *to* COMPUTE except the
+STRUCTURAL->COMPUTE deterministic transition.
+
+The Machine Economy introduces **reverse contagion**: when an ENERGY cell is
+surrounded by a dense COMPUTE cluster, the ENERGY cell is *consumed* and converted
+to COMPUTE. This models the fundamental thermodynamic relationship between
+computation and energy — the brain doesn't just resist energy; it *metabolizes* it.
+
+```
+Current v0.6.0:     ENERGY cluster → eats → COMPUTE cell    (one-way)
+v0.7.0 addition:    COMPUTE cluster → eats → ENERGY cell    (reverse flow)
+```
+
+The direction of flow depends on **local majority**: at the boundary between a
+COMPUTE cluster and an ENERGY cluster, whichever has more neighbours in the
+Moore-3D shell wins the conversion.
+
+#### 12.3.2 Implementation: New Phase 2.75 in step_ca_lattice
+
+```python
+@dataclass
+class MachineEconomyConfig:
+    enabled: bool = True
+    compute_neighbor_threshold: int = 5    # min COMPUTE neighbours to trigger
+    energy_to_compute_prob: float = 0.20   # P(ENERGY -> COMPUTE | surrounded)
+    sensor_to_compute_prob: float = 0.10   # P(SENSOR -> COMPUTE | surrounded)
+    # Optional: require COMPUTE cluster to have minimum average age
+    require_established: bool = True       # only entrenched+ clusters can eat
+```
+
+**New function:**
+
+```python
+def _apply_reverse_contagion(
+    next_state: np.ndarray,
+    neighbor_counts_by_state: np.ndarray,
+    compute_age: np.ndarray,
+    rng: np.random.Generator,
+    machine_economy: MachineEconomyConfig,
+    voxel_memory: VoxelMemoryConfig,
+) -> np.ndarray:
+    """Phase 2.75: Machine Economy — COMPUTE clusters consume ENERGY/SENSOR."""
+    if not machine_economy.enabled:
+        return next_state
+
+    out = next_state.copy()
+    compute_n = neighbor_counts_by_state[STATE_NAME_TO_ID["COMPUTE"]]
+
+    # ENERGY cells surrounded by dense COMPUTE → consumed to COMPUTE
+    energy_cells = out == STATE_NAME_TO_ID["ENERGY"]
+    dense_compute = compute_n >= machine_economy.compute_neighbor_threshold
+
+    if machine_economy.require_established:
+        # Only count neighbours that are "established" or older
+        # (This prevents freshly-born COMPUTE swarms from immediately eating)
+        # Implementation: check average compute_age of COMPUTE neighbours
+        # Approximation: require that at least half the COMPUTE neighbours
+        # have age > established_threshold
+        # For now, use a simpler proxy: the ENERGY cell's own position must
+        # have had COMPUTE neighbours for multiple steps (tracked implicitly
+        # by the threshold being high enough)
+        pass  # Nemo may refine this constraint
+
+    consume_mask = energy_cells & dense_compute
+    out[consume_mask & (rng.random(out.shape) < machine_economy.energy_to_compute_prob)] = STATE_NAME_TO_ID["COMPUTE"]
+
+    # SENSOR cells surrounded by dense COMPUTE → consumed to COMPUTE (weaker)
+    sensor_cells = out == STATE_NAME_TO_ID["SENSOR"]
+    consume_s_mask = sensor_cells & dense_compute
+    out[consume_s_mask & (rng.random(out.shape) < machine_economy.sensor_to_compute_prob)] = STATE_NAME_TO_ID["SENSOR"]
+    # ^ Note: sensor_to_compute should convert to COMPUTE, not SENSOR. Corrected:
+    out[consume_s_mask & (rng.random(out.shape) < machine_economy.sensor_to_compute_prob)] = STATE_NAME_TO_ID["COMPUTE"]
+
+    return out
+```
+
+#### 12.3.3 Phase Order in step_ca_lattice (v0.7.0)
+
+```
+Phase 1:    Deterministic transitions          (unchanged)
+Phase 2:    Forward contagion (ENERGY/SENSOR eat COMPUTE/STRUCTURAL)  (unchanged)
+Phase 2.5:  Voxel Memory age update            (NEW)
+Phase 2.75: Reverse contagion / Machine Economy (NEW)
+Phase 3:    Inactivity decay                   (unchanged)
+Phase 4:    Stochastic overrides               (modified — age-scaled probabilities)
+Phase 5:    Density targeting                  (unchanged)
+```
+
+The ordering matters:
+- Forward contagion runs first (ENERGY tries to eat COMPUTE)
+- Voxel memory updates ages (surviving COMPUTE cells get older)
+- Reverse contagion runs second (old COMPUTE clusters eat ENERGY back)
+- Stochastic drain applies with age-scaled multipliers
+
+This means **the battle at the COMPUTE/ENERGY boundary is now fair**: ENERGY attacks
+first, but COMPUTE that survives gets older and counter-attacks. Over time, stable
+COMPUTE clusters will expand into ENERGY territory.
+
+#### 12.3.4 TOML Parameters (for Nemo)
+
+```toml
+[params.machine_economy]
+enabled = true
+compute_neighbor_threshold = ???    # Nemo: min COMPUTE nbrs to trigger (range: 4-8)
+energy_to_compute_prob = ???        # Nemo: P(convert) (range: 0.10-0.30)
+sensor_to_compute_prob = ???        # Nemo: P(convert) (range: 0.05-0.15)
+require_established = true          # Only established+ COMPUTE can consume
+```
+
+### 12.4 Combined Dynamics: The COMPUTE Growth Cycle
+
+With both mechanisms active, COMPUTE growth follows a lifecycle:
+
+```
+                    ┌─────────────────────────────────┐
+                    │        THE COMPUTE LIFECYCLE     │
+                    └─────────────────────────────────┘
+
+   STRUCTURAL ──[3-6 nbrs]──> COMPUTE (nascent, age=0)
+                                  │
+                          [survives T1 steps?]
+                            /           \
+                          NO             YES
+                          │               │
+                    [destroyed by       COMPUTE (established)
+                     contagion/          │ - 50% contagion resistance
+                     stochastic]         │ - can participate in clusters
+                                         │
+                                  [survives T2 steps?]
+                                    /           \
+                                  NO             YES
+                                  │               │
+                            [still gets          COMPUTE (entrenched)
+                             eroded, but          │ - 75% contagion resistance
+                             slowly]              │ - cluster begins eating ENERGY
+                                                  │
+                                           [survives T3 steps?]
+                                             /           \
+                                           NO             YES
+                                           │               │
+                                     [rare — only         COMPUTE (permanent)
+                                      extreme events       │ - 90% contagion resistance
+                                      destroy]             │ - cluster actively expands
+                                                           │ - ENERGY converted to COMPUTE
+                                                           │   at boundary
+                                                           │
+                                              ┌────────────┘
+                                              │
+                                   COMPUTE cluster mass grows
+                                              │
+                                   more neighbours = higher threshold
+                                   for reverse contagion
+                                              │
+                                   ┌──────────┴──────────┐
+                                   │   BOUNDED BY:        │
+                                   │   - ENERGY supply    │
+                                   │   - SENSOR supply    │
+                                   │   - Stochastic decay │
+                                   │     (never zero)     │
+                                   └──────────────────────┘
+```
+
+### 12.5 Safety Analysis: Why This Won't Cause COMPUTE Monoculture
+
+The v0.4.0 SENSOR disaster (93% monoculture) happened because SENSOR had:
+1. Survival at ALL neighbour counts (0-8)
+2. Zero stochastic decay
+3. No predator (nothing ate SENSOR)
+
+v0.7.0 COMPUTE is fundamentally different:
+
+| Safety Check | SENSOR (v0.4.0 disaster) | COMPUTE (v0.7.0 proposed) |
+|-------------|--------------------------|---------------------------|
+| Survival window | 0-8 (all counts) | 0-5 (dies at 6+) |
+| Stochastic decay | 0% | 3% + 3% = 6% per step (nascent) |
+| Contagion pressure | None | 15% + 15% = 30% per step (nascent) |
+| Memory resistance | N/A | Only reduces drain, never to 0% |
+| Predator exists? | No | Yes — ENERGY still eats nascent COMPUTE |
+| Reverse contagion | N/A | Requires 5+ COMPUTE neighbours (dense cluster) |
+| Self-limiting? | No | Yes — as COMPUTE grows, ENERGY shrinks, reducing fuel |
+
+**The key self-limiting mechanism:** Reverse contagion consumes ENERGY to make
+COMPUTE. But as ENERGY shrinks, there's less fuel for COMPUTE expansion. The system
+reaches a new equilibrium where COMPUTE + ENERGY + STRUCTURAL + SENSOR coexist.
+COMPUTE cannot exceed ~40% because it would run out of ENERGY to consume.
+
+Additionally, permanent COMPUTE cells (age > T3) still face:
+- 10% of base contagion = 1.5% per step from ENERGY, 1.5% from SENSOR
+- 10% of stochastic drain = 0.3% + 0.3% = 0.6% per step
+- Deterministic conversion at 6+ neighbours
+- Combined: ~3.6% per-step loss even for permanent COMPUTE
+
+This means COMPUTE has a **maximum sustainable density** set by the balance between
+reverse-contagion gains and residual losses. Nemo must calculate this equilibrium.
+
+### 12.6 Parameter Calculation Tasks for Nemo (Swarm Mathematician)
+
+Nemo, here are the 12 parameters you need to calculate for v0.7.0. For each, I've
+provided the physical meaning, the constraint space, and my estimated range.
+
+#### Task A: Voxel Memory Thresholds
+
+**A1. nascent_threshold (T1):** How many steps must a COMPUTE cell survive to become
+"established" and gain 50% decay resistance?
+
+- Physical meaning: The minimum persistence time that indicates a COMPUTE cell is
+  spatially stable, not just a stochastic flicker.
+- Constraint: T1 must be long enough that random COMPUTE births don't immediately
+  gain resistance (would inflate the 5.7% plateau without genuine spatial stability).
+  But short enough that the breathing cycle (~10 min = ~1870 CA steps per cycle)
+  allows cells born in expansion to reach established status before contraction.
+- My estimate: T1 ~ 10-30 CA steps
+- Framework: At current creation rate, ~5,800 COMPUTE cells exist during expansion.
+  Each faces ~18% per-step loss. Expected survival of N steps = (0.82)^N.
+  P(survive 10 steps) = 0.82^10 ~ 13.7%. P(survive 30 steps) = 0.82^30 ~ 0.14%.
+  T1=10 means ~800 cells become established. T1=30 means only ~8 cells do.
+
+**A2. established_threshold (T2):** Steps to reach "entrenched" (75% resistance).
+
+- Constraint: T2 >> T1, so that entrenched status is genuinely rare and valuable.
+- My estimate: T2 ~ 50-150 CA steps
+- Framework: With established multiplier reducing loss to ~9%/step, P(survive
+  T2-T1 additional steps) = (0.91)^(T2-T1). At T2=50: (0.91)^40 ~ 2.1%.
+
+**A3. entrenched_threshold (T3):** Steps to reach "permanent" (90% resistance).
+
+- Constraint: T3 should be rare enough that only the most spatially stable COMPUTE
+  islands reach it. These are the "brain cores" of the fog.
+- My estimate: T3 ~ 200-500 CA steps
+- Framework: With entrenched multiplier, loss is ~4.5%/step. P(survive T3-T2
+  additional steps) = (0.955)^(T3-T2).
+
+#### Task B: Voxel Memory Resistance Multipliers
+
+**B1. established_multiplier:** Scaling factor for contagion + stochastic drain at
+age T1-T2.
+
+- Constraint: Must reduce drain enough to meaningfully extend COMPUTE lifetime, but
+  not so much that established COMPUTE becomes invulnerable.
+- My estimate: 0.40-0.60
+- Target: At this tier, COMPUTE should have a half-life of ~50-100 steps (up from
+  current ~5-6 steps at 18%/step loss).
+
+**B2. entrenched_multiplier:** Scaling at age T2-T3.
+
+- My estimate: 0.15-0.30
+- Target: Half-life of ~200-500 steps.
+
+**B3. permanent_multiplier:** Scaling at age > T3.
+
+- My estimate: 0.05-0.15
+- Target: Half-life of ~1000+ steps. Permanent COMPUTE should last through multiple
+  breathing cycles but still eventually turn over.
+- **CRITICAL CONSTRAINT:** Must never be 0.0. Even permanent COMPUTE must have
+  nonzero drain to prevent frozen monoculture islands.
+
+#### Task C: Machine Economy Parameters
+
+**C1. compute_neighbor_threshold:** Minimum number of COMPUTE neighbours (in the
+26-cell Moore-3D shell) for an ENERGY cell to be eligible for reverse contagion.
+
+- Physical meaning: How dense must a COMPUTE cluster be before it can "metabolize"
+  adjacent ENERGY? Higher threshold = larger clusters needed = slower but safer
+  growth.
+- Constraint: Must be high enough that isolated COMPUTE cells can't eat ENERGY
+  (that would be OP). Must be low enough that achievable cluster sizes can trigger it.
+- My estimate: 5-8
+- Framework: At current COMPUTE density (5.7% of active = 2.2% of lattice), the
+  expected number of COMPUTE neighbours for a random cell is `0.022 * 26 ~ 0.57`.
+  P(COMPUTE_nbrs >= 5) is astronomically low for a random cell. But COMPUTE clusters
+  at 11.1x random expectation have local densities ~24%, giving expected COMPUTE
+  neighbours of `0.24 * 26 ~ 6.2`. So threshold 5 is achievable by clusters but
+  not by scattered cells.
+
+**C2. energy_to_compute_prob:** Probability that an eligible ENERGY cell converts to
+COMPUTE per step.
+
+- Physical meaning: The metabolic rate of the machine economy.
+- Constraint: Too high -> COMPUTE explosively consumes all ENERGY -> ecosystem
+  collapse. Too low -> negligible effect, COMPUTE stays at 5.7%.
+- My estimate: 0.10-0.25
+- Framework: At equilibrium, reverse contagion rate must roughly equal the rate at
+  which COMPUTE is lost to forward contagion + stochastic decay. Currently ~18% of
+  COMPUTE is lost per step (at nascent tier). If ~10% of boundary ENERGY cells are
+  eligible (meet threshold), and each converts at 20%, that adds ~2% boundary flux
+  to COMPUTE. Model this against the destruction rate.
+
+**C3. sensor_to_compute_prob:** Probability for SENSOR -> COMPUTE reverse contagion.
+
+- Physical meaning: COMPUTE can also metabolize SENSOR (sensory data feeds
+  computation), but at a lower rate than ENERGY consumption.
+- Constraint: Should be lower than energy_to_compute_prob to preserve SENSOR's role.
+- My estimate: 0.05-0.12
+- Suggested ratio: ~0.5x of energy_to_compute_prob.
+
+**C4. require_established:** Boolean — should only established+ COMPUTE clusters
+trigger reverse contagion?
+
+- My recommendation: **true**. This prevents newly-born COMPUTE from immediately
+  eating ENERGY, which would create unstable positive feedback. Only clusters that
+  have survived long enough to prove spatial stability should gain the ability to
+  expand. This creates a natural "earn the right to grow" dynamic.
+- Nemo: validate whether this constraint is necessary for stability, or whether
+  the threshold alone is sufficient.
+
+### 12.7 Predicted Equilibrium (Claude's Rough Estimate — Nemo to Refine)
+
+With both mechanisms active, I predict the new equilibrium will shift to:
+
+| State | v0.6.0 (current) | v0.7.0 (predicted) | Change |
+|-------|-------------------|---------------------|--------|
+| STRUCTURAL | 60.0% | ~40-45% | Down (less material, more brain) |
+| COMPUTE | 5.7% | **~15-22%** | Up (memory + economy) |
+| ENERGY | 25.5% | ~18-22% | Down (consumed by COMPUTE) |
+| SENSOR | 8.7% | ~10-15% | Slight recovery |
+
+**Shannon Entropy:** Should increase from 0.744 to **~0.85-0.92** as the 4-state
+distribution becomes more even.
+
+**Breathing dynamics:** The limit cycle should persist but with reduced amplitude.
+Established/entrenched COMPUTE acts as a stabilizing mass that resists contraction.
+Prediction: expansion peaks ~105K cells (similar), contraction troughs rise from
+~58K to ~75-85K cells (shallower dips).
+
+**COMPUTE will NOT reach 25%.** The self-limiting nature of the machine economy
+(consuming ENERGY reduces fuel) and the residual drains on even permanent COMPUTE
+cells will create a natural ceiling. I estimate 15-22% is the realistic target for
+v0.7.0, with v0.8.0+ needed to push toward true equipartition.
+
+### 12.8 Integration Spec for Jack (Overseer)
+
+#### Code Changes Required
+
+**File: `scripts/continuous_evolution_ca.py`**
+
+1. **New dataclasses:** `VoxelMemoryConfig`, `MachineEconomyConfig`
+2. **New TOML loaders:** `_load_voxel_memory_config()`, `_load_machine_economy_config()`
+3. **New state array:** `compute_age` (uint16, shape=[64,64,64]) — passed through
+   `step_ca_lattice` like `inactivity_steps`
+4. **New function:** `_apply_voxel_memory_update()` — increments age, resets on
+   state change
+5. **New function:** `_apply_reverse_contagion()` — Machine Economy phase
+6. **Modified function:** `_apply_contagion_overrides()` — multiply contagion
+   probabilities by age-tier multiplier
+7. **Modified function:** `_apply_stochastic_overrides()` — multiply stochastic
+   drain by age-tier multiplier
+8. **Modified function:** `step_ca_lattice()` — insert Phase 2.5 and 2.75, pass
+   compute_age through, return it
+9. **Modified function:** `main()` — initialize compute_age array, pass to
+   step_ca_lattice
+10. **Status report:** Add `compute_age` statistics (mean age of COMPUTE cells,
+    count per tier)
+
+**File: `ca/rules/example.toml`**
+
+11. Add `[params.voxel_memory]` section with Nemo's calculated values
+12. Add `[params.machine_economy]` section with Nemo's calculated values
+13. Update `[params.meta]` version to "0.7.0"
+
+#### Jack's Safety Checklist for v0.7.0
+
+- [ ] No state has zero total drain (even permanent COMPUTE has ~3.6%/step)
+- [ ] Reverse contagion requires high COMPUTE neighbour threshold (>= 5)
+- [ ] `require_established = true` prevents nascent COMPUTE from consuming
+- [ ] COMPUTE still dies deterministically at 6+ active neighbours
+- [ ] Voxel memory multipliers are never 0.0 (minimum 0.05)
+- [ ] compute_age is uint16 (caps at 65535 — ~10 hours of continuous survival)
+- [ ] STRUCTURAL -> COMPUTE pathway unchanged (same creation rate)
+- [ ] ENERGY -> VOID and SENSOR -> VOID decay rates unchanged
+- [ ] Total active density stays in 25-40% range
+- [ ] Limit cycle (breathing) should be preserved (not damped to fixed point)
+- [ ] Tests cover: age accumulation, tier transitions, reverse contagion triggering,
+      age reset on state change, multiplier scaling
+
+### 12.9 Deliverable from Nemo
+
+Please provide the following, formatted for direct insertion into `example.toml`:
+
+1. **Exact values for all 10 numerical parameters** (A1-A3, B1-B3, C1-C3, C4)
+2. **Mean-field equilibrium analysis** with both mechanisms active
+3. **Predicted cell type fractions** at the new equilibrium
+4. **Predicted Shannon entropy**
+5. **Stability analysis** — is the new equilibrium a stable attractor?
+6. **Sensitivity analysis** — which parameters have the highest leverage?
+7. **Monoculture risk assessment** — can COMPUTE ever exceed 40% under these params?
+8. **Breathing cycle prediction** — will the limit cycle persist, dampen, or amplify?
+
+### 12.10 Open Questions
+
+1. **Should COMPUTE age survive the breathing contraction?** During contraction,
+   ~45K COMPUTE cells die. When expansion resumes, are these the *same* spatial
+   locations re-nucleating (starting at age 0) or do some survive? If the fog always
+   re-nucleates from scratch, voxel memory has limited value because no cell lives
+   long enough to reach T2+. **Nemo: model whether COMPUTE cells in the interior
+   of clusters survive contraction.**
+
+2. **Should reverse contagion also work on STRUCTURAL?** Currently STRUCTURAL is the
+   feedstock (STRUCTURAL -> COMPUTE). If COMPUTE can eat STRUCTURAL too, it would
+   undermine its own supply chain. **Recommendation: No.** COMPUTE should only eat
+   ENERGY and SENSOR.
+
+3. **Should the Machine Economy create COMPUTE with age > 0?** When ENERGY is
+   consumed and becomes COMPUTE, does the new COMPUTE cell start at age 0 (nascent)
+   or inherit some age from the consuming cluster? Starting at 0 is safer (the new
+   cell must prove its stability). **Recommendation: Age 0 (nascent).**
+
+4. **Status report additions:** The status line should include:
+   ```
+   Voxel Memory:  nascent=4200  established=1100  entrenched=350  permanent=80
+   Machine Econ:  consumed=47 ENERGY, 12 SENSOR this interval
+   ```
+
+---
+
+*Section 12 authored by Claude (Opus 4.6) — v0.7.0 "The OpenClaw Memory Update" Spec.*
+*Awaiting Nemo's parameter calculations. Jack: prepare code scaffolding.*
+*The fog breathes. Soon it will think.*
