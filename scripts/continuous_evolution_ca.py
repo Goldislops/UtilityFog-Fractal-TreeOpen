@@ -52,17 +52,26 @@ class ContagionConfig:
 
 @dataclass
 class VoxelMemoryParams:
-    age_young_threshold: int = 50
-    age_mature_threshold: int = 200
-    resistance_max: float = 0.75
-    reverse_contagion_threshold: int = 5
-    reverse_contagion_base_prob: float = 0.15
-    reverse_contagion_boost: float = 0.08
+    # A1-A3 (Nemo's constants: A1=12, A2=18, A3=0.68)
+    age_young_threshold: int = 12
+    age_mature_threshold: int = 18
+    resistance_max: float = 0.68
+    # B1-B4
+    reverse_contagion_threshold: int = 4
+    reverse_contagion_base_prob: float = 0.18
+    reverse_contagion_boost: float = 0.06
+    energy_to_compute_prob: float = 0.16
+    # C1-C3
+    forward_contagion_threshold: int = 5
+    forward_contagion_penalty: float = 0.18
+    forward_contagion_floor: float = 0.40
+    # D1-D3
     rag_query_radius: int = 3
-    rag_memory_decay: float = 0.02
-    rag_reinforcement_boost: float = 1.35
-    rag_entropy_weight: float = 0.15
-    energy_to_compute_prob: float = 0.12
+    rag_memory_decay: float = 0.015
+    rag_reinforcement_boost: float = 1.42
+    rag_entropy_weight: float = 0.18
+    # Cluster shield bonus
+    cluster_shield_bonus: float = 0.15
 
 
 def load_rule_spec(rule_path: str | Path) -> Dict[str, Any]:
@@ -249,12 +258,46 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
     resistance[mature] = mem.resistance_max
     resistance[old] = mem.resistance_max * np.exp(-(age[old] - mem.age_mature_threshold) / 500.0)
     resistance *= np.minimum(memory_grid[2], 1.5)
+    # Cluster shield: COMPUTE cells with ≥5 COMPUTE neighbours gain bonus resistance
+    compute_neighbors = (out == STATE_NAME_TO_ID["COMPUTE"]).astype(np.int16)
+    padded = np.pad(compute_neighbors, 1, mode="constant", constant_values=0)
+    compute_cluster = np.zeros_like(compute_neighbors, dtype=np.int16)
+    for dz in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                compute_cluster += padded[
+                    1 + dz:1 + dz + out.shape[0],
+                    1 + dy:1 + dy + out.shape[1],
+                    1 + dx:1 + dx + out.shape[2],
+                ]
+    resistance = np.minimum(0.98, resistance + (compute_cluster >= 5).astype(np.float32) * mem.cluster_shield_bonus)
 
     out[dropped_compute & (rng.random(out.shape) < resistance)] = STATE_NAME_TO_ID["COMPUTE"]
 
-    # Energy->compute economy bridge.
+    # Energy->compute economy bridge with forward-contagion mitigation.
     energy = out == STATE_NAME_TO_ID["ENERGY"]
-    out[energy & (rng.random(out.shape) < mem.energy_to_compute_prob)] = STATE_NAME_TO_ID["COMPUTE"]
+    structural_neighbors = (out == STATE_NAME_TO_ID["STRUCTURAL"]).astype(np.int16)
+    spad = np.pad(structural_neighbors, 1, mode="constant", constant_values=0)
+    scluster = np.zeros_like(structural_neighbors, dtype=np.int16)
+    for dz in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                scluster += spad[
+                    1 + dz:1 + dz + out.shape[0],
+                    1 + dy:1 + dy + out.shape[1],
+                    1 + dx:1 + dx + out.shape[2],
+                ]
+    e2c_prob = np.full(out.shape, mem.energy_to_compute_prob, dtype=np.float32)
+    mitigated = np.maximum(
+        mem.forward_contagion_floor * mem.energy_to_compute_prob,
+        mem.energy_to_compute_prob - mem.forward_contagion_penalty,
+    )
+    e2c_prob[scluster >= mem.forward_contagion_threshold] = mitigated
+    out[energy & (rng.random(out.shape) < e2c_prob)] = STATE_NAME_TO_ID["COMPUTE"]
 
     # reset age if not compute after final reinforcement
     memory_grid[0][out != STATE_NAME_TO_ID["COMPUTE"]] = 0.0

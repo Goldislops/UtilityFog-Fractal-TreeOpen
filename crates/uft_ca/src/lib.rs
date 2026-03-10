@@ -85,31 +85,49 @@ pub struct VoxelMemory {
 
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelMemoryParams {
+    // A1-A3: age/survival curve
     pub age_young_threshold: u16,
     pub age_mature_threshold: u16,
     pub resistance_max: f32,
+    // B1-B4: density-targeting rebalance
     pub reverse_contagion_threshold: usize,
     pub reverse_contagion_base_prob: f32,
     pub reverse_contagion_boost: f32,
+    pub energy_to_compute_prob: f32,
+    // C1-C3: forward contagion mitigation
+    pub forward_contagion_threshold: usize,
+    pub forward_contagion_penalty: f32,
+    pub forward_contagion_floor: f32,
+    // D1-D3: limit cycle preservation
     pub rag_query_radius: usize,
     pub rag_memory_decay: f32,
     pub rag_reinforcement_boost: f32,
     pub rag_entropy_weight: f32,
-    pub energy_to_compute_prob: f32,
+    // cluster shielding
+    pub cluster_shield_bonus: f32,
 }
 
 pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
-    age_young_threshold: 50,
-    age_mature_threshold: 200,
-    resistance_max: 0.75,
-    reverse_contagion_threshold: 5,
-    reverse_contagion_base_prob: 0.15,
-    reverse_contagion_boost: 0.08,
+    // A1-A3 (Nemo's constants: A1=12, A2=18, A3=0.68)
+    age_young_threshold: 12,
+    age_mature_threshold: 18,
+    resistance_max: 0.68,
+    // B1-B4
+    reverse_contagion_threshold: 4,
+    reverse_contagion_base_prob: 0.18,
+    reverse_contagion_boost: 0.06,
+    energy_to_compute_prob: 0.16,
+    // C1-C3
+    forward_contagion_threshold: 5,
+    forward_contagion_penalty: 0.18,
+    forward_contagion_floor: 0.40,
+    // D1-D3
     rag_query_radius: 3,
-    rag_memory_decay: 0.02,
-    rag_reinforcement_boost: 1.35,
-    rag_entropy_weight: 0.15,
-    energy_to_compute_prob: 0.12,
+    rag_memory_decay: 0.015,
+    rag_reinforcement_boost: 1.42,
+    rag_entropy_weight: 0.18,
+    // +15% shield when compute cluster >=5
+    cluster_shield_bonus: 0.15,
 };
 
 impl VoxelMemory {
@@ -344,7 +362,11 @@ impl MultiStateRule {
             (counts.compute as u64).hash(&mut hasher);
             (counts.energy as u64).hash(&mut hasher);
             let roll = (hasher.finish() % 1000) as f32 / 1000.0;
-            let resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
+            let mut resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
+            if counts.compute >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
+                resistance += VOXEL_MEMORY_PARAMS.cluster_shield_bonus;
+            }
+            resistance = resistance.min(0.98);
             if roll < resistance {
                 next = CellState::Compute;
             }
@@ -355,7 +377,11 @@ impl MultiStateRule {
             rng_seed.hash(&mut hasher);
             (counts.compute as u64).hash(&mut hasher);
             let roll = (hasher.finish() % 1000) as f32 / 1000.0;
-            let prob = VOXEL_MEMORY_PARAMS.energy_to_compute_prob;
+            let mut prob = VOXEL_MEMORY_PARAMS.energy_to_compute_prob;
+            if counts.structural >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
+                prob = (prob - VOXEL_MEMORY_PARAMS.forward_contagion_penalty)
+                    .max(VOXEL_MEMORY_PARAMS.forward_contagion_floor * VOXEL_MEMORY_PARAMS.energy_to_compute_prob);
+            }
             if roll < prob {
                 next = CellState::Compute;
                 memory.compute_age = memory.compute_age.saturating_add(1);
