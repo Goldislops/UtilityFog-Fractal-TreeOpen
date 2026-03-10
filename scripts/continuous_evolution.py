@@ -220,6 +220,35 @@ def save_branch_primitives(primitives: List[Dict[str, Any]], epoch: int,
 # Status reporting
 # ---------------------------------------------------------------------------
 
+def generate_primordial_seed_cube(
+    lattice_size: int,
+    cube_size: int = 3,
+    active_state: int = 1,
+) -> np.ndarray:
+    """Create a centered 3D CA seed cube to avoid cold-start extinction.
+
+    The lattice is initialized to VOID (0) everywhere, then a dense cube
+    of STRUCTURAL (default state 1) cells is injected at the exact center.
+    """
+    if cube_size not in (3, 5):
+        raise ValueError(f"cube_size must be 3 or 5, got {cube_size}")
+    if lattice_size < cube_size:
+        raise ValueError(
+            f"lattice_size ({lattice_size}) must be >= cube_size ({cube_size})"
+        )
+
+    seed = np.zeros((lattice_size, lattice_size, lattice_size), dtype=np.uint8)
+    half = cube_size // 2
+    center = lattice_size // 2
+
+    x0, x1 = center - half, center + half + 1
+    y0, y1 = center - half, center + half + 1
+    z0, z1 = center - half, center + half + 1
+
+    seed[x0:x1, y0:y1, z0:z1] = np.uint8(active_state)
+    return seed
+
+
 def print_status_update(epoch: int, total_epochs: int, epoch_result: GrokkingRunResult,
                         primitives_count: int, primitives_path: str,
                         cumulative_time: float, temps: Dict[str, float]):
@@ -263,6 +292,13 @@ def main():
                         help="0 = infinite, N = stop after N epochs")
     parser.add_argument("--status-interval", type=int, default=300,
                         help="Seconds between full status reports (default 300 = 5 min)")
+    parser.add_argument(
+        "--seed-cube-size",
+        type=int,
+        default=3,
+        choices=(3, 5),
+        help="Primordial seed cube edge length for CA bootstrap (3 or 5)",
+    )
     args = parser.parse_args()
 
     print(BANNER)
@@ -285,6 +321,7 @@ def main():
     print(f"  Exchanges/Epoch: {args.exchanges}")
     print(f"  Sweeps/Exchange: {args.sweeps}")
     print(f"  Seed:            {args.seed}")
+    print(f"  Seed Cube:       {args.seed_cube_size}x{args.seed_cube_size}x{args.seed_cube_size} STRUCTURAL")
     print(f"  Epoch Limit:     {'infinite' if args.epoch_limit == 0 else args.epoch_limit}")
     print(f"  Status Interval: {args.status_interval}s")
     print(f"  Thermal Ceiling: {temp_threshold}C (resume at {temp_resume}C)")
@@ -331,6 +368,15 @@ def main():
     total_time = 0.0
     last_status_time = time.time()
     seed_offset = args.seed
+    primordial_seed = generate_primordial_seed_cube(
+        lattice_size=args.lattice,
+        cube_size=args.seed_cube_size,
+    )
+    active_seed_cells = int(np.count_nonzero(primordial_seed))
+    print(
+        f"  [SEED] Primordial cube initialized at lattice center "
+        f"({active_seed_cells} active STRUCTURAL cells)."
+    )
 
     while not SHUTDOWN_REQUESTED:
         if args.epoch_limit > 0 and epoch >= args.epoch_limit:

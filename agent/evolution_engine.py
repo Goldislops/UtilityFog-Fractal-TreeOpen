@@ -12,6 +12,7 @@ License: MIT
 from typing import Dict, List, Any, Optional, Tuple, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 import random
 import numpy as np
 import time
@@ -94,13 +95,68 @@ class FitnessEvaluator(ABC):
 
 class DefaultFitnessEvaluator(FitnessEvaluator):
     """Default fitness evaluator implementation."""
+
+    ENTROPY_BONUS_WEIGHT: float = 0.25
+    STRUCTURAL_DOMINANCE_PENALTY_WEIGHT: float = 0.30
+    STRUCTURAL_DOMINANCE_TARGET: float = 0.55
+
+    @staticmethod
+    def _extract_state_counts(environment_context: Dict[str, Any]) -> Dict[str, int]:
+        raw_counts = environment_context.get("cell_state_counts")
+        if not raw_counts:
+            return {}
+
+        if isinstance(raw_counts, dict):
+            return {
+                str(k).upper(): int(v)
+                for k, v in raw_counts.items()
+                if isinstance(v, (int, float)) and v >= 0
+            }
+
+        if isinstance(raw_counts, (list, tuple)):
+            state_names = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
+            return {
+                state_names[idx]: int(v)
+                for idx, v in enumerate(raw_counts[:len(state_names)])
+                if isinstance(v, (int, float)) and v >= 0
+            }
+
+        return {}
+
+    @classmethod
+    def _differentiation_score(cls, environment_context: Dict[str, Any]) -> float:
+        counts = cls._extract_state_counts(environment_context)
+        if not counts:
+            return 0.0
+
+        non_void_states = ("STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR")
+        non_void_counts = [counts.get(state, 0) for state in non_void_states]
+        total_non_void = sum(non_void_counts)
+        if total_non_void <= 0:
+            return 0.0
+
+        probs = [c / total_non_void for c in non_void_counts if c > 0]
+        if len(probs) <= 1:
+            normalized_entropy = 0.0
+        else:
+            entropy = -sum(p * math.log(p) for p in probs)
+            normalized_entropy = entropy / math.log(len(non_void_states))
+
+        structural_ratio = counts.get("STRUCTURAL", 0) / total_non_void
+        dominance_excess = max(0.0, structural_ratio - cls.STRUCTURAL_DOMINANCE_TARGET)
+        dominance_penalty = min(1.0, dominance_excess / (1.0 - cls.STRUCTURAL_DOMINANCE_TARGET))
+
+        entropy_bonus = cls.ENTROPY_BONUS_WEIGHT * normalized_entropy
+        penalty = cls.STRUCTURAL_DOMINANCE_PENALTY_WEIGHT * dominance_penalty
+        return entropy_bonus - penalty
     
     def evaluate_meme(self, meme: Meme, environment_context: Dict[str, Any]) -> float:
         base_fitness = meme.calculate_fitness(environment_context)
         propagation_bonus = min(0.2, meme.propagation_count * 0.01)
         env_fitness = sum(meme.environment_fitness.values()) / max(1, len(meme.environment_fitness))
         env_bonus = env_fitness * 0.1
-        total_fitness = base_fitness + propagation_bonus + env_bonus
+        differentiation_term = self._differentiation_score(environment_context)
+        total_fitness = base_fitness + propagation_bonus + env_bonus + differentiation_term
         return max(0.0, min(1.0, total_fitness))
     
     def evaluate_agent(self, agent: FogletAgent, environment_context: Dict[str, Any]) -> float:
