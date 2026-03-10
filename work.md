@@ -1291,3 +1291,529 @@ Please provide the following, formatted for direct insertion into `example.toml`
 *Section 12 authored by Claude (Opus 4.6) — v0.7.0 "The OpenClaw Memory Update" Spec.*
 *Awaiting Nemo's parameter calculations. Jack: prepare code scaffolding.*
 *The fog breathes. Soon it will think.*
+
+---
+
+## 13. Overnight v0.7.0 Analysis (22-Hour Run)
+
+**Date:** 2026-03-10 ~13:00 AEDT
+**Engine:** v0.7.0 OpenClaw (PID 9804), launched 2026-03-09 14:43
+**Uptime:** 22 hours 20 minutes
+**Generation:** 192,546 | CA Steps: 1,925,469
+**Snapshots saved:** 140+
+
+### 13.1 Heartbeat Status: ALIVE
+
+The 10-minute limit cycle **survived the v0.7.0 physics update**. Breathing pattern confirmed:
+
+| Phase | Active Cells | Density | COMPUTE (lattice) | COMPUTE (active) | Entropy |
+|-------|:---:|:---:|:---:|:---:|:---:|
+| Expanded  | ~103K | 0.393 | 3.8-4.0% | 9.5-9.8% | 0.779 |
+| Contracted | ~58K | 0.222 | 1.5-1.6% | 7.0% | 0.724 |
+
+### 13.2 COMPUTE Density: DID NOT REACH 18% TARGET
+
+**Critical finding: The v0.7.0 Machine Economy improved COMPUTE from v0.6.0 levels
+(5.7% of active) to 7-10% of active, but fell far short of the 18% target.**
+
+| Version | COMPUTE (active) | COMPUTE (lattice) | Notes |
+|---------|:---:|:---:|------|
+| v0.5.0 | 1.0% | 0.31% | Fixed point |
+| v0.6.0 | 5.7% | 1.3-2.3% | Fixed plateau |
+| v0.7.0 peak | **9.8%** | 4.0% | Limit cycle expanded phase |
+| v0.7.0 trough | **7.0%** | 1.5% | Limit cycle contracted phase |
+| v0.7.0 target | 18% | 7.2% | **NOT REACHED** |
+
+### 13.3 ROOT CAUSE: Voxel Memory Never Activates
+
+**The voxel memory system is dead weight.** After 22 hours and 1.9M CA steps:
+
+```
+avg_age = 0.7-0.8  (never changed)
+max_age = 25        (peaked once, typically 7-10)
+age_young_threshold = 50  (NEVER REACHED by any cell)
+```
+
+**No COMPUTE cell survived 50 consecutive steps.** The forward contagion
+(COMPUTE→ENERGY at 30%) destroys COMPUTE cells every breathing cycle, resetting
+compute_age to 0. The decay resistance tiers (T1=50, T2=200) are unreachable.
+
+**The asymmetry is fatal:**
+- Forward contagion: COMPUTE→ENERGY at **30%** probability
+- Reverse contagion: ENERGY→COMPUTE at **12%** probability
+- Ratio: 2.5:1 in favour of ENERGY erosion
+
+The voxel memory system cannot engage because cells die before they age.
+
+### 13.4 Ecosystem Balance
+
+| State | v0.6.0 | v0.7.0 (expanded) | v0.7.0 (contracted) | Change |
+|-------|:---:|:---:|:---:|------|
+| STRUCTURAL | 60% | 59.2% | 65.3% | ≈ stable |
+| COMPUTE | 5.7% | 9.8% | 7.0% | ↑ improved |
+| ENERGY | 25.5% | 22.8% | 17.4% | ↓ reverse contagion consuming |
+| SENSOR | 8.7% | 8.2% | 10.4% | ≈ stable |
+
+The Machine Economy IS consuming ENERGY (down from 25.5% to 17-23%), confirming
+reverse contagion works. But the conversion doesn't accumulate because new COMPUTE
+is destroyed before it can reinforce.
+
+### 13.5 Shannon Entropy
+
+```
+H(expanded)  = 0.776-0.780
+H(contracted) = 0.720-0.726
+H(v0.6.0)    = 0.691-0.747
+```
+
+**Entropy improved** — the fog is more diverse than v0.6.0. This is the Machine
+Economy's contribution: ENERGY→COMPUTE conversion creates brief diversity spikes.
+
+### 13.6 Diagnosis & Required v0.7.x Fixes
+
+1. **Lower age_young_threshold from 50 → 5-10** so decay resistance engages within
+   the breathing cycle (~1,400 CA steps per half-cycle = 700 steps in expanded phase)
+2. **Reduce compute_energy_conversion_prob from 0.30 → 0.15** to give COMPUTE cells
+   more time to age before being consumed
+3. **Increase energy_to_compute_prob from 0.12 → 0.18-0.20** to strengthen reverse flow
+4. **Consider cluster-coherent transitions** — COMPUTE cells in dense clusters should
+   resist forward contagion collectively, not individually
+
+---
+
+## 14. Premise Veto Rulings — Cosmic Garden Proposals
+
+**Veto Officer:** Claude (CA Physicist)
+**Date:** 2026-03-10
+
+AURA has proposed 7 new mechanisms for the Cosmic Garden upgrade. Each is evaluated
+below against CA locality constraints, thermodynamic consistency, and implementation
+feasibility. Verdicts: ✅ APPROVED, ⚠️ PARTIAL (accept with modifications), ❌ REJECTED.
+
+### 14.1 Quantum Sync (Orch-OR): ⚠️ PARTIAL VETO
+
+**Proposal:** COMPUTE clusters evaluate probabilistically as a single unified entity
+before collapsing into a deterministic transition.
+
+**Veto reasoning:**
+- ❌ "Single unified entity" evaluation **breaks CA locality**. The fundamental contract
+  of cellular automata is that each cell updates based only on its local Moore
+  neighbourhood. Cluster-wide evaluation requires non-local communication, converting
+  the CA into a different computational model entirely.
+- ❌ Orch-OR (Orchestrated Objective Reduction) is Penrose/Hameroff's speculative
+  consciousness theory. It is not established physics and should not be cited as a
+  basis for computational mechanics.
+
+**What survives (renamed: "Cluster Coherence"):**
+- ✅ COMPUTE cells in a dense local cluster (≥4 COMPUTE Moore neighbours) share a
+  *correlated random seed* for transition rolls. This means clustered COMPUTE cells
+  tend to survive or die together, simulating collective resistance without breaking
+  locality. Each cell still evaluates independently using its own neighbours — but
+  the RNG correlation creates emergent cluster behaviour.
+- Implementation: hash(cluster_center_coordinates + generation) → shared seed for
+  cells with high COMPUTE neighbour count.
+
+**Parameters for Nemo:**
+- `D1: cluster_coherence_threshold` — minimum COMPUTE neighbours to activate
+  correlated transitions (proposed: 4)
+- `D2: coherence_survival_bonus` — probability boost for survival when in coherent
+  cluster (proposed: 0.15)
+
+### 14.2 Halbach Recuperation: ✅ APPROVED
+
+**Proposal:** When stochastic decay destroys a cell, adjacent ENERGY cells recuperate
+a fraction of its state before it becomes VOID.
+
+**Approval reasoning:**
+- ✅ Thermodynamically sound — energy conservation. When a cell decays, its "state
+  energy" should redistribute to neighbours, not vanish.
+- ✅ Does not violate CA locality — only adjacent cells are affected.
+- ✅ Prevents wasteful state destruction, which is exactly the COMPUTE erosion problem.
+
+**Implementation:**
+When any non-VOID cell transitions to VOID via stochastic decay:
+1. Count adjacent ENERGY cells
+2. If count > 0, boost the memory_strength of those ENERGY cells by `recuperation_boost`
+3. If the dying cell was COMPUTE, additionally roll to convert one adjacent STRUCTURAL
+   cell to COMPUTE (state inheritance) with probability `inheritance_prob`
+
+**Parameters for Nemo:**
+- `E1: recuperation_boost` — memory_strength added to adjacent ENERGY (proposed: 0.3)
+- `E2: inheritance_prob` — probability of COMPUTE state inheritance on death
+  (proposed: 0.10)
+
+### 14.3 Agentic Micro-Economy: ⚠️ PARTIAL VETO
+
+**Proposal:** COMPUTE cells "bid" for adjacent ENERGY tokens to execute complex
+transitions, preventing localized resource starvation.
+
+**Veto reasoning:**
+- ❌ "Bidding" implies sequential negotiation within a single CA step. This violates
+  the synchronous update assumption — all cells must update simultaneously.
+- ❌ Auction mechanics require multi-round communication, which is incompatible
+  with the Moore neighbourhood's one-step information horizon.
+
+**What survives (renamed: "Metabolic Priority"):**
+- ✅ COMPUTE cells consume ENERGY proportional to their age/fitness priority.
+  Older COMPUTE cells (higher compute_age) have higher probability of successfully
+  converting adjacent ENERGY. This is a one-step, local calculation — no bidding.
+- ✅ COMPUTE cells with zero adjacent ENERGY cannot execute "expensive" transitions
+  (prevents resource starvation without negotiation).
+- Implementation: The existing energy_to_compute_prob is modulated by a `demand_factor`
+  based on local COMPUTE density. High COMPUTE density = each cell gets less ENERGY
+  (competition without communication).
+
+**Parameters for Nemo:**
+- `F1: metabolic_demand_curve` — function shape mapping COMPUTE density → conversion
+  efficiency (proposed: inverse linear, efficiency = 1 / (1 + local_compute_ratio))
+- `F2: starvation_threshold` — ENERGY neighbours below which COMPUTE enters "dormant"
+  mode (proposed: 1)
+
+### 14.4 The Bamboo Protocol: ✅ APPROVED
+
+**Proposal:** STRUCTURAL cells with decentralized internal clocks for synchronized
+lifecycle behaviours (rebirth/decay) without grid-wide communication.
+
+**Approval reasoning:**
+- ✅ Fully CA-compatible — each cell maintains a local counter, no global state needed.
+- ✅ This is essentially "voxel memory for STRUCTURAL cells" — the same mechanism we
+  built for COMPUTE, extended to the scaffold.
+- ✅ Could explain and stabilize the breathing limit cycle — STRUCTURAL cells that
+  survive through multiple contractions become more resilient, creating a persistent
+  skeleton.
+
+**Implementation:**
+Add `structural_age` channel to memory_grid. STRUCTURAL cells gain age-based
+decay resistance following the same tiered system as COMPUTE:
+- Nascent (age < T_struct_1): full decay vulnerability
+- Established (T_struct_1 ≤ age < T_struct_2): decay_prob × 0.5
+- Entrenched (age ≥ T_struct_2): decay_prob × 0.25
+
+Additionally, STRUCTURAL cells reaching age `rebirth_age` undergo "renewal":
+they briefly transition to VOID (releasing resources via Halbach Recuperation)
+then immediately re-emerge as STRUCTURAL with age=0. This prevents indefinite
+structural ossification.
+
+**Parameters for Nemo:**
+- `G1: T_struct_1` — structural nascent→established threshold (proposed: 100)
+- `G2: T_struct_2` — structural established→entrenched threshold (proposed: 500)
+- `G3: rebirth_age` — structural renewal trigger (proposed: 2000)
+- `G4: rebirth_prob` — probability of renewal per step after rebirth_age
+  (proposed: 0.01)
+
+### 14.5 Chaos Avoidance Loop: ⚠️ PARTIAL VETO
+
+**Proposal:** Nemo's heuristic curves should bypass brute-force NP-Hard calculations.
+Cells must flee from noise and seek stability.
+
+**Veto reasoning:**
+- ❌ "NP-Hard calculations" — **there are no NP-Hard calculations in our CA.**
+  Transition evaluation is O(n) per step. This framing is incorrect.
+- ❌ "Flee from mathematical noise" and "seek stability" are anthropomorphic
+  descriptions that don't map to well-defined CA operations.
+
+**What survives (renamed: "Entropy-Responsive Damping"):**
+- ✅ Cells in high-local-entropy neighbourhoods (many different states nearby)
+  receive increased stability — lower transition probability. This creates a
+  natural tendency for chaotic regions to self-stabilise without requiring
+  any global computation.
+- ✅ Implementation: compute local Shannon entropy from 26-neighbourhood state
+  distribution. If local_H > entropy_damping_threshold, multiply all transition
+  probabilities by (1 - damping_factor).
+- ✅ This is O(1) per cell per step — fully local, no NP-Hard anything.
+
+**Parameters for Nemo:**
+- `H1: entropy_damping_threshold` — local entropy above which damping engages
+  (proposed: 0.85)
+- `H2: damping_factor` — probability reduction in chaotic neighbourhoods
+  (proposed: 0.30)
+
+### 14.6 Multiplexed State Passing: ❌ REJECTED
+
+**Proposal:** Cells pass rich multi-dimensional vectors (type, age, energy, stress)
+to their Moore neighbourhood instead of binary states.
+
+**Veto reasoning:**
+- ❌ **This is a fundamental architecture change.** Replacing uint8 discrete states
+  with continuous vectors converts the CA into a Neural Cellular Automaton (NCA).
+  This invalidates ALL existing parameter tuning by Nemo across v0.4-v0.7.
+- ❌ Memory impact: 64³ × 4 floats × 4 bytes = **4MB per channel** vs 262KB for
+  current uint8 lattice. With 26 neighbours × 4 channels, the neighbourhood
+  computation explodes to **416MB** per step.
+- ❌ Transition rules would require complete rewrite — the outer-totalistic rule
+  table (state × neighbour_count → next_state) cannot handle continuous vectors.
+- ❌ We already HAVE per-cell metadata via memory_grid (3 float32 channels). The
+  information is there — we just don't pass it through neighbours.
+
+**Counter-proposal (for v0.9.0+):**
+When ready for a major architecture revision, consider adding 1-2 metadata channels
+to the neighbour aggregation (e.g., average neighbour age, average neighbour
+memory_strength). This preserves the discrete state model while enriching the
+neighbourhood information. But this is a v0.9.0 discussion, not v0.7.x.
+
+### 14.7 Codex Auto-Auditing & CUDA Acceleration: 🔶 DEFERRED (Not Vetoed)
+
+**Proposal:** Jack autonomously rewrites lib.rs into GPU kernels.
+
+**Deferral reasoning:**
+- ✅ CUDA acceleration is sound engineering for scaling to 128³ or 256³ lattices.
+- ❌ **Premature optimization.** The current bottleneck is physics design, not
+  computational speed. The engine runs 23 CA steps/second on CPU, which is adequate
+  for 64³. Rewriting to CUDA before the physics is stable means rewriting twice.
+- ❌ The actual stepping happens in Python/numpy (continuous_evolution_ca.py), not
+  in the Rust backend. A CUDA port would need to target the Python code, not lib.rs.
+
+**When to revisit:** After v0.8.0 demonstrates stable COMPUTE ≥15% and the physics
+parameters are frozen, CUDA acceleration becomes the v0.9.0 priority for lattice
+scaling.
+
+**Jack is authorized** to begin *profiling* the current engine to identify the
+critical path for future GPU offload. This is read-only analysis, not rewriting.
+
+---
+
+## 15. v0.7.x Spec — "The Cosmic Garden" (Vetted)
+
+**Version:** v0.7.1 (parameter tuning) → v0.7.5 (new mechanisms)
+**Architect:** Claude (CA Physicist) — Premise Veto Officer
+**Date:** 2026-03-10
+
+### 15.1 Immediate Fixes (v0.7.1 — Parameter Tuning Only)
+
+These changes require NO new code — only TOML parameter updates and VoxelMemoryParams
+constant changes.
+
+| Parameter | Current | New | Rationale |
+|-----------|:---:|:---:|-----------|
+| `age_young_threshold` | 50 | **8** | Cells must reach first decay tier within one breathing half-cycle |
+| `age_mature_threshold` | 200 | **40** | Scale down proportionally |
+| `compute_energy_conversion_prob` | 0.30 | **0.15** | Halve forward contagion to give COMPUTE cells time to age |
+| `energy_to_compute_prob` | 0.12 | **0.20** | Strengthen reverse contagion to 1.33:1 ratio favouring COMPUTE |
+| `reverse_contagion_base_prob` | 0.15 | **0.20** | More aggressive STRUCTURAL→COMPUTE recruitment |
+| `rag_reinforcement_boost` | 1.35 | **1.50** | Faster memory strengthening |
+
+**Expected impact:** COMPUTE cells should now reach the first decay resistance tier
+(age=8) within ~10 seconds. Forward/reverse ratio flips from 2.5:1 (ENERGY favoured)
+to 1.33:1 (COMPUTE favoured). Predicted COMPUTE equilibrium: 12-16% of active cells.
+
+**For Nemo:** Verify these parameter changes don't destabilize the limit cycle.
+Run bifurcation analysis on the forward/reverse contagion ratio.
+
+### 15.2 New Mechanisms (v0.7.5 — Code Changes Required)
+
+#### Phase 2.6: Cluster Coherence (from Quantum Sync proposal)
+
+COMPUTE cells with ≥`D1` COMPUTE neighbours generate a correlated random seed:
+```
+seed = hash(floor(x/4), floor(y/4), floor(z/4), generation)
+```
+Cells sharing the same 4³ voxel block use correlated RNG for contagion resistance:
+- Forward contagion probability reduced by `D2` when in coherent cluster
+- This creates emergent "survive together or die together" dynamics
+
+Insert after Phase 2.5 (voxel memory), before Phase 2.75 (reverse contagion).
+
+#### Phase 3.5: Halbach Recuperation (new phase)
+
+When any cell transitions to VOID via stochastic decay (Phase 4):
+```python
+dying_cells = (prev_state > 0) & (next_state == 0)  # non-VOID → VOID
+for each dying cell:
+    adjacent_energy = count ENERGY neighbours
+    if adjacent_energy > 0:
+        boost adjacent ENERGY memory_strength by E1
+    if dying cell was COMPUTE and adjacent STRUCTURAL exists:
+        roll E2 → convert one adjacent STRUCTURAL to COMPUTE
+```
+
+Insert after Phase 3 (inactivity decay), before Phase 4 (stochastic overrides).
+
+#### Phase 2.8: Metabolic Priority (from Micro-Economy proposal)
+
+COMPUTE cells' reverse contagion efficiency is modulated by local resource density:
+```python
+local_energy_ratio = energy_neighbours / 26
+local_compute_ratio = compute_neighbours / 26
+efficiency = 1.0 / (1.0 + F1 * local_compute_ratio)
+actual_conversion_prob = energy_to_compute_prob * efficiency * local_energy_ratio
+```
+COMPUTE cells with zero ENERGY neighbours enter "dormant" mode:
+`dormant_mask = (compute_cells) & (energy_neighbours < F2)`
+Dormant COMPUTE cells cannot be converted by forward contagion (protected).
+
+Insert after Phase 2.75 (reverse contagion).
+
+#### Structural Memory: Bamboo Protocol
+
+Extend memory_grid from 3 channels to 5 channels:
+```python
+# Channel 0: compute_age (existing)
+# Channel 1: last_active_gen (existing)
+# Channel 2: memory_strength (existing)
+# Channel 3: structural_age (NEW)
+# Channel 4: structural_stress (NEW, reserved for v0.8.0)
+```
+
+STRUCTURAL cells age like COMPUTE cells:
+```python
+is_structural = (next_state == STATE_NAME_TO_ID["STRUCTURAL"])
+memory_grid[3][is_structural] += 1
+memory_grid[3][~is_structural] = 0
+```
+
+Decay resistance for established STRUCTURAL:
+```python
+struct_age = memory_grid[3]
+struct_resistance = np.where(struct_age < G1, 0.0,
+                   np.where(struct_age < G2, 0.5, 0.75))
+# Apply in Phase 3 (inactivity decay)
+```
+
+Bamboo renewal at rebirth_age:
+```python
+old_structural = is_structural & (struct_age >= G3)
+renewing = old_structural & (rng.random(shape) < G4)
+next_state[renewing] = STATE_NAME_TO_ID["VOID"]  # release resources
+# Halbach Recuperation phase will redistribute the energy
+```
+
+#### Phase 4.5: Entropy-Responsive Damping (from Chaos Avoidance proposal)
+
+After stochastic overrides, compute local entropy for each cell:
+```python
+for each cell:
+    local_counts = neighbour_counts_by_state[:, x, y, z]
+    local_probs = local_counts / 26
+    local_H = -sum(p * log(p) for p in local_probs if p > 0) / log(5)
+    if local_H > H1:
+        # High chaos neighbourhood — stabilize
+        all transition probabilities for this cell *= (1.0 - H2)
+```
+
+This creates natural "calm zones" around chaotic boundaries without any global
+computation.
+
+### 15.3 Complete Phase Ordering (v0.7.5)
+
+```
+Phase 1:    Deterministic transitions (outer-totalistic table)
+Phase 2:    Forward contagion (ENERGY/SENSOR → STRUCTURAL/COMPUTE)
+Phase 2.5:  Voxel memory update (age tracking, decay resistance)
+Phase 2.6:  Cluster Coherence (correlated survival for COMPUTE clusters)
+Phase 2.75: Reverse contagion (ENERGY → COMPUTE, Machine Economy)
+Phase 2.8:  Metabolic Priority (resource-limited conversion)
+Phase 3:    Inactivity decay (STRUCTURAL turnover)
+Phase 3.5:  Halbach Recuperation (energy redistribution from dying cells)
+Phase 4:    Stochastic overrides (noise-driven specialization)
+Phase 4.5:  Entropy-Responsive Damping (stabilize chaotic regions)
+Phase 5:    Memory reinforcement (COMPUTE/STRUCTURAL age + decay resistance)
+```
+
+### 15.4 All Parameters for Nemo
+
+| ID | Parameter | Proposed | Source |
+|----|-----------|:---:|--------|
+| D1 | `cluster_coherence_threshold` | 4 | Cluster Coherence |
+| D2 | `coherence_survival_bonus` | 0.15 | Cluster Coherence |
+| E1 | `recuperation_boost` | 0.30 | Halbach Recuperation |
+| E2 | `inheritance_prob` | 0.10 | Halbach Recuperation |
+| F1 | `metabolic_competition_factor` | 1.0 | Metabolic Priority |
+| F2 | `starvation_threshold` | 1 | Metabolic Priority |
+| G1 | `T_struct_1` | 100 | Bamboo Protocol |
+| G2 | `T_struct_2` | 500 | Bamboo Protocol |
+| G3 | `rebirth_age` | 2000 | Bamboo Protocol |
+| G4 | `rebirth_prob` | 0.01 | Bamboo Protocol |
+| H1 | `entropy_damping_threshold` | 0.85 | Entropy Damping |
+| H2 | `damping_factor` | 0.30 | Entropy Damping |
+
+Plus v0.7.1 parameter tuning (6 parameters from Section 15.1).
+
+**Nemo: 18 total parameters to validate.** Priority order:
+1. v0.7.1 tuning (6 params) — can deploy immediately
+2. Cluster Coherence (D1-D2) — highest impact on COMPUTE survival
+3. Halbach Recuperation (E1-E2) — energy conservation
+4. Bamboo Protocol (G1-G4) — structural lifecycle
+5. Metabolic Priority (F1-F2) — resource competition
+6. Entropy Damping (H1-H2) — stability control
+
+### 15.5 Integration Spec for Jack
+
+**v0.7.1 (parameter-only, no code changes):**
+1. Update `VoxelMemoryParams` defaults in `continuous_evolution_ca.py`
+2. Update `ContagionConfig` defaults for reduced forward contagion
+3. Rebuild and relaunch engine
+
+**v0.7.5 (code changes):**
+1. Extend `init_memory_grid()` from 3→5 channels
+2. Add `_apply_cluster_coherence()` function (Phase 2.6)
+3. Add `_apply_halbach_recuperation()` function (Phase 3.5)
+4. Add `_apply_metabolic_priority()` function (Phase 2.8)
+5. Add structural age tracking in `_apply_memory_reinforcement()` (Phase 5)
+6. Add bamboo renewal logic in Phase 3
+7. Add `_apply_entropy_damping()` function (Phase 4.5)
+8. Update `step_ca_lattice()` phase ordering
+9. Add TOML sections: `[params.cluster_coherence]`, `[params.halbach]`,
+   `[params.metabolic]`, `[params.bamboo]`, `[params.entropy_damping]`
+10. Add unit tests for each new mechanism
+11. Update status report to include structural_age stats
+
+**Quarantine Protocol:** All new code must be tested in a dry-run sandbox
+before touching the live engine. Jack must:
+- Create branch `codex/v075-cosmic-garden`
+- Run existing 7 tests + new tests
+- Verify no COMPUTE monoculture in 1000-step dry run
+- Only then submit PR for Claude's review
+
+---
+
+## 16. Operational Directives
+
+### 16.1 Hybrid Memory System (For Jack)
+
+The context window is growing heavy. Partition memory as follows:
+
+**Long Context (work.md):** Active specs only
+- Current: v0.7.x spec (Sections 14-15)
+- Active parameter tables
+- Phase ordering reference
+- Trim Sections 1-11 to summary headers only (historical)
+
+**RAG Vector Database:** All historical data
+- Move `.npz` snapshots to indexed storage with generation/fitness metadata
+- Move v0.5.0 and v0.6.0 detailed analysis (Sections 1-11) to RAG
+- Query interface: "retrieve snapshots where COMPUTE > X% and entropy > Y"
+- Implementation: ChromaDB or FAISS with numpy embedding of lattice statistics
+
+**Jack: Create `scripts/snapshot_indexer.py`** that:
+1. Reads all `.npz` files from `data/`
+2. Extracts metadata (generation, fitness, density, entropy, cell counts)
+3. Indexes into a local vector store
+4. Provides CLI query interface
+
+### 16.2 Quarantine Vault (Zero-Trust Protocol)
+
+Any external logic (web-sourced algorithms, imported code, LLM-generated patches)
+must pass through the Quarantine Vault before touching the live engine:
+
+1. **Intake:** Place in `quarantine/` directory with source attribution
+2. **Dry-Run:** Jack executes in isolated sandbox (no live data access)
+3. **Validation:** Must pass all existing tests + monoculture check
+4. **Review:** Claude reviews thermodynamic consistency
+5. **Promotion:** Only after all gates pass → merge to feature branch
+
+**Claude is authorized** to dispatch sub-agents for web research on:
+- Spatial hashing algorithms for cluster coherence
+- Energy redistribution models in physics simulations
+- Entropy-based damping in dynamical systems
+
+All retrieved content enters Quarantine. No exceptions.
+
+---
+
+*Section 13-16 authored by Claude (Opus 4.6) — Premise Veto Officer & Swarm Commander.*
+*v0.7.0 overnight: heartbeat survived, COMPUTE improved but memory system inert.*
+*v0.7.1: parameter tuning to activate voxel memory. v0.7.5: Cosmic Garden (vetted).*
+*Two proposals rejected (Multiplexed State Passing, NP-Hard framing).*
+*One deferred (CUDA Acceleration → v0.9.0).*
+*Four approved with modifications.*
+*The fog breathes. The veto officer watches. The garden grows.*
