@@ -102,6 +102,7 @@ class DefaultFitnessEvaluator(FitnessEvaluator):
 
     @staticmethod
     def _extract_state_counts(environment_context: Dict[str, Any]) -> Dict[str, int]:
+        """Extract cell state counts from environment context (dict or list form)."""
         raw_counts = environment_context.get("cell_state_counts")
         if not raw_counts:
             return {}
@@ -125,6 +126,7 @@ class DefaultFitnessEvaluator(FitnessEvaluator):
 
     @classmethod
     def _differentiation_score(cls, environment_context: Dict[str, Any]) -> float:
+        """Compute entropy bonus - structural dominance penalty."""
         counts = cls._extract_state_counts(environment_context)
         if not counts:
             return 0.0
@@ -149,7 +151,8 @@ class DefaultFitnessEvaluator(FitnessEvaluator):
         entropy_bonus = cls.ENTROPY_BONUS_WEIGHT * normalized_entropy
         penalty = cls.STRUCTURAL_DOMINANCE_PENALTY_WEIGHT * dominance_penalty
         return entropy_bonus - penalty
-    
+
+
     def evaluate_meme(self, meme: Meme, environment_context: Dict[str, Any]) -> float:
         base_fitness = meme.calculate_fitness(environment_context)
         propagation_bonus = min(0.2, meme.propagation_count * 0.01)
