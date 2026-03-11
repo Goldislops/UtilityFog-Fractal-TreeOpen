@@ -216,6 +216,14 @@ def main():
         ca_step_count = int(snap["ca_step"])
         best_fitness_ever = float(snap["best_fitness"])
         best_fitness_gen = 0
+        # v0.7.5 migration: extend 3-channel memory grid to 5 channels
+        old_channels = memory_grid.shape[0]
+        if old_channels < 5:
+            shape_3d = memory_grid.shape[1:]
+            extended = init_memory_grid(shape_3d)
+            extended[:old_channels] = memory_grid
+            memory_grid = extended
+            print(f"  [MIGRATE] Extended memory grid from {old_channels} to 5 channels (v0.7.5)")
         print(f"  [RESUME] Loaded gen={generation}, step={ca_step_count}, best_fitness={best_fitness_ever:.4f}")
     else:
         lattice = generate_primordial_seed_cube(args.seed_cube_size)
