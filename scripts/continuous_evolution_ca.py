@@ -324,10 +324,11 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
 
     # Entropy damping (analogue mutation noise)
     mut_mask = rng.random(out.shape) < mem.analogue_mutation
-    out[mut_mask & (out == STATE_NAME_TO_ID["STRUCTURAL"])] = STATE_NAME_TO_ID["COMPUTE"]
-    out[mut_mask & (out == STATE_NAME_TO_ID["COMPUTE"])] = STATE_NAME_TO_ID["ENERGY"]
-    out[mut_mask & (out == STATE_NAME_TO_ID["ENERGY"])] = STATE_NAME_TO_ID["SENSOR"]
-    out[mut_mask & (out == STATE_NAME_TO_ID["SENSOR"])] = STATE_NAME_TO_ID["STRUCTURAL"]
+    pre_mut = out.copy()
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["STRUCTURAL"])] = STATE_NAME_TO_ID["COMPUTE"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["COMPUTE"])] = STATE_NAME_TO_ID["ENERGY"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["ENERGY"])] = STATE_NAME_TO_ID["SENSOR"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["SENSOR"])] = STATE_NAME_TO_ID["STRUCTURAL"]
 
     # reset age if not compute after final reinforcement
     memory_grid[0][out != STATE_NAME_TO_ID["COMPUTE"]] = 0.0
