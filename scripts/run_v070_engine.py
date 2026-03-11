@@ -190,6 +190,8 @@ def main():
     parser = argparse.ArgumentParser(description="v0.7.0 OpenClaw Engine")
     parser.add_argument("--seed-cube-size", type=int, default=3)
     parser.add_argument("--rule-file", type=str, default=str(PROJECT_ROOT / "ca" / "rules" / "example.toml"))
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to .npz snapshot to resume from")
     args = parser.parse_args()
 
     rule_spec = load_rule_spec(args.rule_file)
@@ -206,16 +208,26 @@ def main():
 
     rng = np.random.default_rng(seed=42)
 
-    lattice = generate_primordial_seed_cube(args.seed_cube_size)
-    memory_grid = init_memory_grid(lattice.shape)
-    inactivity_steps = np.zeros_like(lattice, dtype=np.int16)
+    if args.resume:
+        snap = np.load(args.resume, allow_pickle=True)
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap["generation"])
+        ca_step_count = int(snap["ca_step"])
+        best_fitness_ever = float(snap["best_fitness"])
+        best_fitness_gen = 0
+        print(f"  [RESUME] Loaded gen={generation}, step={ca_step_count}, best_fitness={best_fitness_ever:.4f}")
+    else:
+        lattice = generate_primordial_seed_cube(args.seed_cube_size)
+        memory_grid = init_memory_grid(lattice.shape)
+        generation = 0
+        ca_step_count = 0
+        best_fitness_ever = 0.0
+        best_fitness_gen = 0
 
+    inactivity_steps = np.zeros_like(lattice, dtype=np.int16)
     population = np.array([_random_genome(rng) for _ in range(POPULATION_SIZE)], dtype=np.float32)
 
-    generation = 0
-    ca_step_count = 0
-    best_fitness_ever = 0.0
-    best_fitness_gen = 0
     start_time = time.monotonic()
     last_status = start_time
     last_snapshot = start_time
