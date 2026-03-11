@@ -53,7 +53,7 @@ def test_stochastic_transition_promotes_structural_to_energy() -> None:
     nxt, inactivity, memory, _ = step_ca_lattice(state, rule, rng, memory_grid=init_memory_grid(state.shape), current_gen=1)
 
     assert inactivity.shape == state.shape
-    assert memory.shape[0] == 3
+    assert memory.shape[0] == 5
     assert nxt[2, 2, 2] == 3
 
 

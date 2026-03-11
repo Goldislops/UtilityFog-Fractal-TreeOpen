@@ -94,7 +94,7 @@ class FitnessEvaluator(ABC):
 
 
 class DefaultFitnessEvaluator(FitnessEvaluator):
-    """Default fitness evaluator with v0.4.0 differentiation scoring."""
+    """Default fitness evaluator implementation."""
 
     ENTROPY_BONUS_WEIGHT: float = 0.25
     STRUCTURAL_DOMINANCE_PENALTY_WEIGHT: float = 0.30
@@ -151,6 +151,7 @@ class DefaultFitnessEvaluator(FitnessEvaluator):
         entropy_bonus = cls.ENTROPY_BONUS_WEIGHT * normalized_entropy
         penalty = cls.STRUCTURAL_DOMINANCE_PENALTY_WEIGHT * dominance_penalty
         return entropy_bonus - penalty
+
 
     def evaluate_meme(self, meme: Meme, environment_context: Dict[str, Any]) -> float:
         base_fitness = meme.calculate_fitness(environment_context)

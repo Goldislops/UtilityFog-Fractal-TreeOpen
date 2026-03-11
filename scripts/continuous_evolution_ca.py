@@ -52,10 +52,10 @@ class ContagionConfig:
 
 @dataclass
 class VoxelMemoryParams:
-    # A1-A3 (Nemo's constants: A1=12, A2=18, A3=0.68)
-    age_young_threshold: int = 12
-    age_mature_threshold: int = 18
-    resistance_max: float = 0.68
+    # A1-A3
+    age_young_threshold: int = 72
+    age_mature_threshold: int = 260
+    resistance_max: float = 0.82
     # B1-B4
     reverse_contagion_threshold: int = 4
     reverse_contagion_base_prob: float = 0.18
@@ -70,8 +70,20 @@ class VoxelMemoryParams:
     rag_memory_decay: float = 0.015
     rag_reinforcement_boost: float = 1.42
     rag_entropy_weight: float = 0.18
-    # Cluster shield bonus
+    # v0.7.5 lock params
     cluster_shield_bonus: float = 0.15
+    cluster_coherence_threshold: int = 4
+    shield_strength: float = 0.85
+    halbach_recuperation_rate: float = 0.40
+    temporal_dilation: float = 0.15
+    bamboo_initial_growth: int = 100
+    bamboo_max_length: int = 500
+    bamboo_rebirth_age: int = 488
+    otolith_vector: float = 0.05
+    biofilm_leech_rate: float = 0.10
+    super_pod_threshold: int = 12
+    damping_radius: int = 2
+    analogue_mutation: float = 0.03
 
 
 def load_rule_spec(rule_path: str | Path) -> Dict[str, Any]:
@@ -80,9 +92,10 @@ def load_rule_spec(rule_path: str | Path) -> Dict[str, Any]:
 
 
 def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
-    """Memory grid channels: [compute_age, last_active_gen, memory_strength]."""
-    grid = np.zeros((3,) + shape, dtype=np.float32)
+    """Memory grid channels: [compute_age, last_active_gen, memory_strength, structural_age, energy_reserve]."""
+    grid = np.zeros((5,) + shape, dtype=np.float32)
     grid[2, :, :, :] = 1.0
+    grid[4, :, :, :] = 1.0
     return grid
 
 
@@ -240,10 +253,18 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
     memory_grid[1][compute] = float(current_gen)
     memory_grid[2][compute] = np.minimum(memory_grid[2][compute] * mem.rag_reinforcement_boost, 2.0)
 
+    # Bamboo protocol: structural age growth + rebirth channel.
+    structural = out == STATE_NAME_TO_ID["STRUCTURAL"]
+    memory_grid[3][structural] = np.minimum(memory_grid[3][structural] + 1.0, float(mem.bamboo_max_length))
+    memory_grid[2][structural] = np.minimum(memory_grid[2][structural] + mem.otolith_vector, 2.0)
+    rebirth = structural & (memory_grid[3] >= float(mem.bamboo_rebirth_age))
+    out[rebirth] = STATE_NAME_TO_ID["COMPUTE"]
+    memory_grid[3][~structural] = 0.0
+
     # Decay memory for inactive voxels.
     inactive = ~compute
     generations_inactive = np.maximum(0.0, float(current_gen) - memory_grid[1])
-    memory_grid[2][inactive] *= np.power(1.0 - mem.rag_memory_decay, generations_inactive[inactive])
+    memory_grid[2][inactive] *= np.power(1.0 - (mem.rag_memory_decay * mem.temporal_dilation), generations_inactive[inactive])
     memory_grid[2] = np.maximum(memory_grid[2], 0.01)
 
     # Memory-based decay resistance for compute cells that drifted to VOID.
@@ -258,7 +279,6 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
     resistance[mature] = mem.resistance_max
     resistance[old] = mem.resistance_max * np.exp(-(age[old] - mem.age_mature_threshold) / 500.0)
     resistance *= np.minimum(memory_grid[2], 1.5)
-    # Cluster shield: COMPUTE cells with ≥5 COMPUTE neighbours gain bonus resistance
     compute_neighbors = (out == STATE_NAME_TO_ID["COMPUTE"]).astype(np.int16)
     padded = np.pad(compute_neighbors, 1, mode="constant", constant_values=0)
     compute_cluster = np.zeros_like(compute_neighbors, dtype=np.int16)
@@ -272,7 +292,7 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
                     1 + dy:1 + dy + out.shape[1],
                     1 + dx:1 + dx + out.shape[2],
                 ]
-    resistance = np.minimum(0.98, resistance + (compute_cluster >= 5).astype(np.float32) * mem.cluster_shield_bonus)
+    resistance = np.minimum(0.98, resistance + (compute_cluster >= mem.cluster_coherence_threshold).astype(np.float32) * (mem.cluster_shield_bonus + mem.shield_strength * 0.15))
 
     out[dropped_compute & (rng.random(out.shape) < resistance)] = STATE_NAME_TO_ID["COMPUTE"]
 
@@ -297,7 +317,18 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
         mem.energy_to_compute_prob - mem.forward_contagion_penalty,
     )
     e2c_prob[scluster >= mem.forward_contagion_threshold] = mitigated
+    superpod = compute_cluster >= mem.super_pod_threshold
+    e2c_prob[superpod] = np.minimum(0.95, e2c_prob[superpod] + mem.biofilm_leech_rate * 0.5)
+    memory_grid[4][superpod] = np.maximum(0.05, memory_grid[4][superpod] * (1.0 - mem.biofilm_leech_rate))
     out[energy & (rng.random(out.shape) < e2c_prob)] = STATE_NAME_TO_ID["COMPUTE"]
+
+    # Entropy damping (analogue mutation noise)
+    mut_mask = rng.random(out.shape) < mem.analogue_mutation
+    pre_mut = out.copy()
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["STRUCTURAL"])] = STATE_NAME_TO_ID["COMPUTE"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["COMPUTE"])] = STATE_NAME_TO_ID["ENERGY"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["ENERGY"])] = STATE_NAME_TO_ID["SENSOR"]
+    out[mut_mask & (pre_mut == STATE_NAME_TO_ID["SENSOR"])] = STATE_NAME_TO_ID["STRUCTURAL"]
 
     # reset age if not compute after final reinforcement
     memory_grid[0][out != STATE_NAME_TO_ID["COMPUTE"]] = 0.0

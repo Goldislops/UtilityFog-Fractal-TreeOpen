@@ -81,11 +81,13 @@ pub struct VoxelMemory {
     pub compute_age: u16,
     pub last_active_gen: u32,
     pub memory_strength: f32,
+    pub structural_age: u16,
+    pub energy_reserve: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct VoxelMemoryParams {
-    // A1-A3: age/survival curve
+    // A1-A3: age matrix
     pub age_young_threshold: u16,
     pub age_mature_threshold: u16,
     pub resistance_max: f32,
@@ -103,15 +105,27 @@ pub struct VoxelMemoryParams {
     pub rag_memory_decay: f32,
     pub rag_reinforcement_boost: f32,
     pub rag_entropy_weight: f32,
-    // cluster shielding
     pub cluster_shield_bonus: f32,
+    // v0.7.5 cosmic garden locks
+    pub cluster_coherence_threshold: usize,
+    pub shield_strength: f32,
+    pub halbach_recuperation_rate: f32,
+    pub temporal_dilation: f32,
+    pub bamboo_initial_growth: u16,
+    pub bamboo_max_length: u16,
+    pub bamboo_rebirth_age: u16,
+    pub otolith_vector: f32,
+    pub biofilm_leech_rate: f32,
+    pub super_pod_threshold: usize,
+    pub damping_radius: usize,
+    pub analogue_mutation: f32,
 }
 
 pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
-    // A1-A3 (Nemo's constants: A1=12, A2=18, A3=0.68)
-    age_young_threshold: 12,
-    age_mature_threshold: 18,
-    resistance_max: 0.68,
+    // A1-A3
+    age_young_threshold: 72,
+    age_mature_threshold: 260,
+    resistance_max: 0.82,
     // B1-B4
     reverse_contagion_threshold: 4,
     reverse_contagion_base_prob: 0.18,
@@ -126,13 +140,25 @@ pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     rag_memory_decay: 0.015,
     rag_reinforcement_boost: 1.42,
     rag_entropy_weight: 0.18,
-    // +15% shield when compute cluster >=5
     cluster_shield_bonus: 0.15,
+    // Cosmic garden 18-lock parameters
+    cluster_coherence_threshold: 4,
+    shield_strength: 0.85,
+    halbach_recuperation_rate: 0.40,
+    temporal_dilation: 0.15,
+    bamboo_initial_growth: 100,
+    bamboo_max_length: 500,
+    bamboo_rebirth_age: 488,
+    otolith_vector: 0.05,
+    biofilm_leech_rate: 0.10,
+    super_pod_threshold: 12,
+    damping_radius: 2,
+    analogue_mutation: 0.03,
 };
 
 impl VoxelMemory {
     pub fn new() -> Self {
-        Self { compute_age: 0, last_active_gen: 0, memory_strength: 1.0 }
+        Self { compute_age: 0, last_active_gen: 0, memory_strength: 1.0, structural_age: 0, energy_reserve: 1.0 }
     }
 
     pub fn decay_resistance(&self) -> f32 {
@@ -151,7 +177,7 @@ impl VoxelMemory {
     pub fn decay_memory(&mut self, current_gen: u32) {
         let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
         let p = &VOXEL_MEMORY_PARAMS;
-        self.memory_strength *= (1.0 - p.rag_memory_decay).powi(generations_inactive as i32);
+        self.memory_strength *= (1.0 - (p.rag_memory_decay * p.temporal_dilation)).powi(generations_inactive as i32);
         self.memory_strength = self.memory_strength.max(0.01);
     }
 }
@@ -351,9 +377,22 @@ impl MultiStateRule {
         if current == CellState::Compute {
             memory.compute_age = memory.compute_age.saturating_add(1);
             memory.last_active_gen = current_gen;
-            memory.memory_strength = (memory.memory_strength + 0.05).min(2.0);
+            memory.memory_strength = (memory.memory_strength + VOXEL_MEMORY_PARAMS.halbach_recuperation_rate * 0.1).min(2.0);
+            memory.structural_age = 0;
         } else {
             memory.decay_memory(current_gen);
+        }
+
+        if current == CellState::Structural {
+            memory.structural_age = memory.structural_age.saturating_add(1);
+            if memory.structural_age < VOXEL_MEMORY_PARAMS.bamboo_initial_growth {
+                memory.memory_strength = (memory.memory_strength + VOXEL_MEMORY_PARAMS.otolith_vector).min(2.0);
+            }
+            if memory.structural_age >= VOXEL_MEMORY_PARAMS.bamboo_rebirth_age {
+                next = CellState::Compute;
+                memory.structural_age = 0;
+                memory.compute_age = VOXEL_MEMORY_PARAMS.bamboo_initial_growth.min(VOXEL_MEMORY_PARAMS.bamboo_max_length);
+            }
         }
 
         if current == CellState::Compute && next == CellState::Void {
@@ -365,6 +404,9 @@ impl MultiStateRule {
             let mut resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
             if counts.compute >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
                 resistance += VOXEL_MEMORY_PARAMS.cluster_shield_bonus;
+            }
+            if counts.compute >= VOXEL_MEMORY_PARAMS.cluster_coherence_threshold {
+                resistance += VOXEL_MEMORY_PARAMS.shield_strength * 0.25;
             }
             resistance = resistance.min(0.98);
             if roll < resistance {
@@ -378,6 +420,11 @@ impl MultiStateRule {
             (counts.compute as u64).hash(&mut hasher);
             let roll = (hasher.finish() % 1000) as f32 / 1000.0;
             let mut prob = VOXEL_MEMORY_PARAMS.energy_to_compute_prob;
+            if counts.compute >= VOXEL_MEMORY_PARAMS.super_pod_threshold {
+                let leech = VOXEL_MEMORY_PARAMS.biofilm_leech_rate;
+                memory.energy_reserve = (memory.energy_reserve * (1.0 - leech)).max(0.05);
+                prob = (prob + leech * 0.5).min(0.95);
+            }
             if counts.structural >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
                 prob = (prob - VOXEL_MEMORY_PARAMS.forward_contagion_penalty)
                     .max(VOXEL_MEMORY_PARAMS.forward_contagion_floor * VOXEL_MEMORY_PARAMS.energy_to_compute_prob);
@@ -404,10 +451,44 @@ impl MultiStateRule {
             }
         }
 
+        // Entropy damping via analogue mutation noise.
+        let mut hasher = DefaultHasher::new();
+        (rng_seed.wrapping_add(29)).hash(&mut hasher);
+        let noise_roll = (hasher.finish() % 1000) as f32 / 1000.0;
+        if noise_roll < VOXEL_MEMORY_PARAMS.analogue_mutation {
+            next = match next {
+                CellState::Structural => CellState::Compute,
+                CellState::Compute => CellState::Energy,
+                CellState::Energy => CellState::Sensor,
+                CellState::Sensor => CellState::Structural,
+                CellState::Void => CellState::Void,
+            };
+        }
+
         if next != CellState::Compute {
             memory.compute_age = 0;
         }
 
+        next
+    }
+
+    /// OpenFang-style WASM sandbox gate for contraction-phase simulations.
+    pub fn apply_with_memory_sandboxed(
+        &self,
+        current: CellState,
+        counts: &NeighborCount,
+        memory: &mut VoxelMemory,
+        current_gen: u32,
+        rng_seed: u64,
+        contraction_phase: bool,
+    ) -> CellState {
+        let mut next = self.apply_with_memory(current, counts, memory, current_gen, rng_seed);
+        if contraction_phase {
+            // During contraction, prevent unstable direct jump to VOID for mature COMPUTE clusters.
+            if current == CellState::Compute && counts.compute >= VOXEL_MEMORY_PARAMS.damping_radius + 3 && next == CellState::Void {
+                next = CellState::Compute;
+            }
+        }
         next
     }
 }

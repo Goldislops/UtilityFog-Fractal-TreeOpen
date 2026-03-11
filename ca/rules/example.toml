@@ -15,116 +15,126 @@
 # Claude (Opus 4.6): Python engine integration + QA
 
 [rule]
-name = "branching-growth-v0.6"
+name = "branching-growth-v0.7.5"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
-# Deterministic backbone; stochastic/contagion/density-targeting introduce non-determinism.
+# Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
-# --- Transitions: { neighbour_count = "TARGET_STATE" } ---
+[params.transitions]
+# Widen re-nucleation to maintain scaffold regeneration.
+VOID = {
+  3 = "STRUCTURAL",
+  4 = "STRUCTURAL",
+  5 = "STRUCTURAL",
+  6 = "STRUCTURAL"
+}
 
-[params.transitions.VOID]
-# Wider nucleation: STRUCTURAL at 3-6 (unchanged) + ENERGY at 2 (NEW pathway)
-2 = "ENERGY"
-3 = "STRUCTURAL"
-4 = "STRUCTURAL"
-5 = "STRUCTURAL"
-6 = "STRUCTURAL"
+# Buff STRUCTURAL: preserve low-density scaffold before differentiation.
+STRUCTURAL = {
+  0 = "STRUCTURAL",
+  1 = "STRUCTURAL",
+  2 = "STRUCTURAL",
+  3 = "COMPUTE",
+  4 = "COMPUTE",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-[params.transitions.STRUCTURAL]
-# WIDENED COMPUTE WINDOW: 3-6 → COMPUTE (was 3-4 only)
-# High-density survival at 7-8 restored (was SENSOR in v0.5.0)
-# This is the primary lever for COMPUTE production.
-0 = "STRUCTURAL"
-1 = "STRUCTURAL"
-2 = "STRUCTURAL"
-3 = "COMPUTE"
-4 = "COMPUTE"
-5 = "COMPUTE"
-6 = "COMPUTE"
-7 = "STRUCTURAL"
-8 = "STRUCTURAL"
+# Buff COMPUTE: wider stability band so it can accumulate as an intermediary.
+COMPUTE = {
+  1 = "COMPUTE",
+  2 = "COMPUTE",
+  3 = "COMPUTE",
+  4 = "ENERGY",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
 
-[params.transitions.COMPUTE]
-# WIDENED survival: 0-5 (was 1-3). COMPUTE now persists in moderate density.
-# Only converts at 6+ neighbours (extreme crowding).
-0 = "COMPUTE"
-1 = "COMPUTE"
-2 = "COMPUTE"
-3 = "COMPUTE"
-4 = "COMPUTE"
-5 = "COMPUTE"
-6 = "ENERGY"
+# ENERGY remains robust but can still route to SENSOR at higher density.
+ENERGY = {
+  0 = "ENERGY",
+  1 = "ENERGY",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-[params.transitions.ENERGY]
-# Asymmetric stability: ENERGY persists 0-5, routes to SENSOR at 6-8.
-# (Unchanged from v0.5.0 — ENERGY was not the problem.)
-0 = "ENERGY"
-1 = "ENERGY"
-2 = "ENERGY"
-3 = "ENERGY"
-4 = "ENERGY"
-5 = "ENERGY"
-6 = "SENSOR"
-7 = "SENSOR"
-8 = "SENSOR"
-
-[params.transitions.SENSOR]
-# SENSOR stable 0-6 (unchanged from v0.5.0).
-0 = "SENSOR"
-1 = "SENSOR"
-2 = "SENSOR"
-3 = "SENSOR"
-4 = "SENSOR"
-5 = "SENSOR"
-6 = "SENSOR"
+# Nerf SENSOR: vulnerable at extreme densities (7-8 no longer stable mapping).
+SENSOR = {
+  0 = "SENSOR",
+  1 = "SENSOR",
+  2 = "SENSOR",
+  3 = "SENSOR",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
 
 [params.contagion]
 enabled = true
-# State-aware neighbor influence thresholds — raised to reduce pressure.
-energy_neighbor_threshold = 5
-sensor_neighbor_threshold = 5
-# STRUCTURAL contagion unchanged (these convert to ENERGY/SENSOR).
+# State-aware neighbor influence thresholds.
+energy_neighbor_threshold = 4
+sensor_neighbor_threshold = 4
+# STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
 structural_energy_conversion_prob = 0.34
 structural_sensor_conversion_prob = 0.34
-# COMPUTE contagion HALVED — let COMPUTE survive near ENERGY/SENSOR clusters.
-compute_energy_conversion_prob = 0.15
-compute_sensor_conversion_prob = 0.15
+compute_energy_conversion_prob = 0.30
+compute_sensor_conversion_prob = 0.30
 
 [params.stochastic]
 enabled = true
-# Baseline chaos rate retained at 8%.
+# Cranked chaos baseline (requested: 8%).
 baseline_transition_prob = 0.08
-# STRUCTURAL stochastic specialization (retained).
-structural_to_energy_prob = 0.06
-structural_to_sensor_prob = 0.06
-# COMPUTE stochastic drain SLASHED from 10% to 3% each.
-compute_to_energy_prob = 0.03
-compute_to_sensor_prob = 0.03
-# Decay rates.
+# Direct stochastic specialization from scaffold and compute states.
+structural_to_energy_prob = 0.08
+structural_to_sensor_prob = 0.08
+compute_to_energy_prob = 0.10
+compute_to_sensor_prob = 0.10
+# Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
 structural_to_void_decay_prob = 0.025
 energy_to_void_decay_prob = 0.004
 sensor_to_void_decay_prob = 0.003
 
-[params.density_targeting]
-# Nemo's density-targeting probability curve (THE KEY v0.6.0 INNOVATION).
-# When COMPUTE fraction < target, boost STRUCTURAL→COMPUTE creation rate.
-# When COMPUTE fraction >= target, suppress it to prevent overshoot.
-enabled = true
-compute_target_fraction = 0.25
-boost_probability = 0.85
-suppress_probability = 0.35
-
 [params.decay]
 enabled = true
-# 6-step inactivity threshold (unchanged from v0.5.0).
+# Structural cells with low support decay quickly, forcing turnover.
 inactivity_neighbor_threshold = 1
 structural_inactive_steps_to_decay = 6
 
 [params.meta]
-description = "v0.6 The COMPUTE Awakening — density-targeting + wider windows break the 1% bottleneck"
-author = "Nemo (Kimi K2.5) + Jack (GPT-5.4) + Claude (Opus 4.6) + AURA (Gemini)"
-version = "0.6.0"
+description = "v0.7.5 cosmic garden lock with coherence, bamboo rebirth, and entropy damping"
+author = "UtilityFog Team"
+version = "0.7.5"
 target_lambda = 1.7
+
+[params.cosmic_garden]
+# Cluster coherence (D1,D2)
+cluster_coherence_threshold = 4
+shield_strength = 0.85
+
+# Halbach recuperation (E1,E2)
+halbach_recuperation_rate = 0.40
+temporal_dilation = 0.15
+
+# Bamboo protocol (G1-G4)
+bamboo_initial_growth = 100
+bamboo_max_length = 500
+bamboo_rebirth_age = 488
+otolith_vector = 0.05
+
+# Metabolic priority (F1,F2)
+biofilm_leech_rate = 0.10
+super_pod_threshold = 12
+
+# Entropy damping (H1,H2)
+damping_radius = 2
+analogue_mutation = 0.03
