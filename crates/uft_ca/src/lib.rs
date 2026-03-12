@@ -144,7 +144,7 @@ pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     rag_entropy_weight: 0.18,
     cluster_shield_bonus: 0.15,
     // Cosmic garden 18-lock parameters
-    cluster_coherence_threshold: 4,
+    cluster_coherence_threshold: 3,
     shield_strength: 0.85,
     halbach_recuperation_rate: 0.40,
     temporal_dilation: 0.15,
@@ -153,7 +153,7 @@ pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     bamboo_rebirth_age: 488,
     otolith_vector: 0.05,
     biofilm_leech_rate: 0.10,
-    super_pod_threshold: 12,
+    super_pod_threshold: 8,
     damping_radius: 2,
     analogue_mutation: 0.03,
 };
