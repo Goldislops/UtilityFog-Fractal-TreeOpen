@@ -12,6 +12,9 @@
 //! - State observation: census, spatial queries, time-series recording, snapshot/replay
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use rayon::prelude::*;
 
 #[cfg(feature = "python")]
@@ -70,6 +73,238 @@ impl NeighborCount {
 
     pub fn total_non_void(&self) -> usize {
         self.structural + self.compute + self.energy + self.sensor
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoxelMemory {
+    pub compute_age: u16,
+    pub last_active_gen: u32,
+    pub memory_strength: f32,
+    pub structural_age: u16,
+    pub energy_reserve: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VoxelMemoryParams {
+    // A1-A3: age matrix
+    pub age_young_threshold: u16,
+    pub age_mature_threshold: u16,
+    pub resistance_max: f32,
+    // B1-B4: density-targeting rebalance
+    pub reverse_contagion_threshold: usize,
+    pub reverse_contagion_base_prob: f32,
+    pub reverse_contagion_boost: f32,
+    pub energy_to_compute_prob: f32,
+    pub compute_energy_conversion_prob: f32,
+    // C1-C3: forward contagion mitigation
+    pub forward_contagion_threshold: usize,
+    pub forward_contagion_penalty: f32,
+    pub forward_contagion_floor: f32,
+    // D1-D3: limit cycle preservation
+    pub rag_query_radius: usize,
+    pub rag_memory_decay: f32,
+    pub rag_reinforcement_boost: f32,
+    pub rag_entropy_weight: f32,
+    pub cluster_shield_bonus: f32,
+    // v0.7.5 cosmic garden locks
+    pub cluster_coherence_threshold: usize,
+    pub shield_strength: f32,
+    pub halbach_recuperation_rate: f32,
+    pub temporal_dilation: f32,
+    pub bamboo_initial_growth: u16,
+    pub bamboo_max_length: u16,
+    pub bamboo_rebirth_age: u16,
+    pub otolith_vector: f32,
+    pub biofilm_leech_rate: f32,
+    pub super_pod_threshold: usize,
+    pub damping_radius: usize,
+    pub analogue_mutation: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SelectiveMemoryDecayConfig {
+    pub enabled: bool,
+    pub memory_strength_threshold: f32,
+    pub compute_neighbor_threshold: usize,
+    pub low_decay_rate: f32,
+    pub high_decay_rate: f32,
+}
+
+pub const SELECTIVE_MEMORY_DECAY_DEFAULTS: SelectiveMemoryDecayConfig = SelectiveMemoryDecayConfig {
+    enabled: false,
+    memory_strength_threshold: 0.75,
+    compute_neighbor_threshold: 6,
+    low_decay_rate: 0.015,
+    high_decay_rate: 0.045,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct DensityPhaseDetectorConfig {
+    pub enabled: bool,
+    pub window_size: usize,
+    pub density_low_threshold: f32,
+    pub density_high_threshold: f32,
+    pub first_derivative_threshold: f32,
+    pub second_derivative_threshold: f32,
+    pub contraction_density_threshold: f32,
+    pub trigger_sandboxed_memory: bool,
+}
+
+pub const DENSITY_PHASE_DETECTOR_DEFAULTS: DensityPhaseDetectorConfig = DensityPhaseDetectorConfig {
+    enabled: false,
+    window_size: 8,
+    density_low_threshold: 0.10,
+    density_high_threshold: 0.65,
+    first_derivative_threshold: 0.03,
+    second_derivative_threshold: 0.02,
+    contraction_density_threshold: 0.22,
+    trigger_sandboxed_memory: false,
+};
+
+#[derive(Debug, Clone)]
+pub struct DensityPhaseDetector {
+    pub config: DensityPhaseDetectorConfig,
+    densities: VecDeque<f32>,
+    derivatives: VecDeque<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DensityPhaseSignal {
+    pub density: f32,
+    pub first_derivative: f32,
+    pub second_derivative: f32,
+    pub triggered: bool,
+}
+
+pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
+    // A1-A3
+    age_young_threshold: 8,
+    age_mature_threshold: 40,
+    resistance_max: 0.82,
+    // B1-B4
+    reverse_contagion_threshold: 4,
+    reverse_contagion_base_prob: 0.20,
+    reverse_contagion_boost: 0.06,
+    energy_to_compute_prob: 0.20,
+    compute_energy_conversion_prob: 0.15,
+    // C1-C3
+    forward_contagion_threshold: 5,
+    forward_contagion_penalty: 0.18,
+    forward_contagion_floor: 0.40,
+    // D1-D3
+    rag_query_radius: 3,
+    rag_memory_decay: 0.015,
+    rag_reinforcement_boost: 1.50,
+    rag_entropy_weight: 0.18,
+    cluster_shield_bonus: 0.15,
+    // Cosmic garden 18-lock parameters
+    cluster_coherence_threshold: 3,
+    shield_strength: 0.85,
+    halbach_recuperation_rate: 0.40,
+    temporal_dilation: 0.15,
+    bamboo_initial_growth: 100,
+    bamboo_max_length: 500,
+    bamboo_rebirth_age: 488,
+    otolith_vector: 0.05,
+    biofilm_leech_rate: 0.10,
+    super_pod_threshold: 8,
+    damping_radius: 2,
+    analogue_mutation: 0.03,
+};
+
+impl VoxelMemory {
+    pub fn new() -> Self {
+        Self { compute_age: 0, last_active_gen: 0, memory_strength: 1.0, structural_age: 0, energy_reserve: 1.0 }
+    }
+
+    pub fn decay_resistance(&self) -> f32 {
+        let age = self.compute_age;
+        let p = &VOXEL_MEMORY_PARAMS;
+
+        if age <= p.age_young_threshold {
+            (age as f32 / p.age_young_threshold as f32) * p.resistance_max
+        } else if age <= p.age_mature_threshold {
+            p.resistance_max
+        } else {
+            p.resistance_max * (-((age - p.age_mature_threshold) as f32) / 500.0).exp()
+        }
+    }
+
+    pub fn decay_memory(&mut self, current_gen: u32) {
+        let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
+        let p = &VOXEL_MEMORY_PARAMS;
+        self.memory_strength *= (1.0 - (p.rag_memory_decay * p.temporal_dilation)).powi(generations_inactive as i32);
+        self.memory_strength = self.memory_strength.max(0.01);
+    }
+
+    pub fn decay_memory_selective(
+        &mut self,
+        current_gen: u32,
+        compute_neighbors: usize,
+        config: SelectiveMemoryDecayConfig,
+    ) {
+        let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
+        if !config.enabled {
+            self.decay_memory(current_gen);
+            return;
+        }
+
+        let rate = if self.memory_strength >= config.memory_strength_threshold
+            || compute_neighbors >= config.compute_neighbor_threshold
+        {
+            config.high_decay_rate
+        } else {
+            config.low_decay_rate
+        };
+
+        self.memory_strength *= (1.0 - rate).powi(generations_inactive as i32);
+        self.memory_strength = self.memory_strength.max(0.01);
+    }
+}
+
+impl DensityPhaseDetector {
+    pub fn new(config: DensityPhaseDetectorConfig) -> Self {
+        Self { config, densities: VecDeque::new(), derivatives: VecDeque::new() }
+    }
+
+    pub fn update(&mut self, density: f32) -> DensityPhaseSignal {
+        let prev_density = *self.densities.back().unwrap_or(&density);
+        let first_derivative = density - prev_density;
+        let prev_d1 = *self.derivatives.back().unwrap_or(&first_derivative);
+        let second_derivative = first_derivative - prev_d1;
+
+        self.densities.push_back(density);
+        self.derivatives.push_back(first_derivative);
+        while self.densities.len() > self.config.window_size {
+            self.densities.pop_front();
+        }
+        while self.derivatives.len() > self.config.window_size {
+            self.derivatives.pop_front();
+        }
+
+        let mut triggered = false;
+        if self.config.enabled && self.densities.len() >= 3 {
+            let in_band = density >= self.config.density_low_threshold && density <= self.config.density_high_threshold;
+            let high_d1 = first_derivative.abs() >= self.config.first_derivative_threshold;
+            let high_d2 = second_derivative.abs() >= self.config.second_derivative_threshold;
+            let contracting = density <= self.config.contraction_density_threshold && first_derivative < 0.0;
+            triggered = in_band && high_d1 && high_d2 && contracting;
+        }
+
+        DensityPhaseSignal { density, first_derivative, second_derivative, triggered }
+    }
+}
+
+pub fn reverse_contagion_probability(compute_neighbors: usize) -> f32 {
+    let p = &VOXEL_MEMORY_PARAMS;
+    if compute_neighbors < p.reverse_contagion_threshold {
+        0.0
+    } else {
+        let excess = (compute_neighbors - p.reverse_contagion_threshold) as f32;
+        let prob = p.reverse_contagion_base_prob + p.reverse_contagion_boost * excess;
+        prob.min(0.95)
     }
 }
 
@@ -185,6 +420,191 @@ impl MultiStateRule {
         rule.set_default(CellState::Sensor, CellState::Sensor);
 
         rule
+    }
+
+    pub fn utility_fog_optimized_v060() -> Self {
+        let mut rule = MultiStateRule::new();
+
+        // VOID transitions: broader nucleation window
+        rule.add_transition(CellState::Void, CellState::Energy, 2, usize::MAX, CellState::Energy);
+        rule.add_transition(CellState::Void, CellState::Structural, 3, usize::MAX, CellState::Structural);
+        rule.set_default(CellState::Void, CellState::Void);
+
+        // ENERGY transitions: enhanced stability with COMPUTE coupling
+        rule.add_transition(CellState::Energy, CellState::Compute, 1, usize::MAX, CellState::Compute);
+        rule.add_transition(CellState::Energy, CellState::Energy, 1, usize::MAX, CellState::Energy);
+        rule.set_default(CellState::Energy, CellState::Void);
+
+        // COMPUTE transitions: density-preserving with ENERGY dependency
+        rule.add_transition(CellState::Compute, CellState::Energy, 1, usize::MAX, CellState::Compute);
+        rule.add_transition(CellState::Compute, CellState::Compute, 2, 4, CellState::Compute);
+        rule.set_default(CellState::Compute, CellState::Void);
+
+        // STRUCTURAL transitions
+        rule.add_transition(CellState::Structural, CellState::Structural, 1, 2, CellState::Structural);
+        rule.add_transition(CellState::Structural, CellState::Structural, 3, 6, CellState::Compute);
+        rule.add_transition(CellState::Structural, CellState::Structural, 7, usize::MAX, CellState::Structural);
+        rule.set_default(CellState::Structural, CellState::Void);
+
+        // SENSOR transitions
+        rule.add_transition(CellState::Sensor, CellState::Compute, 2, usize::MAX, CellState::Compute);
+        rule.set_default(CellState::Sensor, CellState::Sensor);
+
+        rule
+    }
+
+    /// Stochastic transition with density-targeting probability curve.
+    pub fn apply_stochastic(&self, current: CellState, counts: &NeighborCount, rng_seed: u64) -> CellState {
+        let mut hasher = DefaultHasher::new();
+        rng_seed.hash(&mut hasher);
+        (counts.structural as u64).hash(&mut hasher);
+        (counts.compute as u64).hash(&mut hasher);
+        (counts.energy as u64).hash(&mut hasher);
+        let hash_val = hasher.finish();
+
+        let base_state = self.apply(current, counts);
+
+        if current == CellState::Structural && base_state == CellState::Compute {
+            let prob_factor = (hash_val % 100) as f64 / 100.0;
+            let compute_density = counts.compute as f64 / 26.0;
+            let target_prob = if compute_density < 0.25 { 0.85 } else { 0.35 };
+
+            if prob_factor < target_prob {
+                CellState::Compute
+            } else {
+                CellState::Structural
+            }
+        } else {
+            base_state
+        }
+    }
+
+    pub fn apply_with_memory(
+        &self,
+        current: CellState,
+        counts: &NeighborCount,
+        memory: &mut VoxelMemory,
+        current_gen: u32,
+        rng_seed: u64,
+    ) -> CellState {
+        let mut next = self.apply_stochastic(current, counts, rng_seed);
+
+        if current == CellState::Compute {
+            memory.compute_age = memory.compute_age.saturating_add(1);
+            memory.last_active_gen = current_gen;
+            memory.memory_strength = (memory.memory_strength + VOXEL_MEMORY_PARAMS.halbach_recuperation_rate * 0.1).min(2.0);
+            memory.structural_age = 0;
+        } else {
+            memory.decay_memory(current_gen);
+        }
+
+        if current == CellState::Structural {
+            memory.structural_age = memory.structural_age.saturating_add(1);
+            if memory.structural_age < VOXEL_MEMORY_PARAMS.bamboo_initial_growth {
+                memory.memory_strength = (memory.memory_strength + VOXEL_MEMORY_PARAMS.otolith_vector).min(2.0);
+            }
+            if memory.structural_age >= VOXEL_MEMORY_PARAMS.bamboo_rebirth_age {
+                next = CellState::Compute;
+                memory.structural_age = 0;
+                memory.compute_age = VOXEL_MEMORY_PARAMS.bamboo_initial_growth.min(VOXEL_MEMORY_PARAMS.bamboo_max_length);
+            }
+        }
+
+        if current == CellState::Compute && next == CellState::Void {
+            let mut hasher = DefaultHasher::new();
+            (rng_seed.wrapping_add(7)).hash(&mut hasher);
+            (counts.compute as u64).hash(&mut hasher);
+            (counts.energy as u64).hash(&mut hasher);
+            let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+            let mut resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
+            if counts.compute >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
+                resistance += VOXEL_MEMORY_PARAMS.cluster_shield_bonus;
+            }
+            if counts.compute >= VOXEL_MEMORY_PARAMS.cluster_coherence_threshold {
+                resistance += VOXEL_MEMORY_PARAMS.shield_strength * 0.25;
+            }
+            resistance = resistance.min(0.98);
+            if roll < resistance {
+                next = CellState::Compute;
+            }
+        }
+
+        if current == CellState::Energy {
+            let mut hasher = DefaultHasher::new();
+            rng_seed.hash(&mut hasher);
+            (counts.compute as u64).hash(&mut hasher);
+            let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+            let mut prob = VOXEL_MEMORY_PARAMS.energy_to_compute_prob;
+            if counts.compute >= VOXEL_MEMORY_PARAMS.super_pod_threshold {
+                let leech = VOXEL_MEMORY_PARAMS.biofilm_leech_rate;
+                memory.energy_reserve = (memory.energy_reserve * (1.0 - leech)).max(0.05);
+                prob = (prob + leech * 0.5).min(0.95);
+            }
+            if counts.structural >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
+                prob = (prob - VOXEL_MEMORY_PARAMS.forward_contagion_penalty)
+                    .max(VOXEL_MEMORY_PARAMS.forward_contagion_floor * VOXEL_MEMORY_PARAMS.energy_to_compute_prob);
+            }
+            if roll < prob {
+                next = CellState::Compute;
+                memory.compute_age = memory.compute_age.saturating_add(1);
+                memory.last_active_gen = current_gen;
+            }
+        }
+
+        if current == CellState::Structural {
+            let rc_prob = reverse_contagion_probability(counts.compute);
+            if rc_prob > 0.0 {
+                let mut hasher = DefaultHasher::new();
+                (rng_seed.wrapping_add(13)).hash(&mut hasher);
+                (counts.compute as u64).hash(&mut hasher);
+                let roll = (hasher.finish() % 1000) as f32 / 1000.0;
+                if roll < rc_prob {
+                    next = CellState::Compute;
+                    memory.compute_age = memory.compute_age.saturating_add(1);
+                    memory.last_active_gen = current_gen;
+                }
+            }
+        }
+
+        // Entropy damping via analogue mutation noise.
+        let mut hasher = DefaultHasher::new();
+        (rng_seed.wrapping_add(29)).hash(&mut hasher);
+        let noise_roll = (hasher.finish() % 1000) as f32 / 1000.0;
+        if noise_roll < VOXEL_MEMORY_PARAMS.analogue_mutation {
+            next = match next {
+                CellState::Structural => CellState::Compute,
+                CellState::Compute => CellState::Energy,
+                CellState::Energy => CellState::Sensor,
+                CellState::Sensor => CellState::Structural,
+                CellState::Void => CellState::Void,
+            };
+        }
+
+        if next != CellState::Compute {
+            memory.compute_age = 0;
+        }
+
+        next
+    }
+
+    /// OpenFang-style WASM sandbox gate for contraction-phase simulations.
+    pub fn apply_with_memory_sandboxed(
+        &self,
+        current: CellState,
+        counts: &NeighborCount,
+        memory: &mut VoxelMemory,
+        current_gen: u32,
+        rng_seed: u64,
+        contraction_phase: bool,
+    ) -> CellState {
+        let mut next = self.apply_with_memory(current, counts, memory, current_gen, rng_seed);
+        if contraction_phase {
+            // During contraction, prevent unstable direct jump to VOID for mature COMPUTE clusters.
+            if current == CellState::Compute && counts.compute >= VOXEL_MEMORY_PARAMS.damping_radius + 3 && next == CellState::Void {
+                next = CellState::Compute;
+            }
+        }
+        next
     }
 }
 
@@ -330,6 +750,69 @@ impl GraphState {
         }
     }
 
+    pub fn step_multi_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_stochastic(current, &counts, i as u64);
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState {
+            nodes: next_nodes,
+            adjacency: self.adjacency.clone(),
+        }
+    }
+
+
+
+    pub fn step_multi_with_memory(
+        &self,
+        rule: &MultiStateRule,
+        memory_grid: &mut [VoxelMemory],
+        current_gen: u32,
+    ) -> GraphState {
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_with_memory(current, &counts, &mut memory_grid[i], current_gen, i as u64);
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
+    }
+
+    pub fn step_multi_with_memory_experimental(
+        &self,
+        rule: &MultiStateRule,
+        memory_grid: &mut [VoxelMemory],
+        current_gen: u32,
+        _selective_decay: SelectiveMemoryDecayConfig,
+        mut detector: Option<&mut DensityPhaseDetector>,
+    ) -> GraphState {
+        let total = self.nodes.len().max(1) as f32;
+        let non_void = self.nodes.iter().filter(|&&s| s != u8::from(CellState::Void)).count() as f32;
+        let signal = detector.as_deref_mut().map(|d| d.update(non_void / total));
+        let contraction_phase = signal
+            .map(|s| s.triggered)
+            .unwrap_or(false);
+
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_with_memory_sandboxed(
+                current,
+                &counts,
+                &mut memory_grid[i],
+                current_gen,
+                i as u64,
+                contraction_phase,
+            );
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
+    }
     pub fn step_multi_par(&self, rule: &MultiStateRule) -> GraphState {
         let next_nodes: Vec<u8> = (0..self.nodes.len())
             .into_par_iter()
@@ -345,11 +828,34 @@ impl GraphState {
         }
     }
 
+    pub fn step_multi_par_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        let next_nodes: Vec<u8> = (0..self.nodes.len())
+            .into_par_iter()
+            .map(|i| {
+                let current = CellState::from(self.nodes[i]);
+                let counts = self.count_neighbors(i);
+                u8::from(rule.apply_stochastic(current, &counts, i as u64))
+            })
+            .collect();
+        GraphState {
+            nodes: next_nodes,
+            adjacency: self.adjacency.clone(),
+        }
+    }
+
     pub fn step_auto(&self, rule: &MultiStateRule) -> GraphState {
         if self.nodes.len() >= PAR_THRESHOLD {
             self.step_multi_par(rule)
         } else {
             self.step_multi(rule)
+        }
+    }
+
+    pub fn step_auto_stochastic(&self, rule: &MultiStateRule) -> GraphState {
+        if self.nodes.len() >= PAR_THRESHOLD {
+            self.step_multi_par_stochastic(rule)
+        } else {
+            self.step_multi_stochastic(rule)
         }
     }
 
@@ -763,6 +1269,8 @@ pub struct MultiStateGraphLattice {
     state: GraphState,
     rule: MultiStateRule,
     coords: Option<Vec<(f64, f64, f64)>>,
+    memory_grid: Vec<VoxelMemory>,
+    generation: u32,
 }
 
 #[cfg(feature = "python")]
@@ -783,19 +1291,25 @@ impl MultiStateGraphLattice {
         for (from, default) in defaults {
             rule.set_default(CellState::from(from), CellState::from(default));
         }
+        let node_count = states.len();
         Self {
             state: GraphState::new(states, adjacency),
             rule,
             coords: None,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
     #[staticmethod]
     fn with_fog_rules(states: Vec<u8>, adjacency: Vec<Vec<usize>>) -> Self {
+        let node_count = states.len();
         Self {
             state: GraphState::new(states, adjacency),
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: None,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -803,10 +1317,13 @@ impl MultiStateGraphLattice {
     fn sierpinski(depth: usize, initial_state: u8) -> Self {
         let gs = SierpinskiTetrahedron::generate(depth, CellState::from(initial_state));
         let coords = SierpinskiTetrahedron::coords(depth);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -814,10 +1331,13 @@ impl MultiStateGraphLattice {
     fn menger(depth: usize, initial_state: u8) -> Self {
         let gs = MengerSponge::generate(depth, CellState::from(initial_state));
         let coords = MengerSponge::coords(depth);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
@@ -825,16 +1345,20 @@ impl MultiStateGraphLattice {
     fn octahedral(side: usize, initial_state: u8) -> Self {
         let gs = OctahedralFogLattice::generate(side, CellState::from(initial_state));
         let coords = OctahedralFogLattice::coords(side);
+        let node_count = gs.nodes.len();
         Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords: Some(coords),
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         }
     }
 
     fn step(&mut self) -> Vec<u8> {
-        let next = self.state.step_multi(&self.rule);
+        let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
@@ -860,42 +1384,51 @@ impl MultiStateGraphLattice {
 
     fn step_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_multi(&self.rule);
+            let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
 
     fn step_par(&mut self) -> Vec<u8> {
-        let next = self.state.step_multi_par(&self.rule);
+        let next = self.state.step_multi_par_stochastic(&self.rule);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
     fn step_par_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_multi_par(&self.rule);
+            let next = self.state.step_multi_par_stochastic(&self.rule);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
 
     fn step_auto(&mut self) -> Vec<u8> {
-        let next = self.state.step_auto(&self.rule);
+        let next = self.state.step_auto_stochastic(&self.rule);
         self.state = next;
+        self.generation = self.generation.saturating_add(1);
         self.state.nodes.clone()
     }
 
     fn step_auto_n(&mut self, n: usize) -> Vec<u8> {
         for _ in 0..n {
-            let next = self.state.step_auto(&self.rule);
+            let next = self.state.step_auto_stochastic(&self.rule);
             self.state = next;
+            self.generation = self.generation.saturating_add(1);
         }
         self.state.nodes.clone()
     }
 
     fn set_states(&mut self, states: Vec<u8>) {
         self.state.nodes = states;
+        if self.memory_grid.len() != self.state.nodes.len() {
+            self.memory_grid = vec![VoxelMemory::new(); self.state.nodes.len()];
+            self.generation = 0;
+        }
     }
 
     fn census(&self) -> HashMap<u8, usize> {
@@ -1004,10 +1537,13 @@ impl MultiStateGraphLattice {
         } else {
             None
         };
+        let node_count = gs.nodes.len();
         Ok(Self {
             state: gs,
-            rule: MultiStateRule::utility_fog_default(),
+            rule: MultiStateRule::utility_fog_optimized_v060(),
             coords,
+            memory_grid: vec![VoxelMemory::new(); node_count],
+            generation: 0,
         })
     }
 
@@ -1116,6 +1652,42 @@ mod tests {
         assert_eq!(CellState::from(0), CellState::Void);
         assert_eq!(CellState::from(1), CellState::Structural);
         assert_eq!(u8::from(CellState::Compute), 2);
+    }
+
+    #[test]
+    fn test_selective_memory_decay_default_matches_baseline_path() {
+        let mut m1 = VoxelMemory::new();
+        let mut m2 = VoxelMemory::new();
+        m1.memory_strength = 1.2;
+        m2.memory_strength = 1.2;
+        m1.last_active_gen = 5;
+        m2.last_active_gen = 5;
+
+        m1.decay_memory(12);
+        m2.decay_memory_selective(12, 4, SELECTIVE_MEMORY_DECAY_DEFAULTS);
+
+        assert!((m1.memory_strength - m2.memory_strength).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_density_phase_detector_triggers_in_contraction_band() {
+        let mut detector = DensityPhaseDetector::new(DensityPhaseDetectorConfig {
+            enabled: true,
+            window_size: 5,
+            density_low_threshold: 0.05,
+            density_high_threshold: 0.8,
+            first_derivative_threshold: 0.05,
+            second_derivative_threshold: 0.02,
+            contraction_density_threshold: 0.30,
+            trigger_sandboxed_memory: true,
+        });
+
+        let _ = detector.update(0.90);
+        let _ = detector.update(0.25);
+        let signal = detector.update(0.12);
+
+        assert!(signal.triggered);
+        assert!(signal.first_derivative < 0.0);
     }
 
     #[test]
