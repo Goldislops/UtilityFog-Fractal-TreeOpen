@@ -96,6 +96,7 @@ pub struct VoxelMemoryParams {
     pub reverse_contagion_base_prob: f32,
     pub reverse_contagion_boost: f32,
     pub energy_to_compute_prob: f32,
+    pub compute_energy_conversion_prob: f32,
     // C1-C3: forward contagion mitigation
     pub forward_contagion_threshold: usize,
     pub forward_contagion_penalty: f32,
@@ -123,14 +124,15 @@ pub struct VoxelMemoryParams {
 
 pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     // A1-A3
-    age_young_threshold: 72,
-    age_mature_threshold: 260,
+    age_young_threshold: 8,
+    age_mature_threshold: 40,
     resistance_max: 0.82,
     // B1-B4
     reverse_contagion_threshold: 4,
-    reverse_contagion_base_prob: 0.18,
+    reverse_contagion_base_prob: 0.20,
     reverse_contagion_boost: 0.06,
-    energy_to_compute_prob: 0.16,
+    energy_to_compute_prob: 0.20,
+    compute_energy_conversion_prob: 0.15,
     // C1-C3
     forward_contagion_threshold: 5,
     forward_contagion_penalty: 0.18,
@@ -138,7 +140,7 @@ pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     // D1-D3
     rag_query_radius: 3,
     rag_memory_decay: 0.015,
-    rag_reinforcement_boost: 1.42,
+    rag_reinforcement_boost: 1.50,
     rag_entropy_weight: 0.18,
     cluster_shield_bonus: 0.15,
     // Cosmic garden 18-lock parameters

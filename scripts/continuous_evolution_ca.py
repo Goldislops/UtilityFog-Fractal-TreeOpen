@@ -46,21 +46,21 @@ class ContagionConfig:
     sensor_neighbor_threshold: int = 4
     structural_energy_conversion_prob: float = 0.40
     structural_sensor_conversion_prob: float = 0.30
-    compute_energy_conversion_prob: float = 0.30
+    compute_energy_conversion_prob: float = 0.15
     compute_sensor_conversion_prob: float = 0.25
 
 
 @dataclass
 class VoxelMemoryParams:
     # A1-A3
-    age_young_threshold: int = 72
-    age_mature_threshold: int = 260
+    age_young_threshold: int = 8
+    age_mature_threshold: int = 40
     resistance_max: float = 0.82
     # B1-B4
     reverse_contagion_threshold: int = 4
-    reverse_contagion_base_prob: float = 0.18
+    reverse_contagion_base_prob: float = 0.20
     reverse_contagion_boost: float = 0.06
-    energy_to_compute_prob: float = 0.16
+    energy_to_compute_prob: float = 0.20
     # C1-C3
     forward_contagion_threshold: int = 5
     forward_contagion_penalty: float = 0.18
@@ -68,7 +68,7 @@ class VoxelMemoryParams:
     # D1-D3
     rag_query_radius: int = 3
     rag_memory_decay: float = 0.015
-    rag_reinforcement_boost: float = 1.42
+    rag_reinforcement_boost: float = 1.50
     rag_entropy_weight: float = 0.18
     # v0.7.5 lock params
     cluster_shield_bonus: float = 0.15
@@ -166,7 +166,7 @@ def _load_contagion_config(rule_spec: Mapping[str, Any]) -> ContagionConfig:
         sensor_neighbor_threshold=int(contagion.get("sensor_neighbor_threshold", 4)),
         structural_energy_conversion_prob=float(contagion.get("structural_energy_conversion_prob", 0.40)),
         structural_sensor_conversion_prob=float(contagion.get("structural_sensor_conversion_prob", 0.30)),
-        compute_energy_conversion_prob=float(contagion.get("compute_energy_conversion_prob", 0.30)),
+        compute_energy_conversion_prob=float(contagion.get("compute_energy_conversion_prob", 0.15)),
         compute_sensor_conversion_prob=float(contagion.get("compute_sensor_conversion_prob", 0.25)),
     )
 
