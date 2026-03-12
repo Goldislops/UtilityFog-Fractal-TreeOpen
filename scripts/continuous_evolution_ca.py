@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from collections import deque
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import tomli
@@ -86,6 +87,41 @@ class VoxelMemoryParams:
     analogue_mutation: float = 0.03
 
 
+@dataclass
+class SelectiveMemoryDecayConfig:
+    enabled: bool = False
+    memory_strength_threshold: float = 0.75
+    compute_neighbor_threshold: int = 6
+    low_decay_rate: float = 0.015
+    high_decay_rate: float = 0.045
+
+
+@dataclass
+class DensityPhaseDetectorConfig:
+    enabled: bool = False
+    window_size: int = 8
+    density_low_threshold: float = 0.10
+    density_high_threshold: float = 0.65
+    first_derivative_threshold: float = 0.03
+    second_derivative_threshold: float = 0.02
+    contraction_density_threshold: float = 0.22
+    trigger_sandboxed_memory: bool = False
+
+
+@dataclass
+class MiniLatticeExperimentConfig:
+    enabled: bool = False
+    default_size: int = 16
+    default_steps: int = 6
+
+
+@dataclass
+class ExperimentalConfig:
+    selective_memory_decay: SelectiveMemoryDecayConfig = field(default_factory=SelectiveMemoryDecayConfig)
+    density_phase_detector: DensityPhaseDetectorConfig = field(default_factory=DensityPhaseDetectorConfig)
+    mini_lattice: MiniLatticeExperimentConfig = field(default_factory=MiniLatticeExperimentConfig)
+
+
 def load_rule_spec(rule_path: str | Path) -> Dict[str, Any]:
     with Path(rule_path).open("rb") as f:
         return tomli.load(f)
@@ -98,12 +134,18 @@ def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
     grid[4, :, :, :] = 1.0
     return grid
 
-
 @dataclass
 class TelemetryWindow:
     transition_matrix: np.ndarray = field(default_factory=lambda: np.zeros((5, 5), dtype=np.int64))
     structural_lifetimes: List[float] = field(default_factory=list)
     compute_lifetimes: List[float] = field(default_factory=list)
+
+
+@dataclass
+class DensityPhaseDetector:
+    config: DensityPhaseDetectorConfig
+    densities: Deque[float] = field(default_factory=deque)
+    first_derivatives: Deque[float] = field(default_factory=deque)
 
 
 def init_telemetry_window() -> TelemetryWindow:
@@ -215,6 +257,7 @@ def reset_telemetry_window(telemetry: Optional[TelemetryWindow]) -> None:
     telemetry.compute_lifetimes.clear()
 
 
+
 def _count_neighbors_by_state(state: np.ndarray) -> np.ndarray:
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
@@ -285,6 +328,130 @@ def _load_contagion_config(rule_spec: Mapping[str, Any]) -> ContagionConfig:
         compute_energy_conversion_prob=float(contagion.get("compute_energy_conversion_prob", 0.15)),
         compute_sensor_conversion_prob=float(contagion.get("compute_sensor_conversion_prob", 0.25)),
     )
+
+
+def load_experimental_config(rule_spec: Mapping[str, Any]) -> ExperimentalConfig:
+    exp = rule_spec.get("params", {}).get("experimental", {})
+    selective = exp.get("selective_memory_decay", {})
+    detector = exp.get("density_phase_detector", {})
+    mini = exp.get("mini_lattice", {})
+    return ExperimentalConfig(
+        selective_memory_decay=SelectiveMemoryDecayConfig(
+            enabled=bool(selective.get("enabled", False)),
+            memory_strength_threshold=float(selective.get("memory_strength_threshold", 0.75)),
+            compute_neighbor_threshold=int(selective.get("compute_neighbor_threshold", 6)),
+            low_decay_rate=float(selective.get("low_decay_rate", 0.015)),
+            high_decay_rate=float(selective.get("high_decay_rate", 0.045)),
+        ),
+        density_phase_detector=DensityPhaseDetectorConfig(
+            enabled=bool(detector.get("enabled", False)),
+            window_size=max(3, int(detector.get("window_size", 8))),
+            density_low_threshold=float(detector.get("density_low_threshold", 0.10)),
+            density_high_threshold=float(detector.get("density_high_threshold", 0.65)),
+            first_derivative_threshold=float(detector.get("first_derivative_threshold", 0.03)),
+            second_derivative_threshold=float(detector.get("second_derivative_threshold", 0.02)),
+            contraction_density_threshold=float(detector.get("contraction_density_threshold", 0.22)),
+            trigger_sandboxed_memory=bool(detector.get("trigger_sandboxed_memory", False)),
+        ),
+        mini_lattice=MiniLatticeExperimentConfig(
+            enabled=bool(mini.get("enabled", False)),
+            default_size=int(mini.get("default_size", 16)),
+            default_steps=int(mini.get("default_steps", 6)),
+        ),
+    )
+
+
+def init_density_phase_detector(config: DensityPhaseDetectorConfig) -> DensityPhaseDetector:
+    return DensityPhaseDetector(config=config)
+
+
+def update_density_phase_detector(detector: Optional[DensityPhaseDetector], state: np.ndarray) -> Dict[str, float]:
+    if detector is None:
+        return {}
+
+    density = float(np.count_nonzero(state) / max(1, state.size))
+    prev_density = detector.densities[-1] if detector.densities else density
+    d1 = density - prev_density
+    prev_d1 = detector.first_derivatives[-1] if detector.first_derivatives else d1
+    d2 = d1 - prev_d1
+
+    detector.densities.append(density)
+    detector.first_derivatives.append(d1)
+    if len(detector.densities) > detector.config.window_size:
+        detector.densities.popleft()
+    if len(detector.first_derivatives) > detector.config.window_size:
+        detector.first_derivatives.popleft()
+
+    triggered = 0.0
+    if detector.config.enabled and len(detector.densities) >= 3:
+        in_band = detector.config.density_low_threshold <= density <= detector.config.density_high_threshold
+        high_d1 = abs(d1) >= detector.config.first_derivative_threshold
+        high_d2 = abs(d2) >= detector.config.second_derivative_threshold
+        contracting = density <= detector.config.contraction_density_threshold and d1 < 0
+        if in_band and high_d1 and high_d2 and contracting:
+            triggered = 1.0
+
+    return {
+        "phase_density": density,
+        "phase_d1": d1,
+        "phase_d2": d2,
+        "phase_triggered": triggered,
+    }
+
+
+def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
+    padded = np.pad(mask.astype(np.int16), 1, mode="constant", constant_values=0)
+    cluster = np.zeros_like(mask, dtype=np.int16)
+    for dz in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                cluster += padded[
+                    1 + dz:1 + dz + mask.shape[0],
+                    1 + dy:1 + dy + mask.shape[1],
+                    1 + dx:1 + dx + mask.shape[2],
+                ]
+    return cluster
+
+
+def _apply_selective_memory_decay(
+    memory_grid: np.ndarray,
+    compute_mask: np.ndarray,
+    compute_cluster: np.ndarray,
+    current_gen: int,
+    mem: VoxelMemoryParams,
+    cfg: SelectiveMemoryDecayConfig,
+) -> None:
+    inactive = ~compute_mask
+    generations_inactive = np.maximum(0.0, float(current_gen) - memory_grid[1])
+
+    if not cfg.enabled:
+        memory_grid[2][inactive] *= np.power(1.0 - (mem.rag_memory_decay * mem.temporal_dilation), generations_inactive[inactive])
+        memory_grid[2] = np.maximum(memory_grid[2], 0.01)
+        return
+
+    decay_rate = np.full(memory_grid[2].shape, cfg.low_decay_rate, dtype=np.float32)
+    high_decay_mask = inactive & (
+        (memory_grid[2] >= cfg.memory_strength_threshold)
+        | (compute_cluster >= cfg.compute_neighbor_threshold)
+    )
+    decay_rate[high_decay_mask] = cfg.high_decay_rate
+
+    power = np.where(inactive, generations_inactive, 0.0)
+    memory_grid[2] *= np.power(1.0 - decay_rate, power)
+    memory_grid[2] = np.maximum(memory_grid[2], 0.01)
+
+
+def apply_with_memory_sandboxed(next_state: np.ndarray, memory_grid: np.ndarray, mem: VoxelMemoryParams, contraction_phase: bool) -> np.ndarray:
+    if not contraction_phase:
+        return next_state
+    out = next_state.copy()
+    mature_compute = memory_grid[0] >= float(mem.age_mature_threshold)
+    dense_compute = _compute_neighbor_count(out == STATE_NAME_TO_ID["COMPUTE"]) >= (mem.damping_radius + 3)
+    rescued = (out == STATE_NAME_TO_ID["VOID"]) & mature_compute & dense_compute
+    out[rescued] = STATE_NAME_TO_ID["COMPUTE"]
+    return out
 
 
 def _apply_deterministic_transitions(state: np.ndarray, active_neighbors: np.ndarray, table: Mapping[int, Mapping[int, int]]) -> np.ndarray:
@@ -360,7 +527,14 @@ def _apply_stochastic_overrides(next_state: np.ndarray, rng: np.random.Generator
     return out
 
 
-def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray, current_gen: int, mem: VoxelMemoryParams, rng: np.random.Generator) -> np.ndarray:
+def _apply_memory_reinforcement(
+    next_state: np.ndarray,
+    memory_grid: np.ndarray,
+    current_gen: int,
+    mem: VoxelMemoryParams,
+    rng: np.random.Generator,
+    selective_decay: Optional[SelectiveMemoryDecayConfig] = None,
+) -> np.ndarray:
     out = next_state.copy()
     compute = out == STATE_NAME_TO_ID["COMPUTE"]
 
@@ -377,12 +551,6 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
     out[rebirth] = STATE_NAME_TO_ID["COMPUTE"]
     memory_grid[3][~structural] = 0.0
 
-    # Decay memory for inactive voxels.
-    inactive = ~compute
-    generations_inactive = np.maximum(0.0, float(current_gen) - memory_grid[1])
-    memory_grid[2][inactive] *= np.power(1.0 - (mem.rag_memory_decay * mem.temporal_dilation), generations_inactive[inactive])
-    memory_grid[2] = np.maximum(memory_grid[2], 0.01)
-
     # Memory-based decay resistance for compute cells that drifted to VOID.
     dropped_compute = (next_state == STATE_NAME_TO_ID["VOID"]) & (memory_grid[0] > 0)
     age = memory_grid[0]
@@ -395,38 +563,23 @@ def _apply_memory_reinforcement(next_state: np.ndarray, memory_grid: np.ndarray,
     resistance[mature] = mem.resistance_max
     resistance[old] = mem.resistance_max * np.exp(-(age[old] - mem.age_mature_threshold) / 500.0)
     resistance *= np.minimum(memory_grid[2], 1.5)
-    compute_neighbors = (out == STATE_NAME_TO_ID["COMPUTE"]).astype(np.int16)
-    padded = np.pad(compute_neighbors, 1, mode="constant", constant_values=0)
-    compute_cluster = np.zeros_like(compute_neighbors, dtype=np.int16)
-    for dz in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0 and dz == 0:
-                    continue
-                compute_cluster += padded[
-                    1 + dz:1 + dz + out.shape[0],
-                    1 + dy:1 + dy + out.shape[1],
-                    1 + dx:1 + dx + out.shape[2],
-                ]
+    compute_cluster = _compute_neighbor_count(out == STATE_NAME_TO_ID["COMPUTE"])
+
+    _apply_selective_memory_decay(
+        memory_grid,
+        compute,
+        compute_cluster,
+        current_gen,
+        mem,
+        selective_decay if selective_decay is not None else SelectiveMemoryDecayConfig(enabled=False),
+    )
     resistance = np.minimum(0.98, resistance + (compute_cluster >= mem.cluster_coherence_threshold).astype(np.float32) * (mem.cluster_shield_bonus + mem.shield_strength * 0.15))
 
     out[dropped_compute & (rng.random(out.shape) < resistance)] = STATE_NAME_TO_ID["COMPUTE"]
 
     # Energy->compute economy bridge with forward-contagion mitigation.
     energy = out == STATE_NAME_TO_ID["ENERGY"]
-    structural_neighbors = (out == STATE_NAME_TO_ID["STRUCTURAL"]).astype(np.int16)
-    spad = np.pad(structural_neighbors, 1, mode="constant", constant_values=0)
-    scluster = np.zeros_like(structural_neighbors, dtype=np.int16)
-    for dz in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dx == 0 and dy == 0 and dz == 0:
-                    continue
-                scluster += spad[
-                    1 + dz:1 + dz + out.shape[0],
-                    1 + dy:1 + dy + out.shape[1],
-                    1 + dx:1 + dx + out.shape[2],
-                ]
+    scluster = _compute_neighbor_count(out == STATE_NAME_TO_ID["STRUCTURAL"])
     e2c_prob = np.full(out.shape, mem.energy_to_compute_prob, dtype=np.float32)
     mitigated = np.maximum(
         mem.forward_contagion_floor * mem.energy_to_compute_prob,
@@ -459,6 +612,7 @@ def step_ca_lattice(
     memory_grid: Optional[np.ndarray] = None,
     current_gen: int = 0,
     telemetry: Optional[TelemetryWindow] = None,
+    phase_detector: Optional[DensityPhaseDetector] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     """Single CA step with deterministic + contagion + stochastic + decay + memory dynamics."""
     if state.ndim != 3:
@@ -474,6 +628,7 @@ def step_ca_lattice(
     decay = _load_decay_config(rule_spec)
     stoch = _load_stochastic_config(rule_spec)
     contagion = _load_contagion_config(rule_spec)
+    experimental = load_experimental_config(rule_spec)
     mem = VoxelMemoryParams()
 
     neighbor_counts = _count_neighbors_by_state(state)
@@ -493,7 +648,22 @@ def step_ca_lattice(
         inactivity_steps[~structural] = 0
 
     next_state = _apply_stochastic_overrides(next_state, rng, stoch)
-    next_state = _apply_memory_reinforcement(next_state, memory_grid, current_gen, mem, rng)
+    next_state = _apply_memory_reinforcement(
+        next_state,
+        memory_grid,
+        current_gen,
+        mem,
+        rng,
+        experimental.selective_memory_decay,
+    )
+
+    phase_signals = update_density_phase_detector(phase_detector, next_state)
+    if (
+        phase_detector is not None
+        and phase_detector.config.trigger_sandboxed_memory
+        and phase_signals.get("phase_triggered", 0.0) > 0
+    ):
+        next_state = apply_with_memory_sandboxed(next_state, memory_grid, mem, contraction_phase=True)
 
     update_telemetry_window(
         telemetry,
@@ -518,4 +688,53 @@ def step_ca_lattice(
         "energy_ratio": float(counts[3] / max(1, np.prod(next_state.shape))),
         "sensor_ratio": float(counts[4] / max(1, np.prod(next_state.shape))),
     }
+    metrics.update(phase_signals)
     return next_state.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), memory_grid.astype(np.float32, copy=False), metrics
+
+
+def run_mini_lattice_mutation_trials(
+    base_rule_spec: Mapping[str, Any],
+    mutation_specs: List[Mapping[str, Any]],
+    trials_per_mutation: int = 3,
+    lattice_size: int = 16,
+    steps: int = 6,
+    seed: int = 0,
+) -> List[Dict[str, Any]]:
+    """Experimental-only reduced-lattice harness (16^3 default).
+
+    Hypothesis aid only: this harness is for isolated mutation trials and does not claim
+    predictive equivalence with full-size production lattices.
+    """
+    rng = np.random.default_rng(seed)
+    results: List[Dict[str, Any]] = []
+    for mutation_id, mutation in enumerate(mutation_specs):
+        trial_scores: List[float] = []
+        for trial in range(trials_per_mutation):
+            state = np.zeros((lattice_size, lattice_size, lattice_size), dtype=np.uint8)
+            c = lattice_size // 2
+            state[c, c, c] = STATE_NAME_TO_ID["STRUCTURAL"]
+            memory = init_memory_grid(state.shape)
+            inactivity = np.zeros_like(state, dtype=np.int16)
+            rule = dict(base_rule_spec)
+            rule_params = dict(rule.get("params", {}))
+            trial_mut = dict(mutation)
+            if "transitions" in trial_mut and "transitions" in rule_params:
+                transitions = dict(rule_params["transitions"])
+                transitions.update(trial_mut.pop("transitions"))
+                rule_params["transitions"] = transitions
+            rule_params.update(trial_mut)
+            rule["params"] = rule_params
+            for gen in range(steps):
+                state, inactivity, memory, metrics = step_ca_lattice(state, rule, rng, inactivity, memory, gen + 1)
+            trial_scores.append(float(metrics.get("compute_ratio", 0.0) + metrics.get("structural_ratio", 0.0)))
+
+        avg = float(np.mean(np.asarray(trial_scores, dtype=np.float32))) if trial_scores else 0.0
+        label = "collapse" if avg < 0.05 else "stable" if avg < 0.35 else "growth"
+        results.append({
+            "mutation_id": mutation_id,
+            "mean_survival_score": avg,
+            "classification": label,
+            "hypothesis_only": True,
+            "lattice_size": lattice_size,
+        })
+    return results
