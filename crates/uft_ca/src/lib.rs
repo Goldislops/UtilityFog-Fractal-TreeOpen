@@ -12,6 +12,7 @@
 //! - State observation: census, spatial queries, time-series recording, snapshot/replay
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use rayon::prelude::*;
@@ -122,6 +123,61 @@ pub struct VoxelMemoryParams {
     pub analogue_mutation: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SelectiveMemoryDecayConfig {
+    pub enabled: bool,
+    pub memory_strength_threshold: f32,
+    pub compute_neighbor_threshold: usize,
+    pub low_decay_rate: f32,
+    pub high_decay_rate: f32,
+}
+
+pub const SELECTIVE_MEMORY_DECAY_DEFAULTS: SelectiveMemoryDecayConfig = SelectiveMemoryDecayConfig {
+    enabled: false,
+    memory_strength_threshold: 0.75,
+    compute_neighbor_threshold: 6,
+    low_decay_rate: 0.015,
+    high_decay_rate: 0.045,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct DensityPhaseDetectorConfig {
+    pub enabled: bool,
+    pub window_size: usize,
+    pub density_low_threshold: f32,
+    pub density_high_threshold: f32,
+    pub first_derivative_threshold: f32,
+    pub second_derivative_threshold: f32,
+    pub contraction_density_threshold: f32,
+    pub trigger_sandboxed_memory: bool,
+}
+
+pub const DENSITY_PHASE_DETECTOR_DEFAULTS: DensityPhaseDetectorConfig = DensityPhaseDetectorConfig {
+    enabled: false,
+    window_size: 8,
+    density_low_threshold: 0.10,
+    density_high_threshold: 0.65,
+    first_derivative_threshold: 0.03,
+    second_derivative_threshold: 0.02,
+    contraction_density_threshold: 0.22,
+    trigger_sandboxed_memory: false,
+};
+
+#[derive(Debug, Clone)]
+pub struct DensityPhaseDetector {
+    pub config: DensityPhaseDetectorConfig,
+    densities: VecDeque<f32>,
+    derivatives: VecDeque<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DensityPhaseSignal {
+    pub density: f32,
+    pub first_derivative: f32,
+    pub second_derivative: f32,
+    pub triggered: bool,
+}
+
 pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     // A1-A3
     age_young_threshold: 8,
@@ -181,6 +237,63 @@ impl VoxelMemory {
         let p = &VOXEL_MEMORY_PARAMS;
         self.memory_strength *= (1.0 - (p.rag_memory_decay * p.temporal_dilation)).powi(generations_inactive as i32);
         self.memory_strength = self.memory_strength.max(0.01);
+    }
+
+    pub fn decay_memory_selective(
+        &mut self,
+        current_gen: u32,
+        compute_neighbors: usize,
+        config: SelectiveMemoryDecayConfig,
+    ) {
+        let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
+        if !config.enabled {
+            self.decay_memory(current_gen);
+            return;
+        }
+
+        let rate = if self.memory_strength >= config.memory_strength_threshold
+            || compute_neighbors >= config.compute_neighbor_threshold
+        {
+            config.high_decay_rate
+        } else {
+            config.low_decay_rate
+        };
+
+        self.memory_strength *= (1.0 - rate).powi(generations_inactive as i32);
+        self.memory_strength = self.memory_strength.max(0.01);
+    }
+}
+
+impl DensityPhaseDetector {
+    pub fn new(config: DensityPhaseDetectorConfig) -> Self {
+        Self { config, densities: VecDeque::new(), derivatives: VecDeque::new() }
+    }
+
+    pub fn update(&mut self, density: f32) -> DensityPhaseSignal {
+        let prev_density = *self.densities.back().unwrap_or(&density);
+        let first_derivative = density - prev_density;
+        let prev_d1 = *self.derivatives.back().unwrap_or(&first_derivative);
+        let second_derivative = first_derivative - prev_d1;
+
+        self.densities.push_back(density);
+        self.derivatives.push_back(first_derivative);
+        while self.densities.len() > self.config.window_size {
+            self.densities.pop_front();
+        }
+        while self.derivatives.len() > self.config.window_size {
+            self.derivatives.pop_front();
+        }
+
+        let mut triggered = false;
+        if self.config.enabled && self.densities.len() >= 3 {
+            let in_band = density >= self.config.density_low_threshold && density <= self.config.density_high_threshold;
+            let high_d1 = first_derivative.abs() >= self.config.first_derivative_threshold;
+            let high_d2 = second_derivative.abs() >= self.config.second_derivative_threshold;
+            let contracting = density <= self.config.contraction_density_threshold && first_derivative < 0.0;
+            triggered = in_band && high_d1 && high_d2 && contracting;
+        }
+
+        DensityPhaseSignal { density, first_derivative, second_derivative, triggered }
     }
 }
 
@@ -664,6 +777,38 @@ impl GraphState {
             let current = CellState::from(self.nodes[i]);
             let counts = self.count_neighbors(i);
             let next = rule.apply_with_memory(current, &counts, &mut memory_grid[i], current_gen, i as u64);
+            next_nodes[i] = u8::from(next);
+        }
+        GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
+    }
+
+    pub fn step_multi_with_memory_experimental(
+        &self,
+        rule: &MultiStateRule,
+        memory_grid: &mut [VoxelMemory],
+        current_gen: u32,
+        _selective_decay: SelectiveMemoryDecayConfig,
+        mut detector: Option<&mut DensityPhaseDetector>,
+    ) -> GraphState {
+        let total = self.nodes.len().max(1) as f32;
+        let non_void = self.nodes.iter().filter(|&&s| s != u8::from(CellState::Void)).count() as f32;
+        let signal = detector.as_deref_mut().map(|d| d.update(non_void / total));
+        let contraction_phase = signal
+            .map(|s| s.triggered)
+            .unwrap_or(false);
+
+        let mut next_nodes = vec![0u8; self.nodes.len()];
+        for i in 0..self.nodes.len() {
+            let current = CellState::from(self.nodes[i]);
+            let counts = self.count_neighbors(i);
+            let next = rule.apply_with_memory_sandboxed(
+                current,
+                &counts,
+                &mut memory_grid[i],
+                current_gen,
+                i as u64,
+                contraction_phase,
+            );
             next_nodes[i] = u8::from(next);
         }
         GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
@@ -1507,6 +1652,42 @@ mod tests {
         assert_eq!(CellState::from(0), CellState::Void);
         assert_eq!(CellState::from(1), CellState::Structural);
         assert_eq!(u8::from(CellState::Compute), 2);
+    }
+
+    #[test]
+    fn test_selective_memory_decay_default_matches_baseline_path() {
+        let mut m1 = VoxelMemory::new();
+        let mut m2 = VoxelMemory::new();
+        m1.memory_strength = 1.2;
+        m2.memory_strength = 1.2;
+        m1.last_active_gen = 5;
+        m2.last_active_gen = 5;
+
+        m1.decay_memory(12);
+        m2.decay_memory_selective(12, 4, SELECTIVE_MEMORY_DECAY_DEFAULTS);
+
+        assert!((m1.memory_strength - m2.memory_strength).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_density_phase_detector_triggers_in_contraction_band() {
+        let mut detector = DensityPhaseDetector::new(DensityPhaseDetectorConfig {
+            enabled: true,
+            window_size: 5,
+            density_low_threshold: 0.05,
+            density_high_threshold: 0.8,
+            first_derivative_threshold: 0.05,
+            second_derivative_threshold: 0.02,
+            contraction_density_threshold: 0.30,
+            trigger_sandboxed_memory: true,
+        });
+
+        let _ = detector.update(0.90);
+        let _ = detector.update(0.25);
+        let signal = detector.update(0.12);
+
+        assert!(signal.triggered);
+        assert!(signal.first_derivative < 0.0);
     }
 
     #[test]

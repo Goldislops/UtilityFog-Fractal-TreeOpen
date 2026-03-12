@@ -1,10 +1,16 @@
 import numpy as np
 
 from scripts.continuous_evolution_ca import (
+    DensityPhaseDetectorConfig,
+    SelectiveMemoryDecayConfig,
+    _apply_selective_memory_decay,
+    init_density_phase_detector,
     init_memory_grid,
     init_telemetry_window,
+    load_experimental_config,
     step_ca_lattice,
     summarize_telemetry_window,
+    update_density_phase_detector,
 )
 
 
@@ -146,3 +152,55 @@ def test_telemetry_window_collects_lifetimes_and_matrix() -> None:
     assert "Telemetry Window" in summary
     assert "transition_matrix" in payload
     assert len(payload["transition_matrix"]) == 5
+
+
+def test_load_experimental_config_defaults_disabled() -> None:
+    cfg = load_experimental_config({"params": {}})
+    assert cfg.selective_memory_decay.enabled is False
+    assert cfg.density_phase_detector.enabled is False
+    assert cfg.mini_lattice.default_size == 16
+
+
+def test_selective_memory_decay_math_applies_high_decay_rate() -> None:
+    memory = init_memory_grid((3, 3, 3))
+    memory[2, :, :, :] = 1.0
+    memory[1, :, :, :] = 0.0
+    compute_mask = np.zeros((3, 3, 3), dtype=bool)
+    compute_cluster = np.zeros((3, 3, 3), dtype=np.int16)
+    compute_cluster[1, 1, 1] = 9
+
+    cfg = SelectiveMemoryDecayConfig(
+        enabled=True,
+        memory_strength_threshold=2.0,
+        compute_neighbor_threshold=6,
+        low_decay_rate=0.01,
+        high_decay_rate=0.50,
+    )
+    from scripts.continuous_evolution_ca import VoxelMemoryParams
+    _apply_selective_memory_decay(memory, compute_mask, compute_cluster, current_gen=1, mem=VoxelMemoryParams(), cfg=cfg)
+
+    assert memory[2, 1, 1, 1] < memory[2, 0, 0, 0]
+
+
+def test_density_phase_detector_trigger_logic() -> None:
+    detector = init_density_phase_detector(
+        DensityPhaseDetectorConfig(
+            enabled=True,
+            window_size=5,
+            density_low_threshold=0.05,
+            density_high_threshold=0.8,
+            first_derivative_threshold=0.05,
+            second_derivative_threshold=0.02,
+            contraction_density_threshold=0.30,
+            trigger_sandboxed_memory=True,
+        )
+    )
+    s1 = np.ones((4, 4, 4), dtype=np.uint8)
+    s2 = np.zeros((4, 4, 4), dtype=np.uint8)
+    s2.ravel()[:16] = 1
+    s3 = np.zeros((4, 4, 4), dtype=np.uint8)
+    s3.ravel()[:8] = 1
+    update_density_phase_detector(detector, s1)
+    update_density_phase_detector(detector, s2)
+    sig = update_density_phase_detector(detector, s3)
+    assert sig["phase_triggered"] == 1.0
