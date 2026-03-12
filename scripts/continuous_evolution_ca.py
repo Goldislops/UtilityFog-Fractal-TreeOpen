@@ -34,7 +34,7 @@ class StochasticConfig:
     structural_to_sensor_prob: float = 0.08
     compute_to_energy_prob: float = 0.10
     compute_to_sensor_prob: float = 0.10
-    structural_to_void_decay_prob: float = 0.04
+    structural_to_void_decay_prob: float = 0.005
     energy_to_void_decay_prob: float = 0.005
     sensor_to_void_decay_prob: float = 0.004
 

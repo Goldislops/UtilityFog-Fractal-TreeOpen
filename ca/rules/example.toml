@@ -100,7 +100,7 @@ structural_to_sensor_prob = 0.08
 compute_to_energy_prob = 0.10
 compute_to_sensor_prob = 0.10
 # Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
-structural_to_void_decay_prob = 0.025
+structural_to_void_decay_prob = 0.005
 energy_to_void_decay_prob = 0.004
 sensor_to_void_decay_prob = 0.003
 
