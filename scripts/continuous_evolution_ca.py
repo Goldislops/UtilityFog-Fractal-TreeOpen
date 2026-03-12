@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import tomli
@@ -72,7 +72,7 @@ class VoxelMemoryParams:
     rag_entropy_weight: float = 0.18
     # v0.7.5 lock params
     cluster_shield_bonus: float = 0.15
-    cluster_coherence_threshold: int = 4
+    cluster_coherence_threshold: int = 3
     shield_strength: float = 0.85
     halbach_recuperation_rate: float = 0.40
     temporal_dilation: float = 0.15
@@ -81,7 +81,7 @@ class VoxelMemoryParams:
     bamboo_rebirth_age: int = 488
     otolith_vector: float = 0.05
     biofilm_leech_rate: float = 0.10
-    super_pod_threshold: int = 12
+    super_pod_threshold: int = 8
     damping_radius: int = 2
     analogue_mutation: float = 0.03
 
@@ -97,6 +97,122 @@ def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
     grid[2, :, :, :] = 1.0
     grid[4, :, :, :] = 1.0
     return grid
+
+
+@dataclass
+class TelemetryWindow:
+    transition_matrix: np.ndarray = field(default_factory=lambda: np.zeros((5, 5), dtype=np.int64))
+    structural_lifetimes: List[float] = field(default_factory=list)
+    compute_lifetimes: List[float] = field(default_factory=list)
+
+
+def init_telemetry_window() -> TelemetryWindow:
+    return TelemetryWindow()
+
+
+def _percentile(values: List[float], q: float) -> float:
+    if not values:
+        return 0.0
+    return float(np.percentile(np.asarray(values, dtype=np.float32), q))
+
+
+def _histogram(values: List[float], bins: int = 10) -> Dict[str, Any]:
+    if not values:
+        return {"bins": [], "counts": []}
+    counts, edges = np.histogram(np.asarray(values, dtype=np.float32), bins=bins)
+    return {"bins": edges.tolist(), "counts": counts.tolist()}
+
+
+def update_telemetry_window(
+    telemetry: Optional[TelemetryWindow],
+    prev_state: np.ndarray,
+    next_state: np.ndarray,
+    compute_age_snapshot: np.ndarray,
+    structural_age_snapshot: np.ndarray,
+) -> None:
+    if telemetry is None:
+        return
+
+    flat_prev = prev_state.ravel().astype(np.int64)
+    flat_next = next_state.ravel().astype(np.int64)
+    for src in range(5):
+        src_mask = flat_prev == src
+        if not np.any(src_mask):
+            continue
+        dst_vals = flat_next[src_mask]
+        counts = np.bincount(dst_vals, minlength=5)
+        telemetry.transition_matrix[src, :] += counts[:5]
+
+    structural_left = (prev_state == STATE_NAME_TO_ID["STRUCTURAL"]) & (next_state != STATE_NAME_TO_ID["STRUCTURAL"])
+    compute_left = (prev_state == STATE_NAME_TO_ID["COMPUTE"]) & (next_state != STATE_NAME_TO_ID["COMPUTE"])
+    if np.any(structural_left):
+        telemetry.structural_lifetimes.extend(structural_age_snapshot[structural_left].astype(float).tolist())
+    if np.any(compute_left):
+        telemetry.compute_lifetimes.extend(compute_age_snapshot[compute_left].astype(float).tolist())
+
+
+def summarize_telemetry_window(telemetry: Optional[TelemetryWindow]) -> Tuple[str, Dict[str, Any]]:
+    if telemetry is None:
+        return "(telemetry disabled)", {}
+
+    matrix = telemetry.transition_matrix
+    transitions = []
+    for src in range(5):
+        for dst in range(5):
+            c = int(matrix[src, dst])
+            if c > 0:
+                transitions.append((c, src, dst))
+    transitions.sort(reverse=True)
+    top_pairs = [
+        {
+            "from": int(src),
+            "to": int(dst),
+            "count": int(c),
+        }
+        for c, src, dst in transitions[:10]
+    ]
+
+    s_median = _percentile(telemetry.structural_lifetimes, 50)
+    s_p95 = _percentile(telemetry.structural_lifetimes, 95)
+    c_median = _percentile(telemetry.compute_lifetimes, 50)
+    c_p95 = _percentile(telemetry.compute_lifetimes, 95)
+
+    payload = {
+        "structural": {
+            "median": s_median,
+            "p95": s_p95,
+            "histogram": _histogram(telemetry.structural_lifetimes),
+        },
+        "compute": {
+            "median": c_median,
+            "p95": c_p95,
+            "histogram": _histogram(telemetry.compute_lifetimes),
+        },
+        "transition_matrix": matrix.astype(int).tolist(),
+        "top_transition_pairs": top_pairs,
+    }
+
+    summary = (
+        f"Telemetry Window | STRUCTURAL median={s_median:.2f} p95={s_p95:.2f} | "
+        f"COMPUTE median={c_median:.2f} p95={c_p95:.2f} | "
+        f"Top transitions={top_pairs[:3]}"
+    )
+    return summary, payload
+
+
+def write_telemetry_artifact(path: str | Path, payload: Dict[str, Any]) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    import json
+    with Path(path).open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def reset_telemetry_window(telemetry: Optional[TelemetryWindow]) -> None:
+    if telemetry is None:
+        return
+    telemetry.transition_matrix.fill(0)
+    telemetry.structural_lifetimes.clear()
+    telemetry.compute_lifetimes.clear()
 
 
 def _count_neighbors_by_state(state: np.ndarray) -> np.ndarray:
@@ -342,6 +458,7 @@ def step_ca_lattice(
     inactivity_steps: Optional[np.ndarray] = None,
     memory_grid: Optional[np.ndarray] = None,
     current_gen: int = 0,
+    telemetry: Optional[TelemetryWindow] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
     """Single CA step with deterministic + contagion + stochastic + decay + memory dynamics."""
     if state.ndim != 3:
@@ -349,6 +466,9 @@ def step_ca_lattice(
 
     if memory_grid is None:
         memory_grid = init_memory_grid(state.shape)
+
+    compute_age_snapshot = memory_grid[0].copy() if memory_grid is not None else None
+    structural_age_snapshot = memory_grid[3].copy() if memory_grid is not None else None
 
     table = _compile_transition_table(rule_spec)
     decay = _load_decay_config(rule_spec)
@@ -374,6 +494,14 @@ def step_ca_lattice(
 
     next_state = _apply_stochastic_overrides(next_state, rng, stoch)
     next_state = _apply_memory_reinforcement(next_state, memory_grid, current_gen, mem, rng)
+
+    update_telemetry_window(
+        telemetry,
+        state,
+        next_state,
+        compute_age_snapshot if compute_age_snapshot is not None else np.zeros_like(state, dtype=np.float32),
+        structural_age_snapshot if structural_age_snapshot is not None else np.zeros_like(state, dtype=np.float32),
+    )
 
     counts = np.bincount(next_state.ravel(), minlength=5)
     non_void_total = int(np.sum(counts[1:]))

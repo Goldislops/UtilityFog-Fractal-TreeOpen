@@ -118,7 +118,7 @@ target_lambda = 1.7
 
 [params.cosmic_garden]
 # Cluster coherence (D1,D2)
-cluster_coherence_threshold = 4
+cluster_coherence_threshold = 3
 shield_strength = 0.85
 
 # Halbach recuperation (E1,E2)
@@ -133,7 +133,7 @@ otolith_vector = 0.05
 
 # Metabolic priority (F1,F2)
 biofilm_leech_rate = 0.10
-super_pod_threshold = 12
+super_pod_threshold = 8
 
 # Entropy damping (H1,H2)
 damping_radius = 2

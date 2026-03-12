@@ -35,8 +35,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.continuous_evolution_ca import (
     STATE_NAME_TO_ID,
     init_memory_grid,
+    init_telemetry_window,
     load_rule_spec,
+    reset_telemetry_window,
     step_ca_lattice,
+    summarize_telemetry_window,
+    write_telemetry_artifact,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -252,6 +256,7 @@ def main():
             inactivity_steps=inactivity_steps,
             memory_grid=memory_grid,
             current_gen=ca_step_count,
+            telemetry=telemetry,
         )
         ca_step_count += 1
 
@@ -298,6 +303,13 @@ def main():
             print(f"  Shannon entropy: {metrics['entropy']:.4f}")
             print(f"  Memory: avg_age={avg_age:.1f}  max_age={max_age:.0f}")
             print(f"  Fitness: best={fits_now.max():.4f}  mean={fits_now.mean():.4f}  (ATH={best_fitness_ever:.4f} @ gen {best_fitness_gen})")
+            # Telemetry window summary
+            telem_summary, telem_payload = summarize_telemetry_window(telemetry)
+            print(f"  {telem_summary}")
+            if telem_payload:
+                ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+                write_telemetry_artifact(DATA_DIR / f"telemetry_{ts}.json", telem_payload)
+            reset_telemetry_window(telemetry)
             print("-" * 72)
             sys.stdout.flush()
             last_status = t_now

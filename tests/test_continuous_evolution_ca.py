@@ -1,6 +1,11 @@
 import numpy as np
 
-from scripts.continuous_evolution_ca import init_memory_grid, step_ca_lattice
+from scripts.continuous_evolution_ca import (
+    init_memory_grid,
+    init_telemetry_window,
+    step_ca_lattice,
+    summarize_telemetry_window,
+)
 
 
 def _rule_spec_for_tests():
@@ -115,3 +120,29 @@ def test_asymmetric_stability_keeps_energy_cells_alive() -> None:
     nxt, _, _, _ = step_ca_lattice(state, rule, rng, memory_grid=init_memory_grid(state.shape), current_gen=1)
 
     assert nxt[2, 2, 2] == 3
+
+
+def test_telemetry_window_collects_lifetimes_and_matrix() -> None:
+    rule = _rule_spec_for_tests()
+    rule["params"]["stochastic"]["enabled"] = False
+    rule["params"]["contagion"]["enabled"] = False
+
+    state = np.zeros((5, 5, 5), dtype=np.uint8)
+    state[2, 2, 2] = 1
+    inactivity = np.zeros_like(state, dtype=np.int16)
+    memory = init_memory_grid(state.shape)
+    telemetry = init_telemetry_window()
+    rng = np.random.default_rng(123)
+
+    state, inactivity, memory, _ = step_ca_lattice(
+        state, rule, rng, inactivity, memory, 1, telemetry
+    )
+    state, inactivity, memory, _ = step_ca_lattice(
+        state, rule, rng, inactivity, memory, 2, telemetry
+    )
+
+    summary, payload = summarize_telemetry_window(telemetry)
+
+    assert "Telemetry Window" in summary
+    assert "transition_matrix" in payload
+    assert len(payload["transition_matrix"]) == 5
