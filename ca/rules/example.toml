@@ -1,33 +1,132 @@
 # Example CA rule: Branching growth with multiple states
 
 [rule]
-name = "branching-growth"
+name = "branching-growth-v0.7.5"
 states = ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]
 neighborhood = "moore-3d"
 transition = "outer-totalistic"
 
 [params]
-# Outer-totalistic transitions based on neighbor count
-# Format: current_state = { neighbor_count = next_state }
+# Deterministic backbone; stochastic/contagion sections introduce non-determinism.
 
 [params.transitions]
-# VOID cells become STRUCTURAL with 4-6 neighbors
-VOID = { 4 = "STRUCTURAL", 5 = "STRUCTURAL", 6 = "STRUCTURAL" }
+# Widen re-nucleation to maintain scaffold regeneration.
+VOID = {
+  3 = "STRUCTURAL",
+  4 = "STRUCTURAL",
+  5 = "STRUCTURAL",
+  6 = "STRUCTURAL"
+}
 
-# STRUCTURAL cells evolve based on density
-STRUCTURAL = { 2 = "STRUCTURAL", 3 = "STRUCTURAL", 4 = "COMPUTE", 5 = "COMPUTE" }
+# Buff STRUCTURAL: preserve low-density scaffold before differentiation.
+STRUCTURAL = {
+  0 = "STRUCTURAL",
+  1 = "STRUCTURAL",
+  2 = "STRUCTURAL",
+  3 = "COMPUTE",
+  4 = "COMPUTE",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# COMPUTE cells can become ENERGY or SENSOR
-COMPUTE = { 2 = "COMPUTE", 3 = "ENERGY", 4 = "SENSOR" }
+# Buff COMPUTE: wider stability band so it can accumulate as an intermediary.
+COMPUTE = {
+  1 = "COMPUTE",
+  2 = "COMPUTE",
+  3 = "COMPUTE",
+  4 = "ENERGY",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
 
-# ENERGY cells are stable
-ENERGY = { 2 = "ENERGY", 3 = "ENERGY", 4 = "ENERGY" }
+# ENERGY remains robust but can still route to SENSOR at higher density.
+ENERGY = {
+  0 = "ENERGY",
+  1 = "ENERGY",
+  2 = "ENERGY",
+  3 = "ENERGY",
+  4 = "ENERGY",
+  5 = "ENERGY",
+  6 = "SENSOR",
+  7 = "SENSOR",
+  8 = "SENSOR"
+}
 
-# SENSOR cells are stable
-SENSOR = { 2 = "SENSOR", 3 = "SENSOR", 4 = "SENSOR" }
+# Nerf SENSOR: vulnerable at extreme densities (7-8 no longer stable mapping).
+SENSOR = {
+  0 = "SENSOR",
+  1 = "SENSOR",
+  2 = "SENSOR",
+  3 = "SENSOR",
+  4 = "SENSOR",
+  5 = "SENSOR",
+  6 = "SENSOR"
+}
+
+[params.contagion]
+enabled = true
+# State-aware neighbor influence thresholds.
+energy_neighbor_threshold = 4
+sensor_neighbor_threshold = 4
+# STRUCTURAL/COMPUTE near ENERGY/SENSOR clusters are likely to convert.
+structural_energy_conversion_prob = 0.34
+structural_sensor_conversion_prob = 0.34
+compute_energy_conversion_prob = 0.15
+compute_sensor_conversion_prob = 0.30
+
+[params.stochastic]
+enabled = true
+# Cranked chaos baseline (requested: 8%).
+baseline_transition_prob = 0.08
+# Direct stochastic specialization from scaffold and compute states.
+structural_to_energy_prob = 0.08
+structural_to_sensor_prob = 0.08
+compute_to_energy_prob = 0.10
+compute_to_sensor_prob = 0.10
+# Asymmetric decay: STRUCTURAL fragile, ENERGY/SENSOR resilient.
+structural_to_void_decay_prob = 0.025
+energy_to_void_decay_prob = 0.004
+sensor_to_void_decay_prob = 0.003
+
+[params.decay]
+enabled = true
+# Structural cells with low support decay quickly, forcing turnover.
+inactivity_neighbor_threshold = 1
+structural_inactive_steps_to_decay = 6
 
 [params.meta]
-description = "Multi-state branching growth rule for fractal structures"
+description = "v0.7.5 cosmic garden lock with coherence, bamboo rebirth, and entropy damping"
 author = "UtilityFog Team"
-version = "0.1.0"
-target_lambda = 1.5  # Target branching factor (edge of chaos)
+version = "0.7.5"
+target_lambda = 1.7
+
+[params.cosmic_garden]
+# Cluster coherence (D1,D2)
+cluster_coherence_threshold = 4
+shield_strength = 0.85
+
+# Halbach recuperation (E1,E2)
+halbach_recuperation_rate = 0.40
+temporal_dilation = 0.15
+
+# Bamboo protocol (G1-G4)
+bamboo_initial_growth = 100
+bamboo_max_length = 500
+bamboo_rebirth_age = 488
+otolith_vector = 0.05
+
+# Metabolic priority (F1,F2)
+biofilm_leech_rate = 0.10
+super_pod_threshold = 12
+
+# Entropy damping (H1,H2)
+damping_radius = 2
+analogue_mutation = 0.03
+
+age_young_threshold = 8
+age_mature_threshold = 40
+reverse_contagion_base_prob = 0.20
+energy_to_compute_prob = 0.20
+rag_reinforcement_boost = 1.50
