@@ -102,6 +102,28 @@ author = "UtilityFog Team"
 version = "0.7.5"
 target_lambda = 1.7
 
+[params.experimental.selective_memory_decay]
+enabled = false
+memory_strength_threshold = 0.75
+compute_neighbor_threshold = 6
+low_decay_rate = 0.015
+high_decay_rate = 0.045
+
+[params.experimental.density_phase_detector]
+enabled = false
+window_size = 8
+density_low_threshold = 0.10
+density_high_threshold = 0.65
+first_derivative_threshold = 0.03
+second_derivative_threshold = 0.02
+contraction_density_threshold = 0.22
+trigger_sandboxed_memory = false
+
+[params.experimental.mini_lattice]
+enabled = false
+default_size = 16
+default_steps = 6
+
 [params.cosmic_garden]
 # Cluster coherence (D1,D2)
 cluster_coherence_threshold = 3
