@@ -244,6 +244,7 @@ def main():
     last_status = start_time
     last_snapshot = start_time
     prev_compute_ratio = 0.0
+    telemetry = init_telemetry_window()
 
     print(f"\n[{datetime.now().isoformat()}] Engine started (PID {os.getpid()}).\n")
 
