@@ -133,6 +133,21 @@ class VoxelMemoryParams:
     rag_memory_decay: float = 0.015
     rag_reinforcement_boost: float = 1.50
     rag_entropy_weight: float = 0.18
+    # Phase 3: Mamba-Viking memory dynamics
+    mamba_delta_threshold: float = 0.12
+    mamba_tau_base: float = 5.0
+    mamba_tau_scale: float = 12.0
+    mamba_boost_base: float = 0.015
+    mamba_boost_gain: float = 0.045
+    mamba_age_stability_gain: float = 0.03
+    mamba_high_delta_floor: float = 1.15
+    # Phase 3: Void Sanctuary Shield
+    void_sanctuary_multiplier: float = 50.0
+    # Phase 3: Epsilon Buffer (Dimensional Regularization)
+    epsilon_p_max: float = 0.943
+    epsilon_buffer: float = 0.08
+    epsilon_n_c: int = 20
+    epsilon_tau: float = 3.0
 
 
 @dataclass
@@ -588,9 +603,12 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     e2c_prob[superpod] = np.minimum(0.95, e2c_prob[superpod] + cosmic.biofilm_leech_rate * 0.5)
     memory_grid[3][superpod] = np.maximum(0.05, memory_grid[3][superpod] * (1.0 - cosmic.biofilm_leech_rate))
     out[energy & (rng.random(shape) < e2c_prob)] = COMPUTE
-    # Memory reinforcement
+    # Memory reinforcement (Phase 3: half-rate aging for isolated COMPUTE)
     compute = out == COMPUTE
-    memory_grid[0][compute] = np.minimum(memory_grid[0][compute] + 1.0, 65535.0)
+    isolated_compute = compute & (active_neighbors == 0)
+    connected_compute = compute & (active_neighbors > 0)
+    memory_grid[0][connected_compute] = np.minimum(memory_grid[0][connected_compute] + 1.0, 65535.0)
+    memory_grid[0][isolated_compute] = np.minimum(memory_grid[0][isolated_compute] + 0.5, 65535.0)
     memory_grid[4][compute] = float(current_gen)
     memory_grid[2][compute] = np.minimum(memory_grid[2][compute] * mem.rag_reinforcement_boost, 2.0)
     # Bamboo protocol
@@ -613,19 +631,41 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     resistance *= np.minimum(memory_grid[2], 1.5)
     compute_cluster2 = _compute_neighbor_count(out == COMPUTE)
     resistance = np.minimum(0.98, resistance + (compute_cluster2 >= cosmic.cluster_coherence_threshold).astype(np.float32) * (cosmic.cluster_shield_bonus + cosmic.shield_strength * 0.15))
+    # Phase 3: Void Sanctuary Shield -- isolated COMPUTE gets 50x resistance
+    void_sanctuary_mask = dropped_compute & (active_neighbors == 0)
+    resistance[void_sanctuary_mask] = np.minimum(0.98, resistance[void_sanctuary_mask] * mem.void_sanctuary_multiplier)
+    # Phase 3: Epsilon Buffer -- packed cells get survival floor (>5.7%)
+    packed_mask = dropped_compute & (active_neighbors >= mem.epsilon_n_c)
+    if np.any(packed_mask):
+        excess = (active_neighbors[packed_mask].astype(np.float32) - float(mem.epsilon_n_c))
+        p_reg = mem.epsilon_p_max - mem.epsilon_buffer * np.exp(-excess / mem.epsilon_tau)
+        survival_floor = np.maximum(1.0 - p_reg, 0.057)
+        resistance[packed_mask] = np.maximum(resistance[packed_mask], survival_floor)
     out[dropped_compute & (rng.random(shape) < resistance)] = COMPUTE
-    # Memory decay
+    # Phase 3: Mamba-Viking memory dynamics (state-space update)
+    # M(t+1) = M(t) * exp(-1/tau(d)) + B(d)*d + S*Phi(age)
+    # where d = local non-void density, tau adapts to activity
     inactive = ~(out == COMPUTE)
-    generations_inactive = np.maximum(0.0, float(current_gen) - memory_grid[4])
-    if exp.selective_memory_decay_enabled:
-        decay_rate = np.full(memory_grid[2].shape, exp.selective_low_decay_rate, dtype=np.float32)
-        high_decay_mask = inactive & ((memory_grid[2] >= exp.selective_memory_decay_threshold) | (compute_cluster2 >= exp.selective_compute_neighbor_threshold))
-        decay_rate[high_decay_mask] = exp.selective_high_decay_rate
-        power = np.where(inactive, generations_inactive, 0.0)
-        memory_grid[2] *= np.power(1.0 - decay_rate, power)
-    else:
-        memory_grid[2][inactive] *= np.power(1.0 - (mem.rag_memory_decay * cosmic.temporal_dilation), generations_inactive[inactive])
-    memory_grid[2] = np.maximum(memory_grid[2], 0.01)
+    local_density = active_neighbors.astype(np.float32) / 26.0
+    # Adaptive tau: higher in active regions (slow decay), lower in dead regions
+    tau = mem.mamba_tau_base + mem.mamba_tau_scale * np.tanh(
+        local_density / max(mem.mamba_delta_threshold, 1e-6))
+    decay_factor = np.exp(-1.0 / np.maximum(tau, 0.1))
+    # Boost proportional to local activity
+    boost = (mem.mamba_boost_base + mem.mamba_boost_gain * local_density) * local_density
+    # Age stability: older cells get memory bonus
+    age_stability = mem.mamba_age_stability_gain * np.tanh(
+        memory_grid[0] / max(float(mem.age_mature_threshold), 1.0))
+    # Apply state-space update
+    memory_grid[2][inactive] *= decay_factor[inactive]
+    memory_grid[2] += boost
+    memory_grid[2] += age_stability
+    # High-delta floor: active regions keep memory above floor
+    high_delta = local_density > mem.mamba_delta_threshold
+    memory_grid[2][high_delta] = np.maximum(
+        memory_grid[2][high_delta], mem.mamba_high_delta_floor)
+    # Global floor and ceiling
+    memory_grid[2] = np.clip(memory_grid[2], 0.01, 2.0)
     # Analogue mutation (MUST have pre_mut = out.copy() before mutation)
     pre_mut = out.copy()
     mut_mask = rng.random(shape) < cosmic.analogue_mutation
