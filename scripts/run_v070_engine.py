@@ -107,19 +107,38 @@ def _random_genome(rng: np.random.Generator) -> np.ndarray:
     return rng.uniform(0.1, 0.9, size=5).astype(np.float32)
 
 
+# Phase 5: Target median age for longevity bonus (AURA directive)
+TARGET_MEDIAN_AGE = 10.0
+
 def _fitness(genome: np.ndarray, metrics: dict) -> float:
     dominance, virality, stability, compat, thresh = genome
     density = metrics.get("density", 0.0)
     entropy = metrics.get("entropy", 0.0)
     compute_ratio = metrics.get("compute_ratio", 0.0)
+    compute_median_age = metrics.get("compute_median_age", 0.0)
 
-    # v0.7.0 fitness: reward entropy, compute growth, moderate density
+    # Phase 5 fitness: AURA formula with longevity pressure
+    # base_fitness + propagation_bonus + differentiation*0.4 + longevity*0.6
+    #
+    # base_fitness: genome contribution + density maintenance
     gene_score = 0.3 * dominance + 0.2 * virality + 0.3 * stability + 0.1 * compat + 0.1 * (1 - thresh)
-    entropy_score = min(entropy, 1.0)
-    compute_score = min(compute_ratio * 5.0, 1.0)  # target ~0.20
     density_score = min(density * 2.5, 1.0)
+    base_fitness = 0.15 * gene_score + 0.10 * density_score
 
-    return 0.25 * gene_score + 0.30 * entropy_score + 0.25 * compute_score + 0.20 * density_score
+    # propagation_bonus: compute ratio drives propagation
+    propagation_bonus = min(0.15, compute_ratio * 0.75)
+
+    # differentiation_term: entropy rewards state diversity
+    entropy_score = min(entropy, 1.0)
+    compute_score = min(compute_ratio * 5.0, 1.0)
+    differentiation_term = 0.5 * entropy_score + 0.5 * compute_score
+
+    # longevity_score: AURA's key innovation -- reward persistent COMPUTE
+    longevity_score = min(1.0, compute_median_age / TARGET_MEDIAN_AGE)
+
+    # AURA Phase 5 formula:
+    total = base_fitness + propagation_bonus + (differentiation_term * 0.4) + (longevity_score * 0.6)
+    return max(0.0, min(1.0, total))
 
 
 def _tournament_select(pop, fits, k, rng):
@@ -288,10 +307,12 @@ def main():
             compute_delta = metrics["compute_ratio"] - prev_compute_ratio
             prev_compute_ratio = metrics["compute_ratio"]
 
-            # Memory stats
+            # Memory stats (Phase 5: median age + longevity score)
             compute_mask = lattice == STATE_NAME_TO_ID["COMPUTE"]
             avg_age = float(np.mean(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
+            med_age = float(np.median(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
             max_age = float(np.max(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
+            longevity = min(1.0, med_age / TARGET_MEDIAN_AGE)
 
             print("-" * 72)
             print(f"  STATUS @ {datetime.now().isoformat()}  (uptime {elapsed})")
@@ -302,7 +323,7 @@ def main():
                 print(f"  Ecosystem: STRUCT {counts[1]/non_void:.1%}  COMPUTE {counts[2]/non_void:.1%}  ENERGY {counts[3]/non_void:.1%}  SENSOR {counts[4]/non_void:.1%}")
             print(f"  COMPUTE density: {metrics['compute_ratio']:.4f} (delta {compute_delta:+.4f})")
             print(f"  Shannon entropy: {metrics['entropy']:.4f}")
-            print(f"  Memory: avg_age={avg_age:.1f}  max_age={max_age:.0f}")
+            print(f"  Memory: avg_age={avg_age:.1f}  med_age={med_age:.1f}  max_age={max_age:.0f}  longevity_score={longevity:.3f}")
             print(f"  Fitness: best={fits_now.max():.4f}  mean={fits_now.mean():.4f}  (ATH={best_fitness_ever:.4f} @ gen {best_fitness_gen})")
             # Telemetry window summary
             telem_summary, telem_payload = summarize_telemetry_window(telemetry)

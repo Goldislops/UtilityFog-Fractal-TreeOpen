@@ -710,7 +710,12 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     non_zero_probs = probs[probs > 0]
     entropy = float(-np.sum(non_zero_probs * np.log(non_zero_probs))) if non_zero_probs.size else 0.0
     normalized_entropy = float(entropy / np.log(4.0)) if non_zero_probs.size > 1 else 0.0
-    metrics = {"entropy": normalized_entropy, "structural_ratio": float(counts[STRUCTURAL] / max(1, non_void_total)), "void_ratio": float(counts[VOID] / total_cells), "compute_ratio": float(counts[COMPUTE] / total_cells), "energy_ratio": float(counts[ENERGY] / total_cells), "sensor_ratio": float(counts[SENSOR] / total_cells)}
+    # Phase 5: add compute age metrics for longevity-aware fitness
+    compute_mask_final = out == COMPUTE
+    compute_median_age = float(np.median(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
+    compute_max_age = float(np.max(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
+    compute_mean_age = float(np.mean(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
+    metrics = {"entropy": normalized_entropy, "structural_ratio": float(counts[STRUCTURAL] / max(1, non_void_total)), "void_ratio": float(counts[VOID] / total_cells), "compute_ratio": float(counts[COMPUTE] / total_cells), "energy_ratio": float(counts[ENERGY] / total_cells), "sensor_ratio": float(counts[SENSOR] / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age}
     metrics.update(phase_signals)
     return (out.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), memory_grid.astype(np.float32, copy=False), age_grid.astype(np.float32, copy=False), metrics)
 
