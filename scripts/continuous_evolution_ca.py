@@ -162,8 +162,22 @@ class VoxelMemoryParams:
     # Phase 6b: Sympathetic Joy (mudita) -- resonance from mature neighbors
     joy_beta: float = 0.35           # max resonance multiplier (35%)
     joy_age_scale: float = 15.0      # age excess scaling factor
+    # Phase 6c: Mindsight + Mycelial Network + Compassion
+    mindsight_s_max: float = 1.0     # max signal magnitude
+    mindsight_sigma_opp: float = 0.15  # opportunity gradient scale
+    mindsight_sigma_dis: float = 0.10  # distress gradient scale
+    mindsight_threshold: float = 0.3   # |S| threshold for action
+    mindsight_radius: int = 12         # regional density filter radius
+    mycelial_k_iter: int = 3           # diffusion iterations (3 = ~3-voxel range per interval)
+    mycelial_lambda_distress: float = 12.0   # distress decay length
+    mycelial_lambda_opportunity: float = 8.0 # opportunity decay length
+    compassion_beta: float = 0.50      # remote resistance buff (+50%)
+    compassion_gamma: float = 0.20     # local cost (20% energy/memory drain)
+    compassion_distance_scale: float = 15.0  # exp(-d/15) distance decay
+    compassion_age_scale_min: float = 30.0   # min adaptive age scale
+    compassion_age_scale_factor: float = 1.5 # a_scale = max(min, max_age * factor)
     # Phase 6 signal interval (expensive ops every K steps)
-    signal_interval: int = 5
+    signal_interval: int = 10
 
 
 @dataclass
@@ -430,6 +444,80 @@ def _max_neighbor_value(field: np.ndarray) -> np.ndarray:
     return result
 
 
+# Cache for box filter normalization grids (shape -> count_grid)
+_box_filter_count_cache: Dict[Tuple[int, ...], np.ndarray] = {}
+
+def _box_cumsum_1d(arr: np.ndarray, axis: int, r: int, n: int) -> np.ndarray:
+    """Apply 1D box-sum along one axis using prefix sums."""
+    w = 2 * r + 1
+    pad_widths = [(0, 0)] * 3
+    pad_widths[axis] = (r, r)
+    padded = np.pad(arr, pad_widths, mode='constant', constant_values=0.0)
+    zs = list(padded.shape); zs[axis] = 1
+    padded = np.concatenate([np.zeros(zs, dtype=np.float64), padded], axis=axis)
+    cs = np.cumsum(padded, axis=axis)
+    slices_hi = [slice(None)] * 3
+    slices_lo = [slice(None)] * 3
+    slices_hi[axis] = slice(w, w + n)
+    slices_lo[axis] = slice(0, n)
+    return cs[tuple(slices_hi)] - cs[tuple(slices_lo)]
+
+def _separable_box_filter_3d(field: np.ndarray, radius: int) -> np.ndarray:
+    """Fast R-radius 3D box filter via separable 1D cumsum trick.
+    O(N^3) regardless of R. Caches normalization count for repeated calls."""
+    r = radius
+    cache_key = (field.shape, r)
+    # Compute count normalization grid (cached per shape+radius)
+    if cache_key not in _box_filter_count_cache:
+        count = np.ones(field.shape, dtype=np.float64)
+        for axis in range(3):
+            count = _box_cumsum_1d(count, axis, r, field.shape[axis])
+        _box_filter_count_cache[cache_key] = np.maximum(count, 1.0).astype(np.float64)
+    count = _box_filter_count_cache[cache_key]
+    # Compute box sum of actual field
+    result = field.astype(np.float64)
+    for axis in range(3):
+        result = _box_cumsum_1d(result, axis, r, field.shape[axis])
+    result /= count
+    return result.astype(np.float32)
+
+
+def _mycelial_diffuse(signal: np.ndarray, energy_mask: np.ndarray,
+                      k_iter: int, decay_per_iter: float) -> np.ndarray:
+    """Iterative 3x3x3 diffusion of signal through ENERGY cells.
+    Each iteration: average neighbors (masked to ENERGY), then decay.
+    Optimized: pre-compute padded energy mask (constant across iterations)."""
+    field = signal.copy()
+    nz, ny, nx = field.shape
+    energy_f = energy_mask.astype(np.float32)
+    # Pre-pad the energy mask once (it does not change across iterations)
+    padded_mask = np.pad(energy_f, 1, mode='constant', constant_values=0.0)
+    # Pre-compute 26 mask slices (constant across iterations)
+    mask_slices = []
+    offsets = []
+    for dz in range(3):
+        for dy in range(3):
+            for dx in range(3):
+                if dz == 1 and dy == 1 and dx == 1:
+                    continue
+                mask_slices.append(padded_mask[dz:dz+nz, dy:dy+ny, dx:dx+nx])
+                offsets.append((dz, dy, dx))
+    # Pre-compute neighbor count from energy mask (constant)
+    neighbor_count = np.zeros_like(field)
+    for ms in mask_slices:
+        neighbor_count += ms
+    safe_count = np.maximum(neighbor_count, 1.0)
+    inv_decay = 1.0 - decay_per_iter
+    for _ in range(k_iter):
+        padded = np.pad(field, 1, mode='constant', constant_values=0.0)
+        neighbor_sum = np.zeros_like(field)
+        for i, (dz, dy, dx) in enumerate(offsets):
+            neighbor_sum += padded[dz:dz+nz, dy:dy+ny, dx:dx+nx] * mask_slices[i]
+        avg = neighbor_sum / safe_count
+        field = np.where(energy_mask, field * decay_per_iter + avg * inv_decay, 0.0)
+    return field.astype(np.float32)
+
+
 def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
     padded = np.pad(mask.astype(np.int16), 1, mode="constant", constant_values=0)
     cluster = np.zeros_like(mask, dtype=np.int16)
@@ -629,6 +717,100 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         # This is positive-sum: the neighbor thrives because the elder thrives
         memory_grid[2][has_mature_neighbor] = np.minimum(
             2.0, memory_grid[2][has_mature_neighbor] * r_joy[has_mature_neighbor])
+    # Phase 6c: Mindsight + Mycelial Network + Compassion (nervous system)
+    # Runs every signal_interval steps to save CPU (~3s per call at R=12)
+    if current_gen % mem.signal_interval == 0:
+        # --- 6c.1: Mindsight (Stimulus) ---
+        # Compute regional SENSOR density using R=12 separable box filter
+        sensor_field = (state == SENSOR).astype(np.float32)
+        rho_regional = _separable_box_filter_3d(sensor_field, mem.mindsight_radius)
+        # Local SENSOR density (immediate Moore neighborhood, already computed)
+        sensor_local = neighbor_counts[SENSOR].astype(np.float32) / 26.0
+        # Gradient: positive = opportunity (more SENSOR locally), negative = distress
+        grad_rho = sensor_local - rho_regional
+        # Compute initial signal: S_0 = S_max * tanh(grad / sigma)
+        # Use asymmetric sigma: sigma_opp for positive, sigma_dis for negative
+        sigma = np.where(grad_rho >= 0, mem.mindsight_sigma_opp, mem.mindsight_sigma_dis)
+        s_initial = mem.mindsight_s_max * np.tanh(grad_rho / np.maximum(sigma, 1e-8))
+        # Only seed signals where |S| > threshold AND cell is SENSOR
+        sensor_mask = state == SENSOR
+        s_initial[~sensor_mask] = 0.0
+        s_initial[np.abs(s_initial) < mem.mindsight_threshold] = 0.0
+        # Seed initial signals on SENSOR cells, then deliver to ENERGY neighbors
+        # SENSOR cells generate, ENERGY cells transmit
+        memory_grid[5] = s_initial
+        # --- 6c.2: Mycelial Diffusion (Transmission) ---
+        # First: deliver SENSOR signals to adjacent ENERGY cells (handoff)
+        energy_mask = out == ENERGY
+        if np.any(s_initial != 0) and np.any(energy_mask):
+            # Spread signals from SENSOR to immediate neighbors (including ENERGY)
+            abs_neg = np.abs(np.minimum(s_initial, 0.0))
+            pos = np.maximum(s_initial, 0.0)
+            handoff_distress = _max_neighbor_value(abs_neg)
+            handoff_opportunity = _max_neighbor_value(pos)
+            # Only keep handoff on ENERGY cells (they receive from adjacent SENSOR)
+            energy_seed = np.where(energy_mask, -handoff_distress + handoff_opportunity, 0.0)
+            # Add original SENSOR signals (SENSOR cells also seed the field)
+            s_initial = s_initial + energy_seed
+            # Separate distress and opportunity signals for asymmetric decay
+            distress_signal = np.minimum(s_initial, 0.0)  # negative values
+            opportunity_signal = np.maximum(s_initial, 0.0)  # positive values
+            # Diffuse each with its own decay length
+            decay_distress = np.exp(-1.0 / mem.mycelial_lambda_distress)
+            decay_opportunity = np.exp(-1.0 / mem.mycelial_lambda_opportunity)
+            diffused_distress = _mycelial_diffuse(
+                distress_signal, energy_mask, mem.mycelial_k_iter, decay_distress)
+            diffused_opportunity = _mycelial_diffuse(
+                opportunity_signal, energy_mask, mem.mycelial_k_iter, decay_opportunity)
+            # Combine diffused signals
+            diffused = diffused_distress + diffused_opportunity
+            # Deliver signals to ALL neighbors of ENERGY cells (not just ENERGY)
+            # This lets COMPUTE cells adjacent to the ENERGY network receive signals
+            # Use max absolute signal from neighbors as the delivery mechanism
+            abs_distress = np.abs(diffused_distress)
+            delivered_distress_mag = _max_neighbor_value(abs_distress)
+            delivered_opportunity_mag = _max_neighbor_value(diffused_opportunity)
+            # Reconstruct signed signals: distress is negative, opportunity is positive
+            memory_grid[5] = -delivered_distress_mag + delivered_opportunity_mag
+            # Preserve stronger signals on ENERGY cells themselves
+            stronger = np.abs(diffused) > np.abs(memory_grid[5])
+            memory_grid[5][stronger] = diffused[stronger]
+        # --- 6c.3: Compassion (Response) ---
+        # Mature COMPUTE cells receiving distress donate energy for remote resistance
+        compute_now = out == COMPUTE
+        distress_received = memory_grid[5] < -mem.mindsight_threshold
+        # Adaptive compassion scale: a_scale = max(30, max_age * 1.5)
+        compute_ages = memory_grid[0][compute_now]
+        current_max_age = float(np.max(compute_ages)) if np.any(compute_now) else 0.0
+        a_compassion_scale = max(mem.compassion_age_scale_min,
+                                 current_max_age * mem.compassion_age_scale_factor)
+        # Compassion donors: mature COMPUTE cells receiving distress
+        compassion_donors = compute_now & distress_received & (memory_grid[0] > mem.equanimity_age_min)
+        if np.any(compassion_donors):
+            # Phi_compassion = |S| * (a_self / a_scale)
+            donor_signal_strength = np.abs(memory_grid[5][compassion_donors])
+            donor_age_ratio = memory_grid[0][compassion_donors] / a_compassion_scale
+            phi_compassion = donor_signal_strength * np.minimum(1.0, donor_age_ratio)
+            # Local cost: donors pay gamma_compassion of their memory + energy
+            cost_factor = 1.0 - mem.compassion_gamma * phi_compassion
+            cost_factor = np.maximum(0.3, cost_factor)  # never drain below 30%
+            memory_grid[2][compassion_donors] *= cost_factor
+            memory_grid[3][compassion_donors] *= cost_factor
+            # Remote buff: boost resistance for cells in distress region
+            # Apply buff to ALL cells in distress zones (not just donors)
+            distress_zone = distress_received & (~compassion_donors)
+            if np.any(distress_zone):
+                # Resistance buff proportional to nearby compassion strength
+                # Use the diffused signal magnitude as proxy for compassion reach
+                buff_strength = mem.compassion_beta * np.minimum(
+                    1.0, np.abs(memory_grid[5][distress_zone]))
+                # Boost memory_strength (which feeds into decay resistance)
+                memory_grid[2][distress_zone] = np.minimum(
+                    2.0, memory_grid[2][distress_zone] + buff_strength)
+            # Track compassion activity with cooldown (channel 7)
+            memory_grid[7][compassion_donors] = 5.0  # 5-step cooldown
+        # Decay compassion cooldown
+        memory_grid[7] = np.maximum(0.0, memory_grid[7] - 1.0)
     # Stochastic transitions
     if stoch.enabled:
         structural = out == STRUCTURAL; compute = out == COMPUTE
@@ -792,7 +974,10 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     compute_median_age = float(np.median(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
     compute_max_age = float(np.max(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
     compute_mean_age = float(np.mean(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
-    metrics = {"entropy": normalized_entropy, "structural_ratio": float(counts[STRUCTURAL] / max(1, non_void_total)), "void_ratio": float(counts[VOID] / total_cells), "compute_ratio": float(counts[COMPUTE] / total_cells), "energy_ratio": float(counts[ENERGY] / total_cells), "sensor_ratio": float(counts[SENSOR] / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age}
+    # Phase 6c telemetry: signal activity and compassion stats
+    signal_active = int(np.sum(np.abs(memory_grid[5]) > 0.01))
+    compassion_active = int(np.sum(memory_grid[7] > 0))
+    metrics = {"entropy": normalized_entropy, "structural_ratio": float(counts[STRUCTURAL] / max(1, non_void_total)), "void_ratio": float(counts[VOID] / total_cells), "compute_ratio": float(counts[COMPUTE] / total_cells), "energy_ratio": float(counts[ENERGY] / total_cells), "sensor_ratio": float(counts[SENSOR] / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age, "signal_active": signal_active, "compassion_active": compassion_active}
     metrics.update(phase_signals)
     return (out.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), memory_grid.astype(np.float32, copy=False), age_grid.astype(np.float32, copy=False), metrics)
 
