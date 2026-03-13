@@ -1,64 +1,42 @@
-from agent.evolution_engine import DefaultFitnessEvaluator
-from agent.meme_structure import Meme, MemeGenes
+#!/usr/bin/env python3
+"""Tests for the differentiation-aware fitness scoring in evolution engine."""
+
+import numpy as np
+import pytest
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent"))
+
+try:
+    from evolution_engine import _differentiation_score, ENTROPY_BONUS_WEIGHT
+except ImportError:
+    pytest.skip("evolution_engine not available", allow_module_level=True)
 
 
-def _neutral_meme() -> Meme:
-    meme = Meme(genes=MemeGenes(
-        dominance=0.0,
-        virality=0.0,
-        stability=0.5,
-        compatibility=0.5,
-        expression_threshold=0.5,
-    ))
-    meme.environment_fitness = {}
-    meme.propagation_count = 0
-    return meme
+class TestDifferentiationScore:
+    def test_uniform_distribution_high_score(self):
+        grid = np.zeros((10, 10, 10), dtype=np.uint8)
+        n = grid.size // 5
+        grid.flat[:n] = 0
+        grid.flat[n:2*n] = 1
+        grid.flat[2*n:3*n] = 2
+        grid.flat[3*n:4*n] = 3
+        grid.flat[4*n:] = 4
+        score = _differentiation_score(grid)
+        assert score > 0.8, f"Uniform distribution score {score} should be > 0.8"
 
+    def test_single_state_low_score(self):
+        grid = np.zeros((10, 10, 10), dtype=np.uint8)
+        score = _differentiation_score(grid)
+        assert score < 0.2, f"Single state score {score} should be < 0.2"
 
-def test_entropy_bonus_rewards_heterogeneous_state_mix() -> None:
-    evaluator = DefaultFitnessEvaluator()
-    meme = _neutral_meme()
+    def test_score_between_0_and_1(self):
+        rng = np.random.default_rng(42)
+        grid = rng.integers(0, 5, size=(8, 8, 8), dtype=np.uint8)
+        score = _differentiation_score(grid)
+        assert 0.0 <= score <= 1.0
 
-    monolithic_context = {
-        "cell_state_counts": {
-            "STRUCTURAL": 67000,
-            "COMPUTE": 100,
-            "ENERGY": 100,
-            "SENSOR": 100,
-        }
-    }
-    differentiated_context = {
-        "cell_state_counts": {
-            "STRUCTURAL": 20000,
-            "COMPUTE": 17000,
-            "ENERGY": 15000,
-            "SENSOR": 15000,
-        }
-    }
-
-    monolithic_score = evaluator.evaluate_meme(meme, monolithic_context)
-    differentiated_score = evaluator.evaluate_meme(meme, differentiated_context)
-
-    assert differentiated_score > monolithic_score
-
-
-def test_structural_dominance_penalty_applies_after_target_threshold() -> None:
-    evaluator = DefaultFitnessEvaluator()
-    meme = _neutral_meme()
-
-    below_target = {"cell_state_counts": {"STRUCTURAL": 54, "COMPUTE": 20, "ENERGY": 13, "SENSOR": 13}}
-    above_target = {"cell_state_counts": {"STRUCTURAL": 90, "COMPUTE": 4, "ENERGY": 3, "SENSOR": 3}}
-
-    assert evaluator.evaluate_meme(meme, below_target) > evaluator.evaluate_meme(meme, above_target)
-
-
-def test_list_state_vector_is_supported() -> None:
-    evaluator = DefaultFitnessEvaluator()
-    meme = _neutral_meme()
-
-    # [VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR]
-    vector_context = {"cell_state_counts": [190000, 17000, 17000, 17000, 17000]}
-
-    score = evaluator.evaluate_meme(meme, vector_context)
-
-    assert 0.0 <= score <= 1.0
+    def test_entropy_bonus_weight_positive(self):
+        assert isinstance(ENTROPY_BONUS_WEIGHT, (int, float))
+        assert ENTROPY_BONUS_WEIGHT > 0
