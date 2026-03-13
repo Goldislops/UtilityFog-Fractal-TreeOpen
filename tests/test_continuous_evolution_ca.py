@@ -186,21 +186,20 @@ def test_density_phase_detector_trigger_logic() -> None:
     detector = init_density_phase_detector(
         DensityPhaseDetectorConfig(
             enabled=True,
-            window_size=5,
-            density_low_threshold=0.05,
-            density_high_threshold=0.8,
-            first_derivative_threshold=0.05,
-            second_derivative_threshold=0.02,
-            contraction_density_threshold=0.30,
+            window_size=10,
+            theta_c=0.12,
+            alpha_c=0.02,
+            savgol_poly_order=3,
             trigger_sandboxed_memory=True,
         )
     )
-    s1 = np.ones((4, 4, 4), dtype=np.uint8)
-    s2 = np.zeros((4, 4, 4), dtype=np.uint8)
-    s2.ravel()[:16] = 1
-    s3 = np.zeros((4, 4, 4), dtype=np.uint8)
-    s3.ravel()[:8] = 1
-    update_density_phase_detector(detector, s1)
-    update_density_phase_detector(detector, s2)
-    sig = update_density_phase_detector(detector, s3)
-    assert sig["phase_triggered"] == 1.0
+    ratios = [0.90, 0.84, 0.76, 0.66, 0.54, 0.40, 0.28, 0.18, 0.10, 0.04]
+    sig = {}
+    triggered = False
+    for ratio in ratios:
+        s = np.zeros((10, 10, 10), dtype=np.uint8)
+        active = int(ratio * s.size)
+        s.ravel()[:active] = 1
+        sig = update_density_phase_detector(detector, s)
+        triggered = triggered or bool(sig["phase_triggered"])
+    assert triggered

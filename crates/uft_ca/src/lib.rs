@@ -80,6 +80,7 @@ impl NeighborCount {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VoxelMemory {
     pub compute_age: u16,
+    pub compute_half_step: bool,
     pub last_active_gen: u32,
     pub memory_strength: f32,
     pub structural_age: u16,
@@ -121,6 +122,20 @@ pub struct VoxelMemoryParams {
     pub super_pod_threshold: usize,
     pub damping_radius: usize,
     pub analogue_mutation: f32,
+    // Phase 3: Mamba-Viking memory dynamics
+    pub mamba_delta_threshold: f32,
+    pub mamba_tau_base: f32,
+    pub mamba_tau_scale: f32,
+    pub mamba_boost_base: f32,
+    pub mamba_boost_gain: f32,
+    pub mamba_age_stability_gain: f32,
+    pub mamba_high_delta_floor: f32,
+    // Phase 3: Void sanctuary + epsilon regularization
+    pub void_sanctuary_multiplier: f32,
+    pub epsilon_p_max: f32,
+    pub epsilon_buffer: f32,
+    pub epsilon_n_c: usize,
+    pub epsilon_tau: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,22 +159,16 @@ pub const SELECTIVE_MEMORY_DECAY_DEFAULTS: SelectiveMemoryDecayConfig = Selectiv
 pub struct DensityPhaseDetectorConfig {
     pub enabled: bool,
     pub window_size: usize,
-    pub density_low_threshold: f32,
-    pub density_high_threshold: f32,
-    pub first_derivative_threshold: f32,
-    pub second_derivative_threshold: f32,
-    pub contraction_density_threshold: f32,
+    pub theta_c: f32,
+    pub alpha_c: f32,
     pub trigger_sandboxed_memory: bool,
 }
 
 pub const DENSITY_PHASE_DETECTOR_DEFAULTS: DensityPhaseDetectorConfig = DensityPhaseDetectorConfig {
     enabled: false,
-    window_size: 8,
-    density_low_threshold: 0.10,
-    density_high_threshold: 0.65,
-    first_derivative_threshold: 0.03,
-    second_derivative_threshold: 0.02,
-    contraction_density_threshold: 0.22,
+    window_size: 10,
+    theta_c: 0.12,
+    alpha_c: 0.02,
     trigger_sandboxed_memory: false,
 };
 
@@ -212,11 +221,23 @@ pub const VOXEL_MEMORY_PARAMS: VoxelMemoryParams = VoxelMemoryParams {
     super_pod_threshold: 8,
     damping_radius: 2,
     analogue_mutation: 0.03,
+    mamba_delta_threshold: 0.12,
+    mamba_tau_base: 5.0,
+    mamba_tau_scale: 12.0,
+    mamba_boost_base: 0.015,
+    mamba_boost_gain: 0.045,
+    mamba_age_stability_gain: 0.03,
+    mamba_high_delta_floor: 1.15,
+    void_sanctuary_multiplier: 50.0,
+    epsilon_p_max: 0.943,
+    epsilon_buffer: 0.08,
+    epsilon_n_c: 20,
+    epsilon_tau: 3.0,
 };
 
 impl VoxelMemory {
     pub fn new() -> Self {
-        Self { compute_age: 0, last_active_gen: 0, memory_strength: 1.0, structural_age: 0, energy_reserve: 1.0 }
+        Self { compute_age: 0, compute_half_step: false, last_active_gen: 0, memory_strength: 1.0, structural_age: 0, energy_reserve: 1.0 }
     }
 
     pub fn decay_resistance(&self) -> f32 {
@@ -242,24 +263,46 @@ impl VoxelMemory {
     pub fn decay_memory_selective(
         &mut self,
         current_gen: u32,
-        compute_neighbors: usize,
+        counts: &NeighborCount,
+        current: CellState,
         config: SelectiveMemoryDecayConfig,
     ) {
         let generations_inactive = current_gen.saturating_sub(self.last_active_gen);
-        if !config.enabled {
-            self.decay_memory(current_gen);
-            return;
+
+        let total = counts.total_non_void() as f32;
+        let density_delta = ((counts.compute + counts.energy) as f32 - counts.structural as f32) / 26.0;
+        let delta_abs = density_delta.abs();
+
+        let p = &VOXEL_MEMORY_PARAMS;
+        let tau = (p.mamba_tau_base + p.mamba_tau_scale * delta_abs).max(0.25);
+        let baseline = (-1.0 / tau).exp();
+        let mut boost = (p.mamba_boost_base + p.mamba_boost_gain * delta_abs) * density_delta;
+        if config.enabled {
+            let gate = if self.memory_strength >= config.memory_strength_threshold
+                || counts.compute >= config.compute_neighbor_threshold
+            {
+                config.high_decay_rate
+            } else {
+                config.low_decay_rate
+            };
+            boost += density_delta * gate;
         }
 
-        let rate = if self.memory_strength >= config.memory_strength_threshold
-            || compute_neighbors >= config.compute_neighbor_threshold
-        {
-            config.high_decay_rate
+        let age_phi = if current == CellState::Compute {
+            1.0
         } else {
-            config.low_decay_rate
+            (self.compute_age as f32 / p.age_mature_threshold.max(1) as f32).clamp(0.0, 1.0)
         };
+        let stability = p.mamba_age_stability_gain * age_phi;
 
-        self.memory_strength *= (1.0 - rate).powi(generations_inactive as i32);
+        self.memory_strength = self.memory_strength * baseline.powi(generations_inactive as i32) + boost + stability;
+
+        if delta_abs < p.mamba_delta_threshold && total < 3.0 {
+            self.memory_strength *= 0.92;
+        }
+        if delta_abs >= p.mamba_delta_threshold {
+            self.memory_strength = self.memory_strength.max(p.mamba_high_delta_floor);
+        }
         self.memory_strength = self.memory_strength.max(0.01);
     }
 }
@@ -286,11 +329,8 @@ impl DensityPhaseDetector {
 
         let mut triggered = false;
         if self.config.enabled && self.densities.len() >= 3 {
-            let in_band = density >= self.config.density_low_threshold && density <= self.config.density_high_threshold;
-            let high_d1 = first_derivative.abs() >= self.config.first_derivative_threshold;
-            let high_d2 = second_derivative.abs() >= self.config.second_derivative_threshold;
-            let contracting = density <= self.config.contraction_density_threshold && first_derivative < 0.0;
-            triggered = in_band && high_d1 && high_d2 && contracting;
+            triggered = first_derivative < -(self.config.theta_c / 2.0)
+                && second_derivative < -self.config.alpha_c;
         }
 
         DensityPhaseSignal { density, first_derivative, second_derivative, triggered }
@@ -488,14 +528,23 @@ impl MultiStateRule {
         rng_seed: u64,
     ) -> CellState {
         let mut next = self.apply_stochastic(current, counts, rng_seed);
+        let active_neighbors = counts.total_non_void();
 
         if current == CellState::Compute {
-            memory.compute_age = memory.compute_age.saturating_add(1);
+            if active_neighbors == 0 {
+                memory.compute_half_step = !memory.compute_half_step;
+                if memory.compute_half_step {
+                    memory.compute_age = memory.compute_age.saturating_add(1);
+                }
+            } else {
+                memory.compute_half_step = false;
+                memory.compute_age = memory.compute_age.saturating_add(1);
+            }
             memory.last_active_gen = current_gen;
             memory.memory_strength = (memory.memory_strength + VOXEL_MEMORY_PARAMS.halbach_recuperation_rate * 0.1).min(2.0);
             memory.structural_age = 0;
         } else {
-            memory.decay_memory(current_gen);
+            memory.decay_memory_selective(current_gen, counts, current, SELECTIVE_MEMORY_DECAY_DEFAULTS);
         }
 
         if current == CellState::Structural {
@@ -511,12 +560,35 @@ impl MultiStateRule {
         }
 
         if current == CellState::Compute && next == CellState::Void {
+            if active_neighbors >= VOXEL_MEMORY_PARAMS.epsilon_n_c {
+                let mut reg_hasher = DefaultHasher::new();
+                (rng_seed.wrapping_add(41)).hash(&mut reg_hasher);
+                (active_neighbors as u64).hash(&mut reg_hasher);
+                let reg_roll = (reg_hasher.finish() % 1000) as f32 / 1000.0;
+                let density_offset = (active_neighbors - VOXEL_MEMORY_PARAMS.epsilon_n_c) as f32;
+                let p_reg = VOXEL_MEMORY_PARAMS.epsilon_p_max
+                    - VOXEL_MEMORY_PARAMS.epsilon_buffer
+                        * (-(density_offset / VOXEL_MEMORY_PARAMS.epsilon_tau.max(0.1))).exp();
+                let death_prob = p_reg.min(VOXEL_MEMORY_PARAMS.epsilon_p_max);
+                let survival_prob = (1.0 - death_prob).max(0.057);
+                if reg_roll < survival_prob {
+                    next = CellState::Compute;
+                }
+            }
+
+            if next == CellState::Compute {
+                return next;
+            }
+
             let mut hasher = DefaultHasher::new();
             (rng_seed.wrapping_add(7)).hash(&mut hasher);
             (counts.compute as u64).hash(&mut hasher);
             (counts.energy as u64).hash(&mut hasher);
             let roll = (hasher.finish() % 1000) as f32 / 1000.0;
             let mut resistance = memory.decay_resistance() * memory.memory_strength.min(1.5);
+            if active_neighbors == 0 {
+                resistance *= VOXEL_MEMORY_PARAMS.void_sanctuary_multiplier;
+            }
             if counts.compute >= VOXEL_MEMORY_PARAMS.forward_contagion_threshold {
                 resistance += VOXEL_MEMORY_PARAMS.cluster_shield_bonus;
             }
@@ -582,6 +654,7 @@ impl MultiStateRule {
 
         if next != CellState::Compute {
             memory.compute_age = 0;
+            memory.compute_half_step = false;
         }
 
         next
@@ -1664,30 +1737,63 @@ mod tests {
         m2.last_active_gen = 5;
 
         m1.decay_memory(12);
-        m2.decay_memory_selective(12, 4, SELECTIVE_MEMORY_DECAY_DEFAULTS);
+        let counts = NeighborCount { compute: 4, ..NeighborCount::default() };
+        m2.decay_memory_selective(12, &counts, CellState::Structural, SELECTIVE_MEMORY_DECAY_DEFAULTS);
 
-        assert!((m1.memory_strength - m2.memory_strength).abs() < 1e-6);
+        assert!(m2.memory_strength > 0.01);
+        assert!(m2.memory_strength <= 2.0);
+        assert!(m2.memory_strength != m1.memory_strength);
     }
 
     #[test]
     fn test_density_phase_detector_triggers_in_contraction_band() {
         let mut detector = DensityPhaseDetector::new(DensityPhaseDetectorConfig {
             enabled: true,
-            window_size: 5,
-            density_low_threshold: 0.05,
-            density_high_threshold: 0.8,
-            first_derivative_threshold: 0.05,
-            second_derivative_threshold: 0.02,
-            contraction_density_threshold: 0.30,
+            window_size: 10,
+            theta_c: 0.12,
+            alpha_c: 0.02,
             trigger_sandboxed_memory: true,
         });
 
-        let _ = detector.update(0.90);
-        let _ = detector.update(0.25);
-        let signal = detector.update(0.12);
+        let _ = detector.update(1.00);
+        let _ = detector.update(0.80);
+        let signal = detector.update(0.50);
 
         assert!(signal.triggered);
         assert!(signal.first_derivative < 0.0);
+    }
+
+    #[test]
+    fn test_void_sanctuary_slows_compute_aging() {
+        let mut rule = MultiStateRule::new();
+        rule.set_default(CellState::Compute, CellState::Compute);
+        let counts = NeighborCount::default();
+        for seed in 0..2048u64 {
+            let mut memory = VoxelMemory::new();
+            let n1 = rule.apply_with_memory(CellState::Compute, &counts, &mut memory, 1, seed);
+            let age_after_1 = memory.compute_age;
+            let n2 = rule.apply_with_memory(CellState::Compute, &counts, &mut memory, 2, seed.wrapping_add(1));
+            let age_after_2 = memory.compute_age;
+            if n1 == CellState::Compute && n2 == CellState::Compute {
+                assert_eq!(age_after_1, 1);
+                assert_eq!(age_after_2, 1);
+                return;
+            }
+        }
+        panic!("no deterministic seed preserved compute state for void sanctuary aging test");
+    }
+
+    #[test]
+    fn test_epsilon_buffer_preserves_packed_survival_floor() {
+        let n = 26usize;
+        let density_offset = (n - VOXEL_MEMORY_PARAMS.epsilon_n_c) as f32;
+        let p_reg = VOXEL_MEMORY_PARAMS.epsilon_p_max
+            - VOXEL_MEMORY_PARAMS.epsilon_buffer
+                * (-(density_offset / VOXEL_MEMORY_PARAMS.epsilon_tau.max(0.1))).exp();
+        let death_prob = p_reg.min(VOXEL_MEMORY_PARAMS.epsilon_p_max);
+        let survival_prob = (1.0 - death_prob).max(0.057);
+        assert!(death_prob <= 0.943 + 1e-6);
+        assert!(survival_prob > 0.05);
     }
 
     #[test]

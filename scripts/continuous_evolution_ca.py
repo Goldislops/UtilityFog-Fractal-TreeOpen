@@ -99,12 +99,10 @@ class SelectiveMemoryDecayConfig:
 @dataclass
 class DensityPhaseDetectorConfig:
     enabled: bool = False
-    window_size: int = 8
-    density_low_threshold: float = 0.10
-    density_high_threshold: float = 0.65
-    first_derivative_threshold: float = 0.03
-    second_derivative_threshold: float = 0.02
-    contraction_density_threshold: float = 0.22
+    window_size: int = 10
+    theta_c: float = 0.12
+    alpha_c: float = 0.02
+    savgol_poly_order: int = 3
     trigger_sandboxed_memory: bool = False
 
 
@@ -345,12 +343,10 @@ def load_experimental_config(rule_spec: Mapping[str, Any]) -> ExperimentalConfig
         ),
         density_phase_detector=DensityPhaseDetectorConfig(
             enabled=bool(detector.get("enabled", False)),
-            window_size=max(3, int(detector.get("window_size", 8))),
-            density_low_threshold=float(detector.get("density_low_threshold", 0.10)),
-            density_high_threshold=float(detector.get("density_high_threshold", 0.65)),
-            first_derivative_threshold=float(detector.get("first_derivative_threshold", 0.03)),
-            second_derivative_threshold=float(detector.get("second_derivative_threshold", 0.02)),
-            contraction_density_threshold=float(detector.get("contraction_density_threshold", 0.22)),
+            window_size=max(5, int(detector.get("window_size", 10))),
+            theta_c=float(detector.get("theta_c", 0.12)),
+            alpha_c=float(detector.get("alpha_c", 0.02)),
+            savgol_poly_order=int(detector.get("savgol_poly_order", 3)),
             trigger_sandboxed_memory=bool(detector.get("trigger_sandboxed_memory", False)),
         ),
         mini_lattice=MiniLatticeExperimentConfig(
@@ -365,30 +361,49 @@ def init_density_phase_detector(config: DensityPhaseDetectorConfig) -> DensityPh
     return DensityPhaseDetector(config=config)
 
 
+def _savgol_latest_derivatives(values: List[float], window_size: int, poly_order: int) -> Tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    if len(values) < max(3, window_size):
+        if len(values) < 3:
+            return 0.0, 0.0
+        d1 = values[-1] - values[-2]
+        d2 = d1 - (values[-2] - values[-3])
+        return float(d1), float(d2)
+
+    w = max(5, window_size)
+    window_vals = np.asarray(values[-w:], dtype=np.float32)
+    x = np.arange(window_vals.shape[0], dtype=np.float32)
+    degree = int(max(2, min(poly_order, w - 2)))
+    coeffs = np.polyfit(x, window_vals, degree)
+    p = np.poly1d(coeffs)
+    dp = np.polyder(p, 1)
+    d2p = np.polyder(p, 2)
+    x_eval = float(x[-1])
+    return float(dp(x_eval)), float(d2p(x_eval))
+
+
 def update_density_phase_detector(detector: Optional[DensityPhaseDetector], state: np.ndarray) -> Dict[str, float]:
     if detector is None:
         return {}
 
     density = float(np.count_nonzero(state) / max(1, state.size))
-    prev_density = detector.densities[-1] if detector.densities else density
-    d1 = density - prev_density
-    prev_d1 = detector.first_derivatives[-1] if detector.first_derivatives else d1
-    d2 = d1 - prev_d1
-
     detector.densities.append(density)
-    detector.first_derivatives.append(d1)
     if len(detector.densities) > detector.config.window_size:
         detector.densities.popleft()
+
+    d1, d2 = _savgol_latest_derivatives(
+        list(detector.densities),
+        detector.config.window_size,
+        detector.config.savgol_poly_order,
+    )
+    detector.first_derivatives.append(d1)
     if len(detector.first_derivatives) > detector.config.window_size:
         detector.first_derivatives.popleft()
 
     triggered = 0.0
     if detector.config.enabled and len(detector.densities) >= 3:
-        in_band = detector.config.density_low_threshold <= density <= detector.config.density_high_threshold
-        high_d1 = abs(d1) >= detector.config.first_derivative_threshold
-        high_d2 = abs(d2) >= detector.config.second_derivative_threshold
-        contracting = density <= detector.config.contraction_density_threshold and d1 < 0
-        if in_band and high_d1 and high_d2 and contracting:
+        if d1 < -(detector.config.theta_c / 2.0) and d2 < -detector.config.alpha_c:
             triggered = 1.0
 
     return {

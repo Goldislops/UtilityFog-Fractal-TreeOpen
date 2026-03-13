@@ -111,12 +111,10 @@ high_decay_rate = 0.045
 
 [params.experimental.density_phase_detector]
 enabled = false
-window_size = 8
-density_low_threshold = 0.10
-density_high_threshold = 0.65
-first_derivative_threshold = 0.03
-second_derivative_threshold = 0.02
-contraction_density_threshold = 0.22
+window_size = 10
+theta_c = 0.12
+alpha_c = 0.02
+savgol_poly_order = 3
 trigger_sandboxed_memory = false
 
 [params.experimental.mini_lattice]
