@@ -159,6 +159,9 @@ class VoxelMemoryParams:
     metta_beta: float = 0.25          # max survival floor boost (25%)
     metta_warmth_rate: float = 0.02   # warmth accumulation rate per ENERGY neighbor
     metta_warmth_decay: float = 0.95  # warmth decays when no ENERGY neighbors
+    # Phase 6b: Sympathetic Joy (mudita) -- resonance from mature neighbors
+    joy_beta: float = 0.35           # max resonance multiplier (35%)
+    joy_age_scale: float = 15.0      # age excess scaling factor
     # Phase 6 signal interval (expensive ops every K steps)
     signal_interval: int = 5
 
@@ -411,6 +414,22 @@ def count_neighbors_3d(state: np.ndarray) -> np.ndarray:
 _count_neighbors_by_state = count_neighbors_3d
 
 
+def _max_neighbor_value(field: np.ndarray) -> np.ndarray:
+    """Find the maximum value among Moore neighbors for a 3D scalar field.
+    Used for Sympathetic Joy: find the oldest COMPUTE neighbor.
+    Optimized: pad once + slice (avoids 26 np.roll copies)."""
+    padded = np.pad(field, 1, mode="constant", constant_values=0.0)
+    nz, ny, nx = field.shape
+    result = np.zeros_like(field)
+    for dz in range(3):
+        for dy in range(3):
+            for dx in range(3):
+                if dz == 1 and dy == 1 and dx == 1:
+                    continue
+                np.maximum(result, padded[dz:dz+nz, dy:dy+ny, dx:dx+nx], out=result)
+    return result
+
+
 def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
     padded = np.pad(mask.astype(np.int16), 1, mode="constant", constant_values=0)
     cluster = np.zeros_like(mask, dtype=np.int16)
@@ -596,6 +615,20 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
             1.0 - np.exp(-age_excess / mem.equanimity_tau)
         ) * np.tanh(mem.equanimity_gamma * memory_grid[2])
         equanimity_mask = mature_compute & (rng.random(shape) < p_resist)
+    # Phase 6b: Sympathetic Joy (mudita) -- resonance from mature neighbors
+    # Nemo's formula: R_joy = 1 + beta_joy * tanh((a_max_neighbor - a_m) / joy_age_scale)
+    # A cell benefits from the maturity of its neighbors without consuming them
+    compute_age_field = np.where(state == COMPUTE, memory_grid[0], 0.0).astype(np.float32)
+    max_neighbor_age = _max_neighbor_value(compute_age_field)
+    # Only apply to cells that have a mature COMPUTE neighbor (age > equanimity_age_min)
+    has_mature_neighbor = max_neighbor_age > mem.equanimity_age_min
+    if np.any(has_mature_neighbor):
+        age_excess_neighbor = np.maximum(0.0, max_neighbor_age - mem.equanimity_age_min)
+        r_joy = 1.0 + mem.joy_beta * np.tanh(age_excess_neighbor / mem.joy_age_scale)
+        # Boost memory_strength (channel 2) for ALL cells near mature COMPUTE
+        # This is positive-sum: the neighbor thrives because the elder thrives
+        memory_grid[2][has_mature_neighbor] = np.minimum(
+            2.0, memory_grid[2][has_mature_neighbor] * r_joy[has_mature_neighbor])
     # Stochastic transitions
     if stoch.enabled:
         structural = out == STRUCTURAL; compute = out == COMPUTE
