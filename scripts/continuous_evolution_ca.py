@@ -155,6 +155,12 @@ class VoxelMemoryParams:
     equanimity_p_max: float = 0.85
     equanimity_tau: float = 5.0
     equanimity_gamma: float = 0.5
+    # Phase 6a: Loving-Kindness (metta) -- ENERGY warms STRUCTURAL cells
+    metta_beta: float = 0.25          # max survival floor boost (25%)
+    metta_warmth_rate: float = 0.02   # warmth accumulation rate per ENERGY neighbor
+    metta_warmth_decay: float = 0.95  # warmth decays when no ENERGY neighbors
+    # Phase 6 signal interval (expensive ops every K steps)
+    signal_interval: int = 5
 
 
 @dataclass
@@ -418,22 +424,39 @@ def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Memory grid (5 channels)
+# Memory grid (8 channels -- Phase 6 expansion)
+# Channel map:
+#   0: compute_age        (Phase 1+)
+#   1: structural_age     (Phase 1+)
+#   2: memory_strength    (Phase 1+)
+#   3: energy_reserve     (Phase 1+, repurposed Phase 6c for compassion cost)
+#   4: last_active_gen    (Phase 1+)
+#   5: signal_field       (Phase 6c: mycelial signal amplitude)
+#   6: warmth             (Phase 6a: metta/loving-kindness accumulation)
+#   7: compassion_cooldown (Phase 6c: prevents echo/spam)
 # ---------------------------------------------------------------------------
+MEMORY_CHANNELS = 8
+
 def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
-    """5 channels: compute_age, structural_age, memory_strength, energy_reserve, last_active_gen."""
-    grid = np.zeros((5,) + shape, dtype=np.float32)
-    grid[2, :, :, :] = 1.0
-    grid[3, :, :, :] = 1.0
+    """8 channels: compute_age, structural_age, memory_strength, energy_reserve,
+    last_active_gen, signal_field, warmth, compassion_cooldown."""
+    grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
+    grid[2, :, :, :] = 1.0   # memory_strength default
+    grid[3, :, :, :] = 1.0   # energy_reserve default
     return grid
 
 
 def _migrate_memory_grid(memory_grid: np.ndarray, shape: Tuple[int, int, int]) -> np.ndarray:
-    """Auto-migrate 3-channel memory grid to 5-channel format."""
-    if memory_grid.shape[0] == 5:
+    """Auto-migrate older memory grids to 8-channel format."""
+    if memory_grid.shape[0] == MEMORY_CHANNELS:
         return memory_grid
+    if memory_grid.shape[0] == 5:
+        # Phase 5 -> Phase 6: add 3 new channels (signal, warmth, cooldown)
+        new_grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
+        new_grid[:5] = memory_grid
+        return new_grid
     if memory_grid.shape[0] == 3:
-        new_grid = np.zeros((5,) + shape, dtype=np.float32)
+        new_grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
         new_grid[0] = memory_grid[0]
         new_grid[2] = memory_grid[1]
         new_grid[4] = memory_grid[2]
@@ -542,7 +565,7 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     shape = state.shape
     if memory_grid is None:
         memory_grid = init_memory_grid(shape)
-    elif memory_grid.shape[0] != 5:
+    elif memory_grid.shape[0] != MEMORY_CHANNELS:
         memory_grid = _migrate_memory_grid(memory_grid, shape)
     if age_grid is None:
         age_grid = np.zeros(shape, dtype=np.float32)
@@ -598,10 +621,31 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         rc_prob = _reverse_contagion_probability(compute_n, mem)
         rc_prob = np.minimum(0.95, rc_prob * np.maximum(0.25, memory_grid[2]))
         out[structural & (rng.random(shape) < rc_prob)] = COMPUTE
+    # Phase 6a: Loving-Kindness (metta) -- ENERGY warms STRUCTURAL cells
+    # Nemo's formula: delta_r_metta = beta_metta * (1 - exp(-n_E / 3))
+    # Warmth accumulates in channel 6, decays when no ENERGY neighbors
+    energy_neighbor_count = neighbor_counts[ENERGY].astype(np.float32)
+    structural_now = out == STRUCTURAL
+    # Accumulate warmth for STRUCTURAL cells touching ENERGY
+    has_energy_neighbors = structural_now & (energy_neighbor_count > 0)
+    warmth_boost = mem.metta_warmth_rate * energy_neighbor_count
+    memory_grid[6][has_energy_neighbors] = np.minimum(
+        1.0, memory_grid[6][has_energy_neighbors] + warmth_boost[has_energy_neighbors])
+    # Decay warmth for STRUCTURAL cells with no ENERGY neighbors
+    no_energy = structural_now & (energy_neighbor_count == 0)
+    memory_grid[6][no_energy] *= mem.metta_warmth_decay
+    # Clear warmth for non-STRUCTURAL cells
+    memory_grid[6][~structural_now] = 0.0
     # Stochastic decay (0.005 -- CRITICAL)
+    # Phase 6a: warmth reduces STRUCTURAL decay probability
+    # survival_floor = beta_metta * (1 - exp(-n_E / 3)) -- Nemo's formula
     if stoch.enabled:
         structural = out == STRUCTURAL; energy = out == ENERGY; sensor = out == SENSOR
-        out[structural & (rng.random(shape) < stoch.structural_to_void_decay_prob)] = VOID
+        # Loving-Kindness: warmth-modulated STRUCTURAL decay
+        metta_survival_floor = mem.metta_beta * (1.0 - np.exp(-energy_neighbor_count / 3.0))
+        structural_decay_prob = np.maximum(
+            0.0, stoch.structural_to_void_decay_prob - metta_survival_floor)
+        out[structural & (rng.random(shape) < structural_decay_prob)] = VOID
         out[energy & (rng.random(shape) < stoch.energy_to_void_decay_prob)] = VOID
         out[sensor & (rng.random(shape) < stoch.sensor_to_void_decay_prob)] = VOID
     # Inactivity decay

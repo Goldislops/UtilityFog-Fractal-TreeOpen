@@ -133,10 +133,10 @@ class TestStepFunction:
         rule = _rule_spec_for_tests()
         rng = np.random.default_rng(42)
         ns, inact, mem, age, metrics = step(state, rule, rng)
-        assert mem.shape[0] == 5
+        assert mem.shape[0] == 8  # Phase 6: 8-channel memory grid
         assert mem.shape[1:] == state.shape
 
-    def test_3_to_5_channel_migration(self):
+    def test_3_to_8_channel_migration(self):
         state = np.zeros((4, 4, 4), dtype=np.uint8)
         state[2, 2, 2] = COMPUTE
         rule = _rule_spec_for_tests()
@@ -147,7 +147,7 @@ class TestStepFunction:
         old_mem[1, 2, 2, 2] = 0.9   # memory_strength
         old_mem[2, 2, 2, 2] = 10.0  # last_active_gen
         ns, inact, mem, age, metrics = step(state, rule, rng, memory_grid=old_mem)
-        assert mem.shape[0] == 5
+        assert mem.shape[0] == 8  # Phase 6: 8-channel memory grid
         # Verify migration mapped channels correctly
         # Channel 0 -> compute_age (preserved)
         # Channel 1 -> memory_strength -> new channel 2
