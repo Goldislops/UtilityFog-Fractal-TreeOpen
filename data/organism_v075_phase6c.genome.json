@@ -1,0 +1,279 @@
+{
+  "format": {
+    "schema_version": "1.0.0",
+    "format_id": "utilityfog-portable-genome"
+  },
+  "metadata": {
+    "name": "branching-growth-v0.7.5",
+    "version": "0.7.5",
+    "author": "UtilityFog Team",
+    "description": "v0.7.5 cosmic garden lock with coherence, bamboo rebirth, and entropy damping",
+    "exported_at": "2026-03-13T13:31:46.943652+00:00",
+    "source_generation": 515682,
+    "source_ca_step": 5156825,
+    "best_fitness": 0.646912,
+    "target_lambda": 1.7
+  },
+  "topology": {
+    "states": [
+      "VOID",
+      "STRUCTURAL",
+      "COMPUTE",
+      "ENERGY",
+      "SENSOR"
+    ],
+    "neighborhood": "moore-3d",
+    "transition_mode": "outer-totalistic"
+  },
+  "transition_table": {
+    "VOID": {
+      "3": "STRUCTURAL",
+      "4": "STRUCTURAL",
+      "5": "STRUCTURAL",
+      "6": "STRUCTURAL"
+    },
+    "STRUCTURAL": {
+      "0": "STRUCTURAL",
+      "1": "STRUCTURAL",
+      "2": "STRUCTURAL",
+      "3": "COMPUTE",
+      "4": "COMPUTE",
+      "5": "ENERGY",
+      "6": "SENSOR",
+      "7": "SENSOR",
+      "8": "SENSOR"
+    },
+    "COMPUTE": {
+      "0": "COMPUTE",
+      "1": "COMPUTE",
+      "2": "COMPUTE",
+      "3": "COMPUTE",
+      "4": "ENERGY",
+      "5": "SENSOR",
+      "6": "SENSOR"
+    },
+    "ENERGY": {
+      "0": "ENERGY",
+      "1": "ENERGY",
+      "2": "ENERGY",
+      "3": "ENERGY",
+      "4": "ENERGY",
+      "5": "ENERGY",
+      "6": "SENSOR",
+      "7": "SENSOR",
+      "8": "SENSOR"
+    },
+    "SENSOR": {
+      "0": "SENSOR",
+      "1": "SENSOR",
+      "2": "SENSOR",
+      "3": "SENSOR",
+      "4": "SENSOR",
+      "5": "SENSOR",
+      "6": "SENSOR"
+    }
+  },
+  "stochastic": {
+    "enabled": true,
+    "baseline_transition_prob": 0.08,
+    "structural_to_energy_prob": 0.08,
+    "structural_to_sensor_prob": 0.08,
+    "compute_to_energy_prob": 0.1,
+    "compute_to_sensor_prob": 0.1,
+    "structural_to_void_decay_prob": 0.005,
+    "energy_to_void_decay_prob": 0.004,
+    "sensor_to_void_decay_prob": 0.003
+  },
+  "contagion": {
+    "enabled": true,
+    "energy_neighbor_threshold": 4,
+    "sensor_neighbor_threshold": 4,
+    "structural_energy_conversion_prob": 0.34,
+    "structural_sensor_conversion_prob": 0.34,
+    "compute_energy_conversion_prob": 0.15,
+    "compute_sensor_conversion_prob": 0.3
+  },
+  "decay": {
+    "enabled": true,
+    "inactivity_neighbor_threshold": 1,
+    "structural_inactive_steps_to_decay": 6
+  },
+  "cosmic_garden": {
+    "cluster_coherence_threshold": 3,
+    "shield_strength": 0.85,
+    "cluster_shield_bonus": 0.15,
+    "halbach_recuperation_rate": 0.4,
+    "temporal_dilation": 0.15,
+    "bamboo_initial_growth": 100,
+    "bamboo_max_length": 500,
+    "bamboo_rebirth_age": 488,
+    "biofilm_leech_rate": 0.1,
+    "super_pod_threshold": 8,
+    "analogue_mutation": 0.03,
+    "otolith_vector": 0.05,
+    "damping_radius": 2
+  },
+  "survival_mechanics": {
+    "age_thresholds": {
+      "age_young_threshold": 8,
+      "age_mature_threshold": 40
+    },
+    "reverse_contagion": {
+      "resistance_max": 0.82,
+      "reverse_contagion_threshold": 4,
+      "reverse_contagion_base_prob": 0.2,
+      "reverse_contagion_boost": 0.06,
+      "energy_to_compute_prob": 0.2
+    },
+    "forward_contagion_mitigation": {
+      "forward_contagion_threshold": 5,
+      "forward_contagion_penalty": 0.18,
+      "forward_contagion_floor": 0.4
+    },
+    "rag_memory": {
+      "rag_query_radius": 3,
+      "rag_memory_decay": 0.015,
+      "rag_reinforcement_boost": 1.5,
+      "rag_entropy_weight": 0.18
+    },
+    "phase3_mamba_viking": {
+      "mamba_delta_threshold": 0.12,
+      "mamba_tau_base": 5.0,
+      "mamba_tau_scale": 12.0,
+      "mamba_boost_base": 0.015,
+      "mamba_boost_gain": 0.045,
+      "mamba_age_stability_gain": 0.03,
+      "mamba_high_delta_floor": 1.15
+    },
+    "phase3_void_sanctuary": {
+      "void_sanctuary_multiplier": 50.0
+    },
+    "phase3_epsilon_buffer": {
+      "epsilon_p_max": 0.943,
+      "epsilon_buffer": 0.08,
+      "epsilon_n_c": 20,
+      "epsilon_tau": 3.0
+    },
+    "phase4_equanimity": {
+      "equanimity_age_min": 3.0,
+      "equanimity_p_max": 0.85,
+      "equanimity_tau": 5.0,
+      "equanimity_gamma": 0.5
+    },
+    "phase6a_metta": {
+      "metta_beta": 0.25,
+      "metta_warmth_rate": 0.02,
+      "metta_warmth_decay": 0.95
+    },
+    "phase6b_mudita": {
+      "joy_beta": 0.35,
+      "joy_age_scale": 15.0
+    },
+    "phase6c_nervous_system": {
+      "mindsight_s_max": 1.0,
+      "mindsight_sigma_opp": 0.15,
+      "mindsight_sigma_dis": 0.1,
+      "mindsight_threshold": 0.3,
+      "mindsight_radius": 12,
+      "mycelial_k_iter": 3,
+      "mycelial_lambda_distress": 12.0,
+      "mycelial_lambda_opportunity": 8.0,
+      "compassion_beta": 0.5,
+      "compassion_gamma": 0.2,
+      "compassion_distance_scale": 15.0,
+      "compassion_age_scale_min": 30.0,
+      "compassion_age_scale_factor": 1.5,
+      "signal_interval": 10
+    }
+  },
+  "fitness": {
+    "target_median_age": 10.0,
+    "gene_weights": {
+      "dominance": 0.3,
+      "virality": 0.2,
+      "stability": 0.3,
+      "compat": 0.1,
+      "thresh": 0.1
+    },
+    "formula_weights": {
+      "differentiation_weight": 0.4,
+      "longevity_weight": 0.6
+    },
+    "ga_params": {
+      "population_size": 120,
+      "mutation_rate": 0.1,
+      "crossover_rate": 0.8,
+      "elitism_rate": 0.1,
+      "tournament_k": 3
+    }
+  },
+  "memory_layout": {
+    "num_channels": 8,
+    "channels": [
+      {
+        "index": 0,
+        "name": "compute_age",
+        "description": "Age of COMPUTE cells",
+        "default": 0.0
+      },
+      {
+        "index": 1,
+        "name": "structural_age",
+        "description": "Age of STRUCTURAL cells",
+        "default": 0.0
+      },
+      {
+        "index": 2,
+        "name": "memory_strength",
+        "description": "Mamba-Viking memory M(t)",
+        "default": 1.0
+      },
+      {
+        "index": 3,
+        "name": "energy_reserve",
+        "description": "Cellular energy reserve",
+        "default": 1.0
+      },
+      {
+        "index": 4,
+        "name": "last_active_gen",
+        "description": "Last active generation",
+        "default": 0.0
+      },
+      {
+        "index": 5,
+        "name": "signal_field",
+        "description": "Phase 6c Mindsight signal",
+        "default": 0.0
+      },
+      {
+        "index": 6,
+        "name": "warmth",
+        "description": "Phase 6a Metta warmth",
+        "default": 0.0
+      },
+      {
+        "index": 7,
+        "name": "compassion_cooldown",
+        "description": "Phase 6c Compassion cooldown",
+        "default": 0.0
+      }
+    ]
+  },
+  "experimental": {
+    "mamba_d_model": 64,
+    "mamba_d_state": 16,
+    "mamba_enabled": false,
+    "void_sanctuary_enabled": false,
+    "void_sanctuary_radius": 2,
+    "epsilon": 1e-08,
+    "selective_memory_decay_enabled": false,
+    "selective_memory_decay_threshold": 0.75,
+    "selective_compute_neighbor_threshold": 6,
+    "selective_low_decay_rate": 0.015,
+    "selective_high_decay_rate": 0.045
+  },
+  "epigenetic_snapshot": {
+    "included": false
+  }
+}

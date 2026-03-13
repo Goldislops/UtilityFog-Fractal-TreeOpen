@@ -1,0 +1,403 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utilityfog.dev/schemas/portable-genome-v1.json",
+  "title": "UtilityFog Portable Genome Format v1",
+  "description": "Complete specification of a 3D cellular automaton organism's physics, survival mechanics, and optional epigenetic state. Sufficient to reconstruct the organism on any compatible substrate.",
+  "type": "object",
+  "required": ["format", "metadata", "topology", "transition_table", "survival_mechanics", "stochastic", "contagion", "decay"],
+  "additionalProperties": false,
+  "properties": {
+
+    "format": {
+      "type": "object",
+      "description": "Format identification and versioning.",
+      "required": ["schema_version", "format_id"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "type": "string", "const": "1.0.0" },
+        "format_id": { "type": "string", "const": "utilityfog-portable-genome" }
+      }
+    },
+
+    "metadata": {
+      "type": "object",
+      "description": "Provenance and identity of this genome.",
+      "required": ["name", "version", "author", "exported_at"],
+      "additionalProperties": true,
+      "properties": {
+        "name":        { "type": "string", "description": "Rule name (e.g. branching-growth-v0.7.5)" },
+        "version":     { "type": "string", "description": "Semantic version of the rule set" },
+        "author":      { "type": "string" },
+        "description": { "type": "string" },
+        "exported_at": { "type": "string", "format": "date-time" },
+        "source_generation": { "type": "integer", "description": "GA generation at export time" },
+        "source_ca_step":    { "type": "integer", "description": "CA step count at export time" },
+        "best_fitness":      { "type": "number", "description": "Best fitness score at export time" },
+        "target_lambda":     { "type": "number", "description": "Langton lambda target" }
+      }
+    },
+
+    "topology": {
+      "type": "object",
+      "description": "State space and neighborhood definition.",
+      "required": ["states", "neighborhood"],
+      "additionalProperties": false,
+      "properties": {
+        "states": {
+          "type": "array",
+          "description": "Ordered list of state names. Index = numeric ID.",
+          "items": { "type": "string" },
+          "minItems": 2,
+          "examples": [["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"]]
+        },
+        "neighborhood": {
+          "type": "string",
+          "enum": ["moore-3d", "von-neumann-3d", "moore-2d", "von-neumann-2d"],
+          "description": "Neighborhood type for neighbor counting."
+        },
+        "transition_mode": {
+          "type": "string",
+          "enum": ["outer-totalistic", "inner-totalistic", "full-table"],
+          "default": "outer-totalistic"
+        }
+      }
+    },
+
+    "transition_table": {
+      "type": "object",
+      "description": "Deterministic transition rules. Keys are source state names, values map neighbor_count (string) -> target state name. Unmapped counts default to VOID.",
+      "additionalProperties": {
+        "type": "object",
+        "description": "For a given source state, maps neighbor count -> target state name.",
+        "additionalProperties": { "type": "string" }
+      },
+      "examples": [{
+        "VOID":       { "3": "STRUCTURAL", "4": "STRUCTURAL", "5": "STRUCTURAL", "6": "STRUCTURAL" },
+        "STRUCTURAL": { "0": "STRUCTURAL", "1": "STRUCTURAL", "2": "STRUCTURAL", "3": "COMPUTE", "4": "COMPUTE", "5": "ENERGY", "6": "SENSOR", "7": "SENSOR", "8": "SENSOR" },
+        "COMPUTE":    { "0": "COMPUTE", "1": "COMPUTE", "2": "COMPUTE", "3": "COMPUTE", "4": "ENERGY", "5": "SENSOR", "6": "SENSOR" },
+        "ENERGY":     { "0": "ENERGY", "1": "ENERGY", "2": "ENERGY", "3": "ENERGY", "4": "ENERGY", "5": "ENERGY", "6": "SENSOR", "7": "SENSOR", "8": "SENSOR" },
+        "SENSOR":     { "0": "SENSOR", "1": "SENSOR", "2": "SENSOR", "3": "SENSOR", "4": "SENSOR", "5": "SENSOR", "6": "SENSOR" }
+      }]
+    },
+
+    "stochastic": {
+      "type": "object",
+      "description": "Non-deterministic transition probabilities.",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled":                       { "type": "boolean" },
+        "baseline_transition_prob":      { "type": "number", "minimum": 0, "maximum": 1 },
+        "structural_to_energy_prob":     { "type": "number", "minimum": 0, "maximum": 1 },
+        "structural_to_sensor_prob":     { "type": "number", "minimum": 0, "maximum": 1 },
+        "compute_to_energy_prob":        { "type": "number", "minimum": 0, "maximum": 1 },
+        "compute_to_sensor_prob":        { "type": "number", "minimum": 0, "maximum": 1 },
+        "structural_to_void_decay_prob": { "type": "number", "minimum": 0, "maximum": 1, "description": "CRITICAL: must be 0.005" },
+        "energy_to_void_decay_prob":     { "type": "number", "minimum": 0, "maximum": 1 },
+        "sensor_to_void_decay_prob":     { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "contagion": {
+      "type": "object",
+      "description": "State-aware neighbor influence (forward contagion).",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled":                            { "type": "boolean" },
+        "energy_neighbor_threshold":          { "type": "integer", "minimum": 0 },
+        "sensor_neighbor_threshold":          { "type": "integer", "minimum": 0 },
+        "structural_energy_conversion_prob":  { "type": "number", "minimum": 0, "maximum": 1 },
+        "structural_sensor_conversion_prob":  { "type": "number", "minimum": 0, "maximum": 1 },
+        "compute_energy_conversion_prob":     { "type": "number", "minimum": 0, "maximum": 1 },
+        "compute_sensor_conversion_prob":     { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "decay": {
+      "type": "object",
+      "description": "Inactivity-driven structural decay.",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled":                            { "type": "boolean" },
+        "inactivity_neighbor_threshold":      { "type": "integer", "minimum": 0 },
+        "structural_inactive_steps_to_decay": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "cosmic_garden": {
+      "type": "object",
+      "description": "v0.7.5 Cosmic Garden mechanisms (cluster coherence, Halbach recuperation, bamboo protocol, metabolic priority, entropy damping).",
+      "additionalProperties": false,
+      "properties": {
+        "cluster_coherence_threshold": { "type": "integer" },
+        "shield_strength":             { "type": "number" },
+        "cluster_shield_bonus":        { "type": "number" },
+        "halbach_recuperation_rate":   { "type": "number" },
+        "temporal_dilation":           { "type": "number" },
+        "bamboo_initial_growth":       { "type": "integer" },
+        "bamboo_max_length":           { "type": "integer" },
+        "bamboo_rebirth_age":          { "type": "integer" },
+        "biofilm_leech_rate":          { "type": "number" },
+        "super_pod_threshold":         { "type": "integer" },
+        "analogue_mutation":           { "type": "number" },
+        "otolith_vector":              { "type": "number" },
+        "damping_radius":              { "type": "integer" }
+      }
+    },
+
+    "survival_mechanics": {
+      "type": "object",
+      "description": "Immeasurables: survival shields, memory dynamics, and Phase 3-6c nervous system. These parameters define the organism's 'soul' — the survival physics that can't be captured by the transition table alone.",
+      "additionalProperties": false,
+      "properties": {
+
+        "age_thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "age_young_threshold":  { "type": "integer" },
+            "age_mature_threshold": { "type": "integer" }
+          }
+        },
+
+        "reverse_contagion": {
+          "type": "object",
+          "description": "Machine Economy: ENERGY->COMPUTE conversion.",
+          "additionalProperties": false,
+          "properties": {
+            "resistance_max":              { "type": "number" },
+            "reverse_contagion_threshold": { "type": "integer" },
+            "reverse_contagion_base_prob": { "type": "number" },
+            "reverse_contagion_boost":     { "type": "number" },
+            "energy_to_compute_prob":      { "type": "number" }
+          }
+        },
+
+        "forward_contagion_mitigation": {
+          "type": "object",
+          "description": "v0.7.1 cluster shield forward contagion penalty.",
+          "additionalProperties": false,
+          "properties": {
+            "forward_contagion_threshold": { "type": "integer" },
+            "forward_contagion_penalty":   { "type": "number" },
+            "forward_contagion_floor":     { "type": "number" }
+          }
+        },
+
+        "rag_memory": {
+          "type": "object",
+          "description": "Spatial RAG (Retrieval-Augmented Generation) memory.",
+          "additionalProperties": false,
+          "properties": {
+            "rag_query_radius":        { "type": "integer" },
+            "rag_memory_decay":        { "type": "number" },
+            "rag_reinforcement_boost": { "type": "number" },
+            "rag_entropy_weight":      { "type": "number" }
+          }
+        },
+
+        "phase3_mamba_viking": {
+          "type": "object",
+          "description": "Phase 3: Mamba-Viking memory dynamics — M(t+1) = M(t)·exp(-1/τ(d)) + B(d)·d + S·Φ(age).",
+          "additionalProperties": false,
+          "properties": {
+            "mamba_delta_threshold":     { "type": "number" },
+            "mamba_tau_base":            { "type": "number" },
+            "mamba_tau_scale":           { "type": "number" },
+            "mamba_boost_base":          { "type": "number" },
+            "mamba_boost_gain":          { "type": "number" },
+            "mamba_age_stability_gain":  { "type": "number" },
+            "mamba_high_delta_floor":    { "type": "number" }
+          }
+        },
+
+        "phase3_void_sanctuary": {
+          "type": "object",
+          "description": "Phase 3: Void Sanctuary Shield — 50x resistance for isolated COMPUTE.",
+          "additionalProperties": false,
+          "properties": {
+            "void_sanctuary_multiplier": { "type": "number" }
+          }
+        },
+
+        "phase3_epsilon_buffer": {
+          "type": "object",
+          "description": "Phase 3: Epsilon Buffer (Dimensional Regularization) — survival floor for dense neighborhoods.",
+          "additionalProperties": false,
+          "properties": {
+            "epsilon_p_max":    { "type": "number" },
+            "epsilon_buffer":   { "type": "number" },
+            "epsilon_n_c":      { "type": "integer" },
+            "epsilon_tau":      { "type": "number" }
+          }
+        },
+
+        "phase4_equanimity": {
+          "type": "object",
+          "description": "Phase 4: Equanimity Shield — P_resist(a,M) = P_max·(1-exp(-(a-a_m)/τ))·tanh(γ·M).",
+          "additionalProperties": false,
+          "properties": {
+            "equanimity_age_min": { "type": "number", "description": "Bootstrap threshold (much lower than age_mature)" },
+            "equanimity_p_max":   { "type": "number" },
+            "equanimity_tau":     { "type": "number" },
+            "equanimity_gamma":   { "type": "number" }
+          }
+        },
+
+        "phase6a_metta": {
+          "type": "object",
+          "description": "Phase 6a: Loving-Kindness — ENERGY warms STRUCTURAL cells.",
+          "additionalProperties": false,
+          "properties": {
+            "metta_beta":         { "type": "number" },
+            "metta_warmth_rate":  { "type": "number" },
+            "metta_warmth_decay": { "type": "number" }
+          }
+        },
+
+        "phase6b_mudita": {
+          "type": "object",
+          "description": "Phase 6b: Sympathetic Joy — resonance from mature neighbors.",
+          "additionalProperties": false,
+          "properties": {
+            "joy_beta":      { "type": "number" },
+            "joy_age_scale": { "type": "number" }
+          }
+        },
+
+        "phase6c_nervous_system": {
+          "type": "object",
+          "description": "Phase 6c: Mindsight + Mycelial Network + Compassion — the organism's nervous system.",
+          "additionalProperties": false,
+          "properties": {
+            "mindsight_s_max":              { "type": "number" },
+            "mindsight_sigma_opp":          { "type": "number" },
+            "mindsight_sigma_dis":          { "type": "number" },
+            "mindsight_threshold":          { "type": "number" },
+            "mindsight_radius":             { "type": "integer" },
+            "mycelial_k_iter":              { "type": "integer" },
+            "mycelial_lambda_distress":     { "type": "number" },
+            "mycelial_lambda_opportunity":  { "type": "number" },
+            "compassion_beta":              { "type": "number" },
+            "compassion_gamma":             { "type": "number" },
+            "compassion_distance_scale":    { "type": "number" },
+            "compassion_age_scale_min":     { "type": "number" },
+            "compassion_age_scale_factor":  { "type": "number" },
+            "signal_interval":              { "type": "integer" }
+          }
+        }
+      }
+    },
+
+    "fitness": {
+      "type": "object",
+      "description": "GA fitness function parameters — how the evolution engine scores organisms.",
+      "additionalProperties": false,
+      "properties": {
+        "target_median_age": { "type": "number", "description": "Phase 5 longevity target for COMPUTE median age" },
+        "gene_weights": {
+          "type": "object",
+          "description": "Weights for the 5-gene genome vector [dominance, virality, stability, compat, thresh].",
+          "additionalProperties": false,
+          "properties": {
+            "dominance": { "type": "number" },
+            "virality":  { "type": "number" },
+            "stability": { "type": "number" },
+            "compat":    { "type": "number" },
+            "thresh":    { "type": "number" }
+          }
+        },
+        "formula_weights": {
+          "type": "object",
+          "description": "AURA Phase 5 formula: total = base + propagation + differentiation*d_weight + longevity*l_weight.",
+          "additionalProperties": false,
+          "properties": {
+            "differentiation_weight": { "type": "number" },
+            "longevity_weight":       { "type": "number" }
+          }
+        },
+        "ga_params": {
+          "type": "object",
+          "description": "Genetic algorithm hyperparameters.",
+          "additionalProperties": false,
+          "properties": {
+            "population_size": { "type": "integer" },
+            "mutation_rate":   { "type": "number" },
+            "crossover_rate":  { "type": "number" },
+            "elitism_rate":    { "type": "number" },
+            "tournament_k":    { "type": "integer" }
+          }
+        }
+      }
+    },
+
+    "memory_layout": {
+      "type": "object",
+      "description": "Memory grid channel specification — defines what each channel stores.",
+      "additionalProperties": false,
+      "properties": {
+        "num_channels": { "type": "integer" },
+        "channels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "index":       { "type": "integer" },
+              "name":        { "type": "string" },
+              "description": { "type": "string" },
+              "default":     { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+
+    "experimental": {
+      "type": "object",
+      "description": "Experimental/disabled features preserved for future use.",
+      "additionalProperties": true,
+      "properties": {
+        "mamba_d_model":                       { "type": "integer" },
+        "mamba_d_state":                       { "type": "integer" },
+        "mamba_enabled":                       { "type": "boolean" },
+        "void_sanctuary_enabled":              { "type": "boolean" },
+        "void_sanctuary_radius":               { "type": "integer" },
+        "epsilon":                             { "type": "number" },
+        "selective_memory_decay_enabled":       { "type": "boolean" },
+        "selective_memory_decay_threshold":     { "type": "number" },
+        "selective_compute_neighbor_threshold": { "type": "integer" },
+        "selective_low_decay_rate":             { "type": "number" },
+        "selective_high_decay_rate":            { "type": "number" }
+      }
+    },
+
+    "epigenetic_snapshot": {
+      "type": "object",
+      "description": "Optional: compressed seed state from the live organism for transplantation.",
+      "additionalProperties": false,
+      "properties": {
+        "included": { "type": "boolean" },
+        "lattice_shape": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 3, "maxItems": 3,
+          "description": "[W, H, D] of the lattice."
+        },
+        "lattice_b64": {
+          "type": "string",
+          "description": "Base64-encoded uint8 lattice array (numpy .tobytes() -> base64)."
+        },
+        "memory_grid_b64": {
+          "type": "string",
+          "description": "Base64-encoded float32 memory grid (C-order .tobytes() -> base64)."
+        },
+        "snapshot_generation": { "type": "integer" },
+        "snapshot_ca_step":    { "type": "integer" }
+      }
+    }
+  }
+}
