@@ -148,6 +148,13 @@ class VoxelMemoryParams:
     epsilon_buffer: float = 0.08
     epsilon_n_c: int = 20
     epsilon_tau: float = 3.0
+    # Phase 4: Equanimity Shield (Nemo's sigmoid resistance for mature cells)
+    # equanimity_age_min: bootstrap threshold (much lower than age_mature_threshold)
+    # Without this, cells never reach age 40 to activate the shield (chicken-and-egg)
+    equanimity_age_min: float = 3.0
+    equanimity_p_max: float = 0.85
+    equanimity_tau: float = 5.0
+    equanimity_gamma: float = 0.5
 
 
 @dataclass
@@ -554,6 +561,18 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     active_neighbors = np.sum(neighbor_counts[1:], axis=0)
     # Deterministic transitions
     out = _apply_transition_table(state, active_neighbors, table) if table else _default_transition(state, active_neighbors)
+    # Phase 4: Equanimity Shield -- compute shield mask ONCE before all kills
+    # P_resist(a, M) = P_max * (1 - exp(-(a - a_m) / tau)) * tanh(gamma * M)
+    # Nemo's sigmoid: cells that have endured gain composure under pressure
+    was_compute = state == COMPUTE
+    equanimity_mask = np.zeros(shape, dtype=bool)
+    mature_compute = was_compute & (memory_grid[0] > mem.equanimity_age_min)
+    if np.any(mature_compute):
+        age_excess = np.maximum(0.0, memory_grid[0] - mem.equanimity_age_min)
+        p_resist = mem.equanimity_p_max * (
+            1.0 - np.exp(-age_excess / mem.equanimity_tau)
+        ) * np.tanh(mem.equanimity_gamma * memory_grid[2])
+        equanimity_mask = mature_compute & (rng.random(shape) < p_resist)
     # Stochastic transitions
     if stoch.enabled:
         structural = out == STRUCTURAL; compute = out == COMPUTE
@@ -666,6 +685,9 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         memory_grid[2][high_delta], mem.mamba_high_delta_floor)
     # Global floor and ceiling
     memory_grid[2] = np.clip(memory_grid[2], 0.01, 2.0)
+    # Phase 4: Equanimity Shield restoration -- restore shielded cells after ALL kills
+    if np.any(equanimity_mask):
+        out[equanimity_mask & (out != COMPUTE)] = COMPUTE
     # Analogue mutation (MUST have pre_mut = out.copy() before mutation)
     pre_mut = out.copy()
     mut_mask = rng.random(shape) < cosmic.analogue_mutation

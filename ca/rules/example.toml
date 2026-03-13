@@ -46,7 +46,9 @@ STRUCTURAL = {
 }
 
 # Buff COMPUTE: wider stability band so it can accumulate as an intermediary.
+# Phase 4: 0 = COMPUTE (contemplative isolation -- isolated nodes retain state)
 COMPUTE = {
+  0 = "COMPUTE",
   1 = "COMPUTE",
   2 = "COMPUTE",
   3 = "COMPUTE",
