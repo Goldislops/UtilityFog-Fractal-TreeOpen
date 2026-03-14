@@ -1,6 +1,6 @@
 [package]
 name = "uft_ca"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["UtilityFog Team"]
 description = "Cellular automata kernel for 3D lattices and arbitrary graphs"
@@ -10,17 +10,35 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
-rayon = "1.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "0.8"
+rand = { version = "0.8", default-features = false, features = ["small_rng"] }
+rand_xoshiro = "0.6"
+getrandom = "0.2"
+
+# Platform-specific: Rayon for native parallelism (not available on wasm32)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.8"
+
+# Platform-specific: WASM browser bindings
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
+[dependencies.pyo3]
+version = "0.20"
+features = ["extension-module"]
+optional = true
 
 [dev-dependencies]
 criterion = "0.5"
 
 [features]
-default = ["python"]
+default = []
 python = ["pyo3"]
+wasm = []
 
 [[bench]]
 name = "stepping"

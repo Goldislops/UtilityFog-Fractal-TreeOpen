@@ -15,12 +15,29 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 const PAR_THRESHOLD: usize = 10_000;
+
+// Phase 10: New modules for WASM-compatible dense lattice stepping
+pub mod memory;
+pub mod params;
+pub mod rng_util;
+pub mod voxel_lattice;
+pub mod filters;
+pub mod phase4;
+pub mod phase6a;
+pub mod phase6b;
+pub mod phase6c;
+pub mod stepper;
+pub mod metrics;
+pub mod genome;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_bindings;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -872,6 +889,7 @@ impl GraphState {
         }
         GraphState { nodes: next_nodes, adjacency: self.adjacency.clone() }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn step_multi_par(&self, rule: &MultiStateRule) -> GraphState {
         let next_nodes: Vec<u8> = (0..self.nodes.len())
             .into_par_iter()
@@ -887,6 +905,7 @@ impl GraphState {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn step_multi_par_stochastic(&self, rule: &MultiStateRule) -> GraphState {
         let next_nodes: Vec<u8> = (0..self.nodes.len())
             .into_par_iter()
@@ -903,19 +922,23 @@ impl GraphState {
     }
 
     pub fn step_auto(&self, rule: &MultiStateRule) -> GraphState {
-        if self.nodes.len() >= PAR_THRESHOLD {
-            self.step_multi_par(rule)
-        } else {
-            self.step_multi(rule)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.nodes.len() >= PAR_THRESHOLD {
+                return self.step_multi_par(rule);
+            }
         }
+        self.step_multi(rule)
     }
 
     pub fn step_auto_stochastic(&self, rule: &MultiStateRule) -> GraphState {
-        if self.nodes.len() >= PAR_THRESHOLD {
-            self.step_multi_par_stochastic(rule)
-        } else {
-            self.step_multi_stochastic(rule)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.nodes.len() >= PAR_THRESHOLD {
+                return self.step_multi_par_stochastic(rule);
+            }
         }
+        self.step_multi_stochastic(rule)
     }
 
     pub fn census(&self) -> StateCensus {
@@ -932,6 +955,7 @@ impl GraphState {
         c
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn census_par(&self) -> StateCensus {
         let counts: Vec<[usize; 5]> = self.nodes.par_chunks(1024)
             .map(|chunk| {
@@ -955,11 +979,13 @@ impl GraphState {
     }
 
     pub fn census_auto(&self) -> StateCensus {
-        if self.nodes.len() >= PAR_THRESHOLD {
-            self.census_par()
-        } else {
-            self.census()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.nodes.len() >= PAR_THRESHOLD {
+                return self.census_par();
+            }
         }
+        self.census()
     }
 
     pub fn run_and_record(&self, rule: &MultiStateRule, steps: usize) -> (GraphState, Vec<[usize; 5]>) {
