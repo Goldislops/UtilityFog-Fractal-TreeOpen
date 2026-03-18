@@ -151,10 +151,20 @@ class VoxelMemoryParams:
     # Phase 4: Equanimity Shield (Nemo's sigmoid resistance for mature cells)
     # equanimity_age_min: bootstrap threshold (much lower than age_mature_threshold)
     # Without this, cells never reach age 40 to activate the shield (chicken-and-egg)
-    equanimity_age_min: float = 3.0
+    # Phase 10.5: Lowered from 3.0 to 1.0 (AURA: "Anti-Star early shield onset")
+    equanimity_age_min: float = 1.0
     equanimity_p_max: float = 0.85
     equanimity_tau: float = 5.0
     equanimity_gamma: float = 0.5
+    # Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
+    # VOID cells near COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
+    antistar_enabled: bool = True
+    antistar_prob: float = 0.30  # P(VOID->STRUCTURAL | COMPUTE neighbor)
+    # Phase 10.5: MOF Battery (AURA Deep Think 5.0)
+    # ENERGY cells near COMPUTE funnel energy_reserve to boost elder survival
+    mof_battery_enabled: bool = True
+    mof_energy_boost: float = 0.15  # energy_reserve boost per ENERGY neighbor
+    mof_drain_rate: float = 0.02    # energy drained from donor ENERGY cell
     # Phase 6a: Loving-Kindness (metta) -- ENERGY warms STRUCTURAL cells
     metta_beta: float = 0.25          # max survival floor boost (25%)
     metta_warmth_rate: float = 0.02   # warmth accumulation rate per ENERGY neighbor
@@ -691,6 +701,26 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     active_neighbors = np.sum(neighbor_counts[1:], axis=0)
     # Deterministic transitions
     out = _apply_transition_table(state, active_neighbors, table) if table else _default_transition(state, active_neighbors)
+    # Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
+    # VOID cells adjacent to COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
+    if mem.antistar_enabled:
+        compute_neighbor_count = neighbor_counts[COMPUTE]
+        void_near_compute = (out == VOID) & (compute_neighbor_count > 0)
+        antistar_roll = rng.random(shape) < mem.antistar_prob
+        out[void_near_compute & antistar_roll] = STRUCTURAL
+    # Phase 10.5: MOF Battery (AURA Deep Think 5.0)
+    # ENERGY cells near COMPUTE funnel energy_reserve to boost elder survival
+    if mem.mof_battery_enabled:
+        compute_now = out == COMPUTE
+        energy_now = out == ENERGY
+        # COMPUTE cells receive energy boost from nearby ENERGY cells
+        energy_neighbor_count_for_compute = neighbor_counts[ENERGY].astype(np.float32)
+        boost = mem.mof_energy_boost * energy_neighbor_count_for_compute
+        memory_grid[3][compute_now] = np.minimum(2.0, memory_grid[3][compute_now] + boost[compute_now])
+        # ENERGY cells near COMPUTE slowly drain (sacrifice for the elders)
+        compute_neighbor_count_e = neighbor_counts[COMPUTE]
+        draining = energy_now & (compute_neighbor_count_e > 0)
+        memory_grid[3][draining] = np.maximum(0.05, memory_grid[3][draining] - mem.mof_drain_rate)
     # Phase 4: Equanimity Shield -- compute shield mask ONCE before all kills
     # P_resist(a, M) = P_max * (1 - exp(-(a - a_m) / tau)) * tanh(gamma * M)
     # Nemo's sigmoid: cells that have endured gain composure under pressure

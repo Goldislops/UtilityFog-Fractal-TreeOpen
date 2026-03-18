@@ -100,6 +100,15 @@ pub struct VoxelMemoryParams {
 
     // Phase 6 signal interval
     pub signal_interval: i32,
+
+    // Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
+    pub antistar_enabled: bool,
+    pub antistar_prob: f32,
+
+    // Phase 10.5: MOF Battery
+    pub mof_battery_enabled: bool,
+    pub mof_energy_boost: f32,
+    pub mof_drain_rate: f32,
 }
 
 impl Default for VoxelMemoryParams {
@@ -139,7 +148,7 @@ impl Default for VoxelMemoryParams {
             epsilon_n_c: 20,
             epsilon_tau: 3.0,
             // Equanimity Shield
-            equanimity_age_min: 3.0,
+            equanimity_age_min: 1.0,  // Phase 10.5: lowered from 3.0
             equanimity_p_max: 0.85,
             equanimity_tau: 5.0,
             equanimity_gamma: 0.5,
@@ -166,6 +175,12 @@ impl Default for VoxelMemoryParams {
             compassion_age_scale_factor: 1.5,
             // Signal
             signal_interval: 10,
+            // Phase 10.5
+            antistar_enabled: true,
+            antistar_prob: 0.30,
+            mof_battery_enabled: true,
+            mof_energy_boost: 0.15,
+            mof_drain_rate: 0.02,
         }
     }
 }

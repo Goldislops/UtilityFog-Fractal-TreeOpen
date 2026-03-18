@@ -59,6 +59,34 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
         }
     }
 
+    // ---- Phase 2.5: Anti-Star Density Collapse (AURA Deep Think 5.0) ----
+    // VOID cells near COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
+    if params.antistar_enabled {
+        for i in 0..n3 {
+            if out[i] == VOID && neighbor_counts[i][COMPUTE as usize] > 0 {
+                if rng_vals[i] < params.antistar_prob {
+                    out[i] = STRUCTURAL;
+                }
+            }
+        }
+    }
+
+    // ---- Phase 2.6: MOF Battery (AURA Deep Think 5.0) ----
+    // ENERGY cells near COMPUTE funnel energy_reserve to boost elder survival
+    if params.mof_battery_enabled {
+        for i in 0..n3 {
+            if out[i] == COMPUTE {
+                let n_energy = neighbor_counts[i][ENERGY as usize] as f32;
+                if n_energy > 0.0 {
+                    let boost = params.mof_energy_boost * n_energy;
+                    lattice.memory[i][CH_ENERGY_RESERVE] = (lattice.memory[i][CH_ENERGY_RESERVE] + boost).min(2.0);
+                }
+            } else if out[i] == ENERGY && neighbor_counts[i][COMPUTE as usize] > 0 {
+                lattice.memory[i][CH_ENERGY_RESERVE] = (lattice.memory[i][CH_ENERGY_RESERVE] - params.mof_drain_rate).max(0.05);
+            }
+        }
+    }
+
     // ---- Phase 3: Equanimity mask (store for later restoration) ----
     let (equanimity_mask, equanimity_saved) =
         phase4::compute_equanimity_mask(&out, &lattice.memory, params, &rng_vals);
