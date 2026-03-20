@@ -172,3 +172,27 @@ reverse_contagion_base_prob = 0.20
 energy_to_compute_prob = 0.20
 rag_reinforcement_boost = 1.50
 
+# ===== Phase 10.6: Thermodynamic Overhaul (Nemo's Blueprint) =====
+
+[params.equanimity]
+p_max = 0.85
+equanimity_tau = 2.0       # was 5.0 (accelerated maturation)
+age_min = 3.0
+gamma = 0.5                # memory_strength scaling in tanh
+
+[params.ice_battery]
+k_ice = 2.5                # boost coefficient
+alpha = 0.7                # energy scaling exponent (sublinear)
+age_peak = 4.0             # optimal burn window center
+sigma = 1.0                # Gaussian window width
+burn_rate = 0.20           # 20% E_reserve consumed per step
+activation_threshold = 0.5 # min E_reserve to trigger boost
+p_resist_max = 0.95        # hard cap on total resistance
+
+[params.trash_battery]
+harvest_efficiency = 0.15  # eta (base harvest rate)
+entropic_flux = 0.05       # energy per void neighbor
+max_reclaim_per_step = 0.05 # cap on harvested energy per step
+energy_decay_rate = 0.02   # 2% natural dissipation per step
+max_routing_distance = 3   # max hops to route energy to COMPUTE
+max_energy_reserve = 5.0   # battery capacity limit
