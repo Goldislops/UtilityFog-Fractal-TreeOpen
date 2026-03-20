@@ -1,9 +1,7 @@
 """CA experiment runner and orchestrator.
-
 Loads rules, seeds, and experiment configs, then executes CA simulations
 using the uft_ca Rust kernel.
 """
-
 import json
 import csv
 from pathlib import Path
@@ -19,6 +17,13 @@ try:
 except ImportError:
     HAS_UFT_CA = False
     print("Warning: uft_ca module not available. Using stub implementation.")
+
+try:
+    from .phase106 import (Phase106Params, EquanimityParams, IceBatteryParams,
+        TrashBatteryParams, FogSim)
+    HAS_PHASE106 = True
+except ImportError:
+    HAS_PHASE106 = False
 
 
 @dataclass
@@ -61,7 +66,7 @@ class ExperimentConfig:
         """Load experiment config from YAML file."""
         with open(path) as f:
             data = yaml.safe_load(f)
-        
+
         return cls(
             name=data["experiment"]["name"],
             rule_path=Path(data["experiment"]["rule"]),
@@ -82,6 +87,62 @@ class CARunner:
         self.rule = RuleSpec.from_toml(config.rule_path)
         self.states: Optional[np.ndarray] = None
         self.metrics_history: List[Dict[str, float]] = []
+        self.fog_sim = None
+        self._phase106 = self._is_phase106()
+
+    def _is_phase106(self) -> bool:
+        p = self.rule.params
+        return HAS_PHASE106 and all(k in p for k in ("equanimity", "ice_battery", "trash_battery"))
+
+    def _build_adjacency(self, n: int) -> list:
+        if self.config.lattice_size and len(self.config.lattice_size) == 3:
+            w, h, d = self.config.lattice_size
+        else:
+            side = max(1, round(n ** (1.0 / 3.0)))
+            w, h, d = side, side, side
+        adj: list = [[] for _ in range(n)]
+        for idx in range(n):
+            x, y, z = idx % w, (idx // w) % h, idx // (w * h)
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue
+                        nx_, ny_, nz_ = x + dx, y + dy, z + dz
+                        if 0 <= nx_ < w and 0 <= ny_ < h and 0 <= nz_ < d:
+                            adj[idx].append(nx_ + ny_ * w + nz_ * w * h)
+        return adj
+
+    def _build_phase106_params(self):
+        p = self.rule.params
+        eq = p["equanimity"]
+        ice = p["ice_battery"]
+        tr = p["trash_battery"]
+        return Phase106Params(
+            equanimity=EquanimityParams(
+                p_max=eq.get("p_max", 0.85),
+                tau=eq.get("equanimity_tau", 2.0),
+                age_min=eq.get("age_min", 3.0),
+                gamma=eq.get("gamma", 0.5),
+            ),
+            ice=IceBatteryParams(
+                k_ice=ice.get("k_ice", 2.5),
+                alpha=ice.get("alpha", 0.7),
+                age_peak=ice.get("age_peak", 4.0),
+                sigma=ice.get("sigma", 1.0),
+                activation_threshold=ice.get("activation_threshold", 0.5),
+                burn_rate=ice.get("burn_rate", 0.20),
+                p_resist_max=ice.get("p_resist_max", 0.95),
+            ),
+            trash=TrashBatteryParams(
+                harvest_efficiency=tr.get("harvest_efficiency", 0.15),
+                entropic_flux=tr.get("entropic_flux", 0.05),
+                max_reclaim_per_step=tr.get("max_reclaim_per_step", 0.05),
+                max_routing_distance=tr.get("max_routing_distance", 3),
+                energy_decay_rate=tr.get("energy_decay_rate", 0.02),
+                max_energy_reserve=tr.get("max_energy_reserve", 5.0),
+            ),
+        )
 
     def load_seed(self) -> np.ndarray:
         """Load initial seed configuration."""
@@ -92,7 +153,7 @@ class CARunner:
                 else:
                     data = tomli.load(f)
                 return np.array(data["states"], dtype=np.uint8)
-        
+
         # Generate random seed
         if self.config.lattice_size:
             size = np.prod(self.config.lattice_size)
@@ -104,10 +165,15 @@ class CARunner:
 
     def step(self) -> np.ndarray:
         """Execute one CA step."""
+        if self._phase106 and self.fog_sim is not None:
+            self.fog_sim.step()
+            self.states = self.fog_sim.states.copy()
+            return self.states
+
         if not HAS_UFT_CA:
             # Stub implementation for testing
             return self.states
-        
+
         if self.rule.neighborhood == "moore-3d" and self.config.lattice_size:
             w, h, d = self.config.lattice_size
             next_states = uft_ca.step_lattice_py(w, h, d, self.states.tolist())
@@ -119,30 +185,35 @@ class CARunner:
     def compute_metrics(self) -> Dict[str, float]:
         """Compute requested metrics on current state."""
         metrics = {}
-        
+
         if "density" in self.config.metrics:
             metrics["density"] = np.mean(self.states > 0)
-        
+
         if "branching_factor" in self.config.metrics:
-            # Simplified branching factor: ratio of active cells to previous step
             if len(self.metrics_history) > 0:
                 prev_active = self.metrics_history[-1].get("active_cells", 1)
                 current_active = np.sum(self.states > 0)
                 metrics["branching_factor"] = current_active / max(prev_active, 1)
             else:
                 metrics["branching_factor"] = 1.0
-        
+
         if "connectivity" in self.config.metrics:
-            # Simplified connectivity: fraction of non-void cells
             metrics["connectivity"] = np.mean(self.states > 0)
-        
+
         if "survival" in self.config.metrics:
-            # Survival: fraction of cells that remain active
             metrics["survival"] = np.mean(self.states > 0)
-        
+
         metrics["active_cells"] = int(np.sum(self.states > 0))
         metrics["total_cells"] = int(len(self.states))
-        
+
+        if self._phase106 and self.fog_sim is not None:
+            metrics["max_compute_age"] = self.fog_sim.max_compute_age()
+            metrics["avg_compute_energy"] = self.fog_sim.avg_compute_energy()
+            census = self.fog_sim.census()
+            metrics["compute_cells"] = census.get(2, 0)
+            metrics["structural_cells"] = census.get(1, 0)
+            metrics["energy_cells"] = census.get(3, 0)
+
         return metrics
 
     def run(self) -> Dict[str, Any]:
@@ -150,30 +221,36 @@ class CARunner:
         print(f"Running experiment: {self.config.name}")
         print(f"Rule: {self.rule.name}")
         print(f"Steps: {self.config.steps}")
-        
+
         # Initialize
         self.states = self.load_seed()
         self.metrics_history = []
-        
+
+        if self._phase106:
+            params = self._build_phase106_params()
+            adj = self._build_adjacency(len(self.states))
+            self.fog_sim = FogSim(states=self.states, adjacency=adj, params=params)
+            print(f"Phase 10.6 thermodynamic layer active: {len(self.states)} cells")
+
         # Run simulation
         for step in range(self.config.steps):
             metrics = self.compute_metrics()
             metrics["step"] = step
             self.metrics_history.append(metrics)
-            
+
             if step % 100 == 0:
                 print(f"Step {step}/{self.config.steps}: {metrics['active_cells']} active cells")
-            
+
             self.states = self.step()
-        
+
         # Final metrics
         final_metrics = self.compute_metrics()
         final_metrics["step"] = self.config.steps
         self.metrics_history.append(final_metrics)
-        
+
         # Save results
         self.save_results()
-        
+
         return {
             "experiment": self.config.name,
             "rule": self.rule.name,
@@ -184,7 +261,7 @@ class CARunner:
     def save_results(self):
         """Save metrics to CSV and final state to file."""
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Save metrics CSV
         csv_path = self.config.output_dir / f"{self.config.name}_metrics.csv"
         with open(csv_path, "w", newline="") as f:
@@ -193,7 +270,7 @@ class CARunner:
                 writer.writeheader()
                 writer.writerows(self.metrics_history)
         print(f"Saved metrics to {csv_path}")
-        
+
         # Save final state
         state_path = self.config.output_dir / f"{self.config.name}_final_state.npy"
         np.save(state_path, self.states)
@@ -203,16 +280,16 @@ class CARunner:
 def main():
     """CLI entry point."""
     import sys
-    
+
     if len(sys.argv) < 2:
         print("Usage: python -m uft_orch.ca.runner <experiment.yaml>")
         sys.exit(1)
-    
+
     config_path = Path(sys.argv[1])
     config = ExperimentConfig.from_yaml(config_path)
     runner = CARunner(config)
     results = runner.run()
-    
+
     print("\nExperiment complete!")
     print(json.dumps(results, indent=2))
 
