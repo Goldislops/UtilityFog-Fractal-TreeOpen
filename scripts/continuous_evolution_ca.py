@@ -154,7 +154,7 @@ class VoxelMemoryParams:
     # Phase 10.5: Lowered from 3.0 to 1.0 (AURA: "Anti-Star early shield onset")
     equanimity_age_min: float = 1.0
     equanimity_p_max: float = 0.85
-    equanimity_tau: float = 5.0
+    equanimity_tau: float = 2.0  # Phase 10.6: was 5.0, accelerated for Ice Battery
     equanimity_gamma: float = 0.5
     # Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
     # VOID cells near COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
@@ -186,6 +186,18 @@ class VoxelMemoryParams:
     compassion_distance_scale: float = 15.0  # exp(-d/15) distance decay
     compassion_age_scale_min: float = 30.0   # min adaptive age scale
     compassion_age_scale_factor: float = 1.5 # a_scale = max(min, max_age * factor)
+    # Phase 10.6: Ice Battery (Nemo's thermodynamic overhaul)
+    ice_battery_k: float = 2.5         # boost coefficient
+    ice_battery_alpha: float = 0.7     # energy scaling exponent (sublinear)
+    ice_battery_age_peak: float = 4.0  # optimal burn window center
+    ice_battery_sigma: float = 1.0     # Gaussian window width
+    ice_battery_threshold: float = 0.5 # min energy_reserve to activate
+    ice_battery_burn_rate: float = 0.20 # 20% E consumed per step when active
+    ice_battery_p_max: float = 0.95    # hard cap on total P_resist
+    # Phase 10.6: Trash Battery (entropy harvest from void)
+    trash_harvest_eff: float = 0.15    # base harvest rate
+    trash_entropic_flux: float = 0.05  # energy per void neighbor
+    trash_max_reclaim: float = 0.05    # cap per step
     # Phase 6 signal interval (expensive ops every K steps)
     signal_interval: int = 10
 
@@ -721,6 +733,21 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         compute_neighbor_count_e = neighbor_counts[COMPUTE]
         draining = energy_now & (compute_neighbor_count_e > 0)
         memory_grid[3][draining] = np.maximum(0.05, memory_grid[3][draining] - mem.mof_drain_rate)
+    # Phase 10.6: Trash Battery -- STRUCTURAL cells harvest entropy from void neighbors
+    # E_reclaim = min(harvest_eff * N_void * entropic_flux, max_reclaim)
+    structural_now = state == STRUCTURAL
+    n_void_neighbors = neighbor_counts[VOID]
+    trash_harvestable = structural_now & (n_void_neighbors > 0)
+    if np.any(trash_harvestable):
+        e_reclaimed = np.minimum(
+            mem.trash_harvest_eff * n_void_neighbors * mem.trash_entropic_flux,
+            mem.trash_max_reclaim
+        )
+        # Route harvested energy to the memory grid energy_reserve channel
+        # STRUCTURAL stores it, then MOF battery delivers it to nearby COMPUTE
+        memory_grid[3][trash_harvestable] = np.minimum(
+            5.0, memory_grid[3][trash_harvestable] + e_reclaimed[trash_harvestable]
+        )
     # Phase 4: Equanimity Shield -- compute shield mask ONCE before all kills
     # P_resist(a, M) = P_max * (1 - exp(-(a - a_m) / tau)) * tanh(gamma * M)
     # Nemo's sigmoid: cells that have endured gain composure under pressure
@@ -729,9 +756,27 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     mature_compute = was_compute & (memory_grid[0] > mem.equanimity_age_min)
     if np.any(mature_compute):
         age_excess = np.maximum(0.0, memory_grid[0] - mem.equanimity_age_min)
-        p_resist = mem.equanimity_p_max * (
+        # Phase 10.6: Base Equanimity (with accelerated tau=2.0)
+        p_base = mem.equanimity_p_max * (
             1.0 - np.exp(-age_excess / mem.equanimity_tau)
         ) * np.tanh(mem.equanimity_gamma * memory_grid[2])
+        # Phase 10.6: Ice Battery boost -- COMPUTE elders burn stored energy for resistance spike
+        # P_ice = k * E^alpha * exp(-((age - peak)^2) / (2*sigma^2))
+        e_reserve = memory_grid[3]  # energy_reserve channel
+        ice_active = mature_compute & (e_reserve > mem.ice_battery_threshold)
+        p_ice = np.zeros(shape, dtype=np.float32)
+        if np.any(ice_active):
+            age_field = memory_grid[0]
+            p_ice[ice_active] = (
+                mem.ice_battery_k
+                * np.power(e_reserve[ice_active], mem.ice_battery_alpha)
+                * np.exp(-((age_field[ice_active] - mem.ice_battery_age_peak) ** 2)
+                         / (2.0 * mem.ice_battery_sigma ** 2))
+            )
+            # Burn energy: 20% consumed per step when boost is active
+            memory_grid[3][ice_active] *= (1.0 - mem.ice_battery_burn_rate)
+        # Combined resistance: base + ice, hard-capped
+        p_resist = np.minimum(p_base + p_ice, mem.ice_battery_p_max)
         equanimity_mask = mature_compute & (rng.random(shape) < p_resist)
     # Phase 6b: Sympathetic Joy (mudita) -- resonance from mature neighbors
     # Nemo's formula: R_joy = 1 + beta_joy * tanh((a_max_neighbor - a_m) / joy_age_scale)
