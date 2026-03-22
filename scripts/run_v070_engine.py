@@ -265,6 +265,11 @@ def main():
     prev_compute_ratio = 0.0
     telemetry = init_telemetry_window()
 
+    # Phase 10.8: Great Oscillation tracking
+    initial_non_void = int(np.sum(lattice > 0))
+    drought_start_gen = ca_step_count  # drought cycle starts from current gen
+    drought_hibernation_triggered = False
+
     print(f"\n[{datetime.now().isoformat()}] Engine started (PID {os.getpid()}).\n")
 
     while _running:
@@ -285,6 +290,19 @@ def main():
         density = active / NUM_CELLS
         metrics["density"] = density
         metrics["active_cells"] = active
+
+        # Phase 10.8: Safety valve -- emergency hibernation if population drops >40%
+        if initial_non_void > 0 and not drought_hibernation_triggered:
+            pop_ratio = active / initial_non_void
+            if pop_ratio < 0.60:  # 40% drop threshold
+                print(f"\n  [SAFETY VALVE] Population dropped to {pop_ratio:.1%} of initial!")
+                print(f"  [SAFETY VALVE] Triggering emergency hibernation snapshot...")
+                path = _save_snapshot(lattice, memory_grid, generation, ca_step_count, best_fitness_ever)
+                print(f"  [SAFETY VALVE] Emergency snapshot saved -> {path}")
+                drought_hibernation_triggered = True
+                # Don't stop -- let it recover if it can!
+                print(f"  [SAFETY VALVE] Engine continues. Will not trigger again.")
+                sys.stdout.flush()
 
         # --- Evolution step (every 10 CA steps) ---
         if ca_step_count % 10 == 0:
@@ -325,6 +343,16 @@ def main():
             print(f"  Shannon entropy: {metrics['entropy']:.4f}")
             print(f"  Memory: avg_age={avg_age:.1f}  med_age={med_age:.1f}  max_age={max_age:.0f}  longevity_score={longevity:.3f}")
             print(f"  Fitness: best={fits_now.max():.4f}  mean={fits_now.mean():.4f}  (ATH={best_fitness_ever:.4f} @ gen {best_fitness_gen})")
+            # Phase 10.8 drought status
+            import math
+            cycle_len = 10000
+            cycle_pos = ca_step_count % cycle_len
+            drought_mult = 0.70 + 0.30 * math.cos(2 * math.pi * cycle_pos / cycle_len)
+            season = 'SUMMER' if drought_mult > 0.85 else ('AUTUMN' if drought_mult > 0.55 else 'WINTER')
+            print(f"  Drought: {season} (energy={drought_mult:.1%} of nominal, cycle={cycle_pos}/{cycle_len})")
+            if initial_non_void > 0:
+                pop_pct = active / initial_non_void * 100
+                print(f"  Population: {pop_pct:.1f}% of initial ({initial_non_void:,})")
             # Telemetry window summary
             telem_summary, telem_payload = summarize_telemetry_window(telemetry)
             print(f"  {telem_summary}")

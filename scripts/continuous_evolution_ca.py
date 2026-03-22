@@ -213,6 +213,13 @@ class VoxelMemoryParams:
     # Phase 6 signal interval (expensive ops every K steps)
     signal_interval: int = 10
 
+    # Phase 10.8: Great Oscillation (Sinusoidal Energy Drought)
+    drought_enabled: bool = True
+    drought_cycle_length: int = 10000        # T: full sinusoidal cycle in generations
+    drought_amplitude: float = 0.30          # A: amplitude of oscillation
+    drought_baseline: float = 0.70           # B: baseline fraction (min = B-A = 0.40)
+    drought_start_gen: int = 0               # gen offset for drought cycle
+
 
 @dataclass
 class DecayConfig:
@@ -725,6 +732,13 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     active_neighbors = np.sum(neighbor_counts[1:], axis=0)
     # Deterministic transitions
     out = _apply_transition_table(state, active_neighbors, table) if table else _default_transition(state, active_neighbors)
+    # Phase 10.8: Great Oscillation -- Sinusoidal Energy Drought (computed EARLY, used by all energy systems)
+    drought_multiplier = 1.0
+    if mem.drought_enabled and current_gen > 0:
+        cycle_pos = (current_gen - mem.drought_start_gen) % mem.drought_cycle_length
+        drought_multiplier = mem.drought_baseline + mem.drought_amplitude * np.cos(
+            2.0 * np.pi * cycle_pos / mem.drought_cycle_length
+        )
     # Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
     # VOID cells adjacent to COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
     if mem.antistar_enabled:
@@ -740,6 +754,7 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         # COMPUTE cells receive energy boost from nearby ENERGY cells
         energy_neighbor_count_for_compute = neighbor_counts[ENERGY].astype(np.float32)
         boost = mem.mof_energy_boost * energy_neighbor_count_for_compute
+        boost *= drought_multiplier  # Phase 10.8 drought modulation
         memory_grid[3][compute_now] = np.minimum(2.0, memory_grid[3][compute_now] + boost[compute_now])
         # ENERGY cells near COMPUTE slowly drain (sacrifice for the elders)
         compute_neighbor_count_e = neighbor_counts[COMPUTE]
@@ -755,6 +770,7 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
             mem.trash_harvest_eff * n_void_neighbors * mem.trash_entropic_flux,
             mem.trash_max_reclaim
         )
+        e_reclaimed *= drought_multiplier  # Phase 10.8 drought modulation
         # Route harvested energy to the memory grid energy_reserve channel
         # STRUCTURAL stores it, then MOF battery delivers it to nearby COMPUTE
         memory_grid[3][trash_harvestable] = np.minimum(
@@ -774,6 +790,7 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
             excess = np.maximum(0.0, memory_grid[3] - mem.elder_sustenance_threshold)
             age_factor = np.exp(-mem.elder_membrane_decay * np.maximum(0.0, memory_grid[0] - mem.elder_age_threshold))
             e_circulate = excess * mem.elder_baseline_fraction * age_factor
+            e_circulate *= drought_multiplier  # Phase 10.8 drought modulation
             # Distribute to all non-void cells in neighborhood (pull-agnostic)
             # Use the smoothed density field as a proxy for neighborhood need
             non_void_mask = out != VOID
