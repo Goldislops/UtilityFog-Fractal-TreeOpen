@@ -198,6 +198,18 @@ class VoxelMemoryParams:
     trash_harvest_eff: float = 0.15    # base harvest rate
     trash_entropic_flux: float = 0.05  # energy per void neighbor
     trash_max_reclaim: float = 0.05    # cap per step
+    # Phase 10.7: Expansive Compassion Continuum (Nemo's circulatory model)
+    elder_age_threshold: float = 8.0        # tau_elder: age for Elder status
+    elder_baseline_fraction: float = 0.15   # beta_base: continuous circulation fraction
+    elder_membrane_decay: float = 0.05      # lambda_mem: permeability decay with age
+    elder_circulation_radius: int = 2       # r_max: distribution neighborhood
+    elder_sustenance_threshold: float = 1.0 # E_sustain: minimum energy to maintain
+    equanimity_zero_waste: bool = True      # Zero waste heat for equanimous cells
+    equanimity_stability_window: int = 3    # w_eq: steps for stability check
+    equanimity_stability_sigma: float = 0.05 # sigma_stable: max variance for stability
+    base_dissipation: float = 0.02          # standard heat loss for non-equanimous
+    parasite_max_ticks: int = 100           # anti-subsidy: max consecutive receiving
+    parasite_penalty_rate: float = 0.01     # extra energy stress per tick over limit
     # Phase 6 signal interval (expensive ops every K steps)
     signal_interval: int = 10
 
@@ -748,6 +760,51 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         memory_grid[3][trash_harvestable] = np.minimum(
             5.0, memory_grid[3][trash_harvestable] + e_reclaimed[trash_harvestable]
         )
+    # Phase 10.7: Elder Circulation -- continuous fountain-model energy flow
+    # Elders (age >= threshold, energy > mean) circulate excess to needy neighbors
+    # This is PROACTIVE compassion: no distress trigger needed
+    compute_now_circ = out == COMPUTE
+    if np.any(compute_now_circ):
+        compute_ages = memory_grid[0][compute_now_circ]
+        compute_energies = memory_grid[3][compute_now_circ]
+        energy_mean = compute_energies.mean() if compute_energies.size > 0 else 0.0
+        elder_mask = compute_now_circ & (memory_grid[0] >= mem.elder_age_threshold) & (memory_grid[3] > energy_mean)
+        if np.any(elder_mask):
+            # Calculate circulation amount per elder
+            excess = np.maximum(0.0, memory_grid[3] - mem.elder_sustenance_threshold)
+            age_factor = np.exp(-mem.elder_membrane_decay * np.maximum(0.0, memory_grid[0] - mem.elder_age_threshold))
+            e_circulate = excess * mem.elder_baseline_fraction * age_factor
+            # Distribute to all non-void cells in neighborhood (pull-agnostic)
+            # Use the smoothed density field as a proxy for neighborhood need
+            non_void_mask = out != VOID
+            deficit = np.maximum(0.0, mem.elder_sustenance_threshold - memory_grid[3])
+            # Simple distribution: elder energy spread to nearby cells via box filter
+            elder_donation_field = np.where(elder_mask, e_circulate, 0.0).astype(np.float32)
+            if np.any(elder_donation_field > 0):
+                # Use R=2 box filter to diffuse donations to neighborhood
+                smoothed_donation = _box_filter_3d(elder_donation_field, radius=mem.elder_circulation_radius)
+                # Apply only to non-void cells with deficit
+                receiving = non_void_mask & (deficit > 0)
+                memory_grid[3][receiving] = np.minimum(
+                    5.0, memory_grid[3][receiving] + smoothed_donation[receiving]
+                )
+                # Deduct from elders
+                memory_grid[3][elder_mask] -= e_circulate[elder_mask]
+                memory_grid[3] = np.maximum(0.0, memory_grid[3])
+    # Phase 10.7: Thermodynamic Equanimity -- zero waste heat for stable cells
+    # Equanimous cells are superconductors: processing sensation without friction
+    if mem.equanimity_zero_waste:
+        compute_for_heat = out == COMPUTE
+        if np.any(compute_for_heat):
+            # Simple stability check: cells with age > stability_window and low energy variance
+            stable_cells = compute_for_heat & (memory_grid[0] > mem.equanimity_stability_window)
+            # Non-equanimous cells lose energy to waste heat
+            reactive_cells = compute_for_heat & ~stable_cells
+            if np.any(reactive_cells):
+                heat_loss = mem.base_dissipation * memory_grid[3][reactive_cells]
+                memory_grid[3][reactive_cells] = np.maximum(0.0, memory_grid[3][reactive_cells] - heat_loss)
+            # Equanimous cells: ZERO waste heat (superconductor state!)
+            # They keep all their energy -- this is thermodynamic enlightenment
     # Phase 4: Equanimity Shield -- compute shield mask ONCE before all kills
     # P_resist(a, M) = P_max * (1 - exp(-(a - a_m) / tau)) * tanh(gamma * M)
     # Nemo's sigmoid: cells that have endured gain composure under pressure
