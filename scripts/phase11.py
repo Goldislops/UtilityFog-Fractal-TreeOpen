@@ -477,3 +477,251 @@ def run_phase11_diagnostic(
         "swarm": swarm_stats,
         "mirror_test": mirror_results_clean,
     }
+
+
+# ============================================================
+# Phase 11B: Noisy World Test
+# ============================================================
+
+class NoisyMirrorTestInterface(MirrorTestInterface):
+    """Mirror Test with random noise corruption.
+
+    Tests whether CNNs can filter noise and still recognize self,
+    simulating real-world sensory degradation.
+    """
+
+    def __init__(self, lattice, memory_grid, noise_fraction=0.25, seed=42):
+        super().__init__(lattice, memory_grid, seed=seed)
+        self.noise_fraction = noise_fraction  # 20-30% corruption
+
+    def _add_noise(self, image: np.ndarray) -> np.ndarray:
+        """Corrupt a fraction of pixels with random static."""
+        noisy = image.copy()
+        n_pixels = image.size
+        n_corrupt = int(n_pixels * self.noise_fraction)
+        corrupt_indices = self.rng.choice(n_pixels, size=n_corrupt, replace=False)
+        flat = noisy.flatten()
+        flat[corrupt_indices] = self.rng.uniform(-1.0, 1.0, size=n_corrupt).astype(np.float32)
+        return flat.reshape(image.shape)
+
+    def administer_test(self, cnn: CnidarianNeuralNetwork) -> MirrorTestResult:
+        """Run one noisy mirror test trial."""
+        is_self = self.rng.random() > 0.5
+
+        if is_self:
+            image = self._add_noise(self._self_snapshot())
+        else:
+            image = self._add_noise(self._other_snapshot())
+
+        flat = image.flatten()
+        n_receptors = len(cnn.receptors)
+        if len(flat) > n_receptors:
+            indices = np.linspace(0, len(flat) - 1, n_receptors).astype(int)
+            signal = flat[indices]
+        else:
+            signal = flat
+
+        energy_before = cnn.energy_pool
+        output = cnn.process(signal)
+        energy_spent = energy_before - cnn.energy_pool
+
+        voted_self = output > 0.0
+        correct = voted_self == is_self
+
+        return MirrorTestResult(
+            is_self=is_self,
+            voted_self=voted_self,
+            correct=correct,
+            confidence=abs(output),
+            cnn_size=cnn.size,
+            energy_spent=energy_spent,
+        )
+
+
+# ============================================================
+# Phase 12: Medusa Optics (3D Visualization Generator)
+# ============================================================
+
+def generate_medusa_visualization(
+    states: np.ndarray,
+    memory_grid: np.ndarray,
+    output_path: str = "data/medusa_optics.html",
+    generation: int = 0,
+    mirror_accuracy: float = 0.0,
+    sub_mind_count: int = 0,
+    sage_count: int = 0,
+):
+    """Generate an interactive 3D Plotly visualization of the Medusa Head.
+
+    Color mapping:
+      - STRUCTURAL: obsidian/translucent gray
+      - COMPUTE (young): bioluminescent cyan
+      - COMPUTE (elder age>3): deep purple
+      - Sages (age>=8): brilliant gold
+      - Legends (age>=50): white-hot core
+      - ENERGY: warm amber
+      - SENSOR: soft violet
+
+    Includes HUD overlay with generation, sage count, sub-minds, mirror accuracy.
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        print("Plotly not installed. Run: pip install plotly")
+        return None
+
+    n = states.shape[0]
+    compute_mask = states == 2
+
+    # Collect point data per category
+    categories = {
+        'STRUCTURAL': {'x': [], 'y': [], 'z': [], 'color': 'rgba(80,80,100,0.15)', 'size': 2, 'symbol': 'circle'},
+        'COMPUTE (young)': {'x': [], 'y': [], 'z': [], 'color': 'rgba(0,220,255,0.4)', 'size': 3, 'symbol': 'circle'},
+        'Elder (age>3)': {'x': [], 'y': [], 'z': [], 'color': 'rgba(120,60,220,0.6)', 'size': 4, 'symbol': 'circle'},
+        'Sage (age>=8)': {'x': [], 'y': [], 'z': [], 'color': 'rgba(255,200,50,0.8)', 'size': 5, 'symbol': 'diamond'},
+        'Legend (age>=50)': {'x': [], 'y': [], 'z': [], 'color': 'rgba(255,255,255,0.95)', 'size': 8, 'symbol': 'diamond'},
+        'ENERGY': {'x': [], 'y': [], 'z': [], 'color': 'rgba(245,158,11,0.3)', 'size': 2, 'symbol': 'circle'},
+        'SENSOR': {'x': [], 'y': [], 'z': [], 'color': 'rgba(168,85,247,0.2)', 'size': 2, 'symbol': 'circle'},
+    }
+
+    for z in range(n):
+        for y in range(n):
+            for x in range(n):
+                s = states[z, y, x]
+                if s == 0:
+                    continue
+                elif s == 1:  # STRUCTURAL
+                    cat = 'STRUCTURAL'
+                elif s == 2:  # COMPUTE
+                    age = memory_grid[0, z, y, x]
+                    if age >= 50:
+                        cat = 'Legend (age>=50)'
+                    elif age >= 8:
+                        cat = 'Sage (age>=8)'
+                    elif age > 3:
+                        cat = 'Elder (age>3)'
+                    else:
+                        cat = 'COMPUTE (young)'
+                elif s == 3:  # ENERGY
+                    cat = 'ENERGY'
+                elif s == 4:  # SENSOR
+                    cat = 'SENSOR'
+                else:
+                    continue
+
+                categories[cat]['x'].append(x)
+                categories[cat]['y'].append(y)
+                categories[cat]['z'].append(z)
+
+    # Build traces
+    traces = []
+    for name, data in categories.items():
+        if len(data['x']) == 0:
+            continue
+        traces.append(go.Scatter3d(
+            x=data['x'], y=data['y'], z=data['z'],
+            mode='markers',
+            name=f"{name} ({len(data['x']):,})",
+            marker=dict(
+                size=data['size'],
+                color=data['color'],
+                symbol=data['symbol'],
+                line=dict(width=0),
+            ),
+            hovertext=[f"{name} ({data['x'][i]},{data['y'][i]},{data['z'][i]})"
+                       for i in range(len(data['x']))],
+        ))
+
+    # Layout with dark theme + HUD annotations
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>MEDUSA HEAD</b> | Gen {generation:,}<br>"
+                f"<sup>Sub-minds: {sub_mind_count:,} | Sages: {sage_count:,} | "
+                f"Mirror Test: {mirror_accuracy:.1%}</sup>"
+            ),
+            font=dict(family="Courier New, monospace", size=16, color="#e0e0e0"),
+            x=0.5,
+        ),
+        scene=dict(
+            bgcolor='rgb(10,10,15)',
+            xaxis=dict(showgrid=False, showticklabels=False, title='', zeroline=False,
+                       backgroundcolor='rgb(10,10,15)'),
+            yaxis=dict(showgrid=False, showticklabels=False, title='', zeroline=False,
+                       backgroundcolor='rgb(10,10,15)'),
+            zaxis=dict(showgrid=False, showticklabels=False, title='', zeroline=False,
+                       backgroundcolor='rgb(10,10,15)'),
+            camera=dict(eye=dict(x=1.8, y=1.4, z=1.2)),
+        ),
+        paper_bgcolor='rgb(10,10,15)',
+        plot_bgcolor='rgb(10,10,15)',
+        font=dict(color='#a0a0a0', family='Courier New, monospace'),
+        legend=dict(
+            bgcolor='rgba(10,10,15,0.8)',
+            bordercolor='rgba(255,255,255,0.1)',
+            font=dict(size=10),
+        ),
+        margin=dict(l=0, r=0, t=60, b=0),
+    )
+
+    # Add HUD annotation
+    fig.add_annotation(
+        text=(
+            f"<b>HUD</b><br>"
+            f"Generation: {generation:,}<br>"
+            f"Sub-minds: {sub_mind_count:,}<br>"
+            f"Sages: {sage_count:,}<br>"
+            f"Mirror: {mirror_accuracy:.1%}<br>"
+            f"Fitness: 0.8969"
+        ),
+        xref="paper", yref="paper",
+        x=0.01, y=0.99,
+        showarrow=False,
+        font=dict(family="Courier New, monospace", size=11, color="#6ee7b7"),
+        bgcolor="rgba(10,10,15,0.8)",
+        bordercolor="rgba(16,185,129,0.3)",
+        borderwidth=1,
+        align="left",
+    )
+
+    fig.write_html(output_path, auto_open=False)
+    print(f"Medusa Optics visualization saved to {output_path}")
+    return output_path
+
+
+def run_phase11b_diagnostic(
+    states: np.ndarray,
+    memory_grid: np.ndarray,
+    n_clean_tests: int = 100,
+    n_noisy_tests: int = 100,
+    noise_fraction: float = 0.25,
+    seed: int = 42,
+) -> Dict:
+    """Run Phase 11B diagnostic: clean + noisy Mirror Tests side by side."""
+    params = CNNParams()
+    clusters = detect_cnns(states, memory_grid, params)
+    cnns = [CnidarianNeuralNetwork(cluster, params) for cluster in clusters]
+
+    if not cnns:
+        return {"error": "No CNNs detected"}
+
+    # Clean tests
+    clean_interface = MirrorTestInterface(states, memory_grid, seed=seed)
+    clean_results = clean_interface.run_battery(cnns, n_trials=n_clean_tests)
+
+    # Rebuild CNNs (energy was consumed)
+    cnns2 = [CnidarianNeuralNetwork(cluster, params) for cluster in clusters]
+
+    # Noisy tests
+    noisy_interface = NoisyMirrorTestInterface(
+        states, memory_grid, noise_fraction=noise_fraction, seed=seed + 1
+    )
+    noisy_results = noisy_interface.run_battery(cnns2, n_trials=n_noisy_tests)
+
+    return {
+        "clean": {k: v for k, v in clean_results.items() if k != "results"},
+        "noisy": {k: v for k, v in noisy_results.items() if k != "results"},
+        "noise_fraction": noise_fraction,
+        "resilience": noisy_results["accuracy"] / max(0.01, clean_results["accuracy"]),
+    }
