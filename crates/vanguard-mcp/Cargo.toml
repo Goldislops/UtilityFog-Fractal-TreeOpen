@@ -1,9 +1,9 @@
 [package]
 name = "vanguard-mcp"
-version = "0.1.0"
+version = "0.13.0"
 edition = "2021"
 authors = ["UtilityFog Team"]
-description = "MCP server for Vanguard SOC GPU cluster orchestration"
+description = "Phase 13: Vanguard MCP Cluster - 160GB VRAM Multi-GPU Orchestrator"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -11,16 +11,29 @@ name = "vanguard-mcp"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tonic = "0.11"
-prost = "0.12"
-uuid = { version = "1", features = ["v4"] }
+toml = "0.8"
+tonic = "0.12"
+prost = "0.13"
+thiserror = "1.0"
+anyhow = "1.0"
 tracing = "0.1"
-tracing-subscriber = "0.3"
-dashmap = "5"
-tokio-stream = "0.1.18"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+dashmap = "6"
 
 [build-dependencies]
-tonic-build = "0.11"
+tonic-build = "0.12"
+
+[features]
+default = []
+cuda = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
