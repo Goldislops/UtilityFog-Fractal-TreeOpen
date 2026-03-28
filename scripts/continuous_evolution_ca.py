@@ -817,7 +817,7 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
             elder_donation_field = np.where(elder_mask, e_circulate, 0.0).astype(np.float32)
             if np.any(elder_donation_field > 0):
                 # Use R=2 box filter to diffuse donations to neighborhood
-                smoothed_donation = _box_filter_3d(elder_donation_field, radius=mem.elder_circulation_radius)
+                smoothed_donation = _separable_box_filter_3d(elder_donation_field, radius=mem.elder_circulation_radius)
                 # Apply only to non-void cells with deficit
                 receiving = non_void_mask & (deficit > 0)
                 memory_grid[3][receiving] = np.minimum(
