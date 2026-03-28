@@ -219,16 +219,6 @@ def main():
 
     rule_spec = load_rule_spec(args.rule_file)
 
-    print("=" * 72)
-    print("  v0.7.0 OPENCLAW ENGINE — The Machine Economy")
-    print("  Lattice: {}x{}x{}  |  Population: {}".format(
-        LATTICE_W, LATTICE_H, LATTICE_D, POPULATION_SIZE))
-    print("  Voxel Memory: ENABLED  |  Reverse Contagion: ENABLED")
-    print("  Rule file: {}".format(args.rule_file))
-    print("  Status every {}s  |  Snapshot every {}s".format(
-        STATUS_INTERVAL, SNAPSHOT_INTERVAL))
-    print("=" * 72)
-
     rng = np.random.default_rng(seed=42)
 
     if args.resume:
@@ -247,7 +237,8 @@ def main():
             extended[:old_channels] = memory_grid
             memory_grid = extended
             print(f"  [MIGRATE] Extended memory grid from {old_channels} to 5 channels (v0.7.5)")
-        print(f"  [RESUME] Loaded gen={generation}, step={ca_step_count}, best_fitness={best_fitness_ever:.4f}")
+        lw, lh, ld = lattice.shape
+        num_cells = lw * lh * ld
     else:
         lattice = generate_primordial_seed_cube(args.seed_cube_size)
         memory_grid = init_memory_grid(lattice.shape)
@@ -255,6 +246,27 @@ def main():
         ca_step_count = 0
         best_fitness_ever = 0.0
         best_fitness_gen = 0
+        lw, lh, ld = LATTICE_W, LATTICE_H, LATTICE_D
+        num_cells = NUM_CELLS
+
+    print("=" * 72)
+    print("  v0.7.0 OPENCLAW ENGINE — The Machine Economy")
+    print(f"  Lattice: {lw}x{lh}x{ld}  |  Cells: {num_cells:,}  |  Population: {POPULATION_SIZE}")
+    try:
+        from scripts.gpu_accelerator import GPU_AVAILABLE as _gpu_ok, GPU_NAME as _gpu_name
+        if _gpu_ok:
+            print(f"  GPU: {_gpu_name} | CuPy ONLINE")
+        else:
+            print("  GPU: Not available | CPU mode")
+    except ImportError:
+        print("  GPU: Not available | CPU mode")
+    print("  Voxel Memory: ENABLED  |  Reverse Contagion: ENABLED")
+    print("  Rule file: {}".format(args.rule_file))
+    print("  Status every {}s  |  Snapshot every {}s".format(
+        STATUS_INTERVAL, SNAPSHOT_INTERVAL))
+    if args.resume:
+        print(f"  [RESUME] gen={generation}, step={ca_step_count}, best_fitness={best_fitness_ever:.4f}")
+    print("=" * 72)
 
     inactivity_steps = np.zeros_like(lattice, dtype=np.int16)
     population = np.array([_random_genome(rng) for _ in range(POPULATION_SIZE)], dtype=np.float32)
@@ -287,7 +299,7 @@ def main():
 
         # Compute density for GA
         active = int(np.sum(lattice > 0))
-        density = active / NUM_CELLS
+        density = active / num_cells
         metrics["density"] = density
         metrics["active_cells"] = active
 
@@ -335,7 +347,7 @@ def main():
             print("-" * 72)
             print(f"  STATUS @ {datetime.now().isoformat()}  (uptime {elapsed})")
             print(f"  Generation: {generation}  |  CA step: {ca_step_count}")
-            print(f"  Active cells:    {active}/{NUM_CELLS} (density {density:.4f})")
+            print(f"  Active cells:    {active}/{num_cells} (density {density:.4f})")
             print(f"  STRUCT: {counts[1]:>6}  COMPUTE: {counts[2]:>6}  ENERGY: {counts[3]:>6}  SENSOR: {counts[4]:>6}")
             if non_void > 0:
                 print(f"  Ecosystem: STRUCT {counts[1]/non_void:.1%}  COMPUTE {counts[2]/non_void:.1%}  ENERGY {counts[3]/non_void:.1%}  SENSOR {counts[4]/non_void:.1%}")
