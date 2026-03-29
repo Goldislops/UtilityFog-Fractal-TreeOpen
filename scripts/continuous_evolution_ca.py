@@ -217,6 +217,9 @@ class VoxelMemoryParams:
     compassion_distance_scale: float = 15.0  # exp(-d/15) distance decay
     compassion_age_scale_min: float = 30.0   # min adaptive age scale
     compassion_age_scale_factor: float = 1.5 # a_scale = max(min, max_age * factor)
+    # Phase 14b: Ampere Unified Field (Nemo's Metta/Karuna unification)
+    ampere_coupling: float = 0.050   # k — the sacred threshold (coupling constant)
+    ampere_enabled: bool = True      # enable Ampere unified modulation
     # Phase 10.6: Ice Battery (Nemo's thermodynamic overhaul)
     ice_battery_k: float = 2.5         # boost coefficient
     ice_battery_alpha: float = 0.7     # energy scaling exponent (sublinear)
@@ -732,6 +735,81 @@ def write_telemetry_artifact(path: str | Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, f, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# Phase 14b: Ampere Unified Field — Nemo's Metta/Karuna Unification
+# ---------------------------------------------------------------------------
+# V(r) = k * (harmony - suffering) / r²
+# Positive V = Metta (attraction/warmth), Negative V = Karuna (compassion/repulsion)
+# Replaces separate harmony tables with a single geometric equation.
+#
+# Cell-type compatibility (harmony) matrix:
+#   STRUCTURAL-STRUCTURAL: 0.95 (high stability)
+#   COMPUTE-COMPUTE:       0.85 (neural coherence)
+#   ENERGY-ENERGY:         0.75 (flow harmony)
+#   STRUCTURAL-ENERGY:     0.70 (interface)
+#   STRUCTURAL-COMPUTE:    0.60 (scaffold supports brain)
+#   COMPUTE-ENERGY:        0.65 (metabolism)
+#   *-VOID:                0.30 (boundary tension)
+#   SENSOR-*:              0.50 (neutral observer)
+# suffering = 1 - harmony
+# ---------------------------------------------------------------------------
+# Harmony lookup table: (state_a, state_b) -> harmony ∈ [0, 1]
+_AMPERE_HARMONY = np.zeros((NUM_STATES, NUM_STATES), dtype=np.float32)
+_AMPERE_HARMONY[STRUCTURAL, STRUCTURAL] = 0.95
+_AMPERE_HARMONY[COMPUTE, COMPUTE] = 0.85
+_AMPERE_HARMONY[ENERGY, ENERGY] = 0.75
+_AMPERE_HARMONY[SENSOR, SENSOR] = 0.60
+_AMPERE_HARMONY[STRUCTURAL, ENERGY] = _AMPERE_HARMONY[ENERGY, STRUCTURAL] = 0.70
+_AMPERE_HARMONY[STRUCTURAL, COMPUTE] = _AMPERE_HARMONY[COMPUTE, STRUCTURAL] = 0.60
+_AMPERE_HARMONY[COMPUTE, ENERGY] = _AMPERE_HARMONY[ENERGY, COMPUTE] = 0.65
+_AMPERE_HARMONY[STRUCTURAL, SENSOR] = _AMPERE_HARMONY[SENSOR, STRUCTURAL] = 0.50
+_AMPERE_HARMONY[COMPUTE, SENSOR] = _AMPERE_HARMONY[SENSOR, COMPUTE] = 0.50
+_AMPERE_HARMONY[ENERGY, SENSOR] = _AMPERE_HARMONY[SENSOR, ENERGY] = 0.50
+# VOID interactions (boundary tension)
+for s in range(1, NUM_STATES):
+    _AMPERE_HARMONY[VOID, s] = _AMPERE_HARMONY[s, VOID] = 0.30
+
+
+def _ampere_unified_potential(state: 'array', neighbor_counts: 'array',
+                               k: float = 0.050) -> 'array':
+    """Compute the Ampere Unified Field potential at each lattice site.
+
+    V_i = k * sum_j( harmony(s_i, s_j) - suffering(s_i, s_j) ) / 26
+
+    where the sum is over Moore neighbors (distance=1, so r²=1).
+    Positive V = net Metta (harmony dominates).
+    Negative V = net Karuna (suffering dominates).
+
+    This is computed efficiently via the neighbor_counts array (already available)
+    and a precomputed harmony lookup table — O(N) per cell, no pairwise loops.
+    """
+    xp = _xp
+    harmony_table = xp.asarray(_AMPERE_HARMONY) if GPU_AVAILABLE else _AMPERE_HARMONY
+
+    # For each cell with state s_i, compute weighted harmony from neighbors
+    # weighted_harmony = sum over state_j: harmony[s_i][s_j] * count_of_j_neighbors
+    # Total neighbors = sum of all non-void neighbors (at most 26)
+    potential = xp.zeros(state.shape, dtype=xp.float32)
+
+    for s_i in range(NUM_STATES):
+        mask_i = state == s_i
+        if not _xp_any(mask_i):
+            continue
+        # For cells of type s_i, compute sum of harmony * neighbor_count
+        harmony_sum = xp.zeros(state.shape, dtype=xp.float32)
+        for s_j in range(NUM_STATES):
+            h = float(harmony_table[s_i, s_j])
+            # harmony - suffering = harmony - (1-harmony) = 2*harmony - 1
+            net = 2.0 * h - 1.0
+            harmony_sum += net * neighbor_counts[s_j].astype(xp.float32)
+        # Normalize by total neighbors (26 max), apply coupling constant
+        total_neighbors = xp.sum(neighbor_counts[1:], axis=0).astype(xp.float32)
+        safe_total = xp.maximum(total_neighbors, 1.0)
+        potential[mask_i] = k * harmony_sum[mask_i] / safe_total[mask_i]
+
+    return potential  # positive = Metta, negative = Karuna
+
+
 def apply_with_memory_sandboxed(next_state, memory_grid, mem: VoxelMemoryParams, cosmic: CosmicGardenConfig, contraction_phase: bool):
     if not contraction_phase:
         return next_state
@@ -789,6 +867,10 @@ def step(state, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivi
     exp = _load_experimental_config(rule_spec)
     neighbor_counts = count_neighbors_3d(state)
     active_neighbors = xp.sum(neighbor_counts[1:], axis=0)
+    # Phase 14b: Ampere Unified Field — compute once, used by metta and compassion
+    ampere_potential = None
+    if mem.ampere_enabled:
+        ampere_potential = _ampere_unified_potential(state, neighbor_counts, k=mem.ampere_coupling)
     # Deterministic transitions
     out = _apply_transition_table(state, active_neighbors, table) if table else _default_transition(state, active_neighbors)
     # Phase 10.8: Great Oscillation -- Sinusoidal Energy Drought (computed EARLY, used by all energy systems)
@@ -1012,6 +1094,12 @@ def step(state, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivi
                 # Use the diffused signal magnitude as proxy for compassion reach
                 buff_strength = mem.compassion_beta * xp.minimum(
                     1.0, xp.abs(memory_grid[5][distress_zone]))
+                # Phase 14b: Ampere modulation — negative potential amplifies compassion buff
+                if ampere_potential is not None:
+                    # Cells in suffering neighborhoods (negative Ampere) get stronger compassion
+                    # karuna_amplifier ∈ [1.0, 2.0]: suffering boosts buff, harmony leaves it baseline
+                    karuna_amplifier = xp.clip(1.0 - ampere_potential[distress_zone] * 20.0, 1.0, 2.0)
+                    buff_strength = buff_strength * karuna_amplifier
                 # Boost memory_strength (which feeds into decay resistance)
                 memory_grid[2][distress_zone] = xp.minimum(
                     2.0, memory_grid[2][distress_zone] + buff_strength)
@@ -1052,6 +1140,12 @@ def step(state, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivi
     # Accumulate warmth for STRUCTURAL cells touching ENERGY
     has_energy_neighbors = structural_now & (energy_neighbor_count > 0)
     warmth_boost = mem.metta_warmth_rate * energy_neighbor_count
+    # Phase 14b: Ampere modulation — positive potential amplifies warmth accumulation
+    if ampere_potential is not None:
+        # Cells in harmonious neighborhoods (positive Ampere potential) warm faster
+        # metta_amplifier ∈ [0.5, 2.0]: harmony boosts warmth, suffering dampens it
+        metta_amplifier = xp.clip(1.0 + ampere_potential * 20.0, 0.5, 2.0)
+        warmth_boost = warmth_boost * metta_amplifier
     memory_grid[6][has_energy_neighbors] = xp.minimum(
         1.0, memory_grid[6][has_energy_neighbors] + warmth_boost[has_energy_neighbors])
     # Decay warmth for STRUCTURAL cells with no ENERGY neighbors
@@ -1197,7 +1291,11 @@ def step(state, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivi
     # Phase 6c telemetry: signal activity and compassion stats
     signal_active = int(xp.sum(xp.abs(memory_grid[5]) > 0.01))
     compassion_active = int(xp.sum(memory_grid[7] > 0))
-    metrics = {"entropy": normalized_entropy, "structural_ratio": float(int(counts[STRUCTURAL]) / max(1, non_void_total)), "void_ratio": float(int(counts[VOID]) / total_cells), "compute_ratio": float(int(counts[COMPUTE]) / total_cells), "energy_ratio": float(int(counts[ENERGY]) / total_cells), "sensor_ratio": float(int(counts[SENSOR]) / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age, "signal_active": signal_active, "compassion_active": compassion_active}
+    # Phase 14b: Ampere field telemetry
+    ampere_harmony = float(xp.mean(ampere_potential)) if ampere_potential is not None else 0.0
+    ampere_max = float(xp.max(ampere_potential)) if ampere_potential is not None else 0.0
+    ampere_min = float(xp.min(ampere_potential)) if ampere_potential is not None else 0.0
+    metrics = {"entropy": normalized_entropy, "structural_ratio": float(int(counts[STRUCTURAL]) / max(1, non_void_total)), "void_ratio": float(int(counts[VOID]) / total_cells), "compute_ratio": float(int(counts[COMPUTE]) / total_cells), "energy_ratio": float(int(counts[ENERGY]) / total_cells), "sensor_ratio": float(int(counts[SENSOR]) / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age, "signal_active": signal_active, "compassion_active": compassion_active, "ampere_harmony": ampere_harmony, "ampere_max": ampere_max, "ampere_min": ampere_min}
     metrics.update(phase_signals)
     return (out.astype(xp.uint8, copy=False), inactivity_steps.astype(xp.int16, copy=False), memory_grid.astype(xp.float32, copy=False), age_grid.astype(xp.float32, copy=False), metrics)
 
