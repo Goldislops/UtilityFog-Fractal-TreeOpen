@@ -28,6 +28,25 @@ except ImportError:
     GPU_AVAILABLE = False
     _xp = np
 
+# GPU-resident random number generator
+if GPU_AVAILABLE:
+    _gpu_rng = cp.random.RandomState(seed=42)
+else:
+    _gpu_rng = None
+
+def _xp_random(shape, rng=None):
+    """Generate random floats on GPU or CPU depending on availability."""
+    if GPU_AVAILABLE and _gpu_rng is not None:
+        return _gpu_rng.rand(*shape, dtype=cp.float32)
+    return rng.random(shape).astype(np.float32) if rng else np.random.random(shape).astype(np.float32)
+
+
+def _xp_any(mask):
+    """Safe _xp_any() replacement — avoids CUDA 13.2 NVRTC JIT compilation bug."""
+    if GPU_AVAILABLE:
+        return int(mask.sum()) > 0
+    return bool(np.any(mask))
+
 try:
     import tomli
 except ImportError:
@@ -431,20 +450,22 @@ def update_density_phase_detector(detector: Optional[DensityPhaseDetector], stat
 # ---------------------------------------------------------------------------
 # Transition functions
 # ---------------------------------------------------------------------------
-def _apply_transition_table(state: np.ndarray, active_neighbors: np.ndarray, table: Mapping[int, Mapping[int, int]]) -> np.ndarray:
-    next_state = np.zeros_like(state)
+def _apply_transition_table(state, active_neighbors, table: Mapping[int, Mapping[int, int]]):
+    xp = _xp
+    next_state = xp.zeros_like(state)
     for src, mapping in table.items():
         src_mask = state == src
-        if not np.any(src_mask):
+        if not _xp_any(src_mask):
             continue
         for n_count, target in mapping.items():
             next_state[src_mask & (active_neighbors == n_count)] = target
     return next_state
 
 
-def _default_transition(state: np.ndarray, active_neighbors: np.ndarray) -> np.ndarray:
+def _default_transition(state, active_neighbors):
     """v0.6.0 default rules."""
-    out = np.zeros_like(state)
+    xp = _xp
+    out = xp.zeros_like(state)
     out[(state == VOID) & (active_neighbors == 3)] = STRUCTURAL
     for n in range(3):
         out[(state == STRUCTURAL) & (active_neighbors == n)] = STRUCTURAL
@@ -459,14 +480,18 @@ def _default_transition(state: np.ndarray, active_neighbors: np.ndarray) -> np.n
 # ---------------------------------------------------------------------------
 # count_neighbors_3d
 # ---------------------------------------------------------------------------
-def count_neighbors_3d(state: np.ndarray) -> np.ndarray:
-    """Count neighbors by state using np.roll for 3D Moore neighborhood (26 neighbors).
-    GPU-accelerated via CuPy when available (44x speedup at 128^3)."""
+def count_neighbors_3d(state):
+    """Count neighbors by state using xp.roll for 3D Moore neighborhood (26 neighbors).
+    GPU-resident: arrays stay on GPU throughout when available."""
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
     xp = _xp
-    s = to_gpu(state) if GPU_AVAILABLE else state
-    out = xp.zeros((NUM_STATES,) + state.shape, dtype=xp.int16)
+    # If state is numpy but GPU available, convert once
+    if GPU_AVAILABLE and not isinstance(state, cp.ndarray):
+        s = cp.asarray(state)
+    else:
+        s = state
+    out = xp.zeros((NUM_STATES,) + s.shape, dtype=xp.int16)
     for state_id in range(NUM_STATES):
         indicator = (s == state_id).astype(xp.int16)
         counts = xp.zeros_like(indicator, dtype=xp.int16)
@@ -479,78 +504,81 @@ def count_neighbors_3d(state: np.ndarray) -> np.ndarray:
                     counts += shifted
         out[state_id] = counts
     if GPU_AVAILABLE:
-        sync()
-        out = to_cpu(out)
+        cp.cuda.Stream.null.synchronize()
     return out
 
 
 _count_neighbors_by_state = count_neighbors_3d
 
 
-def _max_neighbor_value(field: np.ndarray) -> np.ndarray:
+def _max_neighbor_value(field):
     """Find the maximum value among Moore neighbors for a 3D scalar field.
     Used for Sympathetic Joy: find the oldest COMPUTE neighbor.
-    Optimized: pad once + slice (avoids 26 np.roll copies)."""
-    padded = np.pad(field, 1, mode="constant", constant_values=0.0)
+    Optimized: pad once + slice (avoids 26 xp.roll copies)."""
+    xp = _xp
+    padded = xp.pad(field, 1, mode="constant", constant_values=0.0)
     nz, ny, nx = field.shape
-    result = np.zeros_like(field)
+    result = xp.zeros_like(field)
     for dz in range(3):
         for dy in range(3):
             for dx in range(3):
                 if dz == 1 and dy == 1 and dx == 1:
                     continue
-                np.maximum(result, padded[dz:dz+nz, dy:dy+ny, dx:dx+nx], out=result)
+                xp.maximum(result, padded[dz:dz+nz, dy:dy+ny, dx:dx+nx], out=result)
     return result
 
 
 # Cache for box filter normalization grids (shape -> count_grid)
-_box_filter_count_cache: Dict[Tuple[int, ...], np.ndarray] = {}
+# Stores xp arrays (GPU arrays when GPU_AVAILABLE, numpy otherwise)
+_box_filter_count_cache: Dict[Tuple[int, ...], Any] = {}
 
-def _box_cumsum_1d(arr: np.ndarray, axis: int, r: int, n: int) -> np.ndarray:
+def _box_cumsum_1d(arr, axis: int, r: int, n: int):
     """Apply 1D box-sum along one axis using prefix sums."""
+    xp = _xp
     w = 2 * r + 1
     pad_widths = [(0, 0)] * 3
     pad_widths[axis] = (r, r)
-    padded = np.pad(arr, pad_widths, mode='constant', constant_values=0.0)
+    padded = xp.pad(arr, pad_widths, mode='constant', constant_values=0.0)
     zs = list(padded.shape); zs[axis] = 1
-    padded = np.concatenate([np.zeros(zs, dtype=np.float64), padded], axis=axis)
-    cs = np.cumsum(padded, axis=axis)
+    padded = xp.concatenate([xp.zeros(zs, dtype=xp.float64), padded], axis=axis)
+    cs = xp.cumsum(padded, axis=axis)
     slices_hi = [slice(None)] * 3
     slices_lo = [slice(None)] * 3
     slices_hi[axis] = slice(w, w + n)
     slices_lo[axis] = slice(0, n)
     return cs[tuple(slices_hi)] - cs[tuple(slices_lo)]
 
-def _separable_box_filter_3d(field: np.ndarray, radius: int) -> np.ndarray:
+def _separable_box_filter_3d(field, radius: int):
     """Fast R-radius 3D box filter via separable 1D cumsum trick.
     O(N^3) regardless of R. Caches normalization count for repeated calls."""
+    xp = _xp
     r = radius
-    cache_key = (field.shape, r)
-    # Compute count normalization grid (cached per shape+radius)
+    cache_key = (field.shape, r, GPU_AVAILABLE)
+    # Compute count normalization grid (cached per shape+radius+device)
     if cache_key not in _box_filter_count_cache:
-        count = np.ones(field.shape, dtype=np.float64)
+        count = xp.ones(field.shape, dtype=xp.float64)
         for axis in range(3):
             count = _box_cumsum_1d(count, axis, r, field.shape[axis])
-        _box_filter_count_cache[cache_key] = np.maximum(count, 1.0).astype(np.float64)
+        _box_filter_count_cache[cache_key] = xp.maximum(count, 1.0).astype(xp.float64)
     count = _box_filter_count_cache[cache_key]
     # Compute box sum of actual field
-    result = field.astype(np.float64)
+    result = field.astype(xp.float64)
     for axis in range(3):
         result = _box_cumsum_1d(result, axis, r, field.shape[axis])
     result /= count
-    return result.astype(np.float32)
+    return result.astype(xp.float32)
 
 
-def _mycelial_diffuse(signal: np.ndarray, energy_mask: np.ndarray,
-                      k_iter: int, decay_per_iter: float) -> np.ndarray:
+def _mycelial_diffuse(signal, energy_mask, k_iter: int, decay_per_iter: float):
     """Iterative 3x3x3 diffusion of signal through ENERGY cells.
     Each iteration: average neighbors (masked to ENERGY), then decay.
     Optimized: pre-compute padded energy mask (constant across iterations)."""
+    xp = _xp
     field = signal.copy()
     nz, ny, nx = field.shape
-    energy_f = energy_mask.astype(np.float32)
+    energy_f = energy_mask.astype(xp.float32)
     # Pre-pad the energy mask once (it does not change across iterations)
-    padded_mask = np.pad(energy_f, 1, mode='constant', constant_values=0.0)
+    padded_mask = xp.pad(energy_f, 1, mode='constant', constant_values=0.0)
     # Pre-compute 26 mask slices (constant across iterations)
     mask_slices = []
     offsets = []
@@ -562,24 +590,25 @@ def _mycelial_diffuse(signal: np.ndarray, energy_mask: np.ndarray,
                 mask_slices.append(padded_mask[dz:dz+nz, dy:dy+ny, dx:dx+nx])
                 offsets.append((dz, dy, dx))
     # Pre-compute neighbor count from energy mask (constant)
-    neighbor_count = np.zeros_like(field)
+    neighbor_count = xp.zeros_like(field)
     for ms in mask_slices:
         neighbor_count += ms
-    safe_count = np.maximum(neighbor_count, 1.0)
+    safe_count = xp.maximum(neighbor_count, 1.0)
     inv_decay = 1.0 - decay_per_iter
     for _ in range(k_iter):
-        padded = np.pad(field, 1, mode='constant', constant_values=0.0)
-        neighbor_sum = np.zeros_like(field)
+        padded = xp.pad(field, 1, mode='constant', constant_values=0.0)
+        neighbor_sum = xp.zeros_like(field)
         for i, (dz, dy, dx) in enumerate(offsets):
             neighbor_sum += padded[dz:dz+nz, dy:dy+ny, dx:dx+nx] * mask_slices[i]
         avg = neighbor_sum / safe_count
-        field = np.where(energy_mask, field * decay_per_iter + avg * inv_decay, 0.0)
-    return field.astype(np.float32)
+        field = xp.where(energy_mask, field * decay_per_iter + avg * inv_decay, 0.0)
+    return field.astype(xp.float32)
 
 
-def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
-    padded = np.pad(mask.astype(np.int16), 1, mode="constant", constant_values=0)
-    cluster = np.zeros_like(mask, dtype=np.int16)
+def _compute_neighbor_count(mask):
+    xp = _xp
+    padded = xp.pad(mask.astype(xp.int16), 1, mode="constant", constant_values=0)
+    cluster = xp.zeros_like(mask, dtype=xp.int16)
     for dz in (-1, 0, 1):
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
@@ -603,26 +632,28 @@ def _compute_neighbor_count(mask: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 MEMORY_CHANNELS = 8
 
-def init_memory_grid(shape: Tuple[int, int, int]) -> np.ndarray:
+def init_memory_grid(shape: Tuple[int, int, int]):
     """8 channels: compute_age, structural_age, memory_strength, energy_reserve,
     last_active_gen, signal_field, warmth, compassion_cooldown."""
-    grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
+    xp = _xp
+    grid = xp.zeros((MEMORY_CHANNELS,) + shape, dtype=xp.float32)
     grid[2, :, :, :] = 1.0   # memory_strength default
     grid[3, :, :, :] = 1.0   # energy_reserve default
     return grid
 
 
-def _migrate_memory_grid(memory_grid: np.ndarray, shape: Tuple[int, int, int]) -> np.ndarray:
+def _migrate_memory_grid(memory_grid, shape: Tuple[int, int, int]):
     """Auto-migrate older memory grids to 8-channel format."""
+    xp = _xp
     if memory_grid.shape[0] == MEMORY_CHANNELS:
         return memory_grid
     if memory_grid.shape[0] == 5:
         # Phase 5 -> Phase 6: add 3 new channels (signal, warmth, cooldown)
-        new_grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
+        new_grid = xp.zeros((MEMORY_CHANNELS,) + shape, dtype=xp.float32)
         new_grid[:5] = memory_grid
         return new_grid
     if memory_grid.shape[0] == 3:
-        new_grid = np.zeros((MEMORY_CHANNELS,) + shape, dtype=np.float32)
+        new_grid = xp.zeros((MEMORY_CHANNELS,) + shape, dtype=xp.float32)
         new_grid[0] = memory_grid[0]
         new_grid[2] = memory_grid[1]
         new_grid[4] = memory_grid[2]
@@ -701,7 +732,7 @@ def write_telemetry_artifact(path: str | Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, f, indent=2)
 
 
-def apply_with_memory_sandboxed(next_state: np.ndarray, memory_grid: np.ndarray, mem: VoxelMemoryParams, cosmic: CosmicGardenConfig, contraction_phase: bool) -> np.ndarray:
+def apply_with_memory_sandboxed(next_state, memory_grid, mem: VoxelMemoryParams, cosmic: CosmicGardenConfig, contraction_phase: bool):
     if not contraction_phase:
         return next_state
     out = next_state.copy()
@@ -711,32 +742,42 @@ def apply_with_memory_sandboxed(next_state: np.ndarray, memory_grid: np.ndarray,
     return out
 
 
-def _reverse_contagion_probability(compute_neighbors: np.ndarray, mem: VoxelMemoryParams) -> np.ndarray:
-    excess = np.maximum(0, compute_neighbors - mem.reverse_contagion_threshold)
-    prob = mem.reverse_contagion_base_prob + mem.reverse_contagion_boost * excess.astype(np.float32)
+def _reverse_contagion_probability(compute_neighbors, mem: VoxelMemoryParams):
+    xp = _xp
+    excess = xp.maximum(0, compute_neighbors - mem.reverse_contagion_threshold)
+    prob = mem.reverse_contagion_base_prob + mem.reverse_contagion_boost * excess.astype(xp.float32)
     prob[compute_neighbors < mem.reverse_contagion_threshold] = 0.0
-    return np.minimum(prob, 0.95)
+    return xp.minimum(prob, 0.95)
 
 
 # ---------------------------------------------------------------------------
 # step function
 # ---------------------------------------------------------------------------
-def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivity_steps: Optional[np.ndarray] = None, memory_grid: Optional[np.ndarray] = None, age_grid: Optional[np.ndarray] = None, current_gen: int = 0, telemetry: Optional[TelemetryWindow] = None, phase_detector: Optional[DensityPhaseDetector] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:
+def step(state, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivity_steps=None, memory_grid=None, age_grid=None, current_gen: int = 0, telemetry: Optional[TelemetryWindow] = None, phase_detector: Optional[DensityPhaseDetector] = None) -> Tuple:
     """Single CA step. Returns (next_state, inactivity_steps, memory_grid, age_grid, metrics).
-    Memory grid 5 channels: compute_age, structural_age, memory_strength, energy_reserve, last_active_gen.
-    Supports 3->5 channel auto-migration.
+    GPU-resident: all arrays stay on GPU when available. Only scalars transfer back for metrics.
     """
+    xp = _xp
     if state.ndim != 3:
         raise ValueError(f"Expected a 3D lattice, got shape={state.shape}")
+    # Ensure state is on GPU if available
+    if GPU_AVAILABLE and not isinstance(state, cp.ndarray):
+        state = cp.asarray(state)
     shape = state.shape
     if memory_grid is None:
         memory_grid = init_memory_grid(shape)
     elif memory_grid.shape[0] != MEMORY_CHANNELS:
         memory_grid = _migrate_memory_grid(memory_grid, shape)
+    if GPU_AVAILABLE and not isinstance(memory_grid, cp.ndarray):
+        memory_grid = cp.asarray(memory_grid)
     if age_grid is None:
-        age_grid = np.zeros(shape, dtype=np.float32)
+        age_grid = xp.zeros(shape, dtype=xp.float32)
+    elif GPU_AVAILABLE and not isinstance(age_grid, cp.ndarray):
+        age_grid = cp.asarray(age_grid)
     if inactivity_steps is None:
-        inactivity_steps = np.zeros(shape, dtype=np.int16)
+        inactivity_steps = xp.zeros(shape, dtype=xp.int16)
+    elif GPU_AVAILABLE and not isinstance(inactivity_steps, cp.ndarray):
+        inactivity_steps = cp.asarray(inactivity_steps)
     compute_age_snapshot = memory_grid[0].copy()
     structural_age_snapshot = memory_grid[1].copy()
     table = _load_transition_table(rule_spec)
@@ -747,22 +788,22 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     mem = VoxelMemoryParams()
     exp = _load_experimental_config(rule_spec)
     neighbor_counts = count_neighbors_3d(state)
-    active_neighbors = np.sum(neighbor_counts[1:], axis=0)
+    active_neighbors = xp.sum(neighbor_counts[1:], axis=0)
     # Deterministic transitions
     out = _apply_transition_table(state, active_neighbors, table) if table else _default_transition(state, active_neighbors)
     # Phase 10.8: Great Oscillation -- Sinusoidal Energy Drought (computed EARLY, used by all energy systems)
     drought_multiplier = 1.0
     if mem.drought_enabled and current_gen > 0:
         cycle_pos = (current_gen - mem.drought_start_gen) % mem.drought_cycle_length
-        drought_multiplier = mem.drought_baseline + mem.drought_amplitude * np.cos(
-            2.0 * np.pi * cycle_pos / mem.drought_cycle_length
-        )
+        drought_multiplier = mem.drought_baseline + mem.drought_amplitude * float(xp.cos(
+            2.0 * xp.pi * cycle_pos / mem.drought_cycle_length
+        ))
     # Phase 10.5: Anti-Star Density Collapse (AURA Deep Think 5.0)
     # VOID cells adjacent to COMPUTE rapidly nucleate to STRUCTURAL, forming a protective shell
     if mem.antistar_enabled:
         compute_neighbor_count = neighbor_counts[COMPUTE]
         void_near_compute = (out == VOID) & (compute_neighbor_count > 0)
-        antistar_roll = rng.random(shape) < mem.antistar_prob
+        antistar_roll = _xp_random(shape, rng) < mem.antistar_prob
         out[void_near_compute & antistar_roll] = STRUCTURAL
     # Phase 10.5: MOF Battery (AURA Deep Think 5.0)
     # ENERGY cells near COMPUTE funnel energy_reserve to boost elder survival
@@ -770,161 +811,161 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         compute_now = out == COMPUTE
         energy_now = out == ENERGY
         # COMPUTE cells receive energy boost from nearby ENERGY cells
-        energy_neighbor_count_for_compute = neighbor_counts[ENERGY].astype(np.float32)
+        energy_neighbor_count_for_compute = neighbor_counts[ENERGY].astype(xp.float32)
         boost = mem.mof_energy_boost * energy_neighbor_count_for_compute
         boost *= drought_multiplier  # Phase 10.8 drought modulation
-        memory_grid[3][compute_now] = np.minimum(2.0, memory_grid[3][compute_now] + boost[compute_now])
+        memory_grid[3][compute_now] = xp.minimum(2.0, memory_grid[3][compute_now] + boost[compute_now])
         # ENERGY cells near COMPUTE slowly drain (sacrifice for the elders)
         compute_neighbor_count_e = neighbor_counts[COMPUTE]
         draining = energy_now & (compute_neighbor_count_e > 0)
-        memory_grid[3][draining] = np.maximum(0.05, memory_grid[3][draining] - mem.mof_drain_rate)
+        memory_grid[3][draining] = xp.maximum(0.05, memory_grid[3][draining] - mem.mof_drain_rate)
     # Phase 10.6: Trash Battery -- STRUCTURAL cells harvest entropy from void neighbors
     # E_reclaim = min(harvest_eff * N_void * entropic_flux, max_reclaim)
     structural_now = state == STRUCTURAL
     n_void_neighbors = neighbor_counts[VOID]
     trash_harvestable = structural_now & (n_void_neighbors > 0)
-    if np.any(trash_harvestable):
-        e_reclaimed = np.minimum(
+    if _xp_any(trash_harvestable):
+        e_reclaimed = xp.minimum(
             mem.trash_harvest_eff * n_void_neighbors * mem.trash_entropic_flux,
             mem.trash_max_reclaim
         )
         e_reclaimed *= drought_multiplier  # Phase 10.8 drought modulation
         # Route harvested energy to the memory grid energy_reserve channel
         # STRUCTURAL stores it, then MOF battery delivers it to nearby COMPUTE
-        memory_grid[3][trash_harvestable] = np.minimum(
+        memory_grid[3][trash_harvestable] = xp.minimum(
             5.0, memory_grid[3][trash_harvestable] + e_reclaimed[trash_harvestable]
         )
     # Phase 10.7: Elder Circulation -- continuous fountain-model energy flow
     # Elders (age >= threshold, energy > mean) circulate excess to needy neighbors
     # This is PROACTIVE compassion: no distress trigger needed
     compute_now_circ = out == COMPUTE
-    if np.any(compute_now_circ):
+    if _xp_any(compute_now_circ):
         compute_ages = memory_grid[0][compute_now_circ]
         compute_energies = memory_grid[3][compute_now_circ]
         energy_mean = compute_energies.mean() if compute_energies.size > 0 else 0.0
         elder_mask = compute_now_circ & (memory_grid[0] >= mem.elder_age_threshold) & (memory_grid[3] > energy_mean)
-        if np.any(elder_mask):
+        if _xp_any(elder_mask):
             # Calculate circulation amount per elder
-            excess = np.maximum(0.0, memory_grid[3] - mem.elder_sustenance_threshold)
-            age_factor = np.exp(-mem.elder_membrane_decay * np.maximum(0.0, memory_grid[0] - mem.elder_age_threshold))
+            excess = xp.maximum(0.0, memory_grid[3] - mem.elder_sustenance_threshold)
+            age_factor = xp.exp(-mem.elder_membrane_decay * xp.maximum(0.0, memory_grid[0] - mem.elder_age_threshold))
             e_circulate = excess * mem.elder_baseline_fraction * age_factor
             e_circulate *= drought_multiplier  # Phase 10.8 drought modulation
             # Distribute to all non-void cells in neighborhood (pull-agnostic)
             # Use the smoothed density field as a proxy for neighborhood need
             non_void_mask = out != VOID
-            deficit = np.maximum(0.0, mem.elder_sustenance_threshold - memory_grid[3])
+            deficit = xp.maximum(0.0, mem.elder_sustenance_threshold - memory_grid[3])
             # Simple distribution: elder energy spread to nearby cells via box filter
-            elder_donation_field = np.where(elder_mask, e_circulate, 0.0).astype(np.float32)
-            if np.any(elder_donation_field > 0):
+            elder_donation_field = xp.where(elder_mask, e_circulate, 0.0).astype(xp.float32)
+            if _xp_any(elder_donation_field > 0):
                 # Use R=2 box filter to diffuse donations to neighborhood
                 smoothed_donation = _separable_box_filter_3d(elder_donation_field, radius=mem.elder_circulation_radius)
                 # Apply only to non-void cells with deficit
                 receiving = non_void_mask & (deficit > 0)
-                memory_grid[3][receiving] = np.minimum(
+                memory_grid[3][receiving] = xp.minimum(
                     5.0, memory_grid[3][receiving] + smoothed_donation[receiving]
                 )
                 # Deduct from elders
                 memory_grid[3][elder_mask] -= e_circulate[elder_mask]
-                memory_grid[3] = np.maximum(0.0, memory_grid[3])
+                memory_grid[3] = xp.maximum(0.0, memory_grid[3])
     # Phase 10.7: Thermodynamic Equanimity -- zero waste heat for stable cells
     # Equanimous cells are superconductors: processing sensation without friction
     if mem.equanimity_zero_waste:
         compute_for_heat = out == COMPUTE
-        if np.any(compute_for_heat):
+        if _xp_any(compute_for_heat):
             # Simple stability check: cells with age > stability_window and low energy variance
             stable_cells = compute_for_heat & (memory_grid[0] > mem.equanimity_stability_window)
             # Non-equanimous cells lose energy to waste heat
             reactive_cells = compute_for_heat & ~stable_cells
-            if np.any(reactive_cells):
+            if _xp_any(reactive_cells):
                 heat_loss = mem.base_dissipation * memory_grid[3][reactive_cells]
-                memory_grid[3][reactive_cells] = np.maximum(0.0, memory_grid[3][reactive_cells] - heat_loss)
+                memory_grid[3][reactive_cells] = xp.maximum(0.0, memory_grid[3][reactive_cells] - heat_loss)
             # Equanimous cells: ZERO waste heat (superconductor state!)
             # They keep all their energy -- this is thermodynamic enlightenment
     # Phase 4: Equanimity Shield -- compute shield mask ONCE before all kills
     # P_resist(a, M) = P_max * (1 - exp(-(a - a_m) / tau)) * tanh(gamma * M)
     # Nemo's sigmoid: cells that have endured gain composure under pressure
     was_compute = state == COMPUTE
-    equanimity_mask = np.zeros(shape, dtype=bool)
+    equanimity_mask = xp.zeros(shape, dtype=bool)
     mature_compute = was_compute & (memory_grid[0] > mem.equanimity_age_min)
-    if np.any(mature_compute):
-        age_excess = np.maximum(0.0, memory_grid[0] - mem.equanimity_age_min)
+    if _xp_any(mature_compute):
+        age_excess = xp.maximum(0.0, memory_grid[0] - mem.equanimity_age_min)
         # Phase 10.6: Base Equanimity (with accelerated tau=2.0)
         p_base = mem.equanimity_p_max * (
-            1.0 - np.exp(-age_excess / mem.equanimity_tau)
-        ) * np.tanh(mem.equanimity_gamma * memory_grid[2])
+            1.0 - xp.exp(-age_excess / mem.equanimity_tau)
+        ) * xp.tanh(mem.equanimity_gamma * memory_grid[2])
         # Phase 10.6: Ice Battery boost -- COMPUTE elders burn stored energy for resistance spike
         # P_ice = k * E^alpha * exp(-((age - peak)^2) / (2*sigma^2))
         e_reserve = memory_grid[3]  # energy_reserve channel
         ice_active = mature_compute & (e_reserve > mem.ice_battery_threshold)
-        p_ice = np.zeros(shape, dtype=np.float32)
-        if np.any(ice_active):
+        p_ice = xp.zeros(shape, dtype=xp.float32)
+        if _xp_any(ice_active):
             age_field = memory_grid[0]
             p_ice[ice_active] = (
                 mem.ice_battery_k
-                * np.power(e_reserve[ice_active], mem.ice_battery_alpha)
-                * np.exp(-((age_field[ice_active] - mem.ice_battery_age_peak) ** 2)
+                * xp.power(e_reserve[ice_active], mem.ice_battery_alpha)
+                * xp.exp(-((age_field[ice_active] - mem.ice_battery_age_peak) ** 2)
                          / (2.0 * mem.ice_battery_sigma ** 2))
             )
             # Burn energy: 20% consumed per step when boost is active
             memory_grid[3][ice_active] *= (1.0 - mem.ice_battery_burn_rate)
         # Combined resistance: base + ice, hard-capped
-        p_resist = np.minimum(p_base + p_ice, mem.ice_battery_p_max)
-        equanimity_mask = mature_compute & (rng.random(shape) < p_resist)
+        p_resist = xp.minimum(p_base + p_ice, mem.ice_battery_p_max)
+        equanimity_mask = mature_compute & (_xp_random(shape, rng) < p_resist)
     # Phase 6b: Sympathetic Joy (mudita) -- resonance from mature neighbors
     # Nemo's formula: R_joy = 1 + beta_joy * tanh((a_max_neighbor - a_m) / joy_age_scale)
     # A cell benefits from the maturity of its neighbors without consuming them
-    compute_age_field = np.where(state == COMPUTE, memory_grid[0], 0.0).astype(np.float32)
+    compute_age_field = xp.where(state == COMPUTE, memory_grid[0], 0.0).astype(xp.float32)
     max_neighbor_age = _max_neighbor_value(compute_age_field)
     # Only apply to cells that have a mature COMPUTE neighbor (age > equanimity_age_min)
     has_mature_neighbor = max_neighbor_age > mem.equanimity_age_min
-    if np.any(has_mature_neighbor):
-        age_excess_neighbor = np.maximum(0.0, max_neighbor_age - mem.equanimity_age_min)
-        r_joy = 1.0 + mem.joy_beta * np.tanh(age_excess_neighbor / mem.joy_age_scale)
+    if _xp_any(has_mature_neighbor):
+        age_excess_neighbor = xp.maximum(0.0, max_neighbor_age - mem.equanimity_age_min)
+        r_joy = 1.0 + mem.joy_beta * xp.tanh(age_excess_neighbor / mem.joy_age_scale)
         # Boost memory_strength (channel 2) for ALL cells near mature COMPUTE
         # This is positive-sum: the neighbor thrives because the elder thrives
-        memory_grid[2][has_mature_neighbor] = np.minimum(
+        memory_grid[2][has_mature_neighbor] = xp.minimum(
             2.0, memory_grid[2][has_mature_neighbor] * r_joy[has_mature_neighbor])
     # Phase 6c: Mindsight + Mycelial Network + Compassion (nervous system)
     # Runs every signal_interval steps to save CPU (~3s per call at R=12)
     if current_gen % mem.signal_interval == 0:
         # --- 6c.1: Mindsight (Stimulus) ---
         # Compute regional SENSOR density using R=12 separable box filter
-        sensor_field = (state == SENSOR).astype(np.float32)
+        sensor_field = (state == SENSOR).astype(xp.float32)
         rho_regional = _separable_box_filter_3d(sensor_field, mem.mindsight_radius)
         # Local SENSOR density (immediate Moore neighborhood, already computed)
-        sensor_local = neighbor_counts[SENSOR].astype(np.float32) / 26.0
+        sensor_local = neighbor_counts[SENSOR].astype(xp.float32) / 26.0
         # Gradient: positive = opportunity (more SENSOR locally), negative = distress
         grad_rho = sensor_local - rho_regional
         # Compute initial signal: S_0 = S_max * tanh(grad / sigma)
         # Use asymmetric sigma: sigma_opp for positive, sigma_dis for negative
-        sigma = np.where(grad_rho >= 0, mem.mindsight_sigma_opp, mem.mindsight_sigma_dis)
-        s_initial = mem.mindsight_s_max * np.tanh(grad_rho / np.maximum(sigma, 1e-8))
+        sigma = xp.where(grad_rho >= 0, mem.mindsight_sigma_opp, mem.mindsight_sigma_dis)
+        s_initial = mem.mindsight_s_max * xp.tanh(grad_rho / xp.maximum(sigma, 1e-8))
         # Only seed signals where |S| > threshold AND cell is SENSOR
         sensor_mask = state == SENSOR
         s_initial[~sensor_mask] = 0.0
-        s_initial[np.abs(s_initial) < mem.mindsight_threshold] = 0.0
+        s_initial[xp.abs(s_initial) < mem.mindsight_threshold] = 0.0
         # Seed initial signals on SENSOR cells, then deliver to ENERGY neighbors
         # SENSOR cells generate, ENERGY cells transmit
         memory_grid[5] = s_initial
         # --- 6c.2: Mycelial Diffusion (Transmission) ---
         # First: deliver SENSOR signals to adjacent ENERGY cells (handoff)
         energy_mask = out == ENERGY
-        if np.any(s_initial != 0) and np.any(energy_mask):
+        if _xp_any(s_initial != 0) and _xp_any(energy_mask):
             # Spread signals from SENSOR to immediate neighbors (including ENERGY)
-            abs_neg = np.abs(np.minimum(s_initial, 0.0))
-            pos = np.maximum(s_initial, 0.0)
+            abs_neg = xp.abs(xp.minimum(s_initial, 0.0))
+            pos = xp.maximum(s_initial, 0.0)
             handoff_distress = _max_neighbor_value(abs_neg)
             handoff_opportunity = _max_neighbor_value(pos)
             # Only keep handoff on ENERGY cells (they receive from adjacent SENSOR)
-            energy_seed = np.where(energy_mask, -handoff_distress + handoff_opportunity, 0.0)
+            energy_seed = xp.where(energy_mask, -handoff_distress + handoff_opportunity, 0.0)
             # Add original SENSOR signals (SENSOR cells also seed the field)
             s_initial = s_initial + energy_seed
             # Separate distress and opportunity signals for asymmetric decay
-            distress_signal = np.minimum(s_initial, 0.0)  # negative values
-            opportunity_signal = np.maximum(s_initial, 0.0)  # positive values
+            distress_signal = xp.minimum(s_initial, 0.0)  # negative values
+            opportunity_signal = xp.maximum(s_initial, 0.0)  # positive values
             # Diffuse each with its own decay length
-            decay_distress = np.exp(-1.0 / mem.mycelial_lambda_distress)
-            decay_opportunity = np.exp(-1.0 / mem.mycelial_lambda_opportunity)
+            decay_distress = float(xp.exp(-1.0 / mem.mycelial_lambda_distress))
+            decay_opportunity = float(xp.exp(-1.0 / mem.mycelial_lambda_opportunity))
             diffused_distress = _mycelial_diffuse(
                 distress_signal, energy_mask, mem.mycelial_k_iter, decay_distress)
             diffused_opportunity = _mycelial_diffuse(
@@ -934,13 +975,13 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
             # Deliver signals to ALL neighbors of ENERGY cells (not just ENERGY)
             # This lets COMPUTE cells adjacent to the ENERGY network receive signals
             # Use max absolute signal from neighbors as the delivery mechanism
-            abs_distress = np.abs(diffused_distress)
+            abs_distress = xp.abs(diffused_distress)
             delivered_distress_mag = _max_neighbor_value(abs_distress)
             delivered_opportunity_mag = _max_neighbor_value(diffused_opportunity)
             # Reconstruct signed signals: distress is negative, opportunity is positive
             memory_grid[5] = -delivered_distress_mag + delivered_opportunity_mag
             # Preserve stronger signals on ENERGY cells themselves
-            stronger = np.abs(diffused) > np.abs(memory_grid[5])
+            stronger = xp.abs(diffused) > xp.abs(memory_grid[5])
             memory_grid[5][stronger] = diffused[stronger]
         # --- 6c.3: Compassion (Response) ---
         # Mature COMPUTE cells receiving distress donate energy for remote resistance
@@ -948,70 +989,70 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
         distress_received = memory_grid[5] < -mem.mindsight_threshold
         # Adaptive compassion scale: a_scale = max(30, max_age * 1.5)
         compute_ages = memory_grid[0][compute_now]
-        current_max_age = float(np.max(compute_ages)) if np.any(compute_now) else 0.0
+        current_max_age = float(xp.max(compute_ages)) if _xp_any(compute_now) else 0.0
         a_compassion_scale = max(mem.compassion_age_scale_min,
                                  current_max_age * mem.compassion_age_scale_factor)
         # Compassion donors: mature COMPUTE cells receiving distress
         compassion_donors = compute_now & distress_received & (memory_grid[0] > mem.equanimity_age_min)
-        if np.any(compassion_donors):
+        if _xp_any(compassion_donors):
             # Phi_compassion = |S| * (a_self / a_scale)
-            donor_signal_strength = np.abs(memory_grid[5][compassion_donors])
+            donor_signal_strength = xp.abs(memory_grid[5][compassion_donors])
             donor_age_ratio = memory_grid[0][compassion_donors] / a_compassion_scale
-            phi_compassion = donor_signal_strength * np.minimum(1.0, donor_age_ratio)
+            phi_compassion = donor_signal_strength * xp.minimum(1.0, donor_age_ratio)
             # Local cost: donors pay gamma_compassion of their memory + energy
             cost_factor = 1.0 - mem.compassion_gamma * phi_compassion
-            cost_factor = np.maximum(0.3, cost_factor)  # never drain below 30%
+            cost_factor = xp.maximum(0.3, cost_factor)  # never drain below 30%
             memory_grid[2][compassion_donors] *= cost_factor
             memory_grid[3][compassion_donors] *= cost_factor
             # Remote buff: boost resistance for cells in distress region
             # Apply buff to ALL cells in distress zones (not just donors)
             distress_zone = distress_received & (~compassion_donors)
-            if np.any(distress_zone):
+            if _xp_any(distress_zone):
                 # Resistance buff proportional to nearby compassion strength
                 # Use the diffused signal magnitude as proxy for compassion reach
-                buff_strength = mem.compassion_beta * np.minimum(
-                    1.0, np.abs(memory_grid[5][distress_zone]))
+                buff_strength = mem.compassion_beta * xp.minimum(
+                    1.0, xp.abs(memory_grid[5][distress_zone]))
                 # Boost memory_strength (which feeds into decay resistance)
-                memory_grid[2][distress_zone] = np.minimum(
+                memory_grid[2][distress_zone] = xp.minimum(
                     2.0, memory_grid[2][distress_zone] + buff_strength)
             # Track compassion activity with cooldown (channel 7)
             memory_grid[7][compassion_donors] = 5.0  # 5-step cooldown
         # Decay compassion cooldown
-        memory_grid[7] = np.maximum(0.0, memory_grid[7] - 1.0)
+        memory_grid[7] = xp.maximum(0.0, memory_grid[7] - 1.0)
     # Stochastic transitions
     if stoch.enabled:
         structural = out == STRUCTURAL; compute = out == COMPUTE
-        out[structural & (rng.random(shape) < stoch.structural_to_energy_prob)] = ENERGY
+        out[structural & (_xp_random(shape, rng) < stoch.structural_to_energy_prob)] = ENERGY
         structural = out == STRUCTURAL
-        out[structural & (rng.random(shape) < stoch.structural_to_sensor_prob)] = SENSOR
-        out[compute & (rng.random(shape) < stoch.compute_to_energy_prob)] = ENERGY
+        out[structural & (_xp_random(shape, rng) < stoch.structural_to_sensor_prob)] = SENSOR
+        out[compute & (_xp_random(shape, rng) < stoch.compute_to_energy_prob)] = ENERGY
         compute = out == COMPUTE
-        out[compute & (rng.random(shape) < stoch.compute_to_sensor_prob)] = SENSOR
+        out[compute & (_xp_random(shape, rng) < stoch.compute_to_sensor_prob)] = SENSOR
     # Forward contagion
     if contagion.enabled:
         energy_n = neighbor_counts[ENERGY]; sensor_n = neighbor_counts[SENSOR]
         structural = out == STRUCTURAL; compute = out == COMPUTE
-        out[structural & (energy_n >= contagion.energy_neighbor_threshold) & (rng.random(shape) < contagion.structural_energy_conversion_prob)] = ENERGY
+        out[structural & (energy_n >= contagion.energy_neighbor_threshold) & (_xp_random(shape, rng) < contagion.structural_energy_conversion_prob)] = ENERGY
         structural = out == STRUCTURAL
-        out[structural & (sensor_n >= contagion.sensor_neighbor_threshold) & (rng.random(shape) < contagion.structural_sensor_conversion_prob)] = SENSOR
-        out[compute & (energy_n >= contagion.energy_neighbor_threshold) & (rng.random(shape) < contagion.compute_energy_conversion_prob)] = ENERGY
+        out[structural & (sensor_n >= contagion.sensor_neighbor_threshold) & (_xp_random(shape, rng) < contagion.structural_sensor_conversion_prob)] = SENSOR
+        out[compute & (energy_n >= contagion.energy_neighbor_threshold) & (_xp_random(shape, rng) < contagion.compute_energy_conversion_prob)] = ENERGY
         compute = out == COMPUTE
-        out[compute & (sensor_n >= contagion.sensor_neighbor_threshold) & (rng.random(shape) < contagion.compute_sensor_conversion_prob)] = SENSOR
+        out[compute & (sensor_n >= contagion.sensor_neighbor_threshold) & (_xp_random(shape, rng) < contagion.compute_sensor_conversion_prob)] = SENSOR
     # Reverse contagion
     if contagion.enabled:
         structural = out == STRUCTURAL; compute_n = neighbor_counts[COMPUTE]
         rc_prob = _reverse_contagion_probability(compute_n, mem)
-        rc_prob = np.minimum(0.95, rc_prob * np.maximum(0.25, memory_grid[2]))
-        out[structural & (rng.random(shape) < rc_prob)] = COMPUTE
+        rc_prob = xp.minimum(0.95, rc_prob * xp.maximum(0.25, memory_grid[2]))
+        out[structural & (_xp_random(shape, rng) < rc_prob)] = COMPUTE
     # Phase 6a: Loving-Kindness (metta) -- ENERGY warms STRUCTURAL cells
     # Nemo's formula: delta_r_metta = beta_metta * (1 - exp(-n_E / 3))
     # Warmth accumulates in channel 6, decays when no ENERGY neighbors
-    energy_neighbor_count = neighbor_counts[ENERGY].astype(np.float32)
+    energy_neighbor_count = neighbor_counts[ENERGY].astype(xp.float32)
     structural_now = out == STRUCTURAL
     # Accumulate warmth for STRUCTURAL cells touching ENERGY
     has_energy_neighbors = structural_now & (energy_neighbor_count > 0)
     warmth_boost = mem.metta_warmth_rate * energy_neighbor_count
-    memory_grid[6][has_energy_neighbors] = np.minimum(
+    memory_grid[6][has_energy_neighbors] = xp.minimum(
         1.0, memory_grid[6][has_energy_neighbors] + warmth_boost[has_energy_neighbors])
     # Decay warmth for STRUCTURAL cells with no ENERGY neighbors
     no_energy = structural_now & (energy_neighbor_count == 0)
@@ -1024,82 +1065,82 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     if stoch.enabled:
         structural = out == STRUCTURAL; energy = out == ENERGY; sensor = out == SENSOR
         # Loving-Kindness: warmth-modulated STRUCTURAL decay
-        metta_survival_floor = mem.metta_beta * (1.0 - np.exp(-energy_neighbor_count / 3.0))
-        structural_decay_prob = np.maximum(
+        metta_survival_floor = mem.metta_beta * (1.0 - xp.exp(-energy_neighbor_count / 3.0))
+        structural_decay_prob = xp.maximum(
             0.0, stoch.structural_to_void_decay_prob - metta_survival_floor)
-        out[structural & (rng.random(shape) < structural_decay_prob)] = VOID
-        out[energy & (rng.random(shape) < stoch.energy_to_void_decay_prob)] = VOID
-        out[sensor & (rng.random(shape) < stoch.sensor_to_void_decay_prob)] = VOID
+        out[structural & (_xp_random(shape, rng) < structural_decay_prob)] = VOID
+        out[energy & (_xp_random(shape, rng) < stoch.energy_to_void_decay_prob)] = VOID
+        out[sensor & (_xp_random(shape, rng) < stoch.sensor_to_void_decay_prob)] = VOID
     # Inactivity decay
     if decay_cfg.enabled:
         structural = out == STRUCTURAL
         low_support = active_neighbors <= decay_cfg.inactivity_neighbor_threshold
-        inactivity_steps = np.where(structural & low_support, inactivity_steps + 1, 0).astype(np.int16)
+        inactivity_steps = xp.where(structural & low_support, inactivity_steps + 1, 0).astype(xp.int16)
         out[structural & (inactivity_steps >= decay_cfg.structural_inactive_steps_to_decay)] = VOID
         inactivity_steps[~(out == STRUCTURAL)] = 0
     # Energy conversion
     energy = out == ENERGY
     compute_cluster = _compute_neighbor_count(out == COMPUTE)
     scluster = _compute_neighbor_count(out == STRUCTURAL)
-    e2c_prob = np.full(shape, mem.energy_to_compute_prob, dtype=np.float32)
-    mitigated = np.maximum(mem.forward_contagion_floor * mem.energy_to_compute_prob, mem.energy_to_compute_prob - mem.forward_contagion_penalty)
+    e2c_prob = xp.full(shape, mem.energy_to_compute_prob, dtype=xp.float32)
+    mitigated = max(mem.forward_contagion_floor * mem.energy_to_compute_prob, mem.energy_to_compute_prob - mem.forward_contagion_penalty)
     e2c_prob[scluster >= mem.forward_contagion_threshold] = mitigated
     superpod = compute_cluster >= cosmic.super_pod_threshold
-    e2c_prob[superpod] = np.minimum(0.95, e2c_prob[superpod] + cosmic.biofilm_leech_rate * 0.5)
-    memory_grid[3][superpod] = np.maximum(0.05, memory_grid[3][superpod] * (1.0 - cosmic.biofilm_leech_rate))
-    out[energy & (rng.random(shape) < e2c_prob)] = COMPUTE
+    e2c_prob[superpod] = xp.minimum(0.95, e2c_prob[superpod] + cosmic.biofilm_leech_rate * 0.5)
+    memory_grid[3][superpod] = xp.maximum(0.05, memory_grid[3][superpod] * (1.0 - cosmic.biofilm_leech_rate))
+    out[energy & (_xp_random(shape, rng) < e2c_prob)] = COMPUTE
     # Memory reinforcement (Phase 3: half-rate aging for isolated COMPUTE)
     compute = out == COMPUTE
     isolated_compute = compute & (active_neighbors == 0)
     connected_compute = compute & (active_neighbors > 0)
-    memory_grid[0][connected_compute] = np.minimum(memory_grid[0][connected_compute] + 1.0, 65535.0)
-    memory_grid[0][isolated_compute] = np.minimum(memory_grid[0][isolated_compute] + 0.5, 65535.0)
+    memory_grid[0][connected_compute] = xp.minimum(memory_grid[0][connected_compute] + 1.0, 65535.0)
+    memory_grid[0][isolated_compute] = xp.minimum(memory_grid[0][isolated_compute] + 0.5, 65535.0)
     memory_grid[4][compute] = float(current_gen)
-    memory_grid[2][compute] = np.minimum(memory_grid[2][compute] * mem.rag_reinforcement_boost, 2.0)
+    memory_grid[2][compute] = xp.minimum(memory_grid[2][compute] * mem.rag_reinforcement_boost, 2.0)
     # Bamboo protocol
     structural = out == STRUCTURAL
-    memory_grid[1][structural] = np.minimum(memory_grid[1][structural] + 1.0, float(cosmic.bamboo_max_length))
-    memory_grid[2][structural] = np.minimum(memory_grid[2][structural] + cosmic.otolith_vector, 2.0)
+    memory_grid[1][structural] = xp.minimum(memory_grid[1][structural] + 1.0, float(cosmic.bamboo_max_length))
+    memory_grid[2][structural] = xp.minimum(memory_grid[2][structural] + cosmic.otolith_vector, 2.0)
     rebirth = structural & (memory_grid[1] >= float(cosmic.bamboo_rebirth_age))
     out[rebirth] = COMPUTE
     memory_grid[1][~(out == STRUCTURAL)] = 0.0
     # Decay resistance
     dropped_compute = (out == VOID) & (memory_grid[0] > 0)
     age_arr = memory_grid[0]
-    resistance = np.zeros_like(memory_grid[2])
+    resistance = xp.zeros_like(memory_grid[2])
     young = age_arr <= mem.age_young_threshold
     mature = (age_arr > mem.age_young_threshold) & (age_arr <= mem.age_mature_threshold)
     old = age_arr > mem.age_mature_threshold
     resistance[young] = (age_arr[young] / max(1.0, float(mem.age_young_threshold))) * mem.resistance_max
     resistance[mature] = mem.resistance_max
-    resistance[old] = mem.resistance_max * np.exp(-(age_arr[old] - mem.age_mature_threshold) / 500.0)
-    resistance *= np.minimum(memory_grid[2], 1.5)
+    resistance[old] = mem.resistance_max * xp.exp(-(age_arr[old] - mem.age_mature_threshold) / 500.0)
+    resistance *= xp.minimum(memory_grid[2], 1.5)
     compute_cluster2 = _compute_neighbor_count(out == COMPUTE)
-    resistance = np.minimum(0.98, resistance + (compute_cluster2 >= cosmic.cluster_coherence_threshold).astype(np.float32) * (cosmic.cluster_shield_bonus + cosmic.shield_strength * 0.15))
+    resistance = xp.minimum(0.98, resistance + (compute_cluster2 >= cosmic.cluster_coherence_threshold).astype(xp.float32) * (cosmic.cluster_shield_bonus + cosmic.shield_strength * 0.15))
     # Phase 3: Void Sanctuary Shield -- isolated COMPUTE gets 50x resistance
     void_sanctuary_mask = dropped_compute & (active_neighbors == 0)
-    resistance[void_sanctuary_mask] = np.minimum(0.98, resistance[void_sanctuary_mask] * mem.void_sanctuary_multiplier)
+    resistance[void_sanctuary_mask] = xp.minimum(0.98, resistance[void_sanctuary_mask] * mem.void_sanctuary_multiplier)
     # Phase 3: Epsilon Buffer -- packed cells get survival floor (>5.7%)
     packed_mask = dropped_compute & (active_neighbors >= mem.epsilon_n_c)
-    if np.any(packed_mask):
-        excess = (active_neighbors[packed_mask].astype(np.float32) - float(mem.epsilon_n_c))
-        p_reg = mem.epsilon_p_max - mem.epsilon_buffer * np.exp(-excess / mem.epsilon_tau)
-        survival_floor = np.maximum(1.0 - p_reg, 0.057)
-        resistance[packed_mask] = np.maximum(resistance[packed_mask], survival_floor)
-    out[dropped_compute & (rng.random(shape) < resistance)] = COMPUTE
+    if _xp_any(packed_mask):
+        excess = (active_neighbors[packed_mask].astype(xp.float32) - float(mem.epsilon_n_c))
+        p_reg = mem.epsilon_p_max - mem.epsilon_buffer * xp.exp(-excess / mem.epsilon_tau)
+        survival_floor = xp.maximum(1.0 - p_reg, 0.057)
+        resistance[packed_mask] = xp.maximum(resistance[packed_mask], survival_floor)
+    out[dropped_compute & (_xp_random(shape, rng) < resistance)] = COMPUTE
     # Phase 3: Mamba-Viking memory dynamics (state-space update)
     # M(t+1) = M(t) * exp(-1/tau(d)) + B(d)*d + S*Phi(age)
     # where d = local non-void density, tau adapts to activity
     inactive = ~(out == COMPUTE)
-    local_density = active_neighbors.astype(np.float32) / 26.0
+    local_density = active_neighbors.astype(xp.float32) / 26.0
     # Adaptive tau: higher in active regions (slow decay), lower in dead regions
-    tau = mem.mamba_tau_base + mem.mamba_tau_scale * np.tanh(
+    tau = mem.mamba_tau_base + mem.mamba_tau_scale * xp.tanh(
         local_density / max(mem.mamba_delta_threshold, 1e-6))
-    decay_factor = np.exp(-1.0 / np.maximum(tau, 0.1))
+    decay_factor = xp.exp(-1.0 / xp.maximum(tau, 0.1))
     # Boost proportional to local activity
     boost = (mem.mamba_boost_base + mem.mamba_boost_gain * local_density) * local_density
     # Age stability: older cells get memory bonus
-    age_stability = mem.mamba_age_stability_gain * np.tanh(
+    age_stability = mem.mamba_age_stability_gain * xp.tanh(
         memory_grid[0] / max(float(mem.age_mature_threshold), 1.0))
     # Apply state-space update
     memory_grid[2][inactive] *= decay_factor[inactive]
@@ -1107,16 +1148,16 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     memory_grid[2] += age_stability
     # High-delta floor: active regions keep memory above floor
     high_delta = local_density > mem.mamba_delta_threshold
-    memory_grid[2][high_delta] = np.maximum(
+    memory_grid[2][high_delta] = xp.maximum(
         memory_grid[2][high_delta], mem.mamba_high_delta_floor)
     # Global floor and ceiling
-    memory_grid[2] = np.clip(memory_grid[2], 0.01, 2.0)
+    memory_grid[2] = xp.clip(memory_grid[2], 0.01, 2.0)
     # Phase 4: Equanimity Shield restoration -- restore shielded cells after ALL kills
-    if np.any(equanimity_mask):
+    if _xp_any(equanimity_mask):
         out[equanimity_mask & (out != COMPUTE)] = COMPUTE
     # Analogue mutation (MUST have pre_mut = out.copy() before mutation)
     pre_mut = out.copy()
-    mut_mask = rng.random(shape) < cosmic.analogue_mutation
+    mut_mask = _xp_random(shape, rng) < cosmic.analogue_mutation
     out[mut_mask & (pre_mut == STRUCTURAL)] = COMPUTE
     out[mut_mask & (pre_mut == COMPUTE)] = ENERGY
     out[mut_mask & (pre_mut == ENERGY)] = SENSOR
@@ -1124,29 +1165,41 @@ def step(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generat
     memory_grid[0][out != COMPUTE] = 0.0
     # Memory grid update (5 channels: compute_age, structural_age, memory_strength, energy_reserve, last_active_gen)
     # Age grid update
-    age_grid = np.where(out != VOID, age_grid + 1.0, 0.0).astype(np.float32)
-    phase_signals = update_density_phase_detector(phase_detector, out)
+    age_grid = xp.where(out != VOID, age_grid + 1.0, 0.0).astype(xp.float32)
+    # Phase detector and telemetry need CPU arrays
+    if GPU_AVAILABLE:
+        out_cpu = cp.asnumpy(out)
+        compute_age_snap_cpu = cp.asnumpy(compute_age_snapshot)
+        structural_age_snap_cpu = cp.asnumpy(structural_age_snapshot)
+    else:
+        out_cpu = out
+        compute_age_snap_cpu = compute_age_snapshot
+        structural_age_snap_cpu = structural_age_snapshot
+    phase_signals = update_density_phase_detector(phase_detector, out_cpu)
     if phase_detector is not None and phase_detector.config.trigger_sandboxed_memory and phase_signals.get("phase_triggered", 0.0) > 0:
         out = apply_with_memory_sandboxed(out, memory_grid, mem, cosmic, contraction_phase=True)
-    update_telemetry_window(telemetry, state, out, compute_age_snapshot, structural_age_snapshot)
-    counts = np.bincount(out.ravel(), minlength=NUM_STATES)
-    total_cells = max(1, int(np.prod(shape)))
-    non_void_total = int(np.sum(counts[1:]))
-    probs = counts[1:] / max(1, non_void_total)
+        if GPU_AVAILABLE:
+            out_cpu = cp.asnumpy(out)
+    update_telemetry_window(telemetry, cp.asnumpy(state) if GPU_AVAILABLE else state, out_cpu, compute_age_snap_cpu, structural_age_snap_cpu)
+    # Metrics extraction -- use xp.bincount (CuPy supports it), scalars auto-convert via float()/int()
+    counts = xp.bincount(out.ravel(), minlength=NUM_STATES)
+    total_cells = max(1, int(xp.prod(xp.array(shape))))
+    non_void_total = int(xp.sum(counts[1:]))
+    probs = counts[1:].astype(xp.float64) / max(1, non_void_total)
     non_zero_probs = probs[probs > 0]
-    entropy = float(-np.sum(non_zero_probs * np.log(non_zero_probs))) if non_zero_probs.size else 0.0
-    normalized_entropy = float(entropy / np.log(4.0)) if non_zero_probs.size > 1 else 0.0
+    entropy = float(-xp.sum(non_zero_probs * xp.log(non_zero_probs))) if non_zero_probs.size else 0.0
+    normalized_entropy = float(entropy / float(xp.log(xp.array(4.0)))) if non_zero_probs.size > 1 else 0.0
     # Phase 5: add compute age metrics for longevity-aware fitness
     compute_mask_final = out == COMPUTE
-    compute_median_age = float(np.median(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
-    compute_max_age = float(np.max(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
-    compute_mean_age = float(np.mean(memory_grid[0][compute_mask_final])) if np.any(compute_mask_final) else 0.0
+    compute_median_age = float(xp.median(memory_grid[0][compute_mask_final])) if _xp_any(compute_mask_final) else 0.0
+    compute_max_age = float(xp.max(memory_grid[0][compute_mask_final])) if _xp_any(compute_mask_final) else 0.0
+    compute_mean_age = float(xp.mean(memory_grid[0][compute_mask_final])) if _xp_any(compute_mask_final) else 0.0
     # Phase 6c telemetry: signal activity and compassion stats
-    signal_active = int(np.sum(np.abs(memory_grid[5]) > 0.01))
-    compassion_active = int(np.sum(memory_grid[7] > 0))
-    metrics = {"entropy": normalized_entropy, "structural_ratio": float(counts[STRUCTURAL] / max(1, non_void_total)), "void_ratio": float(counts[VOID] / total_cells), "compute_ratio": float(counts[COMPUTE] / total_cells), "energy_ratio": float(counts[ENERGY] / total_cells), "sensor_ratio": float(counts[SENSOR] / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age, "signal_active": signal_active, "compassion_active": compassion_active}
+    signal_active = int(xp.sum(xp.abs(memory_grid[5]) > 0.01))
+    compassion_active = int(xp.sum(memory_grid[7] > 0))
+    metrics = {"entropy": normalized_entropy, "structural_ratio": float(int(counts[STRUCTURAL]) / max(1, non_void_total)), "void_ratio": float(int(counts[VOID]) / total_cells), "compute_ratio": float(int(counts[COMPUTE]) / total_cells), "energy_ratio": float(int(counts[ENERGY]) / total_cells), "sensor_ratio": float(int(counts[SENSOR]) / total_cells), "compute_median_age": compute_median_age, "compute_max_age": compute_max_age, "compute_mean_age": compute_mean_age, "signal_active": signal_active, "compassion_active": compassion_active}
     metrics.update(phase_signals)
-    return (out.astype(np.uint8, copy=False), inactivity_steps.astype(np.int16, copy=False), memory_grid.astype(np.float32, copy=False), age_grid.astype(np.float32, copy=False), metrics)
+    return (out.astype(xp.uint8, copy=False), inactivity_steps.astype(xp.int16, copy=False), memory_grid.astype(xp.float32, copy=False), age_grid.astype(xp.float32, copy=False), metrics)
 
 
 def step_ca_lattice(state: np.ndarray, rule_spec: Mapping[str, Any], rng: np.random.Generator, inactivity_steps: Optional[np.ndarray] = None, memory_grid: Optional[np.ndarray] = None, current_gen: int = 0, telemetry: Optional[TelemetryWindow] = None, phase_detector: Optional[DensityPhaseDetector] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, float]]:

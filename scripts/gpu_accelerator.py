@@ -9,6 +9,9 @@ try:
         bin_path = os.path.join(cuda_path, "bin")
         if bin_path not in os.environ.get("PATH", ""):
             os.environ["PATH"] = os.environ.get("PATH", "") + ";" + bin_path
+    # CUDA 13.2 has buggy fp8/fp6/fp4 headers that break CUB JIT compilation.
+    # Disable CUB accelerators so CuPy uses its own reduction kernels instead.
+    os.environ.setdefault("CUPY_ACCELERATORS", "")
     import cupy as cp
     GPU_AVAILABLE = True
     GPU_NAME = cp.cuda.runtime.getDeviceProperties(0)["name"].decode()

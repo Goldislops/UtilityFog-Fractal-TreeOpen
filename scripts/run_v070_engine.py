@@ -26,6 +26,26 @@ from pathlib import Path
 
 import numpy as np
 
+# GPU support
+try:
+    from scripts.gpu_accelerator import GPU_AVAILABLE
+    if GPU_AVAILABLE:
+        import cupy as cp
+except ImportError:
+    GPU_AVAILABLE = False
+
+def _to_numpy(arr):
+    """Convert GPU array to numpy for saving/display. No-op if already numpy."""
+    if GPU_AVAILABLE and hasattr(arr, 'get'):
+        return arr.get()
+    return arr
+
+def _to_gpu(arr):
+    """Convert numpy array to GPU. No-op if GPU not available."""
+    if GPU_AVAILABLE:
+        return cp.asarray(arr)
+    return arr
+
 # ---------------------------------------------------------------------------
 # Project paths
 # ---------------------------------------------------------------------------
@@ -192,10 +212,11 @@ def _save_snapshot(lattice, memory_grid, generation, ca_step, best_fitness):
     ts = datetime.now().strftime("%Y%m%dT%H%M%S")
     fname = f"v070_gen{generation:06d}_step{ca_step:06d}_{ts}.npz"
     path = DATA_DIR / fname
+    # Transfer GPU arrays to CPU for numpy.savez
     np.savez_compressed(
         path,
-        lattice=lattice,
-        memory_grid=memory_grid,
+        lattice=_to_numpy(lattice),
+        memory_grid=_to_numpy(memory_grid),
         generation=generation,
         ca_step=ca_step,
         best_fitness=best_fitness,
@@ -268,7 +289,16 @@ def main():
         print(f"  [RESUME] gen={generation}, step={ca_step_count}, best_fitness={best_fitness_ever:.4f}")
     print("=" * 72)
 
-    inactivity_steps = np.zeros_like(lattice, dtype=np.int16)
+    # Phase 14a: Move arrays to GPU for GPU-resident stepping
+    if GPU_AVAILABLE:
+        print(f"  [GPU] Moving lattice + memory_grid to RTX 5090 VRAM...")
+        lattice = _to_gpu(lattice)
+        memory_grid = _to_gpu(memory_grid)
+        print(f"  [GPU] GPU-resident mode ACTIVE (arrays stay on GPU between steps)")
+
+    inactivity_steps = np.zeros_like(_to_numpy(lattice), dtype=np.int16)
+    if GPU_AVAILABLE:
+        inactivity_steps = _to_gpu(inactivity_steps)
     population = np.array([_random_genome(rng) for _ in range(POPULATION_SIZE)], dtype=np.float32)
 
     start_time = time.monotonic()
@@ -278,7 +308,8 @@ def main():
     telemetry = init_telemetry_window()
 
     # Phase 10.8: Great Oscillation tracking
-    initial_non_void = int(np.sum(lattice > 0))
+    _xp = cp if GPU_AVAILABLE else np
+    initial_non_void = int(_xp.sum(lattice > 0))
     drought_start_gen = ca_step_count  # drought cycle starts from current gen
     drought_hibernation_triggered = False
 
@@ -298,7 +329,7 @@ def main():
         ca_step_count += 1
 
         # Compute density for GA
-        active = int(np.sum(lattice > 0))
+        active = int(_xp.sum(lattice > 0))
         density = active / num_cells
         metrics["density"] = density
         metrics["active_cells"] = active
@@ -329,8 +360,10 @@ def main():
             elapsed = timedelta(seconds=int(t_now - start_time))
             fits_now = np.array([_fitness(g, metrics) for g in population], dtype=np.float32)
 
-            # State census
-            counts = np.bincount(lattice.ravel(), minlength=5)
+            # State census (transfer to CPU for bincount/display)
+            lattice_cpu = _to_numpy(lattice)
+            memory_grid_cpu = _to_numpy(memory_grid)
+            counts = np.bincount(lattice_cpu.ravel(), minlength=5)
             non_void = int(np.sum(counts[1:]))
 
             # Compute delta from previous report
@@ -338,10 +371,10 @@ def main():
             prev_compute_ratio = metrics["compute_ratio"]
 
             # Memory stats (Phase 5: median age + longevity score)
-            compute_mask = lattice == STATE_NAME_TO_ID["COMPUTE"]
-            avg_age = float(np.mean(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
-            med_age = float(np.median(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
-            max_age = float(np.max(memory_grid[0][compute_mask])) if np.any(compute_mask) else 0.0
+            compute_mask = lattice_cpu == STATE_NAME_TO_ID["COMPUTE"]
+            avg_age = float(np.mean(memory_grid_cpu[0][compute_mask])) if np.any(compute_mask) else 0.0
+            med_age = float(np.median(memory_grid_cpu[0][compute_mask])) if np.any(compute_mask) else 0.0
+            max_age = float(np.max(memory_grid_cpu[0][compute_mask])) if np.any(compute_mask) else 0.0
             longevity = min(1.0, med_age / TARGET_MEDIAN_AGE)
 
             print("-" * 72)
