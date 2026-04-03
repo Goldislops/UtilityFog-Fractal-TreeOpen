@@ -34,6 +34,13 @@ try:
 except ImportError:
     GPU_AVAILABLE = False
 
+# Phase 14e: Acoustic Map
+try:
+    from scripts.acoustic_map import AcousticMap, AcousticMapConfig
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from acoustic_map import AcousticMap, AcousticMapConfig
+
 def _to_numpy(arr):
     """Convert GPU array to numpy for saving/display. No-op if already numpy."""
     if GPU_AVAILABLE and hasattr(arr, 'get'):
@@ -313,7 +320,13 @@ def main():
     drought_start_gen = ca_step_count  # drought cycle starts from current gen
     drought_hibernation_triggered = False
 
-    print(f"\n[{datetime.now().isoformat()}] Engine started (PID {os.getpid()}).\n")
+    # Phase 14e: Acoustic Map (decoupled monitoring)
+    acoustic_map = AcousticMap(lattice_size=lw, config=AcousticMapConfig(
+        sector_size=16, output_interval=100, log_dir=str(DATA_DIR)
+    ))
+
+    print(f"\n[{datetime.now().isoformat()}] Engine started (PID {os.getpid()}).")
+    print(f"  Phase 14e: Acoustic Map active ({acoustic_map.sectors_per_dim}^3 sectors)\n")
 
     while _running:
         t_now = time.monotonic()
@@ -327,6 +340,9 @@ def main():
             telemetry=telemetry,
         )
         ca_step_count += 1
+
+        # Phase 14e: Update acoustic map (lightweight — just compares current vs previous)
+        acoustic_map.update(lattice)
 
         # Compute density for GA
         active = int(_xp.sum(lattice > 0))
@@ -405,6 +421,8 @@ def main():
                 ts = datetime.now().strftime("%Y%m%dT%H%M%S")
                 write_telemetry_artifact(DATA_DIR / f"telemetry_{ts}.json", telem_payload)
             reset_telemetry_window(telemetry)
+            # Phase 14e: Acoustic Map summary
+            acoustic_map.print_summary()
             print("-" * 72)
             sys.stdout.flush()
             last_status = t_now
