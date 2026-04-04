@@ -69,7 +69,8 @@ class AcousticMapConfig:
     friction_decay: float = 0.95   # Friction decays toward 0 each step
     output_interval: int = 100     # Output heatmap every N steps
     log_dir: str = "data"          # Where to save heatmap logs
-    friction_threshold: float = 0.3  # Above this = "stressed" sector
+    friction_threshold: float = 0.57  # Above this = "stressed" (calibrated from 256³ data: p75=0.5696)
+    silent_threshold: float = 0.555   # Below this = "silent/Sage" sector (calibrated: p10=0.5544)
 
 
 class AcousticMap:
@@ -187,7 +188,7 @@ class AcousticMap:
         self.total_friction = float(self.heatmap.sum())
         self.max_sector_friction = float(self.heatmap.max())
         self.stressed_sectors = int((self.heatmap > self.config.friction_threshold).sum())
-        self.silent_sectors = int((self.heatmap < 0.01).sum())
+        self.silent_sectors = int((self.heatmap < self.config.silent_threshold).sum())
 
         # Record history
         self.history.append({
@@ -212,7 +213,7 @@ class AcousticMap:
 
     def get_silent_sectors(self) -> list:
         """Get coordinates of sectors with near-zero friction (Sage domains)."""
-        silent = np.argwhere(self.heatmap < 0.01)
+        silent = np.argwhere(self.heatmap < self.config.silent_threshold)
         return [(int(x), int(y), int(z)) for x, y, z in silent]
 
     def get_stats(self) -> Dict:
