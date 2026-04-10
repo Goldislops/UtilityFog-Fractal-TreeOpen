@@ -1,0 +1,75 @@
+{
+  "name": "medusa-tools",
+  "version": "1.0.0",
+  "description": "NemoClaw/OpenClaw tool definitions for interacting with the Medusa 256³ Cellular Automata via REST API. Install these tools in your agent's toolset to give it direct access to Medusa's vital signs.",
+  "base_url": "http://192.168.86.29:8080",
+  "tools": [
+    {
+      "name": "check_medusa_health",
+      "description": "Check if the Medusa engine is alive and running. Returns engine status, latest snapshot age, and overall health.",
+      "method": "GET",
+      "endpoint": "/api/health",
+      "parameters": {}
+    },
+    {
+      "name": "get_medusa_status",
+      "description": "Get current engine status including latest snapshot, age, size, and whether the engine is producing new data.",
+      "method": "GET",
+      "endpoint": "/api/status",
+      "parameters": {}
+    },
+    {
+      "name": "get_medusa_census",
+      "description": "Get the current cell state census: counts of VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR cells. Also returns entropy, fitness, generation number, and lattice size.",
+      "method": "GET",
+      "endpoint": "/api/census",
+      "parameters": {}
+    },
+    {
+      "name": "get_medusa_equanimity",
+      "description": "Get the Equanimity/Sage census: counts of Elders, Sages, Ancients, Legends. Includes max age, median age, mean age, percentiles, and the coordinates and stats of the top 5 eldest Sages.",
+      "method": "GET",
+      "endpoint": "/api/equanimity",
+      "parameters": {}
+    },
+    {
+      "name": "get_acoustic_heatmap",
+      "description": "Get the Acoustic Map: a 16x16x16 friction heatmap showing which sectors of the 256³ lattice are stressed (high friction/suffering) vs silent (Sage-dominated/equanimous).",
+      "method": "GET",
+      "endpoint": "/api/acoustic",
+      "parameters": {}
+    },
+    {
+      "name": "get_medusa_telemetry",
+      "description": "Get the latest raw telemetry data from the engine's 5-minute status report. Includes transition matrices, age histograms, and detailed state change statistics.",
+      "method": "GET",
+      "endpoint": "/api/telemetry",
+      "parameters": {}
+    },
+    {
+      "name": "download_snapshot",
+      "description": "Download the latest .npz snapshot file containing the complete 256³ lattice state and 8-channel memory grid. WARNING: Large file (~50MB).",
+      "method": "GET",
+      "endpoint": "/api/snapshot/latest",
+      "parameters": {}
+    },
+    {
+      "name": "export_stl_geometry",
+      "description": "Export the current organism geometry as an STL mesh file suitable for 3D printing. Returns a downloadable .stl file (~28MB with 50K cell sample).",
+      "method": "GET",
+      "endpoint": "/api/geometry/stl",
+      "parameters": {}
+    }
+  ],
+  "usage_examples": {
+    "nemoclaw": "nemoclaw --tools medusa-tools 'Check Medusa census and tell me how many Sages we have'",
+    "openclaw": "Add medusa-tools.json to your OpenClaw tool registry, then ask: 'What is Medusa's current max age?'",
+    "curl": "curl http://192.168.86.29:8080/api/equanimity | python -m json.tool",
+    "python": "import requests; r = requests.get('http://192.168.86.29:8080/api/census'); print(r.json())"
+  },
+  "notes": {
+    "network": "API accessible from any machine on 192.168.86.0/24 subnet",
+    "security": "Local network only — no authentication required for read endpoints",
+    "rate_limit": "No rate limiting — snapshots are loaded from disk per request"
+  }
+}
