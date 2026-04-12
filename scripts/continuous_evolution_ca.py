@@ -220,12 +220,16 @@ class VoxelMemoryParams:
     # Phase 14b: Ampere Unified Field (Nemo's Metta/Karuna unification)
     ampere_coupling: float = 0.050   # k — the sacred threshold (coupling constant)
     ampere_enabled: bool = True      # enable Ampere unified modulation
-    # Phase 15: Spintronic Magnon Field (long-range Sage influence)
+    # Phase 15/17a: Spintronic Magnon Field (long-range Sage influence)
     magnon_enabled: bool = True      # enable magnon field
     magnon_sigma: float = 8.0       # Gaussian kernel sigma (voxels)
-    magnon_radius: int = 16         # Kernel half-width (voxels)
-    magnon_coupling: float = 0.50   # Coupling strength to Ampere field (calibrated: ~14% of Ampere at 256³)
+    magnon_radius: int = 16         # Kernel half-width (voxels) — adaptive: scales with lattice
+    magnon_coupling: float = 2.0    # Phase 17a: Amplified from 0.50 to 2.0 for 512³ readiness
     magnon_sage_age_min: float = 8.0  # Min age to emit magnon radiation
+    # Phase 17a: Hierarchical Sage Anchors — elder age tiers with amplified emission
+    magnon_elder_amplify: float = 2.0   # Ancients (age>=20) emit 2x stronger
+    magnon_legend_amplify: float = 5.0  # Legends (age>=50) emit 5x stronger — "lighthouse" Sages
+    magnon_adaptive_radius: bool = True # Scale radius with lattice size (R = lattice_size // 8)
     # Phase 10.6: Ice Battery (Nemo's thermodynamic overhaul)
     ice_battery_k: float = 2.5         # boost coefficient
     ice_battery_alpha: float = 0.7     # energy scaling exponent (sublinear)
@@ -882,18 +886,37 @@ def _compute_magnon_field(state: 'array', memory_grid: 'array',
     if not _xp_any(sage_mask):
         return xp.zeros(state.shape, dtype=xp.float32)
 
-    # Create impulse field: 1.0 at Sage positions, weighted by age/maturity
+    # Phase 17a: Hierarchical Sage Amplification
+    # Sages emit at base strength, Ancients at 2x, Legends at 5x ("lighthouse" nodes)
+    # This ensures long-range coherence at 512³ by creating strong anchor points
     sage_field = sage_mask.astype(xp.float32)
 
-    # Weight by normalized age (older Sages radiate more strongly)
     ages = memory_grid[0]
     max_age = float(xp.max(ages[sage_mask])) if _xp_any(sage_mask) else 1.0
+
     if max_age > 0:
+        # Base: normalize by age (older = stronger)
         sage_field = sage_field * xp.minimum(ages / max(max_age, 1.0), 1.0)
 
-    # Convolve with Gaussian kernel using separable 3D box filter
-    # (reuse the existing _separable_box_filter_3d for efficiency)
-    magnon_field = _separable_box_filter_3d(sage_field, radius=mem.magnon_radius)
+        # Hierarchical amplification: Ancients (age>=20) and Legends (age>=50)
+        # act as "lighthouse" beacons that anchor distant regions
+        ancient_mask = sage_mask & (ages >= 20.0)
+        legend_mask = sage_mask & (ages >= 50.0)
+
+        if _xp_any(ancient_mask):
+            sage_field[ancient_mask] *= mem.magnon_elder_amplify  # 2x for Ancients
+
+        if _xp_any(legend_mask):
+            sage_field[legend_mask] *= mem.magnon_legend_amplify  # 5x for Legends
+
+    # Phase 17a: Adaptive radius — scale with lattice size for 512³ readiness
+    radius = mem.magnon_radius
+    if mem.magnon_adaptive_radius:
+        lattice_size = state.shape[0]
+        radius = max(16, lattice_size // 8)  # 256→32, 512→64
+
+    # Convolve with separable 3D box filter
+    magnon_field = _separable_box_filter_3d(sage_field, radius=radius)
 
     # Scale by coupling constant
     magnon_field *= mem.magnon_coupling

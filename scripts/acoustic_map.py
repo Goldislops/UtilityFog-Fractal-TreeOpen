@@ -69,8 +69,9 @@ class AcousticMapConfig:
     friction_decay: float = 0.95   # Friction decays toward 0 each step
     output_interval: int = 100     # Output heatmap every N steps
     log_dir: str = "data"          # Where to save heatmap logs
-    friction_threshold: float = 0.57  # Above this = "stressed" (calibrated from 256³ data: p75=0.5696)
-    silent_threshold: float = 0.555   # Below this = "silent/Sage" sector (calibrated: p10=0.5544)
+    friction_threshold: float = 0.0   # Auto-calibrated: above p75 = "stressed"
+    silent_threshold: float = 0.0    # Auto-calibrated: below p25 = "silent/Sage"
+    auto_calibrate: bool = True      # Phase 17a: auto-calibrate thresholds from actual data
 
 
 class AcousticMap:
@@ -183,6 +184,12 @@ class AcousticMap:
 
         # Convert to numpy for the heatmap output
         self.heatmap = _to_numpy(sector_means).astype(np.float32)
+
+        # Phase 17a: Auto-calibrate thresholds from actual data distribution
+        if self.config.auto_calibrate and self.heatmap.size > 0:
+            flat = self.heatmap.flatten()
+            self.config.friction_threshold = float(np.percentile(flat, 75))  # Top 25% = stressed
+            self.config.silent_threshold = float(np.percentile(flat, 25))    # Bottom 25% = silent
 
         # Update statistics
         self.total_friction = float(self.heatmap.sum())
