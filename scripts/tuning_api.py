@@ -93,11 +93,15 @@ class TuningState:
         self,
         data_dir: Path,
         gen_getter: Optional[Callable[[], int]] = None,
+        event_publisher: Optional[Any] = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.ledger_path = self.data_dir / "tuning_ledger.jsonl"
         self.pending_path = self.data_dir / "tuning_pending.json"
         self._gen_getter: Callable[[], int] = gen_getter or (lambda: 0)
+        # Duck-typed: anything with .publish(topic, payload). Kept optional so
+        # unit tests can skip the event bus entirely.
+        self._event_publisher = event_publisher
         self._lock = threading.Lock()
 
         self._effective: dict[str, Any] = {name: p.default for name, p in PARAMS.items()}
@@ -105,6 +109,16 @@ class TuningState:
         self._proposals: dict[str, dict[str, Any]] = {}
         self._snapshots_after_commit: dict[str, dict[str, Any]] = {}
         self._replay_ledger()
+
+    def _emit(self, topic: str, payload: dict) -> None:
+        """Fire-and-forget publish. Never raises."""
+        pub = self._event_publisher
+        if pub is None:
+            return
+        try:
+            pub.publish(topic, payload)
+        except Exception:
+            pass  # the ledger is the source of truth; don't fail callers on event bus issues
 
     # ---- read ----
 
@@ -153,11 +167,41 @@ class TuningState:
             }
             self._append_ledger(entry)
             self._proposals[proposal_id] = entry
-            return entry
+        # Emit after lock release — safety-rail denial is event-worthy.
+        if not validation.ok:
+            self._emit("tuning.rejected", {
+                "stage": "propose",
+                "proposal_id": proposal_id,
+                "source": source,
+                "params": dict(params),
+                "errors": entry["validation"]["errors"],
+            })
+        return entry
 
     # ---- write: commit ----
 
     def commit(self, proposal_id: str, approver: str) -> dict[str, Any]:
+        try:
+            entry = self._commit_locked(proposal_id, approver)
+        except TuningError as e:
+            self._emit("tuning.rejected", {
+                "stage": "commit",
+                "proposal_id": proposal_id,
+                "approver": approver,
+                "error": e.code,
+                "message": e.message,
+            })
+            raise
+        self._emit("tuning.committed", {
+            "proposal_id": proposal_id,
+            "approver": approver,
+            "applied_at_gen": entry["applied_at_gen"],
+            "params": dict(entry["params"]),
+            "effective_after": entry["effective_after"],
+        })
+        return entry
+
+    def _commit_locked(self, proposal_id: str, approver: str) -> dict[str, Any]:
         with self._lock:
             proposal = self._proposals.get(proposal_id)
             if proposal is None:
@@ -222,6 +266,25 @@ class TuningState:
     # ---- write: rollback ----
 
     def rollback(self, to_proposal_id: str) -> dict[str, Any]:
+        try:
+            entry = self._rollback_locked(to_proposal_id)
+        except TuningError as e:
+            self._emit("tuning.rejected", {
+                "stage": "rollback",
+                "to_proposal_id": to_proposal_id,
+                "error": e.code,
+                "message": e.message,
+            })
+            raise
+        self._emit("tuning.rolled_back", {
+            "to_proposal_id": to_proposal_id,
+            "applied_at_gen": entry["applied_at_gen"],
+            "reverted_params": dict(entry["reverted_params"]),
+            "changed_back": list(entry["changed_back"]),
+        })
+        return entry
+
+    def _rollback_locked(self, to_proposal_id: str) -> dict[str, Any]:
         with self._lock:
             snapshot = self._snapshots_after_commit.get(to_proposal_id)
             if snapshot is None:

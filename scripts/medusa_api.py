@@ -323,16 +323,20 @@ def geometry_stl():
 
 
 # ---------------------------------------------------------------------------
-# Phase 18 PR 2: Tuning API Blueprint
+# Phase 18 PR 2 + PR 3: Tuning API Blueprint + Event Bus
 # ---------------------------------------------------------------------------
-# Adds the write-side endpoints (propose/commit/rollback) on top of the
-# existing read-only Phase 16 surface. See scripts/tuning_api.py and
-# PHASE_18.md for the full design.
+# PR 2 adds the write-side tuning endpoints (propose/commit/rollback).
+# PR 3 adds a ZMQ PUB event stream on :8081 and a StateWatcher that
+# broadcasts telemetry.5min events when new telemetry files appear.
+# See scripts/tuning_api.py, scripts/event_bus.py, and PHASE_18.md.
 
+import os as _os
 import re as _re
 
 from scripts.tuning_api import TuningState as _TuningState
 from scripts.tuning_api import create_blueprint as _create_tuning_blueprint
+from scripts.event_bus import EventPublisher as _EventPublisher
+from scripts.event_bus import StateWatcher as _StateWatcher
 
 
 def _infer_current_gen_from_snapshot() -> int:
@@ -345,7 +349,27 @@ def _infer_current_gen_from_snapshot() -> int:
     return int(m.group(1)) if m else 0
 
 
-_tuning_state = _TuningState(data_dir=DATA_DIR, gen_getter=_infer_current_gen_from_snapshot)
+# Event bus — PUB socket + telemetry file watcher. Disabled when running
+# under pytest (MEDUSA_EVENT_BUS_DISABLED=1) to avoid port conflicts in CI.
+_event_publisher = None
+_state_watcher = None
+if _os.environ.get("MEDUSA_EVENT_BUS_DISABLED") != "1":
+    try:
+        _event_publisher = _EventPublisher("tcp://*:8081")
+        _state_watcher = _StateWatcher(_event_publisher, DATA_DIR, poll_interval_s=15.0)
+        _state_watcher.start()
+    except Exception as _e:
+        # Non-fatal: REST API still works even if the event bus is down.
+        print(f"[event_bus] disabled ({_e}); REST endpoints remain available")
+        _event_publisher = None
+        _state_watcher = None
+
+
+_tuning_state = _TuningState(
+    data_dir=DATA_DIR,
+    gen_getter=_infer_current_gen_from_snapshot,
+    event_publisher=_event_publisher,
+)
 app.register_blueprint(_create_tuning_blueprint(_tuning_state))
 
 
@@ -353,8 +377,8 @@ app.register_blueprint(_create_tuning_blueprint(_tuning_state))
 def index():
     """API documentation."""
     return jsonify({
-        "service": "Medusa REST API (Phase 16a + Phase 18 PR 2)",
-        "version": "1.1.0",
+        "service": "Medusa REST API (Phase 16a + Phase 18 PRs 2+3)",
+        "version": "1.2.0",
         "endpoints": {
             "/api/health": "Health check",
             "/api/status": "Engine status",
@@ -369,6 +393,14 @@ def index():
             "/api/tuning/propose": "POST — propose a tuning (dry-run by default)",
             "/api/tuning/commit": "POST — commit a proposal (gated by approver policy + rate limit)",
             "/api/tuning/rollback": "POST — revert to a prior committed proposal",
+        },
+        "event_bus": {
+            "zmq_pub_endpoint": "tcp://<host>:8081" if _event_publisher else None,
+            "topics": [
+                "tuning.committed", "tuning.rejected", "tuning.rolled_back",
+                "telemetry.5min",
+            ],
+            "state_watcher": bool(_state_watcher),
         },
         "cluster_subnet": "192.168.86.0/24",
         "note": "Future cluster nodes can connect to donate compute",
