@@ -322,12 +322,39 @@ def geometry_stl():
     return send_file(str(stl_path), as_attachment=True)
 
 
+# ---------------------------------------------------------------------------
+# Phase 18 PR 2: Tuning API Blueprint
+# ---------------------------------------------------------------------------
+# Adds the write-side endpoints (propose/commit/rollback) on top of the
+# existing read-only Phase 16 surface. See scripts/tuning_api.py and
+# PHASE_18.md for the full design.
+
+import re as _re
+
+from scripts.tuning_api import TuningState as _TuningState
+from scripts.tuning_api import create_blueprint as _create_tuning_blueprint
+
+
+def _infer_current_gen_from_snapshot() -> int:
+    """Extract generation number from the latest snapshot's filename.
+    Returns 0 if no snapshot is found or the filename is unparseable."""
+    snap = _find_latest_snapshot()
+    if snap is None:
+        return 0
+    m = _re.search(r"gen(\d+)", snap.name)
+    return int(m.group(1)) if m else 0
+
+
+_tuning_state = _TuningState(data_dir=DATA_DIR, gen_getter=_infer_current_gen_from_snapshot)
+app.register_blueprint(_create_tuning_blueprint(_tuning_state))
+
+
 @app.route("/")
 def index():
     """API documentation."""
     return jsonify({
-        "service": "Medusa REST API (Phase 16a)",
-        "version": "1.0.0",
+        "service": "Medusa REST API (Phase 16a + Phase 18 PR 2)",
+        "version": "1.1.0",
         "endpoints": {
             "/api/health": "Health check",
             "/api/status": "Engine status",
@@ -337,6 +364,11 @@ def index():
             "/api/acoustic": "Acoustic heatmap (16³)",
             "/api/snapshot/latest": "Download latest .npz",
             "/api/geometry/stl": "Export STL geometry",
+            "/api/params": "GET — current effective tunable parameters",
+            "/api/params/schema": "GET — tunable parameter schema (types, bounds, categories)",
+            "/api/tuning/propose": "POST — propose a tuning (dry-run by default)",
+            "/api/tuning/commit": "POST — commit a proposal (gated by approver policy + rate limit)",
+            "/api/tuning/rollback": "POST — revert to a prior committed proposal",
         },
         "cluster_subnet": "192.168.86.0/24",
         "note": "Future cluster nodes can connect to donate compute",
