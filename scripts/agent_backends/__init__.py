@@ -27,9 +27,22 @@ from scripts.agent_backends.base import (
 )
 from scripts.agent_backends.mock import MockBackend
 
+# AnthropicBackend requires `pip install anthropic`; import lazily so the
+# package is usable (MockBackend still works) when anthropic isn't installed.
+try:
+    from scripts.agent_backends.anthropic_backend import (  # noqa: F401
+        AnthropicBackend,
+        DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL,
+    )
+except ImportError:
+    AnthropicBackend = None  # type: ignore[assignment]
+    ANTHROPIC_DEFAULT_MODEL = None  # type: ignore[assignment]
+
 __all__ = [
     "AgentBackend",
     "AgentResponse",
+    "AnthropicBackend",
+    "ANTHROPIC_DEFAULT_MODEL",
     "ContentBlock",
     "Message",
     "MockBackend",
