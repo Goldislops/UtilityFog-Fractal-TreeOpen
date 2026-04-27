@@ -7,7 +7,59 @@
 [![License](https://i.ytimg.com/vi/4cgpu9L2AE8/maxresdefault.jpg)
 [![Phase 3](https://upload.wikimedia.org/wikipedia/en/thumb/0/03/Flag_of_Italy.svg/330px-Flag_of_Italy.svg.png)
 
-Advanced UtilityFog simulation system with comprehensive telemetry, visualization, and observability capabilities.
+> **`UtilityFog-Fractal-TreeOpen` is both a simulation platform and a governed, model-agnostic agent orchestration / tuning framework around the Medusa engine.**
+>
+> The repository hosts two coupled surfaces:
+>
+> 1. **Cellular-automata simulation engine** (Medusa) — a 256³ voxel CA evolving on the Vanguard GPU cluster, currently running Phase 17a (Magnon Amplification). Substrate-independent design with Portable Genome Format, STL/QR/WASM export, and a transport-agnostic shard protocol for eventual 512³ multi-node distribution.
+> 2. **Governed agent orchestration framework** built on top of the engine in Phase 18 — REST API for live observation + a write-side tuning bus with safety rails (propose / commit / rollback, schema-bound parameter categories, per-param rate limits), a ZMQ PUB event stream, a model-agnostic `AgentBackend` abstraction with concrete Anthropic / Mock backends, and an orchestrator loop that drives an LLM through observe → decide → act cycles.
+>
+> Treat them as one project with two surfaces, not two projects in a trenchcoat. Phase 18 was added because the simulation got mature enough to need autonomous tuning. The orchestration is in service of the matrix; the matrix is the substrate the orchestration governs.
+
+## 📍 Where to Start
+
+| If you are... | Read |
+|---------------|------|
+| ...a new contributor (human) | This README, then `AGENT_HANDOFF.md` |
+| ...a new contributor (AI / agent) | `AGENT_HANDOFF.md` first — operational orientation |
+| ...looking for the latest architectural decisions | `git log --oneline -20`, then `PHASE_17B.md` and `PHASE_18.md` |
+| ...looking to drive the engine via REST | `scripts/medusa_api.py` (port 8080) and `scripts/nemoclaw_tools.json` |
+| ...looking to subscribe to events | `scripts/event_bus.py` (ZMQ PUB on port 8081) |
+| ...running the orchestrator | `scripts/orchestrator_config.py` + `MEDUSA_AGENT_BACKEND` env var |
+
+## 🤖 Agent Orchestration Framework (Phase 18)
+
+The orchestration framework was designed to be **model-agnostic**: the LLM brain on the other end is a one-line config swap, not a rewrite. Today's AnthropicBackend (Claude) is one concrete backend among several planned (Mock for tests; Nemotron via NVIDIA Cloud as a future drop-in once that account is provisioned).
+
+```bash
+# Read-only observation (always available once medusa_api.py is running):
+curl http://localhost:8080/api/params/schema | jq .
+curl http://localhost:8080/api/equanimity   | jq .
+
+# Subscribe to push-worthy events:
+python -c "
+import zmq; ctx = zmq.Context(); s = ctx.socket(zmq.SUB)
+s.connect('tcp://127.0.0.1:8081'); s.setsockopt_string(zmq.SUBSCRIBE, '')
+while True: print(s.recv_multipart())
+"
+
+# Drive the agent loop one iteration (set ANTHROPIC_API_KEY first):
+export MEDUSA_AGENT_BACKEND=anthropic
+python -c "
+from scripts.orchestrator_config import create_orchestrator
+print(create_orchestrator().run_one_iteration('Observe Medusa; suggest one tuning if needed.'))
+"
+```
+
+Safety contract (enforced at three layers — schema, router, API):
+
+- **LOCKED** parameters (e.g. `structural_to_void_decay_prob`) cannot be changed via any commit path.
+- **HUMAN_APPROVAL** parameters require an `approver` string starting with `human:` — the orchestrator never supplies one; it commits as `policy:auto`, which only succeeds for AUTO-category proposals.
+- Per-parameter rate limit (1000 generations between successive commits to the same param).
+- Every proposal requires a non-empty justification string.
+- Append-only JSONL audit trail at `data/tuning_ledger.jsonl`.
+
+See `PHASE_18.md` for the full design and the seven-PR roadmap that built it.
 
 ## 🚀 Phase 3 Features
 
