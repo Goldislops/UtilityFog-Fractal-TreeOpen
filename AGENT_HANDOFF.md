@@ -78,11 +78,11 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 
 ## Safe Next Actions
 
-- **Phase 18.5: stabilization** (current). Documentation, identity reconciliation, no new code paths.
-- **Phase 18 PR 7 — NemoCloudBackend**: waits on NVIDIA Cloud account standup; can be drafted against the public Nemotron API shape but not exercised until a key is in place.
-- **PR 2b + Track A bundle**: the one Medusa-restart change. Engine-side `tuning_pending.json` consumer + 5-stream CuPy parallelism. Coordinate timing with Kevin; probably wants a clean snapshot first.
-- **Budget analysis** (parallel track): Kevin and Ian are providing Signal financial threads + the Commonwealth Bank statement; spreadsheet work continues there.
-- **README dual-identity update**: paired with this handoff doc as Phase 18.5 PR 2.
+- **Phase 18.5 stabilization** is complete. Three doc PRs landed (#126 handoff doc, #127 README dual-identity, #128 privacy + provider-neutral backend plan).
+- **Phase 18 PR 7 — `OpenAICompatBackend`**: provider-neutral backend supporting OpenAI-compatible cloud endpoints (OpenAI, NVIDIA NIM, DeepSeek, Together, Fireworks, …) and local endpoints (vLLM, SGLang, Ollama, llama.cpp server). NVIDIA NIM / Nemo becomes a *config* of this backend, not a bespoke class. See `BACKEND_PROVIDER_MATRIX.md` for the canonical backend roadmap.
+- **Phase 18 PR 8 — Provider parity proof**: run the same orchestrator iteration through `AnthropicBackend` and `OpenAICompatBackend` (against a cheap cloud target like DeepSeek, or a local target like Ollama). Pass condition is "both produce tool calls the tuning API accepts or rejects correctly" — the actual model-agnostic evidence, not a hand-wave.
+- **PR 2b + Track A bundle**: the single coordinated Medusa-restart change. Engine-side `tuning_pending.json` consumer + 5-stream CuPy parallelism. Coordinate timing with Kevin; probably wants a clean snapshot first.
+- **Budget analysis**: private human track. Do not encode personal financial specifics in public repo docs.
 
 ## Things NOT to Do Without Coordination
 
