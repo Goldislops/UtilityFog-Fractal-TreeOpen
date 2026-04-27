@@ -63,11 +63,12 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 
 ## Budget Posture
 
-- Kevin runs on a disability support pension; remaining inheritance ~78,000 AUD as of late April 2026, with quarterly Red Energy bills and an ongoing phone payment plan.
-- **Default to free options**. NVIDIA's free tier, local compute, open-source tooling.
-- **No cloud splurges without explicit approval** — that includes paid API throughput, hosted compute, managed services. AnthropicBackend works today; NemoCloud waits until the free-tier path is mapped.
-- **Track LLM usage**. `IterationResult.usage_total` accumulates input/output tokens per orchestrator iteration. If you build a runner, log this. Cost is real.
-- Kevin's Max plan is generous now but he's flagged he may downgrade to Pro later. Don't design things that depend on heavy throughput.
+**Budget is constrained.** This is the operational rule; specifics live in private memory and Kevin's records, not in this public doc.
+
+- **Prefer free / local / open-source paths** whenever they exist (free tiers, local compute, open weights, self-hosted tooling).
+- **Do NOT start paid cloud services, paid API throughput, or managed infrastructure** without explicit human approval. AnthropicBackend works today and runs on Kevin's existing plan; expanding to a new paid provider is a budget decision, not an engineering decision.
+- **Track LLM and compute usage** where possible. `IterationResult.usage_total` accumulates input/output tokens per orchestrator iteration; surface that in any runner you build so cost stays visible.
+- **Don't design things that depend on heavy throughput** (high QPS, large context windows on every request, always-on agent loops). Cadence is a feature, not a limitation.
 
 ## Currently Running
 
