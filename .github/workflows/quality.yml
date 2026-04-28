@@ -1,0 +1,72 @@
+name: quality
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  lint-type-test:
+    name: Lint • Types • Tests (py+node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11"]
+        node: ["20"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with: { python-version: ${{ matrix.python }} }
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('**/requirements*.txt') }}
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install ruff mypy pytest pytest-xdist hypothesis bandit
+
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node }} }
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ matrix.node }}-${{ hashFiles('**/package-lock.json','**/pnpm-lock.yaml','**/yarn.lock') }}
+      - name: Install Node deps
+        run: |
+          if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm i; fi
+
+      - name: Ruff (lint)
+        run: ruff check .
+      - name: Mypy (types)
+        run: mypy .
+      - name: Bandit (security)
+        run: bandit -q -r .
+
+      - name: ESLint (if present)
+        run: |
+          if npx --yes eslint --version >/dev/null 2>&1; then npx eslint .; else echo "eslint not configured"; fi
+
+      - name: PyTest
+        run: pytest -q -n auto
+
+  sarif-upload:
+    needs: lint-type-test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload Ruff SARIF (if generated)
+        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ hashFiles('ruff.sarif') != '' }}
+        with: { sarif_file: ruff.sarif }
