@@ -35,6 +35,7 @@ table.
 | Tool spec | `{name, description, input_schema}` | `{type:"function", function:{name, description, parameters}}` |
 | Assistant tool use | inline `ToolUseBlock` in content | separate `tool_calls` field on message; arguments are a JSON STRING |
 | Tool result | user message containing `ToolResultBlock`s | separate `{role:"tool", tool_call_id, content}` per result |
+| Tool error flag | `ToolResultBlock.is_error: bool` field | **NO native flag**; this backend prefixes content with `"[ERROR] "` when `is_error=True` (PR 7a). The orchestrator system prompt instructs models to recognise the marker. |
 | Finish reason | `stop_reason` (`end_turn`, `tool_use`, …) | `finish_reason` (`stop`, `tool_calls`, `length`, `content_filter`) |
 | Token counts | `usage.input_tokens` / `output_tokens` | `usage.prompt_tokens` / `completion_tokens` |
 
@@ -210,6 +211,16 @@ class OpenAICompatBackend(AgentBackend):
                             [_block_to_summary_dict(bb) for bb in b.content],
                             default=str,
                         )
+                    # PR 7a: OpenAI's `role:"tool"` message has no `is_error`
+                    # field analogous to Anthropic's ToolResultBlock.is_error.
+                    # When the source side flagged an error, prefix the content
+                    # with a stable marker so the receiving model can tell the
+                    # tool failed. The system prompt instructs the model to
+                    # recognise "[ERROR] ..." as failure. (Without this fix,
+                    # a tool failure looks like a normal tool success to an
+                    # OpenAI-compatible model.)
+                    if b.is_error:
+                        result_content = "[ERROR] " + result_content
                     out.append({
                         "role": "tool",
                         "tool_call_id": b.tool_use_id,
