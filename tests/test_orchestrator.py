@@ -472,6 +472,23 @@ def test_create_backend_openai_compat():
     assert backend.name == "openai-compat"
 
 
+def test_create_backend_underscore_alias_accepted():
+    """PR 7b: openai_compat (with underscore) is accepted as an alias for
+    openai-compat. Humans will inevitably type the underscore — env vars
+    historically use underscores and the shell hyphen is awkward."""
+    from scripts.agent_backends import OpenAICompatBackend
+    if OpenAICompatBackend is None:
+        pytest.skip("openai SDK not installed")
+    cfg = OrchestratorConfig(
+        backend_name="openai_compat",  # underscore!
+        openai_base_url="https://api.deepseek.com/v1",
+        openai_model="deepseek-chat",
+        openai_api_key="sk-fake",
+    )
+    backend = create_backend(cfg)
+    assert isinstance(backend, OpenAICompatBackend)
+
+
 def test_create_backend_nemo_cloud_redirects_to_openai_compat():
     """Friendly-error path: anyone setting MEDUSA_AGENT_BACKEND=nemo_cloud
     (the old planned-but-superseded name) gets pointed at the openai-compat

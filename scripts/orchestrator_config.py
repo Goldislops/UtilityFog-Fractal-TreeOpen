@@ -147,7 +147,12 @@ def create_backend(config: OrchestratorConfig) -> AgentBackend:
     NemoCloud is NOT a separate name; configure "openai-compat" with NIM's
     base_url and a Nemotron model name.
     """
+    # PR 7b: accept openai_compat (underscore) as an alias for openai-compat.
+    # Humans will inevitably type the underscore — both because most env vars
+    # use underscores and because the hyphen is awkward on the shell side.
     name = config.backend_name
+    if name == "openai_compat":
+        name = "openai-compat"
 
     if name == "anthropic":
         if AnthropicBackend is None:

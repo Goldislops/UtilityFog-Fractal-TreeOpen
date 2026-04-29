@@ -477,6 +477,46 @@ def test_backend_name_classvar():
     assert backend.name == "openai-compat"
 
 
+# -- PR 7b: dummy api_key for the OpenAI SDK's strict construction ---------
+
+
+def test_construction_without_api_key_or_env_var_does_not_crash(monkeypatch):
+    """The OpenAI Python SDK raises at construction if neither `api_key` arg
+    nor `OPENAI_API_KEY` env var is set. That's hostile when pointing at a
+    passwordless local server (Ollama, vLLM, llama.cpp). PR 7b: supply a
+    placeholder so local setups Just Work; real auth-required providers
+    fail later with a clearer 401."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    backend = OpenAICompatBackend(
+        base_url="http://localhost:11434/v1",
+        model="llama3.1:8b",
+    )
+    assert backend.name == "openai-compat"
+
+
+def test_explicit_api_key_arg_is_passed_through(monkeypatch):
+    """An explicit api_key arg must NOT be overridden by the dummy."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    backend = OpenAICompatBackend(
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        api_key="sk-real-deepseek-key",
+    )
+    # Backend constructed without crashing; the SDK now holds the real key.
+    assert backend.model == "deepseek-chat"
+
+
+def test_env_var_api_key_does_not_trigger_dummy(monkeypatch):
+    """If OPENAI_API_KEY is set, the backend should let the SDK read it
+    rather than overwriting with a placeholder."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    backend = OpenAICompatBackend(
+        base_url="http://localhost:11434/v1",
+        model="llama3.1:8b",
+    )
+    assert backend.name == "openai-compat"
+
+
 # -- regression: orchestrator can swap backends seamlessly ------------------
 
 

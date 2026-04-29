@@ -118,8 +118,20 @@ class OpenAICompatBackend(AgentBackend):
                 "OpenAICompatBackend requires `pip install openai`"
             ) from e
         kwargs: dict[str, Any] = {}
-        if api_key is not None:
-            kwargs["api_key"] = api_key
+
+        # PR 7b: the OpenAI SDK raises at construction if no api_key is set
+        # AND OPENAI_API_KEY env var is empty. That's hostile when talking
+        # to a passwordless local server (Ollama, vLLM, llama.cpp). If the
+        # caller didn't supply a key and the env var isn't set, supply a
+        # placeholder so construction succeeds. Real auth-required providers
+        # (DeepSeek, NIM, etc.) will fail later with a clear 401, which is
+        # a much better failure mode than crashing at startup.
+        effective_key = api_key
+        if effective_key is None and not os.environ.get("OPENAI_API_KEY"):
+            effective_key = "not-needed"  # placeholder for SDKs that demand a string
+
+        if effective_key is not None:
+            kwargs["api_key"] = effective_key
         if base_url is not None:
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
