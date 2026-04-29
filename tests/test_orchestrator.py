@@ -454,6 +454,61 @@ def test_create_backend_unknown_raises():
         create_backend(cfg)
 
 
+def test_create_backend_openai_compat():
+    """PR 7a wiring: MEDUSA_AGENT_BACKEND=openai-compat instantiates
+    OpenAICompatBackend with config-supplied base_url / model / api_key."""
+    from scripts.agent_backends import OpenAICompatBackend
+    if OpenAICompatBackend is None:
+        pytest.skip("openai SDK not installed")
+    cfg = OrchestratorConfig(
+        backend_name="openai-compat",
+        openai_base_url="https://api.deepseek.com/v1",
+        openai_model="deepseek-chat",
+        openai_api_key="sk-fake-for-construction",  # SDK accepts at construction
+    )
+    backend = create_backend(cfg)
+    assert isinstance(backend, OpenAICompatBackend)
+    assert backend.model == "deepseek-chat"
+    assert backend.name == "openai-compat"
+
+
+def test_create_backend_nemo_cloud_redirects_to_openai_compat():
+    """Friendly-error path: anyone setting MEDUSA_AGENT_BACKEND=nemo_cloud
+    (the old planned-but-superseded name) gets pointed at the openai-compat
+    config that replaced it."""
+    cfg = OrchestratorConfig(backend_name="nemo_cloud")
+    with pytest.raises(ValueError, match="openai-compat"):
+        create_backend(cfg)
+
+
+def test_config_from_env_reads_openai_compat_vars(monkeypatch):
+    monkeypatch.setenv("MEDUSA_AGENT_BACKEND", "openai-compat")
+    monkeypatch.setenv("MEDUSA_OPENAI_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("MEDUSA_OPENAI_MODEL", "llama3.1:8b")
+    monkeypatch.setenv("MEDUSA_OPENAI_API_KEY", "ollama")
+    monkeypatch.setenv("MEDUSA_OPENAI_EXTRA_HEADERS", '{"X-Custom": "abc"}')
+    cfg = OrchestratorConfig.from_env()
+    assert cfg.backend_name == "openai-compat"
+    assert cfg.openai_base_url == "http://localhost:11434/v1"
+    assert cfg.openai_model == "llama3.1:8b"
+    assert cfg.openai_api_key == "ollama"
+    assert cfg.openai_extra_headers == {"X-Custom": "abc"}
+
+
+def test_config_from_env_tolerates_malformed_extra_headers(monkeypatch):
+    """Bad JSON in MEDUSA_OPENAI_EXTRA_HEADERS must not crash startup."""
+    monkeypatch.setenv("MEDUSA_OPENAI_EXTRA_HEADERS", "{not json")
+    cfg = OrchestratorConfig.from_env()
+    assert cfg.openai_extra_headers is None
+
+
+def test_config_from_env_extra_headers_must_be_dict(monkeypatch):
+    """A JSON list/string in MEDUSA_OPENAI_EXTRA_HEADERS is rejected silently."""
+    monkeypatch.setenv("MEDUSA_OPENAI_EXTRA_HEADERS", '["not", "a", "dict"]')
+    cfg = OrchestratorConfig.from_env()
+    assert cfg.openai_extra_headers is None
+
+
 def test_create_orchestrator_smoke():
     """End-to-end wire: creates all the pieces without raising."""
     backend = MockBackend(responses=[_text_response("ok")])

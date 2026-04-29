@@ -214,6 +214,47 @@ def test_tool_result_in_user_message_explodes_into_role_tool():
     assert msgs[1] == {"role": "tool", "tool_call_id": "tu_2", "content": "result two"}
 
 
+def test_tool_result_with_is_error_prefixes_content():
+    """PR 7a fix: OpenAI's role:"tool" message has no is_error field
+    analogous to Anthropic's. When the source side flagged an error,
+    prefix the content with "[ERROR] " so the model can tell the tool
+    failed. Without this, a tool failure would look like a tool success
+    to any OpenAI-compatible model. Regression fence."""
+    client = _MockClient()
+    client.chat.completions.response = _make_response("ok")
+    backend = OpenAICompatBackend(client=client)
+
+    backend.complete(
+        messages=[Message(role="user", content=[
+            ToolResultBlock(tool_use_id="tu_x", content="boom: 500", is_error=True),
+        ])],
+        tools=[],
+    )
+    msgs = client.chat.completions.last_request["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "tool"
+    assert msgs[0]["tool_call_id"] == "tu_x"
+    assert msgs[0]["content"].startswith("[ERROR] ")
+    assert "boom: 500" in msgs[0]["content"]
+
+
+def test_tool_result_without_is_error_unchanged():
+    """Successful tool results must NOT get the [ERROR] marker."""
+    client = _MockClient()
+    client.chat.completions.response = _make_response("ok")
+    backend = OpenAICompatBackend(client=client)
+
+    backend.complete(
+        messages=[Message(role="user", content=[
+            ToolResultBlock(tool_use_id="tu_y", content="all good", is_error=False),
+        ])],
+        tools=[],
+    )
+    msgs = client.chat.completions.last_request["messages"]
+    assert msgs[0]["content"] == "all good"
+    assert not msgs[0]["content"].startswith("[ERROR]")
+
+
 def test_tool_result_plus_user_text_produces_separate_messages():
     client = _MockClient()
     client.chat.completions.response = _make_response("ok")
