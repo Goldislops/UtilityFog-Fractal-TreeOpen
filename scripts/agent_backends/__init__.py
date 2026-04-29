@@ -38,6 +38,17 @@ except ImportError:
     AnthropicBackend = None  # type: ignore[assignment]
     ANTHROPIC_DEFAULT_MODEL = None  # type: ignore[assignment]
 
+# OpenAICompatBackend requires `pip install openai`; same lazy-import pattern
+# so the package keeps working when openai is absent.
+try:
+    from scripts.agent_backends.openai_compat_backend import (  # noqa: F401
+        OpenAICompatBackend,
+        DEFAULT_MODEL as OPENAI_COMPAT_DEFAULT_MODEL,
+    )
+except ImportError:
+    OpenAICompatBackend = None  # type: ignore[assignment]
+    OPENAI_COMPAT_DEFAULT_MODEL = None  # type: ignore[assignment]
+
 __all__ = [
     "AgentBackend",
     "AgentResponse",
@@ -46,6 +57,8 @@ __all__ = [
     "ContentBlock",
     "Message",
     "MockBackend",
+    "OpenAICompatBackend",
+    "OPENAI_COMPAT_DEFAULT_MODEL",
     "TextBlock",
     "ToolCall",
     "ToolResultBlock",
