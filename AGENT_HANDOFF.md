@@ -2,14 +2,14 @@
 
 > **For**: Any AI (Claude, Gemini/AURA, GPT/Jack, future Nemo Claw, etc.) joining this project mid-stream. Read this first; it'll save Kevin from having to re-explain everything every time.
 >
-> **Last revised**: 2026-04-27. State is point-in-time — `git log --oneline -10` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
+> **Last revised**: 2026-05-01. State is point-in-time — `git log --oneline -10` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
 
 ## What This Project Is
 
 **UtilityFog-Fractal-TreeOpen** has two distinct halves now, both real and active:
 
 1. **Cellular-automata simulation engine** ("Medusa"). A 256³ voxel CA evolving on an RTX 5090 since gen ~0; currently at **gen ~1.5M+** running **Phase 17a** (Magnon Amplification for 512³ readiness). Substrate-independent design — Portable Genome Format, STL export, Rust+WASM port, multi-node shard protocol with ZMQ transport.
-2. **Governed, model-agnostic agent orchestration & tuning framework** built on top of Medusa in Phase 18. REST API for observation + write-side tuning (propose/commit/rollback) with a tunable-parameter schema and category gating, ZMQ PUB event bus, agent-backend ABC, AnthropicBackend, and an orchestrator loop that ties them together.
+2. **Governed, model-agnostic agent orchestration & tuning framework** built on top of Medusa in Phase 18. REST API for observation + write-side tuning (propose/commit/rollback) with a tunable-parameter schema and category gating, ZMQ PUB event bus, agent-backend ABC, two concrete backends (`AnthropicBackend`, `OpenAICompatBackend` for OpenAI / NIM / DeepSeek / Together / vLLM / SGLang / Ollama / llama.cpp server), and an orchestrator loop that ties them together. Provider parity is proven by test, not slogan.
 
 Treat them as **one project with two surfaces**, not two projects in a trenchcoat. Phase 18 was added *because* the simulation got mature enough to need autonomous tuning. The orchestration is in service of the matrix, and the matrix is the substrate that gives the orchestration something to govern.
 
@@ -22,7 +22,7 @@ Treat them as **one project with two surfaces**, not two projects in a trenchcoa
 | `scripts/params_schema.py` | Tunable parameter registry (AUTO / HUMAN_APPROVAL / LOCKED). | Pure metadata. Add params here. |
 | `scripts/tuning_api.py` | Flask blueprint: propose/commit/rollback with safety rails. | Restartable. |
 | `scripts/event_bus.py` | ZMQ PUB on `:8081` + StateWatcher. | Restartable. |
-| `scripts/agent_backends/` | `AgentBackend` ABC, `MockBackend`, `AnthropicBackend`. | Pure library. |
+| `scripts/agent_backends/` | `AgentBackend` ABC, `MockBackend`, `AnthropicBackend`, `OpenAICompatBackend`. | Pure library. |
 | `scripts/orchestrator.py` + `orchestrator_config.py` | Observe-decide-act loop driving the LLM. | Pure library. |
 | `scripts/shard_protocol.py` + `shard_transport_zmq.py` | Phase 17b distributed-stepping protocol + ZMQ backend. | Pure library; not yet running in production. |
 | `scripts/dandelion.py`, `dandelion_physics.py` | Phase 9: STL/QR/WASM organism dispersal. | Pure library. |
@@ -31,8 +31,8 @@ Treat them as **one project with two surfaces**, not two projects in a trenchcoa
 | `crates/vanguard-mcp/` | Vanguard MCP cluster orchestrator (Phase 13/16c). | Coordinate. |
 | `vis/observatory/` | Phase 8: 3-tier visualization. | Off-engine. |
 | `data/` | Snapshots + telemetry + ledgers + pending-tuning. | **Read-only for agents.** |
-| `tests/` | pytest suite — 146/146 passing as of 2026-04-21. | Run before every commit. |
-| `PHASE_17B.md`, `PHASE_18.md` | Architecture design docs. | Source of truth on intent. |
+| `tests/` | pytest suite — 181/181 Phase 17b+18 tests passing as of 2026-04-29. | Run before every commit. |
+| `PHASE_17B.md`, `PHASE_18.md`, `BACKEND_PROVIDER_MATRIX.md` | Architecture design docs. | Source of truth on intent. |
 
 ## The Three-AI Collaboration (Default Roles, Not Contracts)
 
@@ -78,11 +78,13 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 
 ## Safe Next Actions
 
-- **Phase 18.5 stabilization** is complete. Four doc PRs landed (#126 handoff doc, #127 README dual-identity, #128 privacy + provider-neutral backend plan, #129 handoff roadmap cleanup).
-- **Phase 18 PR 7 — `OpenAICompatBackend`**: provider-neutral backend supporting OpenAI-compatible cloud endpoints (OpenAI, NVIDIA NIM, DeepSeek, Together, Fireworks, …) and local endpoints (vLLM, SGLang, Ollama, llama.cpp server). NVIDIA NIM / Nemo becomes a *config* of this backend, not a bespoke class. See `BACKEND_PROVIDER_MATRIX.md` for the canonical backend roadmap.
-- **Phase 18 PR 8 — Provider parity proof**: run the same orchestrator iteration through `AnthropicBackend` and `OpenAICompatBackend` (against a cheap cloud target like DeepSeek, or a local target like Ollama). Pass condition is "both produce tool calls the tuning API accepts or rejects correctly" — the actual model-agnostic evidence, not a hand-wave.
-- **PR 2b + Track A bundle**: the single coordinated Medusa-restart change. Engine-side `tuning_pending.json` consumer + 5-stream CuPy parallelism. Coordinate timing with Kevin; probably wants a clean snapshot first.
-- **Budget analysis**: private human track. Do not encode personal financial specifics in public repo docs.
+- **Phase 18 is functionally complete.** All ten implementation PRs landed (params_schema, tuning_api, event_bus, AgentBackend ABC + MockBackend, AnthropicBackend, Orchestrator, OpenAICompatBackend, config wiring + is_error fix, dummy-key + underscore alias, **provider parity proof**). Phase 18.5 stabilization is complete (five doc PRs: #126–#130).
+- **Provider parity proof is complete.** PR #134 (`tests/test_provider_parity.py`) drives the same propose+commit iteration through `AnthropicBackend` and `OpenAICompatBackend` against the real Phase 18 PR 2 tuning API and asserts equivalent ledger/effective-param state. Above `AgentBackend.complete()`, the orchestrator is provably backend-agnostic.
+- **Next technical work: PR 2b + Track A engine-restart bundle.** Engine-side consumer of `tuning_pending.json` + Track A 5-stream CuPy parallelism. Touches `continuous_evolution_ca.py` so it's no longer "safe exterior scaffolding"; it's engine surgery. **No rush while Medusa is baking happily.** Plan deliberately when you choose a Medusa pause; coordinate snapshot timing first.
+- **Optional future: local Ollama/vLLM smoke test.** When machine load permits (BOINC + F@H + Medusa cooperative), a single iteration through a local model server proves the local-cloud equivalence end-to-end. Not urgent.
+- **Budget analysis**: private human track. Specifics live in private memory and Kevin's records, not in this public doc.
+
+> **Posture**: the system has earned a pause. Don't sprint to "there"; make sure "here" is stable. Here is good.
 
 ## Things NOT to Do Without Coordination
 
@@ -101,7 +103,8 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 | `MEMORY.md` (+ topic files) | `~/.claude/projects/.../memory/` (auto-loaded) | High-level project state for THIS terminal session. Where Kevin's preferences and the engine snapshot live. |
 | `PHASE_17B.md` | repo root | Shard protocol design, CuPy streams, why Ray got reclassified. |
 | `PHASE_18.md` | repo root | Orchestration framework design, four-layer model, safety contract. |
-| `README.md` | repo root | Project overview (currently being updated to reflect dual identity in Phase 18.5 PR 2). |
+| `README.md` | repo root | Project overview with dual-identity preamble (sim + orchestration framework). |
+| `BACKEND_PROVIDER_MATRIX.md` | repo root | Canonical backend taxonomy — why `OpenAICompatBackend` is one class with many configs and `NemoCloud` is no longer a separate class. |
 | `git log --oneline -20` | the repo | Authoritative current phase status. Always more current than any doc. |
 
 ## On the "Biological Bridge"
