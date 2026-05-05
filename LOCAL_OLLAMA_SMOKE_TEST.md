@@ -48,19 +48,54 @@ Medusa REST API and records:
 | **Orchestrator** | **Area 51** (default) | none | Pure Python; the orchestrator already imports `scripts.medusa_api` so Area 51 is the natural host. **Do not clone the repo to Aurora for the first smoke test** — keeping the orchestrator on Area 51 is cleaner separation. |
 
 **Communication path**: orchestrator (Area 51) → HTTP → Ollama (Aurora,
-`http://<AURORA_IP>:11434/v1`) → response → orchestrator →
+`http://192.168.86.3:11434/v1`) → response → orchestrator →
 HTTP → Medusa REST API (Area 51 :8080) → ledger.
 
 The two HTTP hops are intentional and prove out the LAN-distributed
 shape we'd eventually use for cluster work.
 
-> **Open: Aurora's IP is to-be-confirmed.** The Vanguard cluster table
-> previously listed `DellUltracore9 (192.168.86.3)` as having an RTX 4090,
-> but that's an inference, not a verified match for "Aurora". Per Jack's
-> review: don't assume. **First operator action on Aurora itself**:
-> `ipconfig` (Windows) or `ip addr` (Linux), look for the IPv4 address on
-> Wi-Fi or Ethernet. Update this doc with the confirmed value before any
-> orchestrator command tries to reach Aurora.
+> **Aurora's IP is `192.168.86.3`** (confirmed by Kevin, 2026-05-05).
+> This is the same machine previously listed in the Vanguard cluster
+> table as `DellUltracore9 (192.168.86.3)` — Alienware Aurora chassis,
+> Ultra Core 9 285, RTX 4090.
+
+### Pre-flight probe results (2026-05-05)
+
+A read-only probe pair was run from Area 51 on 2026-05-05 to characterise
+the starting state of Aurora before any install actions:
+
+```
+ping -n 3 192.168.86.3                          → 100% packet loss
+curl --max-time 5 http://192.168.86.3:11434/...  → connection timed out
+```
+
+Neither result is a problem in itself — they're early observations that
+inform what the operator needs to do BEFORE the test sequence below can
+run. Likely explanations (in order of probability):
+
+1. **Aurora is asleep or powered off.** Most likely; wake/start first.
+2. **Windows Firewall on Aurora blocks inbound ICMP** by default.
+   That would kill ping, but we'd then expect `connection refused` (not
+   `timeout`) on the Ollama port — UNLESS Ollama also isn't installed yet,
+   in which case `timeout` is the correct answer for both probes.
+3. **DHCP has handed Aurora a new IP.** Verify with `ipconfig` on the
+   machine itself if the above explanations don't pan out.
+
+### CRITICAL pre-install note: Ollama's default bind address
+
+Ollama installs with `OLLAMA_HOST=127.0.0.1:11434` by default. **It will
+NOT accept connections from Area 51 unless this is changed.** Before the
+smoke test can use Aurora as the model host, the operator must either:
+
+- **Windows installer**: set system env var `OLLAMA_HOST=0.0.0.0:11434`
+  (System Properties → Environment Variables) and restart the Ollama
+  service / sign out + back in.
+- **Manual start**: `OLLAMA_HOST=0.0.0.0:11434 ollama serve`.
+
+Verify with the curl probe above: a successful response means Ollama is
+listening on the LAN, not just locally. Failure to do this is the single
+most common "but I installed Ollama!" debugging trap; flagging it here
+to save future-Kevin and future-84 the head-scratching.
 
 ## Software prerequisites
 
@@ -105,7 +140,7 @@ After all pre-flight checks pass, the operator runs (on Area 51):
 
 ```bash
 export MEDUSA_AGENT_BACKEND=openai-compat
-export MEDUSA_OPENAI_BASE_URL=http://<AURORA_IP>:11434/v1
+export MEDUSA_OPENAI_BASE_URL=http://192.168.86.3:11434/v1
 export MEDUSA_OPENAI_MODEL=granite4:3b   # primary first-test pick (per Jack)
 # MEDUSA_OPENAI_API_KEY intentionally unset; backend supplies "not-needed"
 
