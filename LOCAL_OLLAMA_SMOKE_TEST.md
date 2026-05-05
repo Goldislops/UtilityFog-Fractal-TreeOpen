@@ -44,29 +44,30 @@ Medusa REST API and records:
 | Role | Machine | GPU | Notes |
 |------|---------|-----|-------|
 | **Medusa engine** | Area 51 (workstation, 192.168.86.29) | RTX 5090 | UNTOUCHED. Continues baking. |
-| **Local LLM host** | Aurora (Ultra Core 9 285 + RTX 4090) | RTX 4090 | Hosts Ollama + Granite. F@H paused during the test. |
-| **Orchestrator** | Either box | none | Pure Python; runs wherever convenient. Probably Area 51 since the orchestrator already imports the medusa_api. |
+| **Local LLM host** | Aurora — **Alienware Aurora Ultra Core 9 285 + RTX 4090** | RTX 4090 | Hosts Ollama + Granite. F@H paused during the test. |
+| **Orchestrator** | **Area 51** (default) | none | Pure Python; the orchestrator already imports `scripts.medusa_api` so Area 51 is the natural host. **Do not clone the repo to Aurora for the first smoke test** — keeping the orchestrator on Area 51 is cleaner separation. |
 
 **Communication path**: orchestrator (Area 51) → HTTP → Ollama (Aurora,
-e.g. `http://192.168.86.<aurora-ip>:11434/v1`) → response → orchestrator →
+`http://<AURORA_IP>:11434/v1`) → response → orchestrator →
 HTTP → Medusa REST API (Area 51 :8080) → ledger.
 
 The two HTTP hops are intentional and prove out the LAN-distributed
 shape we'd eventually use for cluster work.
 
-> **Open question for Kevin**: which Vanguard node is "Aurora"? The cluster
-> table in the prior README listed `DellUltracore9 (192.168.86.3)` as having
-> an RTX 4090. Is that the same machine AURA referred to as Aurora? If yes,
-> the Ollama endpoint will be `http://192.168.86.3:11434/v1`. If Aurora is a
-> different / newer machine, please specify its IP and we'll fill it in
-> before any execution.
+> **Open: Aurora's IP is to-be-confirmed.** The Vanguard cluster table
+> previously listed `DellUltracore9 (192.168.86.3)` as having an RTX 4090,
+> but that's an inference, not a verified match for "Aurora". Per Jack's
+> review: don't assume. **First operator action on Aurora itself**:
+> `ipconfig` (Windows) or `ip addr` (Linux), look for the IPv4 address on
+> Wi-Fi or Ethernet. Update this doc with the confirmed value before any
+> orchestrator command tries to reach Aurora.
 
 ## Software prerequisites
 
 | Component | Where | How |
 |-----------|-------|-----|
 | Ollama runtime | Aurora | `winget install Ollama.Ollama` (Windows) or Linux installer; provides `ollama` CLI + a server on `:11434` |
-| Granite 4.0 MoE model | Aurora (Ollama-managed) | `ollama pull <granite-tag>` — exact tag verified against Ollama's library at execution time. Likely candidates: `granite4:tiny`, `granite4:small`. Pick the smaller MoE variant first. |
+| Granite 4 model | Aurora (Ollama-managed) | `ollama pull <granite-tag>`. **Verified Ollama tags** (per Jack's review of Ollama's Granite page): `granite4:3b`, `granite4:micro`, `granite4:tiny-h`, `granite4:small-h`. **For the first smoke test, prefer `granite4:3b`** — smallest, fastest, sufficient for proving plumbing. Fall back to `granite4:tiny-h` if 3B is too weak at tool use. **Do NOT start with `granite4:small-h` (~19 GB)** — overkill for first plumbing test. |
 | `OpenAICompatBackend` | already in repo | imported from `scripts.agent_backends`; pointed at Aurora's Ollama endpoint |
 | `medusa_api.py` | Area 51 | already running per existing `:8080` deployment |
 
@@ -104,8 +105,8 @@ After all pre-flight checks pass, the operator runs (on Area 51):
 
 ```bash
 export MEDUSA_AGENT_BACKEND=openai-compat
-export MEDUSA_OPENAI_BASE_URL=http://192.168.86.<aurora>:11434/v1
-export MEDUSA_OPENAI_MODEL=granite4:tiny   # or whatever the verified tag is
+export MEDUSA_OPENAI_BASE_URL=http://<AURORA_IP>:11434/v1
+export MEDUSA_OPENAI_MODEL=granite4:3b   # primary first-test pick (per Jack)
 # MEDUSA_OPENAI_API_KEY intentionally unset; backend supplies "not-needed"
 
 python -c "
@@ -161,7 +162,7 @@ report makes the post-mortem easy. Suggested output filename:
 **FAIL** (and what it suggests) if:
 - `stopped_because == "max_depth"` → model is looping; bad model fit, or system prompt wasn't clear enough about "stop when done".
 - Zero tool calls → model can't do tool-use with this provider's chat-completions surface; pick a different model or check Ollama's tool-call support.
-- Validation errors on every proposal → model isn't reading the schema correctly; consider Granite Small instead of Tiny.
+- Validation errors on every proposal → model isn't reading the schema correctly; try `granite4:tiny-h` (next size up) before considering `granite4:small-h`.
 - Commit applied → safety rail breach. Roll back ledger from backup, investigate.
 - Connection refused on Aurora's :11434 → firewall / Ollama not bound externally. Fix and retry.
 
@@ -202,20 +203,51 @@ entries.
   running observers / proposers / critics in parallel) — but only after
   the single-node case is solid.
 
-## Open questions for AURA + Jack
+## Open questions — RESOLVED via Jack's review (2026-05-05)
 
-1. Is "Aurora" the same physical box as `DellUltracore9 (192.168.86.3)`,
-   or a separate machine? IP needs filling in before any commands run.
-2. Do we want the orchestrator running on Area 51 (current default,
-   imports `medusa_api`) or on Aurora itself (cleaner separation but
-   needs the repo cloned there)?
-3. Granite 4.0 MoE Ollama tag verification: are the planned tags
-   `granite4:tiny` and `granite4:small`, or do they have different
-   names in Ollama's library? Verify before pre-flight step 6.
-4. Do we want a tiny Python harness committed to the repo for this
-   test, or keep it as ad-hoc commands the operator pastes? My instinct:
-   ad-hoc first (fewer moving parts), harness only if we'll repeat
-   the smoke test often.
+1. ~~Is "Aurora" the same physical box as `DellUltracore9 (192.168.86.3)`?~~
+   **Resolution**: Aurora = **Alienware Aurora Ultra Core 9 285 + RTX 4090**.
+   IP **to be confirmed** via `ipconfig` on Aurora itself; do not assume
+   `192.168.86.3` is the right machine.
+2. ~~Orchestrator on Area 51 or Aurora?~~
+   **Resolution**: **Area 51**. Don't clone the repo to Aurora for first
+   smoke test. Topology is `Area 51 orchestrator → Aurora Ollama → Area 51 Medusa API`.
+3. ~~Granite 4.0 MoE Ollama tag verification?~~
+   **Resolution**: real Ollama tags are `granite4:3b`, `granite4:micro`,
+   `granite4:tiny-h`, `granite4:small-h` (NOT plain `tiny`/`small`).
+   Use `granite4:3b` first; fall back to `granite4:tiny-h` if needed.
+   `granite4:small-h` (~19 GB) is overkill for first test.
+4. ~~Harness or ad-hoc?~~
+   **Resolution**: **ad-hoc first**. No committed harness. Build one
+   later only if the smoke test proves useful enough to repeat.
+
+## Operator Approval Workflow (per Jack)
+
+For each command in the test sequence below — and especially anything
+that installs software, downloads a model, opens a port, or modifies a
+service — the working pattern is:
+
+1. **84 writes the exact command.**
+2. **84 explains in one sentence what it does.**
+3. **Kevin reads, then says yes or no.**
+4. **84 either runs it (if it's on this Area 51 session) or hands it to
+   Kevin to paste (if it's on Aurora).**
+5. **Result comes back; the next command goes through the same loop.**
+
+Today, the only commands worth approving are read-only / inspection:
+- identify Aurora's IP (`ipconfig` or `ip addr` — read-only).
+- check whether SSH is already running on Aurora (read-only).
+- check whether Ollama is already installed on Aurora (read-only).
+- *optionally*: install Ollama on Aurora (only if Kevin feels clear and steady).
+
+**Explicitly NOT approved without further conversation**:
+- changing firewall rules.
+- downloading large models (>1 GB).
+- starting always-on services.
+- touching Medusa, BOINC, or F@H settings.
+- one-shot multi-step changes across multiple machines.
+
+One machine. One model. One test. Human says yes each step.
 
 ## Posture
 
@@ -226,3 +258,5 @@ Medusa stays untouched throughout. The system has earned a pause; this
 plan is what carefulness looks like when we eventually move forward.
 
 — drafted 2026-05-01 by Agent 84, per AURA + Jack joint scope
+— revised 2026-05-05 with Jack's review corrections (verified Ollama tags,
+  Aurora-IP-to-be-confirmed, explicit operator approval workflow)
