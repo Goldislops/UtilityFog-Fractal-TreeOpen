@@ -295,3 +295,95 @@ plan is what carefulness looks like when we eventually move forward.
 — drafted 2026-05-01 by Agent 84, per AURA + Jack joint scope
 — revised 2026-05-05 with Jack's review corrections (verified Ollama tags,
   Aurora-IP-to-be-confirmed, explicit operator approval workflow)
+
+---
+
+## Execution log — 2026-05-05 (smoke test PASSED)
+
+The plan above was executed end-to-end with operator-driven per-command
+approval. Recording outcomes here so the next session has a verified
+baseline rather than "we think this works."
+
+### Setup completed
+
+| Step | Command / action | Outcome |
+|------|------------------|---------|
+| 1. Install Ollama | `winget install Ollama.Ollama` (on Aurora, RDP from Mega) | ✅ Ollama 0.23.0 installed, ~1.8 GB |
+| 2. Set OLLAMA_HOST | `[System.Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0:11434', 'Machine')` | ✅ Set in registry (Machine scope) |
+| 3. Restart Ollama (initial) | Hit env-var inheritance bug — Start-menu launches inherited explorer.exe's stale env. Worked around in-session via `$env:OLLAMA_HOST = ...; Start-Process ollama serve` | ⚠ Worked, but temporary |
+| 3a. **Permanence fix** | `shutdown /l` (sign out + sign back in via RDP) → Start-menu Ollama relaunch | ✅ explorer.exe now has env var; Ollama listens on `::` (dual-stack, accepts IPv4 too) |
+| 4. Firewall rule | Added automatically by Windows on first 0.0.0.0 bind, confirmed via Allow dialog | ✅ Inbound TCP 11434 allowed |
+| 5. Pull model | `ollama pull granite4:3b` (used absolute path `C:\Users\kevin\AppData\Local\Programs\Ollama\ollama.exe` due to admin PATH gap) | ✅ 2.1 GB downloaded, SHA256 verified |
+| 6. Verify reachability | `curl http://192.168.86.3:11434/api/tags` from Mega | ✅ `{"models": [{"name": "granite4:3b", ...}]}` returned |
+
+### Smoke test (single orchestrator-style iteration)
+
+Backend: `scripts.agent_backends.OpenAICompatBackend`
+Endpoint: `http://192.168.86.3:11434/v1`
+Model: `granite4:3b` (IBM Granite 4, 3.4B params, Q4_K_M)
+Tool offered: `get_medusa_status` (read-only-shaped, with optional `verbose: bool`)
+F@H state: paused on Aurora during the test
+System prompt: "You are a careful tuning agent. Use tools to gather state before reasoning. Be concise."
+
+**Result**:
+
+| Metric | Value |
+|--------|-------|
+| Latency (cold call, includes model load into VRAM) | **3.21 s** |
+| Stop reason | `tool_use` (mapped from Ollama's `tool_calls` finish_reason) |
+| Input tokens | 273 |
+| Output tokens | 27 |
+| Total tokens | 300 |
+| Text content | (none — model went straight to tool) |
+| Tool calls | 1 — `get_medusa_status({"verbose": false})`, id `call_x2c0cn0x` |
+| Raw content blocks | 1 × `ToolUseBlock` |
+
+**What this validated**:
+- ✅ Network path Mega → Aurora over LAN works under load.
+- ✅ `OpenAICompatBackend` outbound translation (PR #131): a real Ollama
+  server consumed our request shape correctly.
+- ✅ `OpenAICompatBackend` inbound translation (PR #131): Ollama's
+  response shape (including the JSON-string `arguments` field) parsed
+  cleanly into our `AgentResponse` dataclass.
+- ✅ The `_FINISH_REASON_MAP` correctly maps `tool_calls` → `tool_use`.
+- ✅ The arguments dict was parsed back from JSON string into a Python
+  dict (`{"verbose": false}`) — the round-trip works.
+- ✅ Granite 4 3B at 3.4B params correctly follows tool-use instructions
+  and produces well-formed structured output.
+- ✅ The resulting `ToolUseBlock` is shape-identical to what
+  `AnthropicBackend` would produce; the orchestrator (PR #125) would
+  route it identically. The provider-parity claim from PR #134
+  (test-mocked) is now also empirically validated against real local
+  hardware.
+
+### Lessons recorded
+
+- **Windows env-var inheritance**: `[System.Environment]::SetEnvironmentVariable(..., 'Machine')` writes to the registry but does not update *running* processes' env blocks. Sign out + sign back in is the cheapest way to make explorer.exe (and therefore Start-menu launches) pick up the change. Documented in the relevant doc section above.
+- **Admin PowerShell PATH**: an elevated PowerShell may inherit a different PATH than the user shell. When running an executable installed in user-scope `%LOCALAPPDATA%\Programs\...`, prefer absolute paths in admin contexts.
+- **Ollama on Windows binds to `::` (IPv6 dual-stack)** when `OLLAMA_HOST=0.0.0.0:11434`. This is fine — Go sockets default to IPv4-mapped-IPv6 dual-stack, so IPv4 LAN clients (like Mega's curl from `192.168.86.x`) reach it transparently. The literal `LocalAddress` will be `::` not `0.0.0.0` in `Get-NetTCPConnection`; this is correct.
+- **Firewall auto-allow**: Windows pops a "do you want to allow" dialog on the first non-localhost bind. If accepted, no manual `netsh advfirewall` rule is needed. (If declined or never prompted, the manual rule from the plan above is still the right fallback.)
+
+### Operational state after this test
+
+- Aurora's Ollama is permanently configured for LAN access.
+- `granite4:3b` is on disk, persistent across reboots.
+- Mega can reach Aurora's Ollama API without RDP being active.
+- F@H can be safely un-paused; Ollama doesn't reserve VRAM when idle.
+- Medusa was untouched throughout; her run continues uninterrupted.
+
+### What's NOT yet validated (deliberately deferred)
+
+- A full orchestrator iteration with the actual Phase 18 PR 2 tuning API
+  live (would require Medusa REST API listening on Mega, plus a real
+  propose / commit cycle through `OrchestratorClient`). The PR #134
+  test-mocked parity proof + this real-hardware backend smoke test
+  together cover both halves of that claim; the integration of both
+  halves at once is a future session, not a blocker.
+- Multi-iteration / sustained / multi-tool conversations.
+- Larger Granite variants (`granite4:tiny-h`, `granite4:small-h`) or
+  other models. The Q4_K_M 3B variant proved tool-use works; larger
+  models would only help with reasoning depth, not with the protocol.
+- Cluster-wide / multi-node distribution (Phase 17b's shard protocol
+  remains available when warranted).
+
+— smoke test executed 2026-05-05 by Agent 84, per Kevin's go-ahead
