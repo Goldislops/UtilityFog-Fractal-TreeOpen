@@ -106,14 +106,14 @@ The observer logs the following per classification cycle. All are derivable from
 | # | Metric | What it tells us |
 |---|--------|------------------|
 | 1 | **Token vocabulary occupancy** | Fraction of vocabulary actually used. Low = monoculture; high = healthy diversity. |
-| 2 | **Per-token persistence histogram** | How long does each token type persist in place before flipping? Long-persistence tokens describe stable regions; short-persistence describes flicker. |
+| 2 | **Per-token persistence histogram** | How long does each token type persist in place before flipping? Long-persistence tokens describe stable regions; short-persistence describes flicker. Measured in **snapshot windows**, not generations, since snapshots are the observer's natural cadence. |
 | 3 | **Spatial autocorrelation length** | At what distance do two patches' tokens become statistically independent? Tells us the *characteristic scale* of structure. |
-| 4 | **Token transition matrix** | Markov-style: $P(\text{token at } t+\Delta\,\|\,\text{token at } t)$. The observer's main "model" of Medusa's dynamics. |
+| 4 | **Token transition matrix** | Markov-style: $P(\text{token at snapshot } t+\Delta\,\|\,\text{token at snapshot } t)$. The observer's main "model" of Medusa's dynamics. Δ counted in **snapshots**, default Δ=1 (next snapshot). |
 | 5 | **Global token entropy** | Shannon entropy of the token distribution. A scalar summary of "how varied are the dynamics right now." |
 | 6 | **Sage-region calmness** | Ratio of `compute_static` / `compute_aging` tokens in the top-K eldest-Sage neighbourhoods. Should be high in healthy Medusa; drops during Sage stress events. |
 | 7 | **Acoustic-stress correspondence** | Cross-correlation between top-25% acoustic-stress sectors and `acoustic_stress` token frequency. Validates the hand-coded vocabulary against an independent (Phase 14e) signal. |
-| 8 | **Propagation-event rate** | Count per generation of tokens that travel (e.g., `energy_pulse` moving through patches). Independent measure of "things in motion." |
-| 9 | **Phase-transition flag** | Boolean: did the token distribution shift "significantly" in the last $W$ generations? See §6 for definition. |
+| 8 | **Propagation-event rate** | Count per snapshot of tokens that travel (e.g., `energy_pulse` moving through patches). Independent measure of "things in motion." |
+| 9 | **Phase-transition flag** | Boolean: did the token distribution shift "significantly" in the last $W$ snapshots? See §6 for definition. |
 | 10 | **Compression ratio** | Bytes of (lattice + memory_grid) per generation vs. bytes of (token grid + transition log). Measures whether the observer is actually summarising. If ratio is ~1.0, the vocabulary isn't doing useful work; refine. |
 
 ## 6. The smallest global signal that Medusa changed state
@@ -153,6 +153,7 @@ The observer **must** uphold all of the following. These are testable; PR 2 ship
 5. **Killable at any time.** SIGTERM / Ctrl+C must leave a consistent log state and have zero engine impact. No partial writes, no orphaned subscriptions.
 6. **Pause-aware.** When Medusa is paused (no new snapshots in $T$ minutes, default 30), the observer enters quiescent mode — stops publishing live events, continues offline analysis only on existing snapshots.
 7. **No `trust_remote_code=True`** anywhere in the observer's dependencies. No execution of remote-fetched code. (This is per Jack's earlier audit on abliterated-model risks.)
+8. **Bounded compute per snapshot.** The observer must stay under a configurable per-snapshot CPU / wall-time budget. Default proposal: `MEDUSA_OBSERVER_BUDGET_S=30` seconds wall-time per snapshot processed; configurable down to `5` for laptop-class machines or up to `300` for offline batch runs. If a classification pass would exceed budget, the observer reduces sampling density (see §9 PR 2) rather than running over. The observer is read-only AND cheap; otherwise it stops being a passive observer and becomes a compute competitor.
 
 ## 8. What would count as a useful result
 
@@ -163,7 +164,7 @@ The observer is useful if **at least three** of the following are demonstrated:
 1. **Detectability of known historical events.** The KL drift signal reliably flags moments in Medusa's snapshot history where we already know something happened (Phase transitions, Sage promotions, acoustic spikes). Calibration baseline.
 2. **Compression that's better than memory_grid raw.** The token grid + transition log uses meaningfully fewer bytes per generation than the raw memory_grid would. If compression ratio < 2×, the vocabulary isn't earning its keep.
 3. **Independent validation against acoustic map.** The `acoustic_stress` token frequency correlates with the Phase 14e acoustic map's top-25% sectors at $r > 0.7$. Two independent signals agreeing on "where the stress is" is meaningful.
-4. **Sage-region anomaly detection.** When a Legend Sage in the top-148 set degrades (e.g., a `compute_aging` patch flips to `compute_decay`), the observer flags it within 10 generations. Currently no such alarm exists.
+4. **Sage-region anomaly detection.** When a Legend Sage in the top-148 set degrades (e.g., a `compute_aging` patch flips to `compute_decay`), the observer flags it within the **next available snapshot window** — or, equivalently, within **N=2 observed snapshots** of the actual degradation event. The observer's natural cadence is per-snapshot (~10 min wall-time), not per-generation, so phrasing the criterion in snapshot-units is the only sensible choice. Currently no such alarm exists in the project.
 5. **Token vocabulary insight.** After 100k generations of observation, the observer has produced a token co-occurrence matrix that reveals at least one previously-unnoticed structural relationship in Medusa's dynamics. (Open-ended; success here is qualitative.)
 
 If fewer than three of those land after PR 5, Phase 19 should be reconsidered — possibly rescoped, possibly retired. **The observer must earn its compute.**
@@ -175,12 +176,24 @@ Each PR is small, independently mergeable, and explicitly **does not** require M
 | PR | Scope | Risk | Notes |
 |----|-------|------|-------|
 | **#1 (this doc)** | `PHASE_19_NEXTNESS_OBSERVER.md` design only | None | **Awaiting AURA + Jack review** |
-| #2 | `scripts/nextness_observer.py` skeleton: snapshot loader, hand-coded 16-token classifier, JSONL output. No ZMQ, no live mode. Unit tests for the safety contract (§7). | Low | Read-only on a single snapshot at a time |
+| #2 | `scripts/nextness_observer.py` skeleton: snapshot loader, hand-coded 16-token classifier, JSONL output. **OFFLINE ONLY — no ZMQ subscribe or publish in PR 2; live integration is strictly PR 6.** Unit tests for the safety contract (§7), including a test that fails if PR 2 attempts any ZMQ socket creation. | Low | Read-only on a single snapshot at a time |
 | #3 | Metrics pipeline: §5 metrics 1–5 (occupancy, persistence, autocorrelation, transition matrix, entropy). Outputs `nextness_log/metrics_*.jsonl`. | Low | Pure post-hoc analysis |
 | #4 | KL-divergence drift signal (§6) + calibration sweep over historical snapshots. Determine $\tau$. | Low | Validation against known events |
 | #5 | Optional: learned token embedding. Train offline on snapshot history; vocabulary size grows to K=512 if hand-coded version proves limiting. | Medium (ML training surface) | Skip if hand-coded version meets §8 useful-result criteria |
 | #6 | Live integration: ZMQ subscribe to `telemetry.5min`, publish `nextness.*` topics. Process snapshots as they arrive. | Low-medium | First time observer runs alongside live Medusa |
 | #7 | Optional: `nextness_observer_dashboard.py` — minimal HTML/static visualisation of token grid + drift signal. | Low | Pure UI on top of logs |
+
+### PR 2 sampling discipline (per Jack's audit)
+
+**PR 2 must NOT classify all 16.7M cells of the 256³ lattice densely on day one.** A naive dense per-cell 3×3×3 × 3-generation pass would visit ~50M cell-evaluations per snapshot before any actual classification logic, and could quietly become a multi-second compute load — which would violate the "passive observer, not compute competitor" contract (§7 #8).
+
+PR 2 starts with **sampled patches**, with three sampling modes selectable by config:
+
+1. **`uniform_grid`** (default for first run): take patches at every Nth voxel along each axis. With N=8 on a 256³ lattice, that's 32³ = 32,768 patches per snapshot — a 512× reduction from dense and well within the §7 #8 budget.
+2. **`importance`**: bias sampling toward acoustic-stress sectors (top-25% friction per the Phase 14e map) and Sage neighbourhoods (top-K eldest COMPUTE cells). Lets the observer spend its budget where things are actually moving.
+3. **`dense`** (only for offline batch runs, never live): full per-cell classification. Reserved for calibration and historical analysis, gated by an explicit `MEDUSA_OBSERVER_DENSE=1` env var, and refuses to run if Medusa is currently live (no fresh snapshots > N min old).
+
+Profiling and dense-pass enablement are deferred to PR 4 or later, once the sampled-mode pipeline is proven cheap.
 
 **Lane A (PR 2b + Track A) is unblocked by Phase 19.** AURA can sequence the engine work whenever; this observer track runs in parallel. The two converge eventually (orchestrator subscribes to `nextness.*` events as one input among many), but they don't have to march in lockstep.
 
