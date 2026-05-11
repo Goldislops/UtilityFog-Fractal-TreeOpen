@@ -486,6 +486,24 @@ def test_find_latest_snapshot_empty_dir_returns_none(tmp_path):
     assert find_latest_snapshot(tmp_path) is None
 
 
+def test_find_latest_snapshot_returns_none_when_all_files_below_threshold(tmp_path):
+    """Per Jack's PR #138 audit: previously this would fall back to the
+    first candidate even if every file was below the tiny/corrupt size
+    threshold. Now it returns None — matching the docstring claim that
+    such files are skipped.
+    """
+    # Create files matching the pattern but all below the 1 MB threshold.
+    for i in range(3):
+        p = tmp_path / f"v070_gen{i}_step{i}_test.npz"
+        # Save a tiny snapshot — well below the 1MB threshold.
+        np.savez(str(p),
+                 lattice=np.zeros((4, 4, 4), dtype=np.uint8),
+                 memory_grid=np.zeros((8, 4, 4, 4), dtype=np.float32),
+                 generation=np.array(i))
+        assert p.stat().st_size < 1_000_000
+    assert find_latest_snapshot(tmp_path) is None
+
+
 def test_is_medusa_live_with_fresh_snapshot(tmp_path):
     _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16,
                     pad_bytes=2_000_000)

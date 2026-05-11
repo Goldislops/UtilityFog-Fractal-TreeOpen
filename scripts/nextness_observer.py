@@ -10,10 +10,23 @@ the per-cell flicker level — without modifying the engine, without
 restarting the engine, and without competing with the engine for
 compute.
 
-This is PR #2's skeleton: data classes, configuration, the 16-token
-vocabulary, module-level constants, and the safety-contract guards.
-**No classifier logic, no sampler, no I/O yet.** Those land in
-Chunks 2–5 of the live drafting session.
+This PR (#2) ships the complete offline skeleton:
+
+  • 16-token hand-coded vocabulary (``TOKEN_NAMES``).
+  • Spatial-patch sampler in ``uniform_grid`` mode (``importance`` and
+    ``dense`` are stubs that raise ``NotImplementedError`` naming the
+    PR each one will land in).
+  • Hand-coded classifier cascading 16 predicates over patch features
+    (``classify_patch``).
+  • Wall-time budget monitor + pre-flight density backoff
+    (``BudgetMonitor``, ``compute_safe_stride``).
+  • Filesystem I/O: snapshot loading, log writing, end-to-end
+    ``process_snapshot``.
+
+Live ZMQ subscription/publishing remain strictly deferred to PR #6.
+KL-drift metrics and acoustic-map cross-validation land in PR #4.
+Optional learned 512-token embedding is PR #5 if §8 useful-result
+criteria suggest the hand-coded vocabulary is limiting.
 
 ## Safety contract (from §7 of the design doc)
 
@@ -320,8 +333,13 @@ class Patch(NamedTuple):
     - ``memory`` is a (channels, 2r+1, 2r+1, 2r+1) block of memory_grid
       values (float32).
 
-    Both ``state`` and ``memory`` are read-only views into the source
-    snapshot arrays. **Do not mutate them.**
+    Both ``state`` and ``memory`` are **zero-copy views** into the source
+    snapshot arrays. **Callers must treat them as read-only.** PR #2 does
+    not enforce immutability via ``setflags(write=False)`` to avoid the
+    per-patch overhead at 32k+ patches/snapshot; the read-only contract
+    is by convention. The classifier in this module never mutates the
+    views (verified by tests), so the convention holds for the in-tree
+    use. External callers should respect it.
 
     Temporal context (per the design doc's ``patch_temporal_window``)
     is NOT part of a Patch in PR #2; classifiers infer temporal
@@ -948,7 +966,11 @@ def find_latest_snapshot(
     """Return the path of the most-recent snapshot matching ``pattern``.
 
     Skips files smaller than ``_LATEST_SNAPSHOT_MIN_BYTES`` (likely
-    truncated / mid-write). Returns ``None`` if no qualifying file exists.
+    truncated or mid-write). Returns ``None`` if no qualifying file
+    exists — INCLUDING the case where matching files are present but
+    all of them are below the size threshold (per Jack's PR #138
+    audit, the previous fallback-to-first-candidate contradicted the
+    "skip tiny files" docstring claim).
     """
     snapshot_dir = pathlib.Path(snapshot_dir)
     if not snapshot_dir.is_dir():
@@ -964,7 +986,7 @@ def find_latest_snapshot(
                 return p
         except OSError:
             continue
-    return candidates[0] if candidates else None
+    return None
 
 
 def is_medusa_live(
@@ -998,7 +1020,16 @@ def load_snapshot(
       • ``state``: uint8 array of shape (X, Y, Z)
       • ``memory_grid``: float32 array of shape (channels, X, Y, Z)
       • ``generation``: int
-      • ``meta``: dict of any other keys present in the snapshot
+      • ``meta``: dict of additional numeric/scalar keys; any pickled
+        object metadata is silently skipped (see below).
+
+    Uses ``allow_pickle=False`` for safety per Jack's PR #138 audit:
+    even though Medusa's own snapshots are trusted, this function accepts
+    arbitrary paths and so must not be a pickle-deserialization sink.
+    Only the three required numeric keys (``lattice``, ``memory_grid``,
+    ``generation``) are needed for classification; any other keys in
+    the file are loaded if they're plain numeric arrays/scalars and
+    skipped silently if they require pickle.
 
     Raises ``ValueError`` if required keys are missing or shapes are
     inconsistent — defensive against passing the wrong file.
@@ -1006,7 +1037,7 @@ def load_snapshot(
     snapshot_path = pathlib.Path(snapshot_path)
     if not snapshot_path.is_file():
         raise FileNotFoundError(f"snapshot not found: {snapshot_path}")
-    snap = np.load(str(snapshot_path), allow_pickle=True)
+    snap = np.load(str(snapshot_path), allow_pickle=False)
     keys = set(snap.files)
     required = {"lattice", "memory_grid", "generation"}
     missing = required - keys
@@ -1026,8 +1057,17 @@ def load_snapshot(
             f"snapshot {snapshot_path.name}: memory shape {memory.shape} "
             f"inconsistent with state shape {state.shape}"
         )
-    meta = {k: snap[k].item() if snap[k].ndim == 0 else snap[k]
-            for k in keys - required}
+    # Optional metadata: only include keys that load without pickle.
+    # With allow_pickle=False any key requiring pickle will raise ValueError
+    # at access time; we catch + skip rather than fail the whole load.
+    meta: dict[str, object] = {}
+    for k in keys - required:
+        try:
+            val = snap[k]
+        except ValueError:
+            # Key needs pickle (object dtype); skip silently per §7 #7 spirit.
+            continue
+        meta[k] = val.item() if val.ndim == 0 else val
     return state, memory, generation, meta
 
 
