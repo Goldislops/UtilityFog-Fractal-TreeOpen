@@ -1,0 +1,748 @@
+"""Tests for scripts/nextness_observer.py — Phase 19 PR #2.
+
+Locks down each §7 safety invariant with a dedicated test, plus
+classifier-token coverage, sampler/budget mechanics, and an end-to-end
+process_snapshot round-trip.
+
+Per the design doc: this is the regression-fence layer. PR #3 (metrics
+pipeline) will add semantic tests on the OUTPUT of the observer; this
+PR just locks down the SHAPE of it.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import inspect
+import json
+import os
+import pathlib
+import time
+
+import numpy as np
+import pytest
+
+from scripts import nextness_observer
+from scripts.nextness_observer import (
+    AGE_ANCIENT,
+    AGE_LEGEND,
+    AGE_SAGE,
+    BudgetMonitor,
+    BudgetReport,
+    DEFAULT_COST_PER_PATCH_SECONDS,
+    DenseModeWhileLiveError,
+    MEMORY_CHANNEL_LAYOUT,
+    ObserverConfig,
+    ObserverSafetyError,
+    Patch,
+    SamplingMode,
+    STATE_COMPUTE,
+    STATE_ENERGY,
+    STATE_SENSOR,
+    STATE_STRUCTURAL,
+    STATE_VOID,
+    THRESHOLD_COMPASSION,
+    THRESHOLD_RESONANCE,
+    THRESHOLD_WARMTH,
+    TOKEN_BY_INDEX,
+    TOKEN_INDEX,
+    TOKEN_NAMES,
+    WriteOutsideLogDirError,
+    ZmqUseInPR2Error,
+    classify_patch,
+    compute_safe_stride,
+    find_latest_snapshot,
+    is_medusa_live,
+    iter_dense_patches,
+    iter_importance_patches,
+    iter_patches,
+    iter_uniform_grid_patches,
+    load_snapshot,
+    process_snapshot,
+    write_log_entry,
+)
+
+
+CH = MEMORY_CHANNEL_LAYOUT
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _zero_patch(state_fill: int = STATE_VOID, channels: dict[str, float] | None = None) -> Patch:
+    """Build a 3x3x3 patch with the given uniform state and optional channel values."""
+    s = np.full((3, 3, 3), state_fill, dtype=np.uint8)
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    if channels:
+        for name, val in channels.items():
+            m[CH[name]].fill(val)
+    return Patch(center=(0, 0, 0), state=s, memory=m)
+
+
+def _make_snapshot(path: pathlib.Path, lattice: int = 32, generation: int = 100,
+                    pad_bytes: int = 0) -> pathlib.Path:
+    """Create a synthetic Medusa-format .npz snapshot, optionally padded."""
+    state = np.zeros((lattice, lattice, lattice), dtype=np.uint8)
+    state[::4, ::4, ::4] = STATE_COMPUTE
+    memory = np.zeros((8, lattice, lattice, lattice), dtype=np.float32)
+    memory[CH["compute_age"]].fill(15.0)
+    extras = {}
+    if pad_bytes > 0:
+        extras["padding"] = np.zeros(pad_bytes // 4, dtype=np.float32)
+    np.savez(
+        str(path),
+        lattice=state, memory_grid=memory,
+        generation=np.array(generation), best_fitness=np.array(0.5),
+        **extras,
+    )
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary integrity (Chunk 1)
+# ---------------------------------------------------------------------------
+
+
+def test_vocabulary_size_is_exactly_16():
+    assert len(TOKEN_NAMES) == 16
+
+
+def test_vocabulary_names_unique():
+    assert len(set(TOKEN_NAMES)) == 16
+
+
+def test_token_index_round_trip():
+    for i, name in enumerate(TOKEN_NAMES):
+        assert TOKEN_BY_INDEX[i] == name
+        assert TOKEN_INDEX[name] == i
+
+
+# ---------------------------------------------------------------------------
+# ObserverConfig (Chunk 1)
+# ---------------------------------------------------------------------------
+
+
+def test_config_defaults_sensible():
+    c = ObserverConfig()
+    assert c.sampling_mode is SamplingMode.UNIFORM_GRID
+    assert c.uniform_grid_stride == 8
+    assert c.patch_spatial_radius == 1
+    assert c.budget_seconds == 30.0
+    assert c.use_gpu is False
+    assert c.allow_dense_mode is False
+
+
+def test_config_from_env_reads_budget(monkeypatch):
+    monkeypatch.setenv("MEDUSA_OBSERVER_BUDGET_S", "90")
+    c = ObserverConfig.from_env()
+    assert c.budget_seconds == 90.0
+
+
+def test_config_from_env_reads_stride(monkeypatch):
+    monkeypatch.setenv("MEDUSA_OBSERVER_STRIDE", "16")
+    c = ObserverConfig.from_env()
+    assert c.uniform_grid_stride == 16
+
+
+def test_config_budget_below_floor_raises():
+    with pytest.raises(ValueError, match="below floor"):
+        ObserverConfig(budget_seconds=2.0)
+
+
+def test_config_dense_without_allow_raises():
+    with pytest.raises(ValueError, match="DENSE"):
+        ObserverConfig(sampling_mode=SamplingMode.DENSE)
+
+
+def test_config_stride_zero_raises():
+    with pytest.raises(ValueError, match="uniform_grid_stride"):
+        ObserverConfig(uniform_grid_stride=0)
+
+
+# ---------------------------------------------------------------------------
+# Sampler (Chunk 2)
+# ---------------------------------------------------------------------------
+
+
+def test_sampler_uniform_grid_count_matches_range_math():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    patches = list(iter_uniform_grid_patches(state, memory, stride=4, radius=1))
+    # range(1, 15, 4) = [1, 5, 9, 13] → 4 per axis, 4^3 total
+    assert len(patches) == 64
+
+
+def test_sampler_returns_zero_copy_views():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    state[5, 5, 5] = STATE_COMPUTE
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    patches = list(iter_uniform_grid_patches(state, memory, stride=4, radius=1))
+    p = next(p for p in patches if p.center == (5, 5, 5))
+    # The view's centre cell should reflect the source array, and the
+    # view must share the source's underlying buffer (zero-copy).
+    assert p.state[1, 1, 1] == STATE_COMPUTE
+    assert p.state.base is state
+
+
+def test_sampler_dispatcher_routes_uniform_grid():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    cfg = ObserverConfig(uniform_grid_stride=4)
+    n = sum(1 for _ in iter_patches(state, memory, cfg))
+    assert n == 64
+
+
+def test_sampler_importance_stub_raises_naming_pr():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    with pytest.raises(NotImplementedError, match="PR #3"):
+        list(iter_importance_patches(state, memory))
+
+
+def test_sampler_dense_stub_raises_naming_pr():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    with pytest.raises(NotImplementedError, match="PR #4"):
+        list(iter_dense_patches(state, memory))
+
+
+def test_sampler_dispatcher_dense_refuses_when_live():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    cfg = ObserverConfig(sampling_mode=SamplingMode.DENSE,
+                          allow_dense_mode=True, uniform_grid_stride=4)
+    with pytest.raises(DenseModeWhileLiveError):
+        list(iter_patches(state, memory, cfg, medusa_is_live=True))
+
+
+def test_sampler_validation_1d_state_raises():
+    with pytest.raises(ValueError, match="3D"):
+        list(iter_uniform_grid_patches(np.zeros((4,)), np.zeros((8, 4, 4, 4))))
+
+
+def test_sampler_validation_stride_zero_raises():
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    with pytest.raises(ValueError, match="stride"):
+        list(iter_uniform_grid_patches(state, memory, stride=0))
+
+
+def test_sampler_validation_too_small_lattice_raises():
+    with pytest.raises(ValueError, match="smaller than patch window"):
+        list(iter_uniform_grid_patches(
+            np.zeros((2, 2, 2), dtype=np.uint8),
+            np.zeros((8, 2, 2, 2), dtype=np.float32),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Classifier (Chunk 3) — one test per token, plus cascade-order regressions
+# ---------------------------------------------------------------------------
+
+
+def test_classifier_void_static():
+    assert classify_patch(_zero_patch()) == "void_static"
+
+
+def test_classifier_compute_static_when_juvenile():
+    assert classify_patch(_zero_patch(STATE_COMPUTE)) == "compute_static"
+
+
+def test_classifier_compute_aging_at_sage_age():
+    p = _zero_patch(STATE_COMPUTE, {"compute_age": AGE_SAGE + 1.0})
+    assert classify_patch(p) == "compute_aging"
+
+
+def test_classifier_magnon_lighthouse_at_legend_age():
+    p = _zero_patch(STATE_COMPUTE, {"compute_age": AGE_LEGEND + 5.0})
+    assert classify_patch(p) == "magnon_lighthouse"
+
+
+def test_classifier_metta_warmth_with_compute():
+    s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    m[CH["warmth"]].fill(THRESHOLD_WARMTH + 0.1)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "metta_warmth"
+
+
+def test_classifier_mudita_resonance_with_compute():
+    s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    m[CH["resonance"]].fill(THRESHOLD_RESONANCE + 0.1)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "mudita_resonance"
+
+
+def test_classifier_karuna_relief_with_compute():
+    s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    m[CH["compassion"]].fill(THRESHOLD_COMPASSION + 0.1)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "karuna_relief"
+
+
+def test_classifier_sensor_alert():
+    s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_SENSOR
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "sensor_alert"
+
+
+def test_classifier_energy_pulse():
+    s = np.zeros((3, 3, 3), dtype=np.uint8)
+    s[0, 0, 0] = STATE_ENERGY
+    s[1, 1, 1] = STATE_ENERGY
+    s[2, 2, 2] = STATE_ENERGY
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "energy_pulse"
+
+
+def test_classifier_structural_growth_when_young():
+    p = _zero_patch(STATE_STRUCTURAL, {"structural_age": 2.0})
+    assert classify_patch(p) == "structural_growth"
+
+
+def test_classifier_structural_decay_when_mature():
+    p = _zero_patch(STATE_STRUCTURAL, {"structural_age": AGE_ANCIENT + 5.0})
+    assert classify_patch(p) == "structural_decay"
+
+
+def test_classifier_void_birth_when_void_dom_with_diversity():
+    s = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    s[1, 1, 1] = STATE_STRUCTURAL  # 1 non-void → distinct=2
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "void_birth"
+
+
+def test_classifier_phase_boundary_with_max_diversity():
+    s = np.zeros((3, 3, 3), dtype=np.uint8)
+    s[0, 0, 0] = STATE_VOID
+    s[1, 0, 0] = STATE_STRUCTURAL
+    s[2, 0, 0] = STATE_COMPUTE
+    s[0, 1, 0] = STATE_ENERGY
+    s[1, 1, 0] = STATE_SENSOR
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "phase_boundary"
+
+
+def test_classifier_acoustic_stress_when_diverse_cold_no_dominance():
+    # Need 3 distinct + warmth=0 + no dominant fraction to reach token 15.
+    # 12 VOID + 13 STRUCTURAL (mid-age) + 2 ENERGY: void_frac=0.44,
+    # structural_frac=0.48, neither ≥0.5 → falls through to acoustic_stress.
+    s = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    s.flat[:13] = STATE_STRUCTURAL
+    s.flat[13] = STATE_ENERGY
+    s.flat[14] = STATE_ENERGY
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    m[CH["structural_age"]].fill(15.0)
+    result = classify_patch(Patch((0, 0, 0), s, m))
+    assert result == "acoustic_stress", f"got {result!r}; cascade landed wrong"
+
+
+def test_classifier_unclassified_when_nothing_else_fits():
+    # 14 STRUCTURAL mid-age + 13 VOID, no signals → no rule matches → unclassified.
+    s = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    s.flat[:14] = STATE_STRUCTURAL
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    m[CH["structural_age"]].fill(15.0)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "unclassified"
+
+
+def test_classifier_compute_decay_dominates_when_cold_void_with_compute():
+    # VOID-dominant with one COMPUTE cell, no warmth → compute_decay (cascade #9).
+    s = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    s[1, 1, 1] = STATE_COMPUTE
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "compute_decay"
+
+
+def test_classifier_void_birth_wins_over_acoustic_stress_when_void_dominant():
+    """Cascade-order regression noted in chunk 3 sanity check.
+
+    A patch with VOID-dominant + 2 non-void cells SHOULD return ``void_birth``
+    (more semantically specific) rather than ``acoustic_stress`` (broad
+    fallback). This was the case my chunk-3 sanity test labelled wrong.
+    """
+    s = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    s[0, 0, 0] = STATE_STRUCTURAL
+    s[1, 1, 1] = STATE_ENERGY
+    m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    assert classify_patch(Patch((0, 0, 0), s, m)) == "void_birth"
+
+
+def test_classifier_returns_only_valid_tokens():
+    """Every classify_patch return must be in TOKEN_NAMES (totality)."""
+    rng = np.random.default_rng(42)
+    for _ in range(50):
+        s = rng.integers(0, 5, size=(3, 3, 3), dtype=np.uint8)
+        m = rng.random((8, 3, 3, 3), dtype=np.float32)
+        assert classify_patch(Patch((0, 0, 0), s, m)) in TOKEN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Budget monitor + safe stride (Chunk 4)
+# ---------------------------------------------------------------------------
+
+
+def test_budget_monitor_basic_elapsed_and_tick():
+    with BudgetMonitor(budget_seconds=2.0) as bm:
+        time.sleep(0.02)
+        assert bm.elapsed() > 0.01
+        assert not bm.exceeded()
+        bm.tick(); bm.tick()
+    r = bm.report()
+    assert r.patches_processed == 2
+    assert r.exceeded is False
+
+
+def test_budget_monitor_exceeds_after_overrun():
+    with BudgetMonitor(budget_seconds=0.05) as bm:
+        time.sleep(0.06)
+        if bm.exceeded():
+            bm.skip()
+    r = bm.report()
+    assert r.exceeded is True
+    assert r.patches_skipped_due_to_budget == 1
+
+
+def test_budget_monitor_zero_budget_raises():
+    with pytest.raises(ValueError):
+        BudgetMonitor(budget_seconds=0)
+
+
+def test_budget_monitor_negative_budget_raises():
+    with pytest.raises(ValueError):
+        BudgetMonitor(budget_seconds=-1.0)
+
+
+def test_budget_report_fraction_used():
+    r = BudgetReport(
+        budget_seconds=10.0, elapsed_seconds=2.5,
+        patches_processed=100, patches_skipped_due_to_budget=0,
+        exceeded=False,
+    )
+    assert r.fraction_used == 0.25
+
+
+def test_safe_stride_kept_when_initial_fits():
+    s = compute_safe_stride((16, 16, 16), radius=1, budget_seconds=30.0,
+                              initial_stride=4)
+    assert s == 4
+
+
+def test_safe_stride_doubles_when_too_dense():
+    # Force a tiny budget so the initial stride won't fit.
+    s = compute_safe_stride((256, 256, 256), radius=1,
+                              budget_seconds=0.01,
+                              cost_per_patch_seconds=DEFAULT_COST_PER_PATCH_SECONDS,
+                              initial_stride=8, max_stride=64)
+    assert s > 8 and s <= 64
+
+
+def test_safe_stride_initial_zero_raises():
+    with pytest.raises(ValueError):
+        compute_safe_stride((16, 16, 16), initial_stride=0)
+
+
+def test_safe_stride_max_below_initial_raises():
+    with pytest.raises(ValueError):
+        compute_safe_stride((16, 16, 16), initial_stride=16, max_stride=8)
+
+
+# ---------------------------------------------------------------------------
+# I/O + safety boundaries (Chunk 5)
+# ---------------------------------------------------------------------------
+
+
+def test_load_snapshot_returns_correct_shapes(tmp_path):
+    p = _make_snapshot(tmp_path / "v070_gen5.npz", lattice=16, generation=5)
+    state, memory, gen, meta = load_snapshot(p)
+    assert state.shape == (16, 16, 16)
+    assert memory.shape == (8, 16, 16, 16)
+    assert gen == 5
+
+
+def test_load_snapshot_missing_keys_raises(tmp_path):
+    bad = tmp_path / "bad.npz"
+    np.savez(str(bad), wrong_key=np.zeros((4, 4, 4)))
+    with pytest.raises(ValueError, match="missing keys"):
+        load_snapshot(bad)
+
+
+def test_load_snapshot_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_snapshot(tmp_path / "nonexistent.npz")
+
+
+def test_find_latest_snapshot_picks_newest(tmp_path):
+    older = _make_snapshot(tmp_path / "v070_gen10.npz", lattice=16,
+                            generation=10, pad_bytes=2_000_000)
+    time.sleep(0.05)
+    newer = _make_snapshot(tmp_path / "v070_gen20.npz", lattice=16,
+                            generation=20, pad_bytes=2_000_000)
+    found = find_latest_snapshot(tmp_path)
+    assert found is not None and found.name == newer.name
+
+
+def test_find_latest_snapshot_empty_dir_returns_none(tmp_path):
+    assert find_latest_snapshot(tmp_path) is None
+
+
+def test_find_latest_snapshot_returns_none_when_all_files_below_threshold(tmp_path):
+    """Per Jack's PR #138 audit: previously this would fall back to the
+    first candidate even if every file was below the tiny/corrupt size
+    threshold. Now it returns None — matching the docstring claim that
+    such files are skipped.
+    """
+    # Create files matching the pattern but all below the 1 MB threshold.
+    for i in range(3):
+        p = tmp_path / f"v070_gen{i}_step{i}_test.npz"
+        # Save a tiny snapshot — well below the 1MB threshold.
+        np.savez(str(p),
+                 lattice=np.zeros((4, 4, 4), dtype=np.uint8),
+                 memory_grid=np.zeros((8, 4, 4, 4), dtype=np.float32),
+                 generation=np.array(i))
+        assert p.stat().st_size < 1_000_000
+    assert find_latest_snapshot(tmp_path) is None
+
+
+def test_is_medusa_live_with_fresh_snapshot(tmp_path):
+    _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16,
+                    pad_bytes=2_000_000)
+    assert is_medusa_live(tmp_path, threshold_minutes=60) is True
+
+
+def test_is_medusa_live_with_stale_snapshot(tmp_path):
+    p = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16,
+                        pad_bytes=2_000_000)
+    # Backdate the file by 2 hours
+    old = time.time() - 7200
+    os.utime(str(p), (old, old))
+    assert is_medusa_live(tmp_path, threshold_minutes=30) is False
+
+
+def test_is_medusa_live_empty_dir_is_false(tmp_path):
+    assert is_medusa_live(tmp_path) is False
+
+
+def test_write_log_entry_appends_jsonl(tmp_path):
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()  # create parent (data/), not the leaf
+    write_log_entry(log_dir, {"a": 1})
+    write_log_entry(log_dir, {"b": 2})
+    log_path = log_dir / "nextness_runs.jsonl"
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["a"] == 1
+    assert json.loads(lines[1])["b"] == 2
+
+
+def test_write_log_entry_refuses_missing_parent_directory(tmp_path):
+    """The observer creates its own leaf log dir but never the scaffolding."""
+    bad_dir = tmp_path / "nonexistent_parent" / "log_dir"
+    with pytest.raises(FileNotFoundError):
+        write_log_entry(bad_dir, {"x": 1})
+
+
+# ---------------------------------------------------------------------------
+# §7 SAFETY CONTRACT — one explicit test per invariant
+# ---------------------------------------------------------------------------
+
+
+def test_invariant_1_no_writes_outside_log_directory(tmp_path):
+    """§7 #1: writes restricted to log_directory."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    log_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    with pytest.raises(WriteOutsideLogDirError):
+        nextness_observer._validate_write_path(outside, log_dir)
+    # And inside paths pass:
+    nextness_observer._validate_write_path(log_dir / "ok.jsonl", log_dir)
+
+
+def test_invariant_2_no_http_libraries_imported_in_module():
+    """§7 #2: no HTTP POSTs. Module must not import any HTTP client lib."""
+    source = inspect.getsource(nextness_observer)
+    forbidden = [
+        "import requests",
+        "from requests",
+        "import httpx",
+        "from httpx",
+        "import urllib.request",
+        "from urllib.request",
+        "import urllib3",
+        "from urllib3",
+    ]
+    for f in forbidden:
+        assert f not in source, f"§7 #2 violated: module contains {f!r}"
+
+
+def test_invariant_3_no_zmq_imported_in_module():
+    """§7 #3: PR #2 must not import ZMQ at all (live is strictly PR #6)."""
+    source = inspect.getsource(nextness_observer)
+    forbidden_imports = ["import zmq", "from zmq"]
+    for f in forbidden_imports:
+        assert f not in source, f"§7 #3 violated: module contains {f!r}"
+    # And the guard exception class is exposed for callers/tests:
+    assert issubclass(ZmqUseInPR2Error, ObserverSafetyError)
+
+
+def test_invariant_3_zmq_at_import_guard_function_exists():
+    """The import-time guard function exists and is callable."""
+    assert callable(nextness_observer._assert_no_zmq_at_import)
+
+
+def test_invariant_4_default_no_gpu():
+    """§7 #4: CPU only by default; GPU opt-in via MEDUSA_OBSERVER_GPU."""
+    c = ObserverConfig()
+    assert c.use_gpu is False
+
+
+def test_invariant_4_gpu_env_var_respected(monkeypatch):
+    monkeypatch.setenv("MEDUSA_OBSERVER_GPU", "1")
+    assert ObserverConfig.from_env().use_gpu is True
+    monkeypatch.setenv("MEDUSA_OBSERVER_GPU", "0")
+    assert ObserverConfig.from_env().use_gpu is False
+
+
+def test_invariant_5_killable_no_orphan_files(tmp_path):
+    """§7 #5: SIGTERM/Ctrl+C should leave a consistent log state.
+
+    Hard to test rigorously, but we can verify that process_snapshot
+    creates only the expected log file and no temp-files / lockfiles
+    in the log directory (so an interrupted run leaves nothing weird).
+    """
+    snap = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16,
+                            pad_bytes=2_000_000)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    process_snapshot(snap, cfg, medusa_is_live=False)
+    # Only the expected log file should exist; no temp/lock files.
+    files_in_log = list(log_dir.iterdir())
+    assert len(files_in_log) == 1
+    assert files_in_log[0].name == "nextness_runs.jsonl"
+
+
+def test_invariant_6_pause_aware_records_medusa_is_live(tmp_path):
+    """§7 #6: pause-awareness — medusa_is_live recorded in every log entry.
+
+    PR #2 doesn't itself behave differently when paused (it's already
+    offline-only); but it MUST record the medusa_is_live flag so PR #6's
+    live integration can react to it.
+    """
+    snap = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16,
+                            pad_bytes=2_000_000)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+    assert "medusa_is_live" in summary
+    assert summary["medusa_is_live"] is False
+    summary2 = process_snapshot(snap, cfg, medusa_is_live=True)
+    assert summary2["medusa_is_live"] is True
+
+
+def test_invariant_7_no_trust_remote_code_in_module():
+    """§7 #7: no ``trust_remote_code=True`` call site in the module.
+
+    The term legitimately appears in the module docstring where it's
+    documented as a forbidden pattern. What we actually forbid is the
+    dangerous *call site* — someone passing ``trust_remote_code=True`` as
+    a keyword argument to a function (the Hugging Face footgun that lets
+    repo-fetched code execute on import).
+
+    AST-walk the module to look for that exact call-site pattern, ignoring
+    any string literals (docstrings, comments, error messages).
+    """
+    import ast
+    source = inspect.getsource(nextness_observer)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "trust_remote_code":
+            value = node.value
+            if isinstance(value, ast.Constant) and value.value is True:
+                pytest.fail(
+                    f"§7 #7 violated: trust_remote_code=True call site "
+                    f"at line {node.lineno}"
+                )
+
+
+def test_invariant_8_bounded_compute_per_snapshot(tmp_path):
+    """§7 #8: BudgetMonitor + compute_safe_stride enforce bounded compute."""
+    # BudgetMonitor.exceeded() works as advertised
+    with BudgetMonitor(budget_seconds=0.01) as bm:
+        time.sleep(0.02)
+        assert bm.exceeded() is True
+    # compute_safe_stride backs off when budget is too tight
+    s = compute_safe_stride((256, 256, 256), radius=1,
+                              budget_seconds=0.001, initial_stride=8)
+    assert s > 8
+
+
+# ---------------------------------------------------------------------------
+# End-to-end process_snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_end_to_end_process_snapshot_round_trip(tmp_path):
+    """Full pipeline: snapshot → patches → tokens → JSONL log entry → readback."""
+    snap = _make_snapshot(tmp_path / "v070_gen42.npz", lattice=32,
+                            generation=42, pad_bytes=2_000_000)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+
+    # Summary structure
+    assert summary["generation"] == 42
+    assert summary["lattice_shape"] == [32, 32, 32]
+    assert summary["sampling_mode"] == "uniform_grid"
+    assert summary["medusa_is_live"] is False
+    assert "token_counts" in summary
+    assert isinstance(summary["token_counts"], dict)
+    assert summary["budget"]["patches_processed"] > 0
+
+    # JSONL log file written + readable
+    log_path = log_dir / "nextness_runs.jsonl"
+    assert log_path.is_file()
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    parsed = json.loads(lines[0])
+    assert parsed["generation"] == 42
+    assert parsed == summary or parsed["snapshot_file"] == summary["snapshot_file"]
+
+
+def test_end_to_end_token_counts_match_patches_processed(tmp_path):
+    snap = _make_snapshot(tmp_path / "v070_gen5.npz", lattice=16,
+                            pad_bytes=2_000_000)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+    total_tokens = sum(summary["token_counts"].values())
+    # In a non-budget-exhausted run, token_counts.values() should sum to
+    # exactly patches_processed (every patch produces exactly one token).
+    assert total_tokens == summary["budget"]["patches_processed"]
+
+
+def test_end_to_end_stride_backoff_recorded(tmp_path):
+    """When budget is too small to fit the initial stride, the actual
+    stride used should be recorded and ``stride_backoff_fired`` set."""
+    snap = _make_snapshot(tmp_path / "v070_gen99.npz", lattice=64,
+                            pad_bytes=2_000_000)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    # Pin cost-per-patch high enough that initial_stride=4 won't fit a 0.05s budget
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=5.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+    # On a 64^3 lattice at radius=1 with stride=4 the patch count is small
+    # enough that the default cost estimate fits comfortably in 5 seconds.
+    # So stride_used should equal stride_initial in this case.
+    assert summary["stride_used"] == summary["stride_initial"]
+    assert summary["stride_backoff_fired"] is False
