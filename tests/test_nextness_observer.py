@@ -486,22 +486,59 @@ def test_find_latest_snapshot_empty_dir_returns_none(tmp_path):
     assert find_latest_snapshot(tmp_path) is None
 
 
-def test_find_latest_snapshot_returns_none_when_all_files_below_threshold(tmp_path):
-    """Per Jack's PR #138 audit: previously this would fall back to the
-    first candidate even if every file was below the tiny/corrupt size
-    threshold. Now it returns None — matching the docstring claim that
-    such files are skipped.
+def test_find_latest_snapshot_skips_npz_missing_required_keys(tmp_path):
+    """Per issue #139 finding (a): validity is now structural (required
+    keys present), not size-based. An .npz matching the glob but lacking
+    the required Medusa keys is skipped, and if no candidate validates,
+    the function returns None.
     """
-    # Create files matching the pattern but all below the 1 MB threshold.
     for i in range(3):
         p = tmp_path / f"v070_gen{i}_step{i}_test.npz"
-        # Save a tiny snapshot — well below the 1MB threshold.
-        np.savez(str(p),
-                 lattice=np.zeros((4, 4, 4), dtype=np.uint8),
-                 memory_grid=np.zeros((8, 4, 4, 4), dtype=np.float32),
-                 generation=np.array(i))
-        assert p.stat().st_size < 1_000_000
+        # Intentionally wrong shape: no lattice/memory_grid/generation
+        np.savez(str(p), wrong_key=np.zeros((4, 4, 4), dtype=np.uint8))
     assert find_latest_snapshot(tmp_path) is None
+
+
+def test_find_latest_snapshot_prefers_newest_valid_skipping_invalid(tmp_path):
+    """Per issue #139 finding (a): when valid and invalid candidates
+    coexist, the iteration walks newest-first by mtime and skips
+    invalid candidates until it finds one with the required keys.
+    """
+    older_valid = _make_snapshot(tmp_path / "v070_gen10.npz", lattice=16,
+                                 generation=10)
+    time.sleep(0.05)
+    # Newest by mtime, but invalid: missing required keys.
+    invalid = tmp_path / "v070_gen20.npz"
+    np.savez(str(invalid), wrong_key=np.zeros((4, 4, 4), dtype=np.uint8))
+    found = find_latest_snapshot(tmp_path)
+    assert found is not None
+    assert found.name == older_valid.name
+
+
+def test_find_latest_snapshot_skips_corrupt_npz(tmp_path):
+    """Per issue #139 finding (a): files matching the glob but with
+    garbage content (not valid zip archives) must not crash the
+    iteration — they're skipped silently like any other invalid file.
+    """
+    corrupt = tmp_path / "v070_gen1_step1_test.npz"
+    corrupt.write_bytes(b"this is not a valid npz file" * 100)
+    assert find_latest_snapshot(tmp_path) is None
+
+
+def test_find_latest_snapshot_accepts_small_but_valid_snapshot(tmp_path):
+    """Per issue #139 finding (a): a synthetic snapshot with the required
+    keys but well under any size heuristic must now be accepted. This
+    locks in the regression that fix (a) is meant to prevent (real
+    sparse-early Medusa snapshots are ~900 KB and were silently
+    excluded by the old 1 MB size threshold).
+    """
+    p = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=4, generation=1)
+    # Confirm the synthetic snapshot is genuinely tiny (well below the
+    # 1 MB heuristic the old code used).
+    assert p.stat().st_size < 100_000
+    found = find_latest_snapshot(tmp_path)
+    assert found is not None
+    assert found.name == p.name
 
 
 def test_is_medusa_live_with_fresh_snapshot(tmp_path):
@@ -746,3 +783,32 @@ def test_end_to_end_stride_backoff_recorded(tmp_path):
     # So stride_used should equal stride_initial in this case.
     assert summary["stride_used"] == summary["stride_initial"]
     assert summary["stride_backoff_fired"] is False
+
+
+def test_process_snapshot_budget_block_includes_fraction_used(tmp_path):
+    """Per issue #139 finding (b): ``BudgetReport.fraction_used`` is a
+    ``@property``, so ``dataclasses.asdict()`` drops it. ``process_snapshot``
+    must explicitly add it to the budget block in both the returned summary
+    and the JSONL log entry so downstream metrics (PR #3) can consume the
+    fraction without recomputing it from elapsed/budget seconds.
+    """
+    snap = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16, generation=1)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+
+    # Live summary should expose fraction_used
+    assert "fraction_used" in summary["budget"]
+    frac = summary["budget"]["fraction_used"]
+    assert isinstance(frac, float)
+    # Synthetic 16^3 run finishes in milliseconds against a 30s budget
+    assert 0.0 <= frac < 1.0
+
+    # And it must round-trip through JSONL — that's the canonical
+    # post-mortem record for PR #3 metrics consumption.
+    jsonl = (log_dir / "nextness_runs.jsonl").read_text().splitlines()
+    entry = json.loads(jsonl[-1])
+    assert "fraction_used" in entry["budget"]
+    assert entry["budget"]["fraction_used"] == frac
