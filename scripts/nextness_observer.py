@@ -955,22 +955,57 @@ import pathlib
 from datetime import datetime, timezone
 
 
-_LATEST_SNAPSHOT_MIN_BYTES: Final[int] = 1_000_000  # skip tiny/corrupt files
+_REQUIRED_SNAPSHOT_KEYS: Final[frozenset[str]] = frozenset(
+    {"lattice", "memory_grid", "generation"}
+)
 _LOG_FILE_NAME: Final[str] = "nextness_runs.jsonl"
+
+
+def _is_valid_snapshot_npz(path: pathlib.Path) -> bool:
+    """Cheap validity predicate for a ``.npz`` Medusa snapshot.
+
+    Opens the file with ``np.load(..., allow_pickle=False)`` and confirms
+    the three required keys (``lattice``, ``memory_grid``, ``generation``)
+    are present in the zip directory. Does NOT load or decompress array
+    data — ``NpzFile.files`` reads only the zip's central directory, so
+    this stays in the milliseconds range even for tens of MB.
+
+    Any failure mode — missing keys, malformed zip, I/O error, pickled
+    payload that ``allow_pickle=False`` refuses to materialize at
+    file-listing time — yields ``False``. The function never raises.
+
+    Per issue #139 finding (a): replaces the previous file-size
+    threshold, which was structurally wrong (real snapshots range from
+    ~900 KB sparse-VOID-early to ~54 MB mature-mixed, so size carries
+    no validity signal).
+    """
+    try:
+        with np.load(str(path), allow_pickle=False) as snap:
+            return _REQUIRED_SNAPSHOT_KEYS.issubset(set(snap.files))
+    except Exception:
+        # Catch broadly: malformed zip, missing file, permissions,
+        # pickled-payload-refused, future numpy quirks. Any failure
+        # is "this is not a valid Medusa snapshot."
+        return False
 
 
 def find_latest_snapshot(
     snapshot_dir: str | pathlib.Path,
     pattern: str = "v070_gen*.npz",
 ) -> pathlib.Path | None:
-    """Return the path of the most-recent snapshot matching ``pattern``.
+    """Return the path of the most-recent valid snapshot matching ``pattern``.
 
-    Skips files smaller than ``_LATEST_SNAPSHOT_MIN_BYTES`` (likely
-    truncated or mid-write). Returns ``None`` if no qualifying file
-    exists — INCLUDING the case where matching files are present but
-    all of them are below the size threshold (per Jack's PR #138
-    audit, the previous fallback-to-first-candidate contradicted the
-    "skip tiny files" docstring claim).
+    Iterates candidates in newest-first mtime order and returns the
+    first one that passes ``_is_valid_snapshot_npz`` (zip directory
+    contains the required keys). Returns ``None`` if no candidate
+    validates — INCLUDING the case where matching files exist but
+    none are well-formed snapshots.
+
+    Per issue #139 finding (a): validity is now a structural check on
+    required keys rather than a file-size heuristic. Sparse early-phase
+    snapshots (~900 KB) that the old size-threshold silently excluded
+    are now recognized, and corrupt ≥1 MB files that the old threshold
+    silently admitted are now rejected.
     """
     snapshot_dir = pathlib.Path(snapshot_dir)
     if not snapshot_dir.is_dir():
@@ -981,11 +1016,8 @@ def find_latest_snapshot(
         reverse=True,
     )
     for p in candidates:
-        try:
-            if p.stat().st_size >= _LATEST_SNAPSHOT_MIN_BYTES:
-                return p
-        except OSError:
-            continue
+        if _is_valid_snapshot_npz(p):
+            return p
     return None
 
 
@@ -1187,6 +1219,13 @@ def process_snapshot(
 
     report = bm.report()
 
+    # Per issue #139 finding (b): ``BudgetReport.fraction_used`` is a
+    # ``@property``, so ``dataclasses.asdict`` (which walks fields only)
+    # silently drops it. Build the budget block explicitly so the JSONL
+    # log carries the same fraction available on the live object.
+    budget_block: dict[str, object] = dict(dataclasses.asdict(report))
+    budget_block["fraction_used"] = report.fraction_used
+
     entry: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "snapshot_file": snapshot_path.name,
@@ -1201,7 +1240,7 @@ def process_snapshot(
         "medusa_is_live": medusa_is_live,
         "token_counts": dict(token_counts),
         "vocabulary_occupancy": len(token_counts) / max(1, len(TOKEN_NAMES)),
-        "budget": dataclasses.asdict(report),
+        "budget": budget_block,
     }
     write_log_entry(config.log_directory, entry)
     return entry
