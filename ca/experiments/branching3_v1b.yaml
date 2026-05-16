@@ -1,0 +1,73 @@
+# Branching3 v1b Experiment - B3/S2 Rule Evaluation
+# 300 steps on 96x96x96 lattice with single-cell seed
+
+name: branching3_v1b
+description: "Evaluate B3/S2 rule for aggressive branching growth"
+version: "1.0"
+
+# Rule configuration
+rule:
+  file: "ca/rules/branching3_v1b.toml"
+  name: "branching3_v1b"
+  type: "outer-totalistic"
+
+# Lattice configuration
+lattice:
+  type: "3d-grid"
+  dimensions: [96, 96, 96]
+  boundary: "periodic"
+  neighborhood: "moore"  # 26 neighbors
+
+# Simulation parameters
+simulation:
+  steps: 300
+  step_interval: 1  # Record every step
+  checkpoint_interval: 50  # Save checkpoint every 50 steps
+
+# Initial conditions
+seed:
+  type: "single-cell"
+  position: [48, 48, 48]  # Center of grid
+  state: 1  # STRUCTURAL
+
+# Metrics to compute
+metrics:
+  - name: "alive_ratio"
+    description: "Fraction of alive cells"
+  - name: "branching_factor"
+    description: "Average number of branches per node"
+  - name: "connectivity"
+    description: "Fraction of cells in giant component"
+  - name: "giant_component"
+    description: "Size of largest connected component"
+  - name: "complexity"
+    description: "Structural complexity measure"
+  - name: "survival_rate"
+    description: "Fraction of cells surviving each step"
+  - name: "density"
+    description: "Spatial density of alive cells"
+
+# Output configuration
+output:
+  formats: ["csv", "npy"]
+  save_final_state: true
+  save_checkpoints: true
+  metrics_file: "metrics.csv"
+  state_file: "final_state.npy"
+
+# Experiment metadata
+metadata:
+  author: "vertex_helper"
+  date: "2025-01-15"
+  track: "CA"
+  milestone: "CA-Alpha"
+  hypothesis: "B3/S2 produces aggressive branching with higher density"
+  expected_alive_ratio: [0.10, 0.25]
+  expected_branching_factor: [3.0, 6.0]
+  expected_giant_component: [0.60, 0.80]
+
+# Analysis parameters
+analysis:
+  window_size: 10  # Moving average window for metrics
+  convergence_threshold: 0.01  # Threshold for detecting convergence
+  min_steps_for_convergence: 100  # Minimum steps before checking convergence

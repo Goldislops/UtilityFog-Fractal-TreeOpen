@@ -1,0 +1,66 @@
+# Branching3 v1 Rule - B4/S23
+# Birth on 4 neighbors, Survival on 2 or 3 neighbors
+# Designed for controlled branching growth with moderate stability
+
+[metadata]
+name = "branching3_v1"
+version = "1.0"
+description = "B4/S23 - Controlled branching with moderate survival"
+author = "vertex_helper"
+date = "2025-01-15"
+
+[rule]
+type = "outer-totalistic"
+neighborhood = "moore"  # 26 neighbors in 3D
+dimension = 3
+
+# Birth conditions: cell becomes alive if exactly 4 neighbors are alive
+[rule.birth]
+counts = [4]
+
+# Survival conditions: cell stays alive if 2 or 3 neighbors are alive
+[rule.survival]
+counts = [2, 3]
+
+[states]
+# Multi-state support (currently using binary: VOID=0, STRUCTURAL=1)
+void = 0
+structural = 1
+compute = 2
+energy = 3
+sensor = 4
+
+[parameters]
+# Default state for new cells
+default_state = 0  # VOID
+
+# State for born cells
+birth_state = 1  # STRUCTURAL
+
+# Boundary conditions
+boundary = "periodic"  # wrap around edges
+
+[metrics]
+# Metrics to compute during simulation
+track_branching_factor = true
+track_connectivity = true
+track_survival_rate = true
+track_density = true
+track_giant_component = true
+
+[notes]
+rationale = """
+B4/S23 rule designed for controlled branching growth:
+- Birth on 4 neighbors: Requires moderate local density to spawn new cells
+- Survival on 2-3 neighbors: Maintains structures without overgrowth
+- Expected behavior: Branching tree-like structures with stable cores
+- Complexity: Medium (not too sparse, not too dense)
+"""
+
+expected_behavior = """
+- Initial seed expands slowly
+- Forms branching structures with 2-4 branches per node
+- Stable cores with active growth fronts
+- Moderate density (5-15% alive cells)
+- Giant component should dominate (>80% connectivity)
+"""
