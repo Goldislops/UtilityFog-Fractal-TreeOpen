@@ -10,7 +10,11 @@ module just implements them.
 
 Scope guarantees (carried forward from PR #138 / PR #140):
     - No engine touch.
-    - No writes outside the resolved output path's directory.
+    - **No writes outside ``log_path.parent``** — the output ``--out`` path
+      must resolve to a location inside the same directory as the input
+      JSONL log. Enforced via :class:`WriteOutsideLogDirError` reused
+      from ``scripts.nextness_observer``; the safety vocabulary is
+      unified across modules.
     - No HTTP, ZMQ, or network of any kind.
     - CPU-only.
     - allow_pickle=False (no .npz reads here; JSONL only).
@@ -43,11 +47,48 @@ from typing import Any
 
 from scripts.nextness_observer import (
     TOKEN_NAMES,
+    WriteOutsideLogDirError,
     boundary_rate as _boundary_rate,
     entropy_normalized as _entropy_normalized,
     shannon_entropy_bits as _shannon_entropy_bits,
     void_compute_balance as _void_compute_balance,
 )
+
+
+# ---------------------------------------------------------------------------
+# Write-boundary guard (Lane B safety contract; mirrors the helper in
+# nextness_observer.py without coupling to its private name)
+# ---------------------------------------------------------------------------
+
+
+def _validate_metrics_output_path(
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+) -> None:
+    """Refuse output paths that resolve outside the input log's directory.
+
+    The Lane B safety contract requires that derived metrics output land
+    only inside ``log_path.parent``. This catches both literal mismatches
+    (``--out /tmp/other.jsonl``) and traversal/symlink escapes
+    (``--out ../somewhere_else/out.jsonl``). Resolves both paths to
+    canonical absolute form before comparing — symlink-aware.
+
+    Per Jack's audit on PR #142: the PR body and module docstring claim
+    "no writes outside log_directory," and this function makes that
+    claim true rather than aspirational. Raises
+    :class:`WriteOutsideLogDirError` (reused from
+    ``scripts.nextness_observer``) so the safety vocabulary stays
+    unified across both modules.
+    """
+    log_dir_resolved = log_path.resolve().parent
+    out_resolved = out_path.resolve()
+    try:
+        out_resolved.relative_to(log_dir_resolved)
+    except ValueError as e:
+        raise WriteOutsideLogDirError(
+            f"refusing to write metrics output outside log_path's directory: "
+            f"{out_resolved} is not inside {log_dir_resolved}"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +336,11 @@ def compute_run_metrics(
     if not log_path.is_file():
         raise FileNotFoundError(f"log file not found: {log_path}")
 
+    # Lane B safety contract (Jack's audit on PR #142): out_path must
+    # resolve under log_path.parent. Validate BEFORE any disk side effects
+    # — no parent-mkdir, no file open, no writes — happen.
+    _validate_metrics_output_path(out_path, log_path)
+
     # Load and sort
     entries: list[dict[str, Any]] = []
     with log_path.open("r", encoding="utf-8") as f:
@@ -451,6 +497,12 @@ def main(argv: list[str] | None = None) -> int:
             smoothing=args.smoothing,
             boundary_delta=args.boundary_delta,
         )
+    except WriteOutsideLogDirError as e:
+        # Lane B safety violation: --out points outside the log file's
+        # directory. Return distinct non-zero code so callers can
+        # distinguish safety refusals from data errors.
+        print(f"safety error: {e}", file=sys.stderr)
+        return 3
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

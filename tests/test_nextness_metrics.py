@@ -17,7 +17,7 @@ import pathlib
 
 import pytest
 
-from scripts.nextness_observer import TOKEN_NAMES
+from scripts.nextness_observer import TOKEN_NAMES, WriteOutsideLogDirError
 from scripts.nextness_metrics import (
     boundary_cv,
     boundary_persistence_aggregate_clamped,
@@ -519,3 +519,96 @@ def test_cli_main_missing_log_returns_nonzero(tmp_path, capsys):
     assert rc != 0
     captured = capsys.readouterr()
     assert "not found" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Write-boundary safety contract (Jack's PR #142 audit)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_run_metrics_accepts_output_inside_log_directory(tmp_path):
+    """Sibling output path (same directory as log) succeeds — happy path
+    for the Lane B safety contract.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out_path = log_dir / "nextness_run_metrics.jsonl"  # sibling of log_path
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    # Should not raise
+    agg = compute_run_metrics(log_path, out_path)
+    assert out_path.is_file()
+    assert agg["n_snapshots"] == 2
+
+
+def test_compute_run_metrics_rejects_output_outside_log_directory(tmp_path):
+    """Output path outside log_path.parent raises WriteOutsideLogDirError.
+
+    Lane B contract: derived metrics output must land inside the same
+    directory as the input JSONL log. Per Jack's PR #142 audit; before
+    this fix, the function would happily write anywhere on disk.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # Output path is a sibling of log_dir, not inside it — outside the boundary
+    out_path = tmp_path / "outside_dir" / "out.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        compute_run_metrics(log_path, out_path)
+
+    # And the parent directory of the rejected out_path must NOT have been
+    # created — validation happens before any disk side effects.
+    assert not (tmp_path / "outside_dir").exists()
+
+
+def test_compute_run_metrics_rejects_traversal_escape(tmp_path):
+    """``..`` traversal must also be rejected, not just literal mismatch.
+
+    Defensive: ensures the validation resolves paths to canonical absolute
+    form rather than doing literal string comparison.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # Looks-inside but actually escapes via ..
+    out_path = log_dir / ".." / ".." / "escape.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    with pytest.raises(WriteOutsideLogDirError):
+        compute_run_metrics(log_path, out_path)
+
+
+def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
+    """CLI propagates WriteOutsideLogDirError as a non-zero exit code.
+
+    Distinct exit code from the data-error path so external callers can
+    distinguish a safety refusal from a malformed-input error.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out_path = tmp_path / "elsewhere" / "out.jsonl"  # outside log_dir
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    rc = main(["--log", str(log_path), "--out", str(out_path)])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "safety error" in captured.err.lower()
+    assert "outside log_path" in captured.err.lower()
+    # No side effects: the outside-of-boundary parent dir must not exist
+    assert not (tmp_path / "elsewhere").exists()
