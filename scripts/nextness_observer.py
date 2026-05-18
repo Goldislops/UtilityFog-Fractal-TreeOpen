@@ -1166,6 +1166,93 @@ def write_log_entry(
     return log_path
 
 
+# ---------------------------------------------------------------------------
+# PR #3 — per-snapshot metric helpers (PHASE_19_PR3_METRICS_PIPELINE.md §3)
+# ---------------------------------------------------------------------------
+
+import math
+from collections.abc import Mapping
+
+
+def shannon_entropy_bits(token_counts: Mapping[str, int]) -> float:
+    """Shannon entropy (in bits) over a token-count distribution.
+
+    Uses base-2 log so the result is in units of bits. Returns 0.0 if the
+    distribution is empty (no patches classified). Zero-count tokens are
+    skipped under the convention 0·log(0) = 0.
+
+    Maximum value for the canonical 16-token vocabulary is log₂(16) = 4.0
+    bits (uniform distribution over all tokens). The first real Medusa
+    pass at gen 1,621,779 yielded ~0.98 bits — distribution concentrated
+    in two tokens, as documented in issue #139.
+    """
+    total = sum(token_counts.values())
+    if total == 0:
+        return 0.0
+    h = 0.0
+    for count in token_counts.values():
+        if count <= 0:
+            continue
+        p = count / total
+        h -= p * math.log2(p)
+    return h
+
+
+def entropy_normalized(entropy_bits: float, vocabulary_size: int) -> float:
+    """Normalize a Shannon-entropy-in-bits value to [0, 1].
+
+    Divides by log₂(vocabulary_size) to produce a unit-comparable score
+    across different vocabulary sizes (relevant once PR #5 introduces the
+    learned 512-token embedding alongside the current 16-token hand-coded
+    vocabulary).
+
+    Returns 0.0 if vocabulary_size <= 1 (no information possible) or if
+    the supplied entropy is non-positive.
+    """
+    if vocabulary_size <= 1 or entropy_bits <= 0.0:
+        return 0.0
+    return entropy_bits / math.log2(vocabulary_size)
+
+
+def void_compute_balance(state: np.ndarray) -> float:
+    """Symmetric balance score between VOID and COMPUTE cell counts.
+
+    Computes ``2 · min(N_VOID, N_COMPUTE) / (N_VOID + N_COMPUTE)`` over the
+    raw cell-state array. Range [0, 1]; 1.0 iff the counts are equal; 0.0
+    if either state is absent or if the lattice contains neither.
+
+    Captures the "coexistence axis" of AURA's Sakana-derived 3-regime
+    framing using the two cell states that dominate the mature 256³
+    Medusa lattice. For gen 1,621,779: N_VOID = 7,909,111 (47.14%),
+    N_COMPUTE = 7,719,525 (46.01%), giving balance ≈ 0.988.
+    """
+    n_void = int(np.count_nonzero(state == STATE_VOID))
+    n_compute = int(np.count_nonzero(state == STATE_COMPUTE))
+    total = n_void + n_compute
+    if total == 0:
+        return 0.0
+    return 2.0 * min(n_void, n_compute) / total
+
+
+def boundary_rate(token_counts: Mapping[str, int]) -> float:
+    """Normalized count of the ``phase_boundary`` token.
+
+    Returns count(phase_boundary) / sum(all token counts), range [0, 1].
+    Returns 0.0 if no patches were classified or if ``phase_boundary``
+    is absent from the counts mapping.
+
+    Promoted to a top-level metric per PHASE_19_PR3_METRICS_PIPELINE.md
+    §3.4 — boundary rate is the single most-architecturally-important
+    token signal (fungal-network "growth at active boundary" intuition),
+    so it gets a first-class field rather than living only inside the
+    nested ``token_counts`` dict.
+    """
+    total = sum(token_counts.values())
+    if total == 0:
+        return 0.0
+    return token_counts.get("phase_boundary", 0) / total
+
+
 def process_snapshot(
     snapshot_path: str | pathlib.Path,
     config: ObserverConfig,
@@ -1226,6 +1313,10 @@ def process_snapshot(
     budget_block: dict[str, object] = dict(dataclasses.asdict(report))
     budget_block["fraction_used"] = report.fraction_used
 
+    # PR #3 per-snapshot metrics (PHASE_19_PR3_METRICS_PIPELINE.md §3).
+    # All computed from data already in memory; total cost ≈ 50 µs at K=16
+    # tokens on a 256³ lattice, negligible against the ~1s classification time.
+    shannon_h = shannon_entropy_bits(token_counts)
     entry: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "snapshot_file": snapshot_path.name,
@@ -1240,6 +1331,10 @@ def process_snapshot(
         "medusa_is_live": medusa_is_live,
         "token_counts": dict(token_counts),
         "vocabulary_occupancy": len(token_counts) / max(1, len(TOKEN_NAMES)),
+        "shannon_entropy_bits": shannon_h,
+        "entropy_normalized": entropy_normalized(shannon_h, len(TOKEN_NAMES)),
+        "void_compute_balance": void_compute_balance(state),
+        "boundary_rate": boundary_rate(token_counts),
         "budget": budget_block,
     }
     write_log_entry(config.log_directory, entry)
@@ -1253,6 +1348,11 @@ __all__ += [  # type: ignore[misc]
     "load_snapshot",
     "write_log_entry",
     "process_snapshot",
+    # PR #3 per-snapshot metric helpers
+    "shannon_entropy_bits",
+    "entropy_normalized",
+    "void_compute_balance",
+    "boundary_rate",
 ]
 
 

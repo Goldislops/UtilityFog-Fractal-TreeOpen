@@ -1,0 +1,614 @@
+"""Tests for scripts/nextness_metrics.py — Phase 19 PR #3.
+
+Locks down each metric formula plus the orchestrator's determinism
+contracts (no fresh ``generated_at``, deterministic sort across input
+orderings, byte-identical idempotent re-run).
+
+Per the design doc (PHASE_19_PR3_METRICS_PIPELINE.md §6): unit tests
+per metric with reference values, integration tests for the orchestrator,
+and a self-contained "golden" test pinning the arithmetic against
+silent regressions.
+"""
+from __future__ import annotations
+
+import json
+import math
+import pathlib
+
+import pytest
+
+from scripts.nextness_observer import TOKEN_NAMES, WriteOutsideLogDirError
+from scripts.nextness_metrics import (
+    boundary_cv,
+    boundary_persistence_aggregate_clamped,
+    boundary_persistence_pairwise,
+    cci,
+    compute_run_metrics,
+    js_divergence,
+    kl_divergence,
+    main,
+    smoothed_distribution,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_entry(
+    *,
+    generation: int,
+    snapshot_file: str,
+    ts: str = "2026-05-18T00:00:00Z",
+    token_counts: dict[str, int] | None = None,
+    void_compute_balance: float = 0.5,
+    boundary_rate: float = 0.3,
+    entropy_normalized: float = 0.4,
+    shannon_entropy_bits: float = 1.6,
+    vocabulary_occupancy: float = 0.125,
+) -> dict:
+    """Build a minimally-valid log entry for tests."""
+    return {
+        "generation": generation,
+        "snapshot_file": snapshot_file,
+        "ts": ts,
+        "token_counts": token_counts or {"karuna_relief": 100, "phase_boundary": 50},
+        "void_compute_balance": void_compute_balance,
+        "boundary_rate": boundary_rate,
+        "entropy_normalized": entropy_normalized,
+        "shannon_entropy_bits": shannon_entropy_bits,
+        "vocabulary_occupancy": vocabulary_occupancy,
+        "lattice_shape": [256, 256, 256],
+    }
+
+
+def _write_log(path: pathlib.Path, entries: list[dict]) -> None:
+    """Write a list of log entries to a JSONL file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, sort_keys=True) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# smoothed_distribution — Jack's canonical-ordering spec (§4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_smoothed_distribution_sums_to_one():
+    """Result always sums to 1.0 (within float precision)."""
+    p = smoothed_distribution({"karuna_relief": 100, "phase_boundary": 50})
+    assert sum(p) == pytest.approx(1.0)
+
+
+def test_smoothed_distribution_length_matches_vocabulary():
+    """Result has exactly len(TOKEN_NAMES) entries, one per canonical token."""
+    p = smoothed_distribution({"karuna_relief": 100})
+    assert len(p) == len(TOKEN_NAMES)
+
+
+def test_smoothed_distribution_canonical_order_independent_of_input_order():
+    """Two semantically equivalent count dicts produce identical vectors."""
+    # Python dicts preserve insertion order; we want the result to be
+    # independent of that order. Build two dicts with different insertion
+    # orders but the same content.
+    counts_a = {"karuna_relief": 100, "phase_boundary": 50, "void_static": 10}
+    counts_b = {"void_static": 10, "phase_boundary": 50, "karuna_relief": 100}
+    assert smoothed_distribution(counts_a) == smoothed_distribution(counts_b)
+
+
+def test_smoothed_distribution_empty_input_uniform_with_zero_smoothing():
+    """Empty + zero smoothing → uniform (defensive against div-by-zero)."""
+    p = smoothed_distribution({}, smoothing=0.0)
+    expected = 1.0 / len(TOKEN_NAMES)
+    assert all(v == pytest.approx(expected) for v in p)
+
+
+def test_smoothed_distribution_negative_smoothing_raises():
+    """Smoothing must be non-negative."""
+    with pytest.raises(ValueError):
+        smoothed_distribution({"a": 1}, smoothing=-0.1)
+
+
+# ---------------------------------------------------------------------------
+# KL divergence (§4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_kl_divergence_identical_distributions_zero():
+    """D_KL(P || P) = 0 by definition."""
+    counts = {"karuna_relief": 100, "phase_boundary": 50}
+    assert kl_divergence(counts, counts) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_kl_divergence_asymmetric():
+    """D_KL(P || Q) != D_KL(Q || P) in general (asymmetry).
+
+    Care needed in test fixture: mirror-image distributions like
+    ({a:100, b:1}, {a:1, b:100}) give *symmetric* KL because the two
+    fall on the same orbit under the token-label swap. Non-mirror
+    fixtures expose the asymmetry properly.
+    """
+    p = {"karuna_relief": 100, "phase_boundary": 10}   # 10:1 ratio
+    q = {"karuna_relief": 50, "phase_boundary": 50}    # uniform between the two
+    forward = kl_divergence(p, q)
+    reverse = kl_divergence(q, p)
+    assert forward != reverse
+    # Both should be positive (the distributions are different)
+    assert forward > 0.01
+    assert reverse > 0.01
+
+
+def test_kl_divergence_with_smoothing_finite_for_disjoint_supports():
+    """Smoothing prevents infinity when a token fires in one but not the other."""
+    p = {"karuna_relief": 100}        # only this token
+    q = {"phase_boundary": 100}       # only this OTHER token
+    val = kl_divergence(p, q, smoothing=1e-6)
+    assert math.isfinite(val)
+    assert val > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Jensen-Shannon divergence (§4.2)
+# ---------------------------------------------------------------------------
+
+
+def test_js_divergence_identical_distributions_zero():
+    """D_JS(P, P) = 0."""
+    counts = {"karuna_relief": 100, "phase_boundary": 50}
+    assert js_divergence(counts, counts) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_js_divergence_symmetric():
+    """D_JS(P, Q) == D_JS(Q, P) by construction."""
+    p = {"karuna_relief": 100, "phase_boundary": 1}
+    q = {"karuna_relief": 1, "phase_boundary": 100}
+    assert js_divergence(p, q) == pytest.approx(js_divergence(q, p))
+
+
+def test_js_divergence_bounded_in_zero_one():
+    """D_JS in bits is bounded [0, 1] for any pair of distributions."""
+    # Maximum case: disjoint supports
+    p = {"karuna_relief": 1_000_000}
+    q = {"phase_boundary": 1_000_000}
+    val = js_divergence(p, q, smoothing=1e-9)
+    assert 0.0 <= val <= 1.0 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Boundary persistence pairwise (§4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_persistence_pairwise_identical_rates_one():
+    """Identical rates → persistence = 1.0."""
+    assert boundary_persistence_pairwise(0.42, 0.42) == pytest.approx(1.0)
+    assert boundary_persistence_pairwise(0.0, 0.0) == pytest.approx(1.0)
+
+
+def test_boundary_persistence_pairwise_max_drop_zero():
+    """Rate dropping from r to 0 → persistence = 0 (full inversion)."""
+    assert boundary_persistence_pairwise(0.42, 0.0) == pytest.approx(0.0)
+    assert boundary_persistence_pairwise(0.0, 0.42) == pytest.approx(0.0)
+
+
+def test_boundary_persistence_pairwise_bounded_in_zero_one():
+    """Always in [0, 1] regardless of inputs."""
+    for r_prev, r_curr in [(0.1, 0.2), (0.5, 0.1), (0.9, 0.9), (0.0, 0.001)]:
+        val = boundary_persistence_pairwise(r_prev, r_curr)
+        assert 0.0 <= val <= 1.0, f"out of range for ({r_prev}, {r_curr}): {val}"
+
+
+def test_boundary_persistence_pairwise_negative_rate_raises():
+    """Negative rates are an input contract violation."""
+    with pytest.raises(ValueError):
+        boundary_persistence_pairwise(-0.1, 0.2)
+    with pytest.raises(ValueError):
+        boundary_persistence_pairwise(0.1, -0.2)
+
+
+# ---------------------------------------------------------------------------
+# Boundary CV + clamped aggregate persistence (§4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_cv_constant_series_zero():
+    """Constant series → CV = 0."""
+    assert boundary_cv([0.42, 0.42, 0.42, 0.42]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_boundary_cv_high_variance_exceeds_one():
+    """The original-formula failure case (rates [0, 0.5, 0, 0.5, 0]) gives CV >= 1."""
+    # Population stats: mean = 0.2, var = 0.06, std ≈ 0.2449
+    # CV ≈ 0.2449 / 0.201 ≈ 1.218 — exceeds 1, which is exactly why the
+    # original 1-CV formula went negative (issue caught by Jack's audit).
+    cv = boundary_cv([0.0, 0.5, 0.0, 0.5, 0.0])
+    assert cv > 1.0
+
+
+def test_boundary_cv_empty_or_single_element_zero():
+    """No variance defined → CV = 0 (sane default for degenerate input)."""
+    assert boundary_cv([]) == 0.0
+    assert boundary_cv([0.42]) == 0.0
+
+
+def test_boundary_persistence_aggregate_clamped_corners():
+    """Constant → 1.0; high-variance → 0.0 (clamp engages)."""
+    # Constant series: CV=0, score=1.0
+    assert boundary_persistence_aggregate_clamped(
+        [0.42, 0.42, 0.42]
+    ) == pytest.approx(1.0)
+    # High variance: CV>1, clamp to 0
+    assert boundary_persistence_aggregate_clamped(
+        [0.0, 0.5, 0.0, 0.5, 0.0]
+    ) == pytest.approx(0.0)
+
+
+def test_boundary_persistence_aggregate_clamped_intermediate_matches_one_minus_cv():
+    """For 0 < CV < 1, clamped score equals 1 - CV exactly (no clamp)."""
+    # Pick rates with moderate variance: mean=0.4, low std
+    rates = [0.38, 0.42, 0.40, 0.40, 0.40]
+    expected = 1.0 - boundary_cv(rates)
+    assert 0.0 < expected < 1.0  # genuinely in the un-clamped regime
+    assert boundary_persistence_aggregate_clamped(rates) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# CCI (§4.4)
+# ---------------------------------------------------------------------------
+
+
+def test_cci_corners():
+    """CCI = 0 iff any factor is 0; CCI = 1 iff all factors are 1."""
+    assert cci(0.0, 0.5, 0.5) == 0.0  # balance zero
+    assert cci(0.5, 0.0, 0.5) == 0.0  # boundary zero
+    assert cci(0.5, 0.5, 1.0) == 0.0  # H_norm = 1 → (1-H) = 0
+    assert cci(1.0, 1.0, 0.0) == pytest.approx(1.0)  # all max
+
+
+def test_cci_gen_1_6m_reference():
+    """Gen-1.6M reference values (design doc §4.4)."""
+    # B_VC = 0.988, R_boundary = 0.422, H_norm = 0.246
+    # CCI = 0.988 * 0.422 * (1 - 0.246) = 0.988 * 0.422 * 0.754 ≈ 0.3144
+    val = cci(0.988, 0.422, 0.246)
+    assert 0.31 < val < 0.32
+
+
+def test_cci_monotonicity():
+    """CCI increases with balance and boundary; decreases with entropy_norm."""
+    base = cci(0.5, 0.5, 0.5)
+    assert cci(0.6, 0.5, 0.5) > base   # higher balance
+    assert cci(0.5, 0.6, 0.5) > base   # higher boundary
+    assert cci(0.5, 0.5, 0.4) > base   # LOWER entropy → higher CCI
+
+
+# ---------------------------------------------------------------------------
+# compute_run_metrics — integration + determinism contracts (§4.5, §10 Q4)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_run_metrics_two_snapshots(tmp_path):
+    """Minimal 2-snapshot run → one pair row + one aggregate row."""
+    log_path = tmp_path / "nextness_runs.jsonl"
+    out_path = tmp_path / "nextness_run_metrics.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=100, snapshot_file="v070_gen100.npz",
+                    boundary_rate=0.40),
+        _make_entry(generation=101, snapshot_file="v070_gen101.npz",
+                    boundary_rate=0.42),
+    ])
+
+    agg = compute_run_metrics(log_path, out_path)
+
+    lines = out_path.read_text().splitlines()
+    assert len(lines) == 2  # 1 pair + 1 aggregate
+
+    pair = json.loads(lines[0])
+    assert pair["summary_type"] == "pair"
+    assert pair["prev_generation"] == 100
+    assert pair["curr_generation"] == 101
+    assert "js_divergence_bits" in pair
+    assert "kl_divergence_bits" in pair
+    assert "boundary_persistence_pairwise" in pair
+
+    aggr = json.loads(lines[1])
+    assert aggr["summary_type"] == "run_aggregate"
+    assert aggr["n_snapshots"] == 2
+    assert aggr["n_pairs"] == 1
+    assert aggr == agg
+
+
+def test_compute_run_metrics_identical_snapshots_zero_drift(tmp_path):
+    """Two identical entries → JS=0, boundary persistence=1, CCIs equal."""
+    log_path = tmp_path / "log.jsonl"
+    out_path = tmp_path / "out.jsonl"
+    entry_a = _make_entry(generation=100, snapshot_file="a.npz", boundary_rate=0.40)
+    entry_b = _make_entry(generation=101, snapshot_file="b.npz", boundary_rate=0.40)
+    # Identical token_counts means identical distributions
+    _write_log(log_path, [entry_a, entry_b])
+
+    compute_run_metrics(log_path, out_path)
+    lines = out_path.read_text().splitlines()
+    pair = json.loads(lines[0])
+
+    assert pair["js_divergence_bits"] == pytest.approx(0.0, abs=1e-9)
+    assert pair["boundary_persistence_pairwise"] == pytest.approx(1.0)
+    assert pair["cci_prev"] == pytest.approx(pair["cci_curr"])
+
+
+def test_compute_run_metrics_idempotent_byte_identical(tmp_path):
+    """Re-running on the same input produces byte-identical output.
+
+    This is the canonical determinism contract — no fresh generated_at,
+    deterministic sort, sort_keys=True in JSON serialization.
+    """
+    log_path = tmp_path / "log.jsonl"
+    out_path_a = tmp_path / "out_a.jsonl"
+    out_path_b = tmp_path / "out_b.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=10, snapshot_file="a.npz", boundary_rate=0.40),
+        _make_entry(generation=11, snapshot_file="b.npz", boundary_rate=0.41),
+        _make_entry(generation=12, snapshot_file="c.npz", boundary_rate=0.39),
+    ])
+
+    compute_run_metrics(log_path, out_path_a)
+    compute_run_metrics(log_path, out_path_b)
+    assert out_path_a.read_bytes() == out_path_b.read_bytes()
+
+
+def test_compute_run_metrics_no_generated_at_field(tmp_path):
+    """Output must NOT contain any 'generated_at' field anywhere.
+
+    Required for byte-identical re-run. Locks in §10 Q4 of the design doc.
+    """
+    log_path = tmp_path / "log.jsonl"
+    out_path = tmp_path / "out.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+    compute_run_metrics(log_path, out_path)
+    content = out_path.read_text()
+    assert "generated_at" not in content
+
+
+def test_compute_run_metrics_deterministic_sort_across_input_orderings(tmp_path):
+    """Same snapshots in three different write-orders → byte-identical output.
+
+    Locks in the sort-key contract: output depends only on the data, not
+    on how the input happened to be ordered in the JSONL file.
+    """
+    entries = [
+        _make_entry(generation=10, snapshot_file="a.npz", boundary_rate=0.40),
+        _make_entry(generation=11, snapshot_file="b.npz", boundary_rate=0.41),
+        _make_entry(generation=12, snapshot_file="c.npz", boundary_rate=0.39),
+        _make_entry(generation=13, snapshot_file="d.npz", boundary_rate=0.43),
+    ]
+
+    log_asc = tmp_path / "log_asc.jsonl"
+    log_desc = tmp_path / "log_desc.jsonl"
+    log_shuffled = tmp_path / "log_shuffled.jsonl"
+    out_asc = tmp_path / "out_asc.jsonl"
+    out_desc = tmp_path / "out_desc.jsonl"
+    out_shuffled = tmp_path / "out_shuffled.jsonl"
+
+    _write_log(log_asc, entries)
+    _write_log(log_desc, list(reversed(entries)))
+    _write_log(log_shuffled, [entries[2], entries[0], entries[3], entries[1]])
+
+    compute_run_metrics(log_asc, out_asc)
+    compute_run_metrics(log_desc, out_desc)
+    compute_run_metrics(log_shuffled, out_shuffled)
+
+    assert out_asc.read_bytes() == out_desc.read_bytes()
+    assert out_asc.read_bytes() == out_shuffled.read_bytes()
+
+
+def test_compute_run_metrics_one_snapshot_only(tmp_path):
+    """Single snapshot → no pairs, single aggregate row, no crash."""
+    log_path = tmp_path / "log.jsonl"
+    out_path = tmp_path / "out.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=42, snapshot_file="lonely.npz"),
+    ])
+
+    agg = compute_run_metrics(log_path, out_path)
+    lines = out_path.read_text().splitlines()
+    assert len(lines) == 1  # only the aggregate; no pair rows
+    aggr_line = json.loads(lines[0])
+    assert aggr_line["summary_type"] == "run_aggregate"
+    assert aggr_line["n_snapshots"] == 1
+    assert aggr_line["n_pairs"] == 0
+    assert agg == aggr_line
+
+
+def test_compute_run_metrics_missing_log_raises(tmp_path):
+    """FileNotFoundError surfaces cleanly for missing input."""
+    with pytest.raises(FileNotFoundError):
+        compute_run_metrics(tmp_path / "does_not_exist.jsonl", tmp_path / "out.jsonl")
+
+
+def test_compute_run_metrics_malformed_jsonl_raises(tmp_path):
+    """Malformed JSONL surfaces as ValueError with line context."""
+    log_path = tmp_path / "log.jsonl"
+    log_path.write_text('{"generation": 1}\nthis is not json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed JSONL"):
+        compute_run_metrics(log_path, tmp_path / "out.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# Golden self-contained: known input → analytically-computed expected output
+# ---------------------------------------------------------------------------
+
+
+def test_compute_run_metrics_golden_three_snapshots(tmp_path):
+    """Three known snapshots → assert key aggregate values against hand-computed expectations.
+
+    Inputs constructed so the expected outputs can be computed by hand
+    and locked in. Acts as the regression-fence test for the orchestrator
+    arithmetic (design doc §6 "Golden-file test", self-contained variant).
+    """
+    log_path = tmp_path / "log.jsonl"
+    out_path = tmp_path / "out.jsonl"
+    # Three identical distributions → JS=0 between adjacent pairs, but
+    # varying boundary_rate so we can verify boundary metrics
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz",
+                    boundary_rate=0.40, void_compute_balance=0.99,
+                    entropy_normalized=0.25),
+        _make_entry(generation=2, snapshot_file="b.npz",
+                    boundary_rate=0.42, void_compute_balance=0.99,
+                    entropy_normalized=0.25),
+        _make_entry(generation=3, snapshot_file="c.npz",
+                    boundary_rate=0.44, void_compute_balance=0.99,
+                    entropy_normalized=0.25),
+    ])
+
+    agg = compute_run_metrics(log_path, out_path)
+
+    # Identical token_counts (default in _make_entry) → all pair JS = 0
+    assert agg["mean_js_divergence_bits"] == pytest.approx(0.0, abs=1e-9)
+
+    # CCI for each entry: 0.99 * boundary_rate * (1 - 0.25) = 0.7425 * boundary
+    expected_ccis = [0.7425 * 0.40, 0.7425 * 0.42, 0.7425 * 0.44]
+    expected_mean_cci = sum(expected_ccis) / 3
+    assert agg["mean_cci"] == pytest.approx(expected_mean_cci)
+    assert agg["min_cci"] == pytest.approx(expected_ccis[0])
+    assert agg["max_cci"] == pytest.approx(expected_ccis[2])
+    assert agg["argmin_cci_snapshot"] == "a.npz"
+    assert agg["argmax_cci_snapshot"] == "c.npz"
+
+    # Boundary CV: mean = 0.42, population variance =
+    #   ((0.40-0.42)^2 + (0.42-0.42)^2 + (0.44-0.42)^2) / 3
+    #   = (0.0004 + 0 + 0.0004) / 3 = 0.000267
+    # std ≈ 0.01633; CV ≈ 0.01633 / 0.421 ≈ 0.0388
+    expected_cv = math.sqrt(0.0008 / 3) / (0.42 + 1e-3)
+    assert agg["boundary_cv"] == pytest.approx(expected_cv, rel=1e-6)
+    assert agg["boundary_persistence_aggregate_clamped"] == pytest.approx(
+        max(0.0, 1.0 - expected_cv), rel=1e-6
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI smoke
+# ---------------------------------------------------------------------------
+
+
+def test_cli_main_runs_on_real_input(tmp_path, capsys):
+    """CLI runs end-to-end on a valid log, returns 0, prints summary."""
+    log_path = tmp_path / "log.jsonl"
+    out_path = tmp_path / "out.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    rc = main(["--log", str(log_path), "--out", str(out_path)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert str(out_path) in captured.out
+    assert "n_snapshots: 2" in captured.out
+    assert "mean_cci:" in captured.out
+
+
+def test_cli_main_missing_log_returns_nonzero(tmp_path, capsys):
+    """CLI surfaces missing-file error as non-zero exit code."""
+    rc = main(["--log", str(tmp_path / "missing.jsonl"),
+               "--out", str(tmp_path / "out.jsonl")])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "not found" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Write-boundary safety contract (Jack's PR #142 audit)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_run_metrics_accepts_output_inside_log_directory(tmp_path):
+    """Sibling output path (same directory as log) succeeds — happy path
+    for the Lane B safety contract.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out_path = log_dir / "nextness_run_metrics.jsonl"  # sibling of log_path
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    # Should not raise
+    agg = compute_run_metrics(log_path, out_path)
+    assert out_path.is_file()
+    assert agg["n_snapshots"] == 2
+
+
+def test_compute_run_metrics_rejects_output_outside_log_directory(tmp_path):
+    """Output path outside log_path.parent raises WriteOutsideLogDirError.
+
+    Lane B contract: derived metrics output must land inside the same
+    directory as the input JSONL log. Per Jack's PR #142 audit; before
+    this fix, the function would happily write anywhere on disk.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # Output path is a sibling of log_dir, not inside it — outside the boundary
+    out_path = tmp_path / "outside_dir" / "out.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        compute_run_metrics(log_path, out_path)
+
+    # And the parent directory of the rejected out_path must NOT have been
+    # created — validation happens before any disk side effects.
+    assert not (tmp_path / "outside_dir").exists()
+
+
+def test_compute_run_metrics_rejects_traversal_escape(tmp_path):
+    """``..`` traversal must also be rejected, not just literal mismatch.
+
+    Defensive: ensures the validation resolves paths to canonical absolute
+    form rather than doing literal string comparison.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # Looks-inside but actually escapes via ..
+    out_path = log_dir / ".." / ".." / "escape.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    with pytest.raises(WriteOutsideLogDirError):
+        compute_run_metrics(log_path, out_path)
+
+
+def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
+    """CLI propagates WriteOutsideLogDirError as a non-zero exit code.
+
+    Distinct exit code from the data-error path so external callers can
+    distinguish a safety refusal from a malformed-input error.
+    """
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out_path = tmp_path / "elsewhere" / "out.jsonl"  # outside log_dir
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+
+    rc = main(["--log", str(log_path), "--out", str(out_path)])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "safety error" in captured.err.lower()
+    assert "outside log_path" in captured.err.lower()
+    # No side effects: the outside-of-boundary parent dir must not exist
+    assert not (tmp_path / "elsewhere").exists()
