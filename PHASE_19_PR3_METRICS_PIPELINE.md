@@ -28,7 +28,7 @@ PR #3 is **strictly Lane B**. It does not touch the engine, does not propose tun
 
 ### What lands in PR #3
 1. Four additional fields in the per-snapshot JSONL entry produced by `process_snapshot()` (cheap to compute on data the observer already has loaded).
-2. A new module `scripts/nextness_metrics.py` for across-snapshots metrics (distribution drift, boundary persistence, regime classification).
+2. A new module `scripts/nextness_metrics.py` for across-snapshots metrics (distribution drift, boundary persistence, CCI interpretive scoring).
 3. A CLI entry point that consumes an existing `nextness_runs.jsonl` log and emits a derived `nextness_run_metrics.jsonl` (one row per snapshot pair, plus an aggregate summary row).
 4. Tests for every new metric, including golden-file tests using the existing playground snapshot.
 
