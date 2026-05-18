@@ -49,7 +49,18 @@ A single snapshot tells us the *state space* once. It does not tell us whether t
 
 ## 3. Per-snapshot metrics (extends `process_snapshot()`)
 
-Four new fields added to the JSONL entry already produced by PR #138. All four are computed from data that `process_snapshot()` has already loaded into memory; no additional snapshot reads.
+Four new fields added to the JSONL entry already produced by PR #138, plus explicit preservation of the existing `vocabulary_occupancy` field as a top-level diagnostic. All five are computed from data that `process_snapshot()` has already loaded into memory; no additional snapshot reads.
+
+### 3.0 Preserved + promoted from PR #138: `vocabulary_occupancy`
+
+Already emitted by `process_snapshot()` (PR #138):
+
+$$O_{\text{vocab}} = \frac{|\{i : N_i > 0\}|}{K}$$
+
+where $K = |\text{TOKEN\_NAMES}|$. Range $[0, 1]$.
+
+- **JSONL field**: `vocabulary_occupancy` (unchanged from PR #138).
+- **Why it's listed here**: vocabulary occupancy was central to issue #139's findings discussion (the 0.125 value drove the whole "two-token saturation" conversation). Calling it out explicitly in PR #3 ensures it stays a first-class diagnostic alongside the four new metrics, rather than getting overlooked as "implicit in `token_counts`."
 
 ### 3.1 Shannon entropy of token distribution
 
@@ -96,6 +107,14 @@ A separate module that consumes an existing `nextness_runs.jsonl` and computes p
 $$D_{\text{KL}}(P_{t-1} \| P_t) = \sum_{i : P_{t-1}(i) > 0} P_{t-1}(i) \log_2 \frac{P_{t-1}(i)}{P_t(i)}$$
 
 - **Smoothing**: tokens with zero count in $P_t$ but nonzero in $P_{t-1}$ are handled via additive (Laplace) smoothing with $\epsilon = 10^{-6}$ before normalization. Documented; tunable; not a free parameter that masks structure.
+- **Smoothing-and-normalization algorithm** (per Jack's audit): the smoothed probability vector is built by iterating over `TOKEN_NAMES` in canonical order, adding $\epsilon$ to each slot (whether the token fired or not), and then dividing by the resulting sum so each vector totals to 1.0. Pseudocode:
+  ```python
+  def smoothed_distribution(counts: dict[str, int], eps: float) -> list[float]:
+      raw = [counts.get(tok, 0) + eps for tok in TOKEN_NAMES]
+      total = sum(raw)
+      return [v / total for v in raw]
+  ```
+  This makes the KL computation independent of dict iteration order or how the caller constructed `counts`.
 - **Use case**: directional — "how surprised is yesterday's distribution by today's?"
 - **JSONL field**: `kl_divergence_bits`.
 
@@ -118,14 +137,25 @@ with $\delta = 10^{-3}$ to avoid singularities when both rates are near zero.
 - **Range**: $[0, 1]$. High = the boundary rate is stable across the pair; low = volatile.
 - **JSONL field**: `boundary_persistence_pairwise`.
 
-Aggregate (across full run window of $N$ snapshots):
+Aggregate (across full run window of $N$ snapshots) — per Jack's audit, emitted as **two** fields rather than one collapsed score:
 
-$$\Pi_{\text{boundary}} = 1 - \frac{\sigma(R_{\text{boundary}})}{\mu(R_{\text{boundary}}) + \delta}$$
+**Raw coefficient of variation** (diagnostic, unbounded):
 
-(one minus the coefficient of variation).
+$$\text{CV}_{\text{boundary}} = \frac{\sigma(R_{\text{boundary}})}{\mu(R_{\text{boundary}}) + \delta}$$
 
-- **Range**: $[0, 1]$ for runs that don't have wildly negative slopes. High = sustained rate; low = drift or volatility.
-- **Emitted in**: the final aggregate row of `nextness_run_metrics.jsonl` (not per-pair).
+- **Range**: $[0, \infty)$. CV $= 0$ means constant rate; CV $\geq 1$ means standard deviation exceeds mean (the original formula's failure case at rates like $[0, 0.5, 0, 0.5, 0]$ where $\mu = 0.2, \sigma \approx 0.245$).
+- **Use case**: raw diagnostic for analysts who want the underlying signal, not the clamped readability score.
+- **JSONL field** (in run-aggregate row): `boundary_cv`.
+
+**Clamped persistence score** (readable, bounded):
+
+$$\Pi_{\text{boundary,clamped}} = \max(0, 1 - \text{CV}_{\text{boundary}})$$
+
+- **Range**: $[0, 1]$. Genuinely bounded; equals 1 when boundary rate is constant; equals 0 when CV ≥ 1 (volatile / drifting).
+- **Use case**: time-series plots and CCI-adjacent summaries that want a single number on a comparable scale.
+- **JSONL field** (in run-aggregate row): `boundary_persistence_aggregate_clamped`.
+
+Emitting both keeps the diagnostic CV available without losing the readable score. Analysts can use either or both.
 
 ### 4.4 Coexistence–Crystallization Index (CCI)
 
@@ -158,7 +188,8 @@ The last row of `nextness_run_metrics.jsonl` is a special entry containing:
 - `n_snapshots: N`
 - `mean_js_divergence_bits`, `std_js_divergence_bits` — how much does the token distribution typically drift between adjacent snapshots?
 - `mean_cci`, `std_cci` — average regime score and its volatility
-- `boundary_persistence_aggregate` — the windowed $\Pi_{\text{boundary}}$ above
+- `boundary_cv` — raw coefficient of variation of the boundary rate across the run
+- `boundary_persistence_aggregate_clamped` — clamped readable score $\max(0, 1 - \text{CV})$
 - `min_cci`, `max_cci`, `argmin_cci_snapshot`, `argmax_cci_snapshot` — endpoints for diagnostic drill-in
 
 ## 5. Module structure proposal
@@ -195,13 +226,16 @@ The CLI reads a JSONL log, computes pairwise + aggregate metrics, writes derived
 - `test_shannon_entropy_*` — uniform distribution → $\log_2(K)$, single-token concentration → 0, intermediate cases verified against scipy-equivalent reference values.
 - `test_kl_divergence_*` — identical distributions → 0; orthogonal distributions → finite via smoothing; symmetry violation (KL is not symmetric) confirmed.
 - `test_js_divergence_*` — identical → 0; orthogonal → $\log_2(2) = 1$ bit; symmetry $D_{\text{JS}}(P, Q) = D_{\text{JS}}(Q, P)$ confirmed.
-- `test_boundary_persistence_*` — identical rates → 1.0; rate jumping 0 → 1 → 0.0; series with high variance vs low variance gives correct ordering.
+- `test_boundary_persistence_pairwise_*` — identical rates → 1.0; rate jumping 0 → 1 → 0.0; series with high variance vs low variance gives correct ordering.
+- `test_boundary_cv_*` — constant series → CV = 0; high-volatility series (rates like `[0, 0.5, 0, 0.5, 0]`) → CV ≥ 1 (the original-formula failure case).
+- `test_boundary_persistence_aggregate_clamped_*` — constant series → 1.0; CV ≥ 1 series → 0.0 (clamp engages); intermediate series → matches `1 - CV` exactly.
 - `test_cci_*` — $\text{CCI} = 0$ if any factor is 0; $\text{CCI} = 1$ iff all three factors are 1; monotonicity in each component.
 
 ### Integration tests
 - `test_compute_run_metrics_two_snapshots` — minimal two-snapshot JSONL → emits one pairwise row + one aggregate row with correct fields.
 - `test_compute_run_metrics_identical_snapshots` — two identical entries → JS divergence $= 0$, boundary persistence $= 1$, CCI unchanged.
-- `test_compute_run_metrics_idempotent` — running twice on the same input produces byte-identical output.
+- `test_compute_run_metrics_idempotent` — running twice on the same input produces byte-identical output. Explicitly verifies no fresh `generated_at` timestamp is present and that input ordering follows `(generation, filename, source_timestamp)`.
+- `test_compute_run_metrics_deterministic_sort` — feeds the same snapshots to the orchestrator in three different input orderings (mtime-ascending, reverse-mtime, shuffled) and asserts byte-identical output across all three.
 
 ### Golden-file test
 - A captured `nextness_runs.jsonl` with 5 synthetic but plausible entries → known-good `nextness_run_metrics.jsonl`. Locks the metric arithmetic against silent regressions.
@@ -217,10 +251,10 @@ The CLI reads a JSONL log, computes pairwise + aggregate metrics, writes derived
 Per Jack's audit caution and 84's audit-hat-on engineering note, the design doc explicitly partitions the framings inherited from AURA's Sakana drop:
 
 ### Operationalized as metrics in PR #3
-- **3-regime classification (mixing / crystallization / coexistence)** → CCI scoring + three-component point
-- **Boundary persistence** → pairwise and aggregate $\Pi_{\text{boundary}}$
+- **3-regime interpretive framing (mixing / crystallization / coexistence)** → CCI scoring function + the three-component vector $(B_{\text{V/C}}, R_{\text{boundary}}, H_{\text{norm}})$. *Not* a classifier; no hard regime thresholds in PR #3.
+- **Boundary persistence** → pairwise persistence per snapshot pair, plus aggregate raw `boundary_cv` and clamped score $\Pi_{\text{boundary,clamped}}$ in the run summary
 - **Distribution drift** → JS divergence between adjacent snapshots
-- **Vocabulary occupancy over time** → entropy and normalized entropy
+- **Vocabulary occupancy over time** → `vocabulary_occupancy` preserved from PR #138, plus new entropy and normalized entropy fields
 - **Fungal-network "growth at active boundary"** → `boundary_rate` as a first-class field
 
 ### Interpretive scaffolding (useful intuition; not computed against)
@@ -273,7 +307,10 @@ Deliberately deferred to **Lane A** (engine track, separately scoped, currently 
 
 3. **Boundary-persistence aggregation window**: should the aggregate version operate on the full run, or on a rolling window of (say) 5 snapshots? The full-run version is simpler; the rolling-window version makes the metric responsive to phase transitions during the run. Recommend full-run for PR #3, add rolling-window in PR #4 if needed.
 
-4. **Should `compute_run_metrics` output be deterministic?** Currently the design implies yes (idempotent re-run produces byte-identical output). One subtlety: floating-point summation order can vary. The implementation will use deterministic ordering (sorted by snapshot timestamp) and a single accumulator pass to keep this property.
+4. **Should `compute_run_metrics` output be deterministic?** Yes — and per Jack's audit the spec needs explicit determinism contracts to actually achieve byte-identical re-run output:
+   - **Sort key for input snapshots**: `(generation, snapshot_filename, source_timestamp)` in that priority order. Generation is the primary key (it's monotonic and embedded in the data); filename is the deterministic tiebreaker; source timestamp from the snapshot itself (NOT a fresh `datetime.now()`) is the final fallback if neither prior key disambiguates.
+   - **No fresh `generated_at` field in the metrics output.** A `generated_at: datetime.now().isoformat()` field — the kind of thing any sensible engineer would reach for — would break byte-identical re-run on every invocation. The metrics output carries source-data timestamps and generations only.
+   - **Floating-point summation order**: deterministic via the canonical TOKEN_NAMES iteration order (see §4.1 KL pseudocode) and a single-pass accumulator. Catastrophic cancellation in entropy / KL sums is not a concern at our scale (16 tokens, counts $\leq 10^5$).
 
 5. **Multi-snapshot observer mode**: PR #3 as currently scoped consumes an existing JSONL. To produce that JSONL across multiple snapshots, the operator can currently invoke `process_snapshot()` in a loop. Should PR #3 also add a `--snapshots-dir` / `--max-snapshots N` flag to `nextness_observer.py` for one-shot multi-snapshot runs? Or keep it as a separate concern? Recommend the latter (one-shot loop can be a 5-line shell script; PR #3 stays focused on metrics).
 
