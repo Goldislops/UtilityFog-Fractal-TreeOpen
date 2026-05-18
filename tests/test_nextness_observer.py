@@ -48,8 +48,10 @@ from scripts.nextness_observer import (
     TOKEN_NAMES,
     WriteOutsideLogDirError,
     ZmqUseInPR2Error,
+    boundary_rate,
     classify_patch,
     compute_safe_stride,
+    entropy_normalized,
     find_latest_snapshot,
     is_medusa_live,
     iter_dense_patches,
@@ -58,6 +60,8 @@ from scripts.nextness_observer import (
     iter_uniform_grid_patches,
     load_snapshot,
     process_snapshot,
+    shannon_entropy_bits,
+    void_compute_balance,
     write_log_entry,
 )
 
@@ -812,3 +816,130 @@ def test_process_snapshot_budget_block_includes_fraction_used(tmp_path):
     entry = json.loads(jsonl[-1])
     assert "fraction_used" in entry["budget"]
     assert entry["budget"]["fraction_used"] == frac
+
+
+# ---------------------------------------------------------------------------
+# PR #3 per-snapshot metric extensions (PHASE_19_PR3_METRICS_PIPELINE.md §3)
+# ---------------------------------------------------------------------------
+
+
+def test_shannon_entropy_bits_basic_cases():
+    """Empty counts → 0; single-token concentration → 0; uniform over K tokens → log2(K)."""
+    import math
+    # Empty distribution
+    assert shannon_entropy_bits({}) == 0.0
+    # All-zero counts
+    assert shannon_entropy_bits({"a": 0, "b": 0}) == 0.0
+    # Single-token concentration: H = -1·log2(1) = 0
+    assert shannon_entropy_bits({"a": 100}) == 0.0
+    # Uniform over 4 tokens: H = log2(4) = 2.0 bits
+    assert shannon_entropy_bits({"a": 25, "b": 25, "c": 25, "d": 25}) == pytest.approx(2.0)
+    # Two-token 50/50: H = log2(2) = 1.0 bit
+    assert shannon_entropy_bits({"a": 10, "b": 10}) == pytest.approx(1.0)
+    # Gen-1.6M Medusa reference: karuna_relief 18941 + phase_boundary 13827
+    # Manually computed in design doc §4.4: H ≈ 0.983 bits.
+    medusa_h = shannon_entropy_bits({"karuna_relief": 18941, "phase_boundary": 13827})
+    assert 0.97 < medusa_h < 0.99
+
+
+def test_entropy_normalized_basic_cases():
+    """vocabulary_size ≤ 1 → 0; H = log2(K) → 1.0; range [0, 1] otherwise."""
+    import math
+    # Degenerate cases
+    assert entropy_normalized(1.0, 1) == 0.0
+    assert entropy_normalized(1.0, 0) == 0.0
+    assert entropy_normalized(0.0, 16) == 0.0
+    assert entropy_normalized(-1.0, 16) == 0.0  # nonsense input → 0, not negative
+    # Full saturation: H = log2(K) for K=16 → 4.0 bits → normalized 1.0
+    assert entropy_normalized(math.log2(16), 16) == pytest.approx(1.0)
+    # Half saturation: H = 0.5·log2(K) → normalized 0.5
+    assert entropy_normalized(0.5 * math.log2(16), 16) == pytest.approx(0.5)
+
+
+def test_void_compute_balance_basic_cases():
+    """Equal counts → 1.0; one absent → 0; lattice with no VOID/COMPUTE → 0."""
+    # Equal counts: 50% VOID + 50% COMPUTE → balance = 1.0
+    state = np.zeros((4, 4, 4), dtype=np.uint8)
+    state[:2] = STATE_VOID
+    state[2:] = STATE_COMPUTE
+    assert void_compute_balance(state) == pytest.approx(1.0)
+    # All VOID, no COMPUTE → balance = 0
+    state_v = np.full((4, 4, 4), STATE_VOID, dtype=np.uint8)
+    assert void_compute_balance(state_v) == 0.0
+    # All COMPUTE, no VOID → balance = 0
+    state_c = np.full((4, 4, 4), STATE_COMPUTE, dtype=np.uint8)
+    assert void_compute_balance(state_c) == 0.0
+    # Neither VOID nor COMPUTE → balance = 0
+    state_s = np.full((4, 4, 4), STATE_STRUCTURAL, dtype=np.uint8)
+    assert void_compute_balance(state_s) == 0.0
+    # Gen-1.6M reference scaled to 16³ (4096 cells): P_VOID = 0.4714,
+    # P_COMPUTE = 0.4601 → balance ≈ 0.988. Synthetic counts:
+    # 47.14% × 4096 ≈ 1931 VOID; 46.01% × 4096 ≈ 1884 COMPUTE; rest STRUCTURAL.
+    state_m = np.full((16, 16, 16), STATE_STRUCTURAL, dtype=np.uint8)  # filler
+    flat = state_m.ravel()
+    flat[:1931] = STATE_VOID
+    flat[1931:1931 + 1884] = STATE_COMPUTE
+    # Expected: 2 * 1884 / (1931 + 1884) = 0.98765
+    assert 0.985 < void_compute_balance(state_m) < 0.990
+
+
+def test_boundary_rate_basic_cases():
+    """phase_boundary absent → 0; present → correct fraction; empty counts → 0."""
+    # Empty
+    assert boundary_rate({}) == 0.0
+    # phase_boundary absent
+    assert boundary_rate({"karuna_relief": 100}) == 0.0
+    # phase_boundary present but not exclusive
+    assert boundary_rate({"phase_boundary": 25, "karuna_relief": 75}) == pytest.approx(0.25)
+    # Only phase_boundary
+    assert boundary_rate({"phase_boundary": 50}) == pytest.approx(1.0)
+    # Gen-1.6M reference: 13827 boundary / 32768 total ≈ 0.4220
+    r = boundary_rate({"karuna_relief": 18941, "phase_boundary": 13827})
+    assert 0.421 < r < 0.423
+
+
+def test_process_snapshot_emits_all_pr3_per_snapshot_fields(tmp_path):
+    """End-to-end: process_snapshot emits all four new PR #3 fields in the
+    JSONL log entry with correct types and ranges. Locks in §3 of the
+    PR #3 design doc against silent regression.
+    """
+    snap = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16, generation=1)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+
+    # All four PR #3 per-snapshot fields present in returned summary
+    assert "shannon_entropy_bits" in summary
+    assert "entropy_normalized" in summary
+    assert "void_compute_balance" in summary
+    assert "boundary_rate" in summary
+    # vocabulary_occupancy preserved + still present (PR #138 field)
+    assert "vocabulary_occupancy" in summary
+
+    # Type + range checks
+    for field in ("shannon_entropy_bits", "entropy_normalized",
+                  "void_compute_balance", "boundary_rate",
+                  "vocabulary_occupancy"):
+        val = summary[field]
+        assert isinstance(val, float), f"{field} should be float, got {type(val).__name__}"
+        assert val >= 0.0, f"{field} should be non-negative, got {val}"
+
+    # Normalized entropy bounded above by 1.0
+    assert summary["entropy_normalized"] <= 1.0
+    # Shannon entropy bounded above by log2(K) for K=len(TOKEN_NAMES)
+    import math
+    assert summary["shannon_entropy_bits"] <= math.log2(len(TOKEN_NAMES)) + 1e-9
+    # Balance and boundary rate in [0, 1]
+    assert 0.0 <= summary["void_compute_balance"] <= 1.0
+    assert 0.0 <= summary["boundary_rate"] <= 1.0
+
+    # All fields round-trip through JSONL identically
+    jsonl = (log_dir / "nextness_runs.jsonl").read_text().splitlines()
+    entry = json.loads(jsonl[-1])
+    for field in ("shannon_entropy_bits", "entropy_normalized",
+                  "void_compute_balance", "boundary_rate",
+                  "vocabulary_occupancy"):
+        assert entry[field] == summary[field], \
+            f"{field} differs between summary and JSONL: {summary[field]!r} vs {entry[field]!r}"
