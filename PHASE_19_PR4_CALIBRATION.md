@@ -57,11 +57,35 @@ The PR #142 smoke run against 5 consecutive Medusa snapshots (gens 1,665,615 →
 
 PR #4's job is to run experiments that would *change* these numbers if those alternative hypotheses are correct, and *leave them unchanged* if AURA's hypothesis is correct. Either way, we learn.
 
+## 2.5. The two calibration sets (per Jack's audit)
+
+Per Jack's PR #143 review, the calibration runs use **two distinct sandboxed snapshot sets**, not one collapsed set:
+
+- **Short set** — **12 consecutive snapshots** (~2h window at Medusa's standard ~10-min snapshot cadence). Tests *local stability*: does the equilibrium hold steady at this exact moment.
+- **Long set** — **12 snapshots spread across ~24h** (every ~120 minutes from the most recent 24h of snapshots). Tests *persistence*: does the equilibrium hold over a meaningful timescale.
+
+Both sets are sandboxed copies; Medusa's actual data directory is untouched. The two sets answer structurally different questions and their results don't average usefully — keeping them separate is the audit-clean move.
+
+**Which experiments use which set:**
+
+| Experiment | Short set | Long set |
+|---|---|---|
+| 3.1 Spatial stride sweep | ✅ | — |
+| 3.2 Temporal window sweep | — | ✅ (inherently needs spread) |
+| 3.3 Patch-size / coarse-graining | ✅ | — |
+| 3.4 Threshold sensitivity | ✅ | — |
+| 3.5 Cascade ablation | ✅ | — |
+| 3.6 Memory-channel verification | ✅ | — |
+| 3.7 Repeatability / determinism | ✅ | ✅ (both, as canonical sanity floor) |
+| 3.8 Null-model / shuffle | ✅ | — (single-snapshot variations) |
+
+Total snapshot copies needed: 24 (or fewer if any short-set members happen to also be long-set members; in practice they'll be disjoint).
+
 ## 3. The eight calibration experiments
 
 Each experiment has the same structure: **hypothesis under test → method → expected outcomes under each competing explanation → falsification criteria**. The orchestrator records every parameter combination's outputs deterministically so results survive re-analysis.
 
-All experiments operate on the **same set of N sandboxed Medusa snapshots** (proposal: N = 10–20 snapshots spanning at least 24h of wall-clock if available, sandboxed-copy-only, Medusa's data dir untouched). All experiments respect the existing scope guarantees (no engine touch, etc.).
+All experiments respect the existing scope guarantees (no engine touch, etc.) and operate on the calibration sets defined in §2.5.
 
 ### Experiment 3.1 — Spatial stride sweep
 
@@ -162,21 +186,37 @@ This is a probe, not a redesign. We learn which predicates are "claiming territo
 
 **Falsification criterion:** any non-deterministic output is a blocker for interpreting the rest of the calibration.
 
-### Experiment 3.8 — Null-model / shuffle test ✨ NEW
+### Experiment 3.8 — Null-model / shuffle test ✨ (with two modes per Jack's audit)
 
-**Tests:** "is the equilibrium in the lattice, or in our classifier?" (the cleanest falsification test available)
+**Tests:** "is the equilibrium in the lattice geometry, or in the memory-channel spatial structure, or in our classifier?" The cleanest falsification test available, refined into a **three-way comparison** that pinpoints *which* spatial structure carries the signal.
 
-**Method:** Take a single snapshot. Randomly permute cell positions in the `lattice` array (preserving total counts per state but destroying all spatial correlations). Also permute the memory_grid voxels in the same way (preserving per-channel marginal statistics but destroying spatial correlations). Run the classifier on this shuffled snapshot. Compare token distribution + CCI to the unshuffled baseline.
+**Method:** For each snapshot, produce three runs and compare token distributions + CCI across them:
 
-**Justification:** if the karuna_relief / phase_boundary dominance arises from the *spatial structure* of Medusa's lattice (i.e., the lattice has real organized geometry), shuffling destroys that geometry and the token distribution should collapse — entropy should rise, CCI should change, the two-token saturation should soften or disappear. If instead the distribution is roughly the same after shuffling, the pattern is in the classifier (firing on independent local features regardless of geometric context), not in the lattice.
+1. **`unshuffled`** — baseline run, no permutation. Reference value.
+2. **`lattice_only_shuffle`** — randomly permute cell positions in the `lattice` array (preserving per-state cell counts but destroying lattice spatial correlations). Leave the `memory_grid` arrays untouched. Tests whether the lattice's spatial geometry is what the classifier is reading.
+3. **`joint_lattice_memory_shuffle`** — apply the **same permutation** to both the `lattice` array and every channel of the `memory_grid`. This destroys *all* spatial correlations while preserving per-array marginal statistics (per-state cell counts; per-channel memory_grid mean/variance). Tests whether *any* spatial structure carries the signal.
 
-**Expected outcomes:**
-- **Signal is in the lattice**: shuffled CCI differs from unshuffled by > 0.10 absolute; entropy rises meaningfully; karuna_relief and phase_boundary may no longer dominate.
-- **Signal is in the classifier**: shuffled and unshuffled give similar distributions. The vocabulary is firing on per-cell properties that don't need geometric context. Reframe needed.
+**Why both modes matter** (Jack's catch on PR #143 review): the classifier reads from both `lattice` and `memory_grid`. If we shuffle only the lattice, the memory_grid spatial structure stays intact — so the compassion-channel readings remain at their original positions and `karuna_relief` could still fire normally. That single-mode shuffle would muddy the falsification result. Doing both modes turns a binary test into a discriminating three-way comparison.
 
-**Falsification criterion:** if shuffled-vs-unshuffled CCI differs by less than 0.05 absolute and vocabulary_occupancy is unchanged, the equilibrium interpretation is mostly classifier behavior, not lattice geometry. This is the carpenter's level on the floor — does the floor sit flat no matter which way you rotate it?
+**Each mode uses the same canonical seed** + 5 variance-estimate seeds per §12 question 6.
 
-Implementation note: shuffling is a numpy one-liner per array. Cost trivial. This experiment is the highest-information-per-line-of-code in the calibration set.
+**Expected outcomes (three-way reading):**
+
+| Result pattern | Interpretation |
+|---|---|
+| All three give similar distributions | Pattern is in the classifier; no spatial structure in either array is necessary. Reframe needed. |
+| `unshuffled` ≈ `lattice_only` but ≠ `joint` | The memory_grid spatial structure carries the signal; lattice geometry is incidental. |
+| `unshuffled` ≠ `lattice_only` and ≠ `joint` | The lattice spatial structure carries the signal; the memory_grid alone isn't sufficient. |
+| `unshuffled` differs from both shuffled runs by similar amounts | Both arrays contribute meaningfully; AURA's "equilibrium is real geometry" hypothesis is strongest under this pattern. |
+
+**Falsification criterion:**
+
+- If **all three** mean CCIs differ from each other by less than 0.05 absolute, the equilibrium interpretation is mostly classifier behavior, not spatial structure. Reframe needed.
+- If `joint_lattice_memory_shuffle` collapses the distribution (CCI drops by > 0.10 absolute, entropy rises meaningfully) **and** `lattice_only_shuffle` produces an intermediate result, AURA's hypothesis strengthens *and* we learn how the signal is distributed between the two array types.
+
+Implementation note: each shuffle is a numpy one-liner per array (`np.random.default_rng(seed).permutation` on flattened indices, reshape back). Cost trivial — three runs per snapshot × 6 seeds = 18 runs per snapshot. Still the highest-information-per-line-of-code experiment in the calibration set, now more so.
+
+This is the carpenter's level on the floor — does the floor sit flat no matter which way you rotate it? With two shuffle modes, we also learn *which floorboard* is doing the load-bearing.
 
 ## 4. Hypothesis discrimination matrix
 
@@ -209,7 +249,7 @@ scripts/
     ├── ablate_cascade(snapshots, predicate_to_disable, out_dir)
     ├── verify_memory_channels(snapshots, acoustic_map_path, out_dir)
     ├── check_determinism(snapshots, out_dir)
-    ├── shuffle_test(snapshots, out_dir, seed)
+    ├── shuffle_test(snapshots, out_dir, seed, mode)  # mode ∈ {unshuffled, lattice_only_shuffle, joint_lattice_memory_shuffle}
     ├── compute_run_metrics_for_sweep(jsonl_path, out_path)
     └── main()                    (CLI: python -m scripts.nextness_calibration <command> [args])
 ```
@@ -226,7 +266,7 @@ python -m scripts.nextness_calibration threshold    --snapshots-dir DIR --name T
 python -m scripts.nextness_calibration ablate       --snapshots-dir DIR --disable karuna_relief --out DIR
 python -m scripts.nextness_calibration verify-mem   --snapshots-dir DIR --acoustic-map PATH --out DIR
 python -m scripts.nextness_calibration determinism  --snapshots-dir DIR --repeats 2 --out DIR
-python -m scripts.nextness_calibration shuffle      --snapshots-dir DIR --seed 42 --out DIR
+python -m scripts.nextness_calibration shuffle      --snapshots-dir DIR --modes lattice_only,joint --seeds 42,1,2,3,4,5 --out DIR
 ```
 
 All sub-commands respect determinism contracts inherited from `nextness_metrics`: no fresh timestamps, sorted snapshot ordering, byte-identical re-runs given the same seed.
@@ -244,12 +284,12 @@ Each sweep function gets unit tests (parameter validation, empty input handling,
 | `ablate_cascade` | 2 |
 | `verify_memory_channels` | 2 |
 | `check_determinism` | 2 |
-| `shuffle_test` | 3 (seeded reproducibility, count preservation, position destruction) |
+| `shuffle_test` | 5 (seeded reproducibility, count preservation, position destruction, lattice-only mode preserves memory_grid voxels, joint mode applies same permutation to both arrays) |
 | Write-boundary safety (per Jack's pattern from PR #142) | 4 |
 | CLI smoke (one per sub-command) | 8 |
-| **Total** | **~33** |
+| **Total** | **~35** |
 
-Estimated post-PR-#4 total: 297 + 33 = **~330** tests in the full regression suite.
+Estimated post-PR-#4 total: 297 + 35 = **~332** tests in the full regression suite.
 
 ## 7. Interpretive vs operational — partitioning carried forward
 
@@ -276,7 +316,9 @@ Each row:
     "threshold_name": <str>,
     "threshold_multiplier": <float>,
     "disabled_predicate": <str | null>,
-    "shuffle_seed": <int | null>
+    "shuffle_seed": <int | null>,
+    "shuffle_mode": <"unshuffled" | "lattice_only_shuffle" | "joint_lattice_memory_shuffle" | null>,
+    "calibration_set": <"short" | "long">
   },
   "metrics": {
     "vocabulary_occupancy": <float>,
@@ -338,23 +380,35 @@ This was conflated in an earlier proposal. Recording the correction here so futu
 - ✅ No fresh `generated_at` field in derived outputs.
 - ✅ No external code pull.
 
-## 12. Open questions for AURA + Jack
+## 12. Open questions for AURA + Jack — RESOLVED per Jack's PR #143 review
 
-Each with a recommended default so review can move fast.
+All seven questions answered by Jack in his review of the first revision of this doc. Recording the resolutions here so future readers don't re-litigate them.
 
-1. **Calibration set size and time span.** N = 10–20 snapshots covering ≥ 24h proposed. Should we aim higher (50+ snapshots, ≥ 7 days)? More data is better but cost is N × snapshot-pipeline-time × sweep-multiplier. Recommend starting at N=12 spanning ~24h; expand if the temporal sweep shows interesting longer-horizon structure.
+1. **Calibration set size and time span.** ✅ Resolved: **short + long, not either/or.** 12 consecutive snapshots (short, ~2h) AND 12 snapshots spread across ~24h (long). See §2.5 for the full split + which experiments use which set. (Jack: *"Short tests local stability; long tests persistence. Do not collapse these into one set."*)
 
-2. **Patch-radius experiment scope.** 5×5×5 implementation requires rescaling all cascade predicates' count thresholds. Should PR #4 implement this fully, or design + defer to PR #4.5 / PR #5? Recommend designing it fully in this doc; defer implementation to a follow-up PR if cost estimates from `iter_uniform_grid_patches()` extension look heavy.
+2. **Patch-radius experiment scope.** ✅ Resolved per recommendation: design fully here; implementation may defer 5×5×5 if it becomes invasive. (Jack: *"PR #4 should not destabilize the observer to chase coarse-graining."*)
 
-3. **Threshold sweep granularity.** ±25% and ±50% multipliers proposed. Should we add ±10% for finer-grained sensitivity around the current value? Recommend yes — adding 0.9× and 1.1× to the multiplier list. Marginal cost; useful for distinguishing "slightly off" from "way off."
+3. **Threshold sweep granularity.** ✅ Resolved per recommendation: include **±10%, ±25%, and ±50%** multipliers. (Jack: *"The ±10% sweep is important because a fragile classifier may flip under tiny changes."*)
 
-4. **Cascade ablation scope.** Ablate one predicate at a time, or also try N-at-a-time combinations? N choose 2 is 120 combinations for our 16-token cascade. Recommend one-at-a-time for PR #4; if any single ablation reveals interesting hidden tokens, follow up with targeted pairwise ablations in PR #4.5.
+4. **Cascade ablation scope.** ✅ Resolved per recommendation: **one-at-a-time first**. Pairwise ablations deferred to PR #4.5 if one-at-a-time results are ambiguous.
 
-5. **Memory-channel verification — what's the canonical source of truth?** Comparing against (a) the engine's actual `memory_grid` semantics in code, (b) the Phase 14e acoustic map, or (c) both? Recommend both, weighted toward (a) because code-as-truth is unambiguous while the acoustic map is itself a Phase 14e interpretation that could carry its own assumptions.
+5. **Memory-channel verification — canonical source of truth.** ✅ Resolved with Jack's strengthening: **engine code is authoritative**, Phase 14e acoustic map is *corroborating evidence*, not the source of truth. (Stronger than my original "weighted toward engine code" framing. Jack's framing is correct — code-as-truth is unambiguous; the acoustic map carries its own Phase 14e interpretation assumptions.)
 
-6. **Shuffle test seed reproducibility.** Use a single seed (e.g., 42) for the published result, plus multiple seeds for robustness check? Recommend yes — single seed for the canonical result + 5 different seeds for variance estimate. Lets us report "shuffled CCI = X ± Y" not just "shuffled CCI = X."
+6. **Shuffle test seed reproducibility.** ✅ Resolved per recommendation: **one canonical seed + 5 variance-estimate seeds.** Now applies to *each* shuffle mode (lattice-only and joint), per the revised §3.8.
 
-7. **Implementation order if/when greenlit.** Recommend: 3.7 (determinism) first as a foundation; then 3.8 (shuffle, cheapest); then 3.1 (stride); then 3.4 (threshold); then 3.5 (cascade); then 3.2 (temporal, requires longer-time-span calibration set); then 3.6 (memory-channel, requires acoustic-map cross-correlation infrastructure); 3.3 (patch-radius) last because it's the most invasive.
+7. **Implementation order.** ✅ Resolved per Jack's revised ordering, which improves on my original by moving memory-channel verification much earlier:
+
+   **Updated order (Jack's, accepted):**
+   1. **3.7 Repeatability / determinism** (sanity floor for everything else)
+   2. **3.6 Memory-channel verification** ← *moved from 7th to 2nd*
+   3. **3.8 Null-model / shuffle test** (cheap, high-information, with two modes)
+   4. **3.1 Spatial stride sweep**
+   5. **3.4 Threshold sensitivity sweep**
+   6. **3.5 Cascade ablation**
+   7. **3.2 Temporal window sweep** (requires long calibration set)
+   8. **3.3 Patch-size / coarse-graining** (most invasive, last)
+
+   Jack's reasoning for moving memory-channel verification to #2: if our compassion-channel index is wrong, all downstream threshold/cascade interpretation is built on sand. Verify the layout *before* anything that depends on layout-correctness, not after. Accepted; this is a better ordering than mine.
 
 ## 13. What happens after PR #4
 
