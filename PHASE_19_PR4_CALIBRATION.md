@@ -71,7 +71,7 @@ Both sets are sandboxed copies; Medusa's actual data directory is untouched. The
 | Experiment | Short set | Long set |
 |---|---|---|
 | 3.1 Spatial stride sweep | ✅ | — |
-| 3.2 Temporal window sweep | — | ✅ (inherently needs spread) |
+| 3.2 Temporal window sweep | ✅ (adjacent, ~1h gaps) | ✅ (~2h, ~6h, ~24h gaps) |
 | 3.3 Patch-size / coarse-graining | ✅ | — |
 | 3.4 Threshold sensitivity | ✅ | — |
 | 3.5 Cascade ablation | ✅ | — |
@@ -105,11 +105,17 @@ All experiments respect the existing scope guarantees (no engine touch, etc.) an
 
 **Tests:** "is the equilibrium short-term stillness or longer-horizon stability?"
 
-**Method:** Compute JS divergence and CCI variance across snapshots with different temporal spacings:
-- Adjacent snapshots (~10min apart): the PR #142 baseline
-- ~1h gap: pick every 6th snapshot in the calibration set
-- ~6h gap: if calibration set spans that
-- ~24h gap: if available
+**Method:** Compute JS divergence and CCI variance across snapshots with different temporal spacings. Per Jack's PR #143 coherence catch, this experiment **draws from both calibration sets**, picking whichever set actually contains the requested spacing (the long set's ~2h spacing can't provide a 1h gap; the short set's ~2h window can't provide a 24h gap):
+
+| Gap | Source set | Method |
+|---|---|---|
+| Adjacent (~10min) | Short set | PR #142 baseline — consecutive pairs |
+| ~1h | Short set | Pick every 6th snapshot from the short set (assumes Medusa's ~10min snapshot cadence) |
+| ~2h | Long set | Consecutive pairs from the long set |
+| ~6h | Long set | Pick every 3rd snapshot from the long set |
+| ~24h | Long set | First and last snapshots of the long set |
+
+General principle: temporal sweep uses whichever calibration set contains the requested spacing — short for sub-2h comparisons, long for multi-hour and full-day comparisons. The mechanical falsification status (§8) records which set each gap-result came from.
 
 For each spacing, compute mean JS, std JS, and CCI drift.
 
