@@ -168,7 +168,9 @@ This is a probe, not a redesign. We learn which predicates are "claiming territo
 
 ### Experiment 3.6 — Memory-channel layout verification
 
-**Tests:** alternate hypothesis 1 (memory-channel layout misindexed). **This is potentially the biggest hidden assumption.**
+> **⚠️ Result already known.** This experiment was effectively executed during pre-implementation exploration in the PR #4 Chapter 3 work. The observer's `MEMORY_CHANNEL_LAYOUT` was found to be wrong in 6 of 8 positions versus the engine's actual `memory_grid` definition. See **issue #144** for the full finding and **the layout-fix PR** that corrected it. Post-fix, this experiment becomes a *regression fence* (does the corrected layout still match the engine?) rather than a *discovery* of whether the layout is correct. Spec below describes the original experiment design; the post-fix interpretation is "verify the fix held and produces stable corrected metrics."
+
+**Tests:** alternate hypothesis 1 (memory-channel layout misindexed). **This was the biggest hidden assumption** — and the assumption was wrong, surfaced before any calibration code was written.
 
 **Method:** Compare the observer's assumed `MEMORY_CHANNEL_LAYOUT` (which maps `"compassion"` to a specific index, etc.) against:
 - The engine's actual `memory_grid` semantics (read-only inspection of `scripts/continuous_evolution_ca.py` or equivalent — code-read only, no engine modification)
