@@ -61,6 +61,7 @@ from scripts.nextness_calibration import (
     _shuffled_snapshot_arrays,
     _sort_snapshots_by_generation,
     _validate_calibration_output_path,
+    _validate_config_log_directory,
     _verify_snapshot_memory_grid,
     check_determinism,
     shuffle_test,
@@ -290,6 +291,179 @@ def test_validate_output_traversal_escape_rejected(tmp_path):
     out_path = log_dir / ".." / ".." / "escape.jsonl"
     with pytest.raises(WriteOutsideLogDirError):
         _validate_calibration_output_path(out_path, log_path)
+
+
+# ---------------------------------------------------------------------------
+# _validate_config_log_directory (Jack PR #149 safety-contract guard)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_log_dir_matches_log_path_parent_succeeds(tmp_path):
+    """config.log_directory == log_path.parent passes silently."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    config = ObserverConfig(log_directory=str(log_dir))
+    # Should not raise.
+    _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_mismatch_raises(tmp_path):
+    """Mismatched config.log_directory raises WriteOutsideLogDirError."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    log_path = log_dir / "nextness_runs.jsonl"
+    config = ObserverConfig(log_directory=str(elsewhere))
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging from log_path.parent",
+    ):
+        _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_traversal_escape_rejected(tmp_path):
+    """``..`` traversal in config.log_directory is rejected via resolve()."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # log_dir / ".." resolves to tmp_path / "data" — not the same as log_dir
+    config = ObserverConfig(log_directory=str(log_dir / ".."))
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_mismatch_creates_no_side_effect_directory(tmp_path):
+    """When the guard rejects a mismatched config, no stray log directory
+    must be created. Locks in the property that the guard fires BEFORE any
+    process_snapshot() call (which would trigger _ensure_log_dir on the
+    misconfigured path)."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    bogus_dir = tmp_path / "bogus_log_dir_should_never_be_created"
+    assert not bogus_dir.exists()
+    config = ObserverConfig(log_directory=str(bogus_dir))
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_config_log_directory(config, log_path)
+    # The bogus directory must NOT have been created as a side effect.
+    assert not bogus_dir.exists()
+
+
+def test_check_determinism_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: check_determinism must fire the config-log-dir guard
+    before any process_snapshot() call. Proves the helper is wired in."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_check_determinism"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        check_determinism(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+            repeats=2,
+        )
+    # Neither the bogus log dir nor the output file may have been created.
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_shuffle_test_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: shuffle_test must fire the config-log-dir guard
+    before any process_snapshot() call."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_shuffle_test"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        shuffle_test(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_sweep_stride_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: sweep_stride must fire the config-log-dir guard
+    before any process_snapshot() call."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_sweep_stride"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        sweep_stride(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_sweep_threshold_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: sweep_threshold must fire the config-log-dir guard
+    before any process_snapshot() call AND before any threshold monkeypatch."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_sweep_threshold"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    # Snapshot the threshold so we can also confirm the guard fired before
+    # any monkeypatch happened (no threshold mutation if the guard rejects).
+    from scripts import nextness_observer as _observer_module
+    original_threshold = getattr(_observer_module, "THRESHOLD_WARMTH")
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        sweep_threshold(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+    assert getattr(_observer_module, "THRESHOLD_WARMTH") == original_threshold
 
 
 # ---------------------------------------------------------------------------

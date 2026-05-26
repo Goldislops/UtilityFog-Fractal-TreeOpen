@@ -144,6 +144,51 @@ def _validate_calibration_output_path(
         ) from e
 
 
+def _validate_config_log_directory(
+    config: ObserverConfig,
+    log_path: pathlib.Path,
+) -> None:
+    """Refuse configs whose ``log_directory`` diverges from ``log_path.parent``.
+
+    Closes the gap flagged in Jack's PR #149 audit: calibration functions
+    validate ``out_path`` against ``log_path.parent`` via
+    :func:`_validate_calibration_output_path`, but functions that call
+    ``process_snapshot()`` also write through ``config.log_directory``
+    (one JSONL line per call into ``<log_directory>/nextness_runs.jsonl``).
+    If ``config.log_directory`` and ``log_path.parent`` ever diverge, the
+    calibration function may write outside the claimed boundary even though
+    ``out_path`` is validated.
+
+    This guard requires::
+
+        Path(config.log_directory).resolve() == log_path.parent.resolve()
+
+    so the side-effect log writes land in the same directory the calibration
+    function's safety contract anchors on. Symlink-aware via ``resolve()``;
+    matches the canonical-form comparison style used elsewhere.
+
+    Crucially, this raises BEFORE any ``process_snapshot()`` call, so a
+    mismatched config can never create or write into a stray log directory
+    (``process_snapshot`` calls ``_ensure_log_dir`` which would create the
+    misconfigured directory on first call).
+
+    Raises :class:`WriteOutsideLogDirError` so the safety vocabulary stays
+    unified with the existing ``out_path`` boundary check.
+    """
+    config_log_resolved = pathlib.Path(config.log_directory).resolve()
+    log_path_parent_resolved = log_path.resolve().parent
+    if config_log_resolved != log_path_parent_resolved:
+        raise WriteOutsideLogDirError(
+            f"refusing to run calibration with config.log_directory "
+            f"diverging from log_path.parent: "
+            f"config.log_directory={config_log_resolved} "
+            f"vs log_path.parent={log_path_parent_resolved}. "
+            f"process_snapshot() writes side-effect log entries to "
+            f"config.log_directory; the two must match for the Lane B "
+            f"write-boundary contract to hold."
+        )
+
+
 def _extract_generation_from_filename(path: pathlib.Path) -> int:
     """Parse generation number out of a Medusa snapshot filename.
 
@@ -396,6 +441,7 @@ def check_determinism(
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
     _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
 
     sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
 
@@ -713,6 +759,7 @@ def shuffle_test(
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
     _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
 
     sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
 
@@ -1278,6 +1325,7 @@ def sweep_stride(
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
     _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
 
     sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
 
@@ -1560,6 +1608,7 @@ def sweep_threshold(
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
     _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
 
     sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
 
