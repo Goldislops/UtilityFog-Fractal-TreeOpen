@@ -1433,10 +1433,295 @@ def sweep_stride(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Experiment 3.4 — sweep_threshold (threshold sensitivity sweep)
+# ---------------------------------------------------------------------------
+
+
+#: Default multipliers per design doc §12 Q3 (Jack's resolution: ±10%,
+#: ±25%, ±50%, including the baseline 1.0). Symmetric around 1.0 so we
+#: see whether the threshold is on a cliff in either direction.
+DEFAULT_THRESHOLD_MULTIPLIERS: tuple[float, ...] = (0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
+
+#: Default threshold to sweep. ``THRESHOLD_WARMTH`` is the only
+#: classifier-active threshold post-#144 (the deprecated tokens
+#: ``karuna_relief`` / ``mudita_resonance`` / ``magnon_lighthouse``
+#: don't fire, so sweeping ``THRESHOLD_COMPASSION`` / ``THRESHOLD_RESONANCE``
+#: would be no-ops). Caller can override if they want to sweep a different
+#: future threshold.
+DEFAULT_THRESHOLD_NAME: str = "THRESHOLD_WARMTH"
+
+#: Falsification threshold per design doc §3.4 (adapted post-#144):
+#: a ±25% multiplier producing > 50% relative change in the firing count
+#: of the threshold's downstream token indicates the threshold is on a
+#: knife edge. Original §3.4 spec named ``karuna_relief`` (deprecated);
+#: post-#144 the only active threshold-dependent token is ``metta_warmth``.
+_THRESHOLD_KNIFE_EDGE_REL_CHANGE: float = 0.5
+
+#: Multiplier range considered "±25%" for the knife-edge criterion.
+#: Multipliers within [0.75, 1.25] are checked; outside is too far for
+#: the criterion to apply.
+_THRESHOLD_KNIFE_EDGE_MULT_RANGE: tuple[float, float] = (0.75, 1.25)
+
+
+def sweep_threshold(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+    config: ObserverConfig,
+    threshold_name: str = DEFAULT_THRESHOLD_NAME,
+    multipliers: tuple[float, ...] = DEFAULT_THRESHOLD_MULTIPLIERS,
+    threshold_dependent_token: str = "metta_warmth",
+) -> dict[str, Any]:
+    """Threshold sensitivity sweep per design doc §3.4.
+
+    For each ``(snapshot, multiplier)`` pair, temporarily override the
+    named threshold constant on the observer module to ``base_value *
+    multiplier``, run ``process_snapshot()``, capture metrics + the
+    threshold-dependent token's firing count, then restore the original
+    value. ``try/finally`` ensures restoration even on exception.
+
+    The thresholds (``THRESHOLD_WARMTH``, etc.) live as module-level
+    ``Final[float]`` constants in ``scripts.nextness_observer`` because
+    they're typed for static analysis. Python doesn't enforce ``Final``
+    at runtime, so we can monkeypatch + restore for sweep purposes —
+    this is precisely the kind of experimental override the constants
+    were designed to be subject to during calibration. We do NOT mutate
+    the observer module from production code paths; only from inside
+    this sweep, within try/finally, single-threaded by construction.
+
+    Per design doc §12 Q3: multipliers default to ``(0.5, 0.75, 0.9,
+    1.0, 1.1, 1.25, 1.5)`` — symmetric ±10%, ±25%, ±50% around the
+    baseline of 1.0.
+
+    Per design doc §3.4 (adapted post-#144 since ``karuna_relief`` is
+    deprecated): mechanical falsification_status:
+
+        - ``"hypothesis_supported"``: relative change in the
+          threshold-dependent token's firing count across ±25% multipliers
+          stays below ``_THRESHOLD_KNIFE_EDGE_REL_CHANGE`` (= 0.5).
+          Threshold is well-positioned.
+        - ``"hypothesis_falsified"``: ±25% multiplier produces > 50%
+          relative change in the firing count. Threshold is on a cliff
+          and the current value can't be trusted as "well-calibrated."
+        - ``"inconclusive"``: the threshold-dependent token never fires
+          on any (snapshot, multiplier) combination so the relative-
+          change criterion has no denominator; OR fewer than 3
+          multipliers in the ±25% range.
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths.
+        out_path: where to write the sweep JSONL.
+        log_path: write-boundary anchor.
+        calibration_set: ``"short"`` or ``"long"``.
+        config: base ``ObserverConfig`` (used as-is for all multipliers;
+            only the threshold constant changes).
+        threshold_name: name of the constant on ``scripts.nextness_observer``
+            to sweep. Must be an attribute of the module. Defaults to
+            ``"THRESHOLD_WARMTH"``.
+        multipliers: tuple of float multipliers to apply to the
+            threshold's base value. Must be all positive.
+        threshold_dependent_token: name of the token whose firing count
+            we track across the sweep for the knife-edge criterion.
+            Defaults to ``"metta_warmth"`` (the only ``THRESHOLD_WARMTH``-
+            dependent active token post-#144).
+
+    Returns the aggregate dict for callers that want to inspect it.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir.
+        ``ValueError`` for invalid calibration_set, missing threshold
+            attribute, empty multipliers, or non-positive multipliers.
+    """
+    # Lazy import of the observer module so we can monkeypatch its
+    # threshold attribute. This is the only place in the calibration
+    # module that mutates observer state, and only within try/finally.
+    from scripts import nextness_observer as _observer_module
+
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got "
+            f"{calibration_set!r}"
+        )
+    if not hasattr(_observer_module, threshold_name):
+        raise ValueError(
+            f"threshold_name {threshold_name!r} not found on "
+            f"scripts.nextness_observer module"
+        )
+    if not multipliers:
+        raise ValueError("multipliers must be non-empty")
+    for m in multipliers:
+        if not isinstance(m, (int, float)) or m <= 0:
+            raise ValueError(
+                f"every multiplier must be a positive number, got {m!r}"
+            )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    base_threshold_value = float(getattr(_observer_module, threshold_name))
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    # Per-multiplier aggregator: multiplier -> list of {snapshot, metrics,
+    # threshold_dependent_token_count, total_classified}.
+    by_multiplier: dict[float, list[dict[str, Any]]] = {m: [] for m in multipliers}
+
+    for snap in sorted_snapshots:
+        generation = _extract_generation_from_filename(snap)
+        for multiplier in multipliers:
+            new_threshold_value = base_threshold_value * multiplier
+            # Monkeypatch + restore inside try/finally. Single-threaded
+            # by construction (calibration is sequential).
+            original = getattr(_observer_module, threshold_name)
+            try:
+                setattr(_observer_module, threshold_name, new_threshold_value)
+                entry = process_snapshot(snap, config, medusa_is_live=False)
+            finally:
+                setattr(_observer_module, threshold_name, original)
+
+            token_counts = entry.get("token_counts", {}) or {}
+            total_classified = sum(token_counts.values())
+            token_count = int(token_counts.get(threshold_dependent_token, 0))
+            metrics = _extract_metrics_subset(entry)
+            metrics["cci"] = _cci_from_entry(entry)
+            metrics["threshold_dependent_token_count"] = token_count
+            metrics["threshold_dependent_token_name"] = threshold_dependent_token
+            metrics["threshold_dependent_token_fraction"] = (
+                token_count / total_classified if total_classified else 0.0
+            )
+
+            per_snapshot_rows.append(_make_per_snapshot_row(
+                experiment="threshold_sweep",
+                snapshot_path=snap,
+                generation=generation,
+                parameter_combination={
+                    "threshold_name": threshold_name,
+                    "threshold_multiplier": multiplier,
+                    "threshold_effective_value": new_threshold_value,
+                    "threshold_dependent_token": threshold_dependent_token,
+                },
+                metrics=metrics,
+                run_metadata={
+                    # patches_processed is deterministic; elapsed_seconds
+                    # was wallclock-derived and removed in Chapter 4 to
+                    # preserve byte-identical re-run.
+                    "patches_processed": entry.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                },
+                calibration_set=calibration_set,
+            ))
+
+            by_multiplier[multiplier].append({
+                "snapshot": snap.name,
+                "metrics": metrics,
+                "token_count": token_count,
+                "total_classified": total_classified,
+            })
+
+    # --- Per-multiplier summary statistics ---
+    per_multiplier_summary: dict[str, Any] = {}
+    for multiplier, runs in by_multiplier.items():
+        if not runs:
+            per_multiplier_summary[str(multiplier)] = {"n_snapshots": 0}
+            continue
+        voc_occs = [r["metrics"]["vocabulary_occupancy"] for r in runs]
+        ccis = [r["metrics"]["cci"] for r in runs]
+        token_counts = [r["token_count"] for r in runs]
+        token_fractions = [r["metrics"]["threshold_dependent_token_fraction"]
+                           for r in runs]
+        per_multiplier_summary[str(multiplier)] = {
+            "n_snapshots": len(runs),
+            "effective_threshold_value": base_threshold_value * multiplier,
+            "mean_vocabulary_occupancy": sum(voc_occs) / len(voc_occs),
+            "mean_cci": sum(ccis) / len(ccis),
+            "mean_threshold_dependent_token_count": sum(token_counts) / len(token_counts),
+            "mean_threshold_dependent_token_fraction": sum(token_fractions) / len(token_fractions),
+            "max_threshold_dependent_token_count": max(token_counts),
+        }
+
+    # --- Falsification logic (knife-edge detection per §3.4) ---
+    # Find the baseline (multiplier=1.0) and compare against multipliers
+    # in [0.75, 1.25] (the ±25% range).
+    falsification_status: str = "inconclusive"
+    knife_edge_evidence: dict[str, Any] = {}
+    if 1.0 in by_multiplier and by_multiplier[1.0]:
+        baseline_summary = per_multiplier_summary["1.0"]
+        baseline_count = baseline_summary["mean_threshold_dependent_token_count"]
+        in_range = [
+            m for m in multipliers
+            if _THRESHOLD_KNIFE_EDGE_MULT_RANGE[0] <= m <= _THRESHOLD_KNIFE_EDGE_MULT_RANGE[1]
+            and m != 1.0
+        ]
+        knife_edge_evidence["baseline_multiplier"] = 1.0
+        knife_edge_evidence["baseline_mean_token_count"] = baseline_count
+        knife_edge_evidence["multipliers_in_range"] = in_range
+
+        if baseline_count == 0 and all(
+            per_multiplier_summary[str(m)]["mean_threshold_dependent_token_count"] == 0
+            for m in in_range
+        ):
+            # The token never fires anywhere in the ±25% range.
+            # No relative-change denominator → inconclusive.
+            knife_edge_evidence["reason"] = (
+                f"{threshold_dependent_token} never fires on any snapshot "
+                f"in the ±25% multiplier range; relative change undefined"
+            )
+            falsification_status = "inconclusive"
+        elif len(in_range) < 2:
+            knife_edge_evidence["reason"] = (
+                f"fewer than 2 multipliers in ±25% range; criterion needs at least 2"
+            )
+            falsification_status = "inconclusive"
+        else:
+            # Compute max relative change vs baseline across the ±25% range.
+            max_rel_change = 0.0
+            for m in in_range:
+                m_count = per_multiplier_summary[str(m)][
+                    "mean_threshold_dependent_token_count"
+                ]
+                denom = max(baseline_count, m_count, 1.0)  # avoid div-by-zero
+                rel_change = abs(m_count - baseline_count) / denom
+                if rel_change > max_rel_change:
+                    max_rel_change = rel_change
+            knife_edge_evidence["max_rel_change_in_25pct_range"] = max_rel_change
+            knife_edge_evidence["knife_edge_threshold"] = _THRESHOLD_KNIFE_EDGE_REL_CHANGE
+            if max_rel_change > _THRESHOLD_KNIFE_EDGE_REL_CHANGE:
+                falsification_status = "hypothesis_falsified"
+            else:
+                falsification_status = "hypothesis_supported"
+
+    extra_fields: dict[str, Any] = {
+        "threshold_name": threshold_name,
+        "threshold_base_value": base_threshold_value,
+        "threshold_dependent_token": threshold_dependent_token,
+        "multipliers_swept": list(multipliers),
+        "per_multiplier_summary": per_multiplier_summary,
+        "knife_edge_evidence": knife_edge_evidence,
+    }
+
+    aggregate = _make_aggregate_row(
+        experiment="threshold_sweep",
+        calibration_set=calibration_set,
+        n_snapshots=len(sorted_snapshots),
+        extra_fields=extra_fields,
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
     "CANONICAL_STRIDE",
     "DEFAULT_CANONICAL_SEED",
     "DEFAULT_STRIDES",
+    "DEFAULT_THRESHOLD_MULTIPLIERS",
+    "DEFAULT_THRESHOLD_NAME",
     "DEFAULT_VARIANCE_SEEDS",
     "EXPECTED_MEMORY_CHANNELS",
     "EXPECTED_MEMORY_DTYPE",
@@ -1445,5 +1730,6 @@ __all__ = [
     "check_determinism",
     "shuffle_test",
     "sweep_stride",
+    "sweep_threshold",
     "verify_memory_channels",
 ]
