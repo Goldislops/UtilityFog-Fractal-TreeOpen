@@ -839,10 +839,337 @@ def shuffle_test(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Experiment 3.6 — verify_memory_channels (Jack's #2 in implementation order;
+# runtime regression-fence complementing PR #145's static layout check)
+# ---------------------------------------------------------------------------
+
+
+#: Number of memory channels the engine writes per snapshot, per
+#: ``scripts/continuous_evolution_ca.py:646`` (``MEMORY_CHANNELS = 8``).
+#: A future engine change that adds or removes channels should be caught
+#: by this runtime check.
+EXPECTED_MEMORY_CHANNELS: int = 8
+
+#: Expected dtype of the engine's ``memory_grid`` array. Engine writes
+#: float32 throughout (see ``init_memory_grid`` at line 652). A dtype
+#: change would be a structural drift worth catching.
+EXPECTED_MEMORY_DTYPE: str = "float32"
+
+#: Sparsity threshold for the per-channel signature. Voxels with
+#: ``abs(value) <= SPARSITY_EPSILON`` are counted as "near-zero" for
+#: the sparsity fraction. Chosen conservative — does not depend on any
+#: per-channel semantic meaning.
+SPARSITY_EPSILON: float = 1e-6
+
+
+def _per_channel_signature(channel_array: "np.ndarray") -> dict[str, Any]:
+    """Compute a small, robust per-channel statistical signature.
+
+    Returns a dict with min/max/mean/std/sparsity, plus a ``finite``
+    flag indicating whether every voxel in the channel is a finite
+    real number (no ``NaN``, no ``Inf``).
+
+    The fields are designed to be diagnostic — analysts can spot at a
+    glance whether a channel looks healthy (varying values, no NaNs,
+    sensible mean/std) or pathological (all zero, dominated by NaN,
+    constant value across the lattice). The verification status logic
+    in :func:`verify_memory_channels` uses only the structural checks
+    (shape, dtype, finiteness); the signature numbers are emitted for
+    human and downstream-tool inspection.
+    """
+    flat = channel_array.flatten()
+    finite_mask = np.isfinite(flat)
+    all_finite = bool(finite_mask.all())
+    if all_finite:
+        n_near_zero = int(np.sum(np.abs(flat) <= SPARSITY_EPSILON))
+        sparsity = n_near_zero / float(flat.size) if flat.size > 0 else 0.0
+        return {
+            "min": float(flat.min()),
+            "max": float(flat.max()),
+            "mean": float(flat.mean()),
+            "std": float(flat.std()),
+            "sparsity": sparsity,
+            "n_voxels": int(flat.size),
+            "finite": True,
+            "n_non_finite": 0,
+        }
+    # Partial-finite case: report what we can from the finite subset
+    # plus an explicit count of non-finite voxels.
+    n_non_finite = int((~finite_mask).sum())
+    finite_values = flat[finite_mask]
+    if finite_values.size > 0:
+        signature = {
+            "min": float(finite_values.min()),
+            "max": float(finite_values.max()),
+            "mean": float(finite_values.mean()),
+            "std": float(finite_values.std()),
+            "sparsity": float(
+                (np.abs(finite_values) <= SPARSITY_EPSILON).sum()
+            ) / float(flat.size),
+            "n_voxels": int(flat.size),
+            "finite": False,
+            "n_non_finite": n_non_finite,
+        }
+    else:
+        # Every voxel is non-finite — return null stats but a clear status
+        signature = {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+            "sparsity": None,
+            "n_voxels": int(flat.size),
+            "finite": False,
+            "n_non_finite": n_non_finite,
+        }
+    return signature
+
+
+def _verify_snapshot_memory_grid(
+    snapshot_path: pathlib.Path,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Load a snapshot's memory_grid and verify shape/dtype/finiteness.
+
+    Returns ``(channel_signatures, drift_reasons)``:
+        - ``channel_signatures``: dict mapping channel name → per-channel
+          signature dict (see :func:`_per_channel_signature`). Only
+          populated for channels that exist; uses the canonical
+          ``MEMORY_CHANNEL_LAYOUT`` channel names from
+          :mod:`scripts.nextness_observer`.
+        - ``drift_reasons``: list of human-readable strings describing
+          any structural drift detected. Empty list = no drift, snapshot
+          verifies clean.
+
+    Per Jack's Chapter 3 guardrails: we do NOT touch the engine, and
+    we do NOT cross-reference against the Phase 14e acoustic map (that's
+    deferred). The check is strictly: does the snapshot's
+    ``memory_grid`` array match the structural invariants we expect
+    given PR #145's corrected layout?
+    """
+    # Import lazily so the module's top-level import graph doesn't
+    # depend on the observer at all for non-channel-verification
+    # code paths.
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT
+
+    drift_reasons: list[str] = []
+
+    try:
+        with np.load(str(snapshot_path), allow_pickle=False) as data:
+            if "memory_grid" not in data.files:
+                drift_reasons.append(
+                    f"snapshot missing 'memory_grid' key (found: "
+                    f"{sorted(data.files)})"
+                )
+                return {}, drift_reasons
+            memory = data["memory_grid"]
+            # Materialize the array (np.load returns a lazy view)
+            memory = np.asarray(memory)
+    except Exception as e:
+        drift_reasons.append(f"snapshot load failed: {type(e).__name__}: {e}")
+        return {}, drift_reasons
+
+    # Structural check 1: number of channels
+    if memory.ndim != 4:
+        drift_reasons.append(
+            f"memory_grid has {memory.ndim} dimensions; expected 4 "
+            f"(channels, x, y, z)"
+        )
+    elif memory.shape[0] != EXPECTED_MEMORY_CHANNELS:
+        drift_reasons.append(
+            f"memory_grid has {memory.shape[0]} channels; "
+            f"expected {EXPECTED_MEMORY_CHANNELS} per "
+            f"continuous_evolution_ca.py MEMORY_CHANNELS constant"
+        )
+
+    # Structural check 2: dtype
+    if str(memory.dtype) != EXPECTED_MEMORY_DTYPE:
+        drift_reasons.append(
+            f"memory_grid dtype is {memory.dtype}; expected "
+            f"{EXPECTED_MEMORY_DTYPE} per engine init_memory_grid"
+        )
+
+    # Per-channel signatures (computed for as many channels as exist,
+    # even if the count is wrong, so analysts can see what is in the
+    # file). Map channel index to name where possible.
+    index_to_name: dict[int, str] = {
+        idx: name for name, idx in MEMORY_CHANNEL_LAYOUT.items()
+    }
+    channel_signatures: dict[str, dict[str, Any]] = {}
+    if memory.ndim == 4:
+        for ch_idx in range(memory.shape[0]):
+            name = index_to_name.get(
+                ch_idx,
+                f"channel_{ch_idx}_unknown",  # extra channels beyond expected layout
+            )
+            signature = _per_channel_signature(memory[ch_idx])
+            channel_signatures[name] = signature
+            if not signature["finite"]:
+                drift_reasons.append(
+                    f"channel {ch_idx} ({name}) contains "
+                    f"{signature['n_non_finite']} non-finite voxel(s) "
+                    f"(NaN or Inf)"
+                )
+
+    return channel_signatures, drift_reasons
+
+
+def verify_memory_channels(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+) -> dict[str, Any]:
+    """Runtime per-snapshot regression-fence for the memory-channel layout.
+
+    Complements the static layout check from PR #145 (`tests/
+    test_nextness_observer.py::test_layout_matches_engine_documented_
+    8_channel_map`). The static check confirms that the observer's
+    constants match what the engine code documents *at test time*;
+    this runtime check confirms that *every actual snapshot* matches
+    the same invariants. Catches drift that wouldn't show up in a unit
+    test — e.g., the engine added a 9th channel mid-run, or a snapshot
+    became corrupted, or a dtype changed.
+
+    Per issue #144 / PR #145: the layout that was wrong has been
+    corrected and locked in. This experiment is the live runtime
+    sentinel ensuring no future drift slips past.
+
+    Per Jack's Chapter 3 guardrails (PR #146 follow-up direction):
+        - Lane B only. No engine touch.
+        - No threshold / stride / cascade / temporal / patch-radius
+          sweeps. No CLI.
+        - No vocabulary redesign. No reopening of the Karuna naming.
+        - Uses the PR #145-corrected layout as source of truth.
+        - Same write-boundary safety contract.
+        - Same deterministic JSONL style.
+
+    For each snapshot:
+        - Load memory_grid via ``np.load(..., allow_pickle=False)``.
+        - Verify shape == (8, X, Y, Z) per engine's MEMORY_CHANNELS = 8.
+        - Verify dtype == float32 per engine's init_memory_grid.
+        - Per-channel signature: min, max, mean, std, sparsity,
+          finite-flag, non-finite-count.
+        - Aggregate any drift reasons.
+
+    Falsification status:
+        - ``"hypothesis_supported"`` — every snapshot verifies cleanly
+          (shape + dtype + finiteness). The corrected layout is holding.
+        - ``"hypothesis_falsified"`` — at least one snapshot fails
+          verification. Blocking for downstream calibration runs.
+        - ``"inconclusive"`` — only emitted for an empty snapshot list.
+
+    Output JSONL: one row per snapshot containing the per-channel
+    signatures + drift reasons; final aggregate row summarising
+    overall verification status across the run.
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths.
+        out_path: where to write the verification JSONL. Must resolve
+            under ``log_path.parent`` per the Lane B safety contract.
+        log_path: anchor for the write-boundary check.
+        calibration_set: ``"short"`` or ``"long"``; recorded on every row.
+
+    Returns the aggregate dict for callers that want to inspect it
+    without re-reading the output file.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside the
+            log directory.
+        ``ValueError`` if ``calibration_set`` isn't ``"short"`` or
+            ``"long"``.
+
+    Note: unlike :func:`check_determinism` and :func:`shuffle_test`,
+    this function does NOT take an ``ObserverConfig`` because it does
+    not call ``process_snapshot()``. It reads the raw ``.npz`` files
+    directly to inspect structural invariants, deliberately bypassing
+    the observer pipeline so it can catch drift that would otherwise
+    silently propagate through it.
+    """
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got "
+            f"{calibration_set!r}"
+        )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    n_snapshots_verified = 0
+    n_snapshots_with_drift = 0
+    all_drift_reasons: list[str] = []
+
+    for snap in sorted_snapshots:
+        generation = _extract_generation_from_filename(snap)
+        signatures, drift_reasons = _verify_snapshot_memory_grid(snap)
+
+        snapshot_verified = (len(drift_reasons) == 0)
+        if snapshot_verified:
+            n_snapshots_verified += 1
+        else:
+            n_snapshots_with_drift += 1
+            for reason in drift_reasons:
+                all_drift_reasons.append(f"{snap.name}: {reason}")
+
+        per_snapshot_rows.append(_make_per_snapshot_row(
+            experiment="verify_memory_channels",
+            snapshot_path=snap,
+            generation=generation,
+            parameter_combination={
+                "expected_channels": EXPECTED_MEMORY_CHANNELS,
+                "expected_dtype": EXPECTED_MEMORY_DTYPE,
+            },
+            metrics={
+                "channel_signatures": signatures,
+                "snapshot_verified": snapshot_verified,
+                "n_drift_reasons": len(drift_reasons),
+            },
+            run_metadata={
+                "drift_reasons": drift_reasons,
+            },
+            calibration_set=calibration_set,
+        ))
+
+    n_snapshots = len(sorted_snapshots)
+    if n_snapshots == 0:
+        falsification_status = "inconclusive"
+    elif n_snapshots_with_drift == 0:
+        falsification_status = "hypothesis_supported"
+    else:
+        falsification_status = "hypothesis_falsified"
+
+    aggregate = _make_aggregate_row(
+        experiment="verify_memory_channels",
+        calibration_set=calibration_set,
+        n_snapshots=n_snapshots,
+        extra_fields={
+            "expected_channels": EXPECTED_MEMORY_CHANNELS,
+            "expected_dtype": EXPECTED_MEMORY_DTYPE,
+            "n_snapshots_verified": n_snapshots_verified,
+            "n_snapshots_with_drift": n_snapshots_with_drift,
+            # First 10 drift reasons across the run (full list is in the
+            # per-snapshot rows; this is a quick-glance aggregate).
+            "first_drift_reasons": all_drift_reasons[:10],
+        },
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
     "DEFAULT_CANONICAL_SEED",
     "DEFAULT_VARIANCE_SEEDS",
+    "EXPECTED_MEMORY_CHANNELS",
+    "EXPECTED_MEMORY_DTYPE",
     "SHUFFLE_MODES",
+    "SPARSITY_EPSILON",
     "check_determinism",
     "shuffle_test",
+    "verify_memory_channels",
 ]

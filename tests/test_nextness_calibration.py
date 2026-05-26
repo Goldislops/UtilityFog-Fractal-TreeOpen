@@ -31,18 +31,24 @@ from scripts.nextness_observer import (
 from scripts.nextness_calibration import (
     DEFAULT_CANONICAL_SEED,
     DEFAULT_VARIANCE_SEEDS,
+    EXPECTED_MEMORY_CHANNELS,
+    EXPECTED_MEMORY_DTYPE,
     SHUFFLE_MODES,
+    SPARSITY_EPSILON,
     _content_fingerprint,
     _extract_generation_from_filename,
     _interpret_signal_location,
     _make_aggregate_row,
     _make_per_snapshot_row,
+    _per_channel_signature,
     _shuffle_falsification_status,
     _shuffled_snapshot_arrays,
     _sort_snapshots_by_generation,
     _validate_calibration_output_path,
+    _verify_snapshot_memory_grid,
     check_determinism,
     shuffle_test,
+    verify_memory_channels,
 )
 
 
@@ -812,3 +818,359 @@ def test_shuffle_test_subset_of_modes_marks_aggregate_incomplete(tmp_path):
                              modes=("unshuffled", "lattice_only_shuffle"))
     assert aggregate["signal_location_interpretation"] == "incomplete_modes"
     assert aggregate["falsification_status"] == "inconclusive"
+
+
+# ---------------------------------------------------------------------------
+# Chapter 3 — verify_memory_channels runtime regression-fence
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot_with_options(
+    path: pathlib.Path,
+    *,
+    n_channels: int = 8,
+    dtype: type = np.float32,
+    inject_nan_at: tuple[int, int, int, int] | None = None,
+    inject_inf_at: tuple[int, int, int, int] | None = None,
+    lattice: int = 4,
+    generation: int = 1,
+) -> pathlib.Path:
+    """Make a synthetic snapshot with explicit control over structural
+    properties. Used to test verify_memory_channels under various drift
+    scenarios.
+    """
+    state = np.zeros((lattice, lattice, lattice), dtype=np.uint8)
+    state[::4, ::4, ::4] = STATE_COMPUTE
+    memory = np.zeros((n_channels, lattice, lattice, lattice), dtype=dtype)
+    memory[0, 0, 0, 0] = 1.0  # at least one non-zero
+    if inject_nan_at is not None:
+        memory[inject_nan_at] = np.nan
+    if inject_inf_at is not None:
+        memory[inject_inf_at] = np.inf
+    np.savez(
+        str(path),
+        lattice=state, memory_grid=memory,
+        generation=np.array(generation), best_fitness=np.array(0.5),
+    )
+    return path
+
+
+# --- _per_channel_signature unit tests ---
+
+
+def test_per_channel_signature_clean_channel_returns_complete_stats():
+    """All-finite channel returns min/max/mean/std/sparsity + finite=True."""
+    arr = np.array([[[0.0, 1.0], [2.0, 3.0]],
+                    [[4.0, 5.0], [6.0, 7.0]]], dtype=np.float32)
+    sig = _per_channel_signature(arr)
+    assert sig["min"] == 0.0
+    assert sig["max"] == 7.0
+    assert sig["mean"] == pytest.approx(3.5)
+    assert sig["finite"] is True
+    assert sig["n_non_finite"] == 0
+    assert sig["n_voxels"] == 8
+
+
+def test_per_channel_signature_with_nan_flags_non_finite():
+    """A NaN in the channel yields finite=False + non-zero n_non_finite."""
+    arr = np.array([1.0, 2.0, np.nan, 4.0], dtype=np.float32)
+    sig = _per_channel_signature(arr)
+    assert sig["finite"] is False
+    assert sig["n_non_finite"] == 1
+
+
+def test_per_channel_signature_with_inf_flags_non_finite():
+    """An Inf in the channel yields finite=False."""
+    arr = np.array([1.0, np.inf, 3.0], dtype=np.float32)
+    sig = _per_channel_signature(arr)
+    assert sig["finite"] is False
+    assert sig["n_non_finite"] == 1
+
+
+def test_per_channel_signature_all_nan_returns_null_stats():
+    """If every value is non-finite, min/max/mean/std are null but n_voxels
+    and n_non_finite are still reported."""
+    arr = np.array([np.nan, np.nan, np.nan], dtype=np.float32)
+    sig = _per_channel_signature(arr)
+    assert sig["min"] is None
+    assert sig["max"] is None
+    assert sig["mean"] is None
+    assert sig["finite"] is False
+    assert sig["n_non_finite"] == 3
+
+
+def test_per_channel_signature_sparsity_counts_near_zero():
+    """Sparsity = fraction of voxels with |value| <= SPARSITY_EPSILON."""
+    # 6/8 voxels are zero
+    arr = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0], dtype=np.float32)
+    sig = _per_channel_signature(arr)
+    assert sig["sparsity"] == pytest.approx(6.0 / 8.0)
+
+
+# --- _verify_snapshot_memory_grid unit tests ---
+
+
+def test_verify_snapshot_clean_returns_no_drift(tmp_path):
+    """Standard 8-channel float32 snapshot verifies cleanly."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        n_channels=8, dtype=np.float32,
+    )
+    signatures, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert drift_reasons == []
+    assert len(signatures) == 8
+
+
+def test_verify_snapshot_wrong_channel_count_flags_drift(tmp_path):
+    """7-channel grid flags shape drift."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        n_channels=7, dtype=np.float32,
+    )
+    _, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert any("7 channels" in r for r in drift_reasons)
+    assert any("expected 8" in r for r in drift_reasons)
+
+
+def test_verify_snapshot_extra_channels_flag_drift(tmp_path):
+    """9-channel grid flags shape drift (engine added a channel)."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        n_channels=9, dtype=np.float32,
+    )
+    _, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert any("9 channels" in r for r in drift_reasons)
+
+
+def test_verify_snapshot_wrong_dtype_flags_drift(tmp_path):
+    """float64 instead of float32 flags dtype drift."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        n_channels=8, dtype=np.float64,
+    )
+    _, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert any("dtype" in r.lower() for r in drift_reasons)
+    assert any("float64" in r for r in drift_reasons)
+
+
+def test_verify_snapshot_nan_in_channel_flags_drift(tmp_path):
+    """A single NaN voxel in the memory_grid is flagged in drift reasons."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        inject_nan_at=(3, 1, 1, 1),  # channel 3, voxel (1,1,1)
+    )
+    signatures, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert any("non-finite" in r for r in drift_reasons)
+    assert any("channel 3" in r for r in drift_reasons)
+    # The named channel for index 3 in post-#145 layout is "energy_reserve"
+    assert "energy_reserve" in signatures
+    assert signatures["energy_reserve"]["finite"] is False
+
+
+def test_verify_snapshot_inf_in_channel_flags_drift(tmp_path):
+    """A single Inf voxel is flagged the same way as NaN."""
+    snap = _make_snapshot_with_options(
+        tmp_path / "v070_gen1_step1_test.npz",
+        inject_inf_at=(0, 0, 0, 0),  # channel 0
+    )
+    signatures, drift_reasons = _verify_snapshot_memory_grid(snap)
+    assert any("non-finite" in r for r in drift_reasons)
+    assert signatures["compute_age"]["finite"] is False
+
+
+def test_verify_snapshot_missing_memory_grid_key_flags_drift(tmp_path):
+    """An .npz file that lacks the memory_grid key is flagged."""
+    bad = tmp_path / "v070_gen1_step1_test.npz"
+    np.savez(
+        str(bad),
+        lattice=np.zeros((4, 4, 4), dtype=np.uint8),
+        generation=np.array(1),
+        # NO memory_grid key
+    )
+    signatures, drift_reasons = _verify_snapshot_memory_grid(bad)
+    assert signatures == {}
+    assert any("memory_grid" in r for r in drift_reasons)
+
+
+# --- verify_memory_channels orchestrator integration tests ---
+
+
+def test_verify_memory_channels_happy_path_all_snapshots_clean(tmp_path):
+    """3 clean synthetic snapshots → hypothesis_supported, 0 drift."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+
+    snaps = [
+        _make_snapshot_with_options(
+            snaps_dir / f"v070_gen{i}_step{i}_test.npz", generation=i
+        ) for i in (1, 2, 3)
+    ]
+    out = log_path.parent / "calibration_verify.jsonl"
+    aggregate = verify_memory_channels(snaps, out, log_path, "short")
+
+    assert aggregate["experiment"] == "verify_memory_channels"
+    assert aggregate["summary_type"] == "run_aggregate"
+    assert aggregate["n_snapshots"] == 3
+    assert aggregate["n_snapshots_verified"] == 3
+    assert aggregate["n_snapshots_with_drift"] == 0
+    assert aggregate["falsification_status"] == "hypothesis_supported"
+    assert aggregate["expected_channels"] == EXPECTED_MEMORY_CHANNELS
+    assert aggregate["expected_dtype"] == EXPECTED_MEMORY_DTYPE
+    assert aggregate["first_drift_reasons"] == []
+
+
+def test_verify_memory_channels_mixed_set_flags_hypothesis_falsified(tmp_path):
+    """Mix of clean + drifted snapshots → hypothesis_falsified, drift counted."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+
+    clean = _make_snapshot_with_options(
+        snaps_dir / "v070_gen1_step1_test.npz", generation=1,
+    )
+    bad_channels = _make_snapshot_with_options(
+        snaps_dir / "v070_gen2_step2_test.npz", generation=2, n_channels=9,
+    )
+    bad_dtype = _make_snapshot_with_options(
+        snaps_dir / "v070_gen3_step3_test.npz", generation=3, dtype=np.float64,
+    )
+    out = log_path.parent / "calibration_verify.jsonl"
+    aggregate = verify_memory_channels(
+        [clean, bad_channels, bad_dtype], out, log_path, "short",
+    )
+
+    assert aggregate["n_snapshots_verified"] == 1
+    assert aggregate["n_snapshots_with_drift"] == 2
+    assert aggregate["falsification_status"] == "hypothesis_falsified"
+    assert len(aggregate["first_drift_reasons"]) >= 2
+
+
+def test_verify_memory_channels_empty_set_returns_inconclusive(tmp_path):
+    """Empty snapshot list → inconclusive (nothing to verify)."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out = log_path.parent / "calibration_verify.jsonl"
+
+    aggregate = verify_memory_channels([], out, log_path, "short")
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert aggregate["n_snapshots"] == 0
+
+
+def test_verify_memory_channels_per_row_has_channel_signatures(tmp_path):
+    """Per-snapshot rows expose channel_signatures dict keyed by channel name."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    snap = _make_snapshot_with_options(
+        snaps_dir / "v070_gen1_step1_test.npz", generation=1,
+    )
+    out = log_path.parent / "calibration_verify.jsonl"
+    verify_memory_channels([snap], out, log_path, "short")
+
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    assert len(rows) == 1
+    sigs = rows[0]["metrics"]["channel_signatures"]
+    # Post-#145 layout — all 8 named channels present
+    expected_names = {
+        "compute_age", "structural_age", "memory_strength",
+        "energy_reserve", "last_active_gen", "signal_field",
+        "warmth", "compassion_cooldown",
+    }
+    assert set(sigs.keys()) == expected_names
+
+
+def test_verify_memory_channels_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set validation — must be 'short' or 'long'."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    out = log_path.parent / "calibration_verify.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        verify_memory_channels([], out, log_path, "medium")
+
+
+def test_verify_memory_channels_rejects_outside_log_dir_output(tmp_path):
+    """Write-boundary inheritance — output outside log dir raises."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    snap = _make_snapshot_with_options(
+        snaps_dir / "v070_gen1_step1_test.npz", generation=1,
+    )
+    bad_out = tmp_path / "outside_dir" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        verify_memory_channels([snap], bad_out, log_path, "short")
+    assert not (tmp_path / "outside_dir").exists()
+
+
+def test_verify_memory_channels_no_generated_at_field(tmp_path):
+    """Output JSONL must not include a fresh generated_at field."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    snap = _make_snapshot_with_options(
+        snaps_dir / "v070_gen1_step1_test.npz", generation=1,
+    )
+    out = log_path.parent / "calibration_verify.jsonl"
+    verify_memory_channels([snap], out, log_path, "short")
+    assert "generated_at" not in out.read_text()
+
+
+def test_verify_memory_channels_deterministic_output(tmp_path):
+    """Re-running on the same input produces byte-identical output.
+
+    Same determinism contract as the other calibration functions — no
+    fresh timestamps, sorted snapshot ordering, sort_keys=True in JSON.
+    """
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    snaps = [
+        _make_snapshot_with_options(
+            snaps_dir / f"v070_gen{i}_step{i}_test.npz", generation=i
+        ) for i in (1, 2, 3)
+    ]
+    out_a = log_path.parent / "calibration_verify_a.jsonl"
+    out_b = log_path.parent / "calibration_verify_b.jsonl"
+    verify_memory_channels(snaps, out_a, log_path, "short")
+    verify_memory_channels(snaps, out_b, log_path, "short")
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_verify_memory_channels_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows in output appear in generation-ascending order."""
+    snaps_dir = tmp_path / "snapshots"
+    snaps_dir.mkdir()
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # Create out of order
+    s3 = _make_snapshot_with_options(
+        snaps_dir / "v070_gen300_step3000_test.npz", generation=300,
+    )
+    s1 = _make_snapshot_with_options(
+        snaps_dir / "v070_gen100_step1000_test.npz", generation=100,
+    )
+    s2 = _make_snapshot_with_options(
+        snaps_dir / "v070_gen200_step2000_test.npz", generation=200,
+    )
+    out = log_path.parent / "calibration_verify.jsonl"
+    verify_memory_channels([s3, s1, s2], out, log_path, "short")
+
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    generations = [r["snapshot_generation"] for r in rows]
+    assert generations == [100, 200, 300]
