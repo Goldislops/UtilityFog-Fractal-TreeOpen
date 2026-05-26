@@ -76,8 +76,6 @@ from scripts.nextness_observer import (
     WriteOutsideLogDirError,
     process_snapshot,
 )
-import copy
-
 from scripts.nextness_metrics import (
     cci as _cci,
     js_divergence as _js_divergence,
