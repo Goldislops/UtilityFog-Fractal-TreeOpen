@@ -1,17 +1,28 @@
-"""Tests for scripts/nextness_calibration.py — Phase 19 PR #4, Chapter 1.
+"""Tests for scripts/nextness_calibration.py — Phase 19 PR #4 calibration suite.
 
-Covers the shared module infrastructure (write-boundary safety,
-deterministic snapshot ordering, content fingerprinting, JSONL output
-writer, falsification-status reporting) plus ``check_determinism()`` —
-Jack's #1 in the implementation order.
+Currently covers Chapters 1, 2, and 3 of the eight-chapter PR #4
+implementation:
 
-Per design doc PHASE_19_PR4_CALIBRATION.md §3.7 + §6: this experiment is
-the sanity floor for the rest of the calibration suite, so we lock down
-both happy-path and edge-case behavior here.
+  - Chapter 1: Shared module infrastructure (write-boundary safety,
+    deterministic snapshot ordering, content fingerprinting, JSONL
+    output writer, falsification-status reporting) plus
+    ``check_determinism()`` (Jack's #1 in the implementation order —
+    the sanity floor for the rest of the calibration suite).
 
-Later chapters will add tests for the other seven experiments (memory-
-channel verification, shuffle test with two modes, stride sweep, threshold
-sweep, cascade ablation, temporal sweep, patch-radius coarse-graining).
+  - Chapter 2: ``shuffle_test()`` (Jack's #3) with **three modes** —
+    ``unshuffled``, ``lattice_only_shuffle``, and
+    ``joint_lattice_memory_shuffle`` — for the null-model
+    discriminating test (signal_location_interpretation +
+    falsification_status).
+
+  - Chapter 3: ``verify_memory_channels()`` (Jack's #2) — runtime
+    per-snapshot regression-fence complementing PR #145's static
+    layout check. Verifies channel count, dtype, finiteness, and
+    emits per-channel statistical signatures as diagnostic readout.
+
+Later chapters will add tests for the remaining four experiments
+(stride sweep, threshold sweep, cascade ablation, temporal sweep,
+patch-radius coarse-graining).
 """
 from __future__ import annotations
 
