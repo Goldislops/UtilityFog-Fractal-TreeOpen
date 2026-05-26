@@ -258,30 +258,71 @@ def test_classifier_compute_aging_at_sage_age():
     assert classify_patch(p) == "compute_aging"
 
 
-def test_classifier_magnon_lighthouse_at_legend_age():
+def test_classifier_magnon_lighthouse_disabled_post_144_falls_through_to_compute_aging():
+    """Post-issue-#144: magnon_lighthouse is disabled (status: derived_future).
+    A COMPUTE-dominant patch at Legend-tier age now falls through to the
+    next-priority predicate, ``compute_aging``, since AGE_LEGEND > AGE_SAGE.
+    """
     p = _zero_patch(STATE_COMPUTE, {"compute_age": AGE_LEGEND + 5.0})
-    assert classify_patch(p) == "magnon_lighthouse"
+    result = classify_patch(p)
+    assert result != "magnon_lighthouse", (
+        "magnon_lighthouse should never fire post-#144 (channel is "
+        "derived, not stored; disabled until observer implements the "
+        "derivation)"
+    )
+    assert result == "compute_aging", (
+        f"Expected cascade fallthrough to compute_aging; got {result!r}"
+    )
 
 
 def test_classifier_metta_warmth_with_compute():
     s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
     m = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    # Post-#144: CH["warmth"] now resolves to engine index 6 (the actual
+    # warmth channel). The predicate logic is unchanged; it just reads the
+    # correct field now.
     m[CH["warmth"]].fill(THRESHOLD_WARMTH + 0.1)
     assert classify_patch(Patch((0, 0, 0), s, m)) == "metta_warmth"
 
 
-def test_classifier_mudita_resonance_with_compute():
+def test_classifier_mudita_resonance_disabled_post_144_falls_through_to_compute_decay():
+    """Post-issue-#144: mudita_resonance is disabled (status:
+    deprecated_no_engine_channel) — the engine has no resonance channel.
+    A patch that *would have* triggered the old predicate now falls
+    through to compute_decay (1 COMPUTE in mostly-VOID cold patch).
+
+    Setup must not use CH["resonance"] (the key was removed); we just
+    place a COMPUTE cell in a VOID-dominant patch with all-zero memory.
+    """
     s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
     m = np.zeros((8, 3, 3, 3), dtype=np.float32)
-    m[CH["resonance"]].fill(THRESHOLD_RESONANCE + 0.1)
-    assert classify_patch(Patch((0, 0, 0), s, m)) == "mudita_resonance"
+    result = classify_patch(Patch((0, 0, 0), s, m))
+    assert result != "mudita_resonance", (
+        "mudita_resonance should never fire post-#144"
+    )
+    assert result == "compute_decay", (
+        f"Expected cascade fallthrough to compute_decay; got {result!r}"
+    )
 
 
-def test_classifier_karuna_relief_with_compute():
+def test_classifier_karuna_relief_disabled_post_144_falls_through_to_compute_decay():
+    """Post-issue-#144: karuna_relief is disabled (status:
+    deprecated_no_engine_channel) — the engine has no compassion channel.
+    A patch that *would have* triggered the old predicate now falls
+    through to compute_decay.
+
+    Setup must not use CH["compassion"] (the key was removed); we just
+    place a COMPUTE cell in a VOID-dominant patch with all-zero memory.
+    """
     s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
     m = np.zeros((8, 3, 3, 3), dtype=np.float32)
-    m[CH["compassion"]].fill(THRESHOLD_COMPASSION + 0.1)
-    assert classify_patch(Patch((0, 0, 0), s, m)) == "karuna_relief"
+    result = classify_patch(Patch((0, 0, 0), s, m))
+    assert result != "karuna_relief", (
+        "karuna_relief should never fire post-#144"
+    )
+    assert result == "compute_decay", (
+        f"Expected cascade fallthrough to compute_decay; got {result!r}"
+    )
 
 
 def test_classifier_sensor_alert():
@@ -720,6 +761,209 @@ def test_invariant_8_bounded_compute_per_snapshot(tmp_path):
     s = compute_safe_stride((256, 256, 256), radius=1,
                               budget_seconds=0.001, initial_stride=8)
     assert s > 8
+
+
+# ---------------------------------------------------------------------------
+# Issue #144 regression fences — memory-channel layout integrity
+# ---------------------------------------------------------------------------
+
+
+def test_layout_matches_engine_documented_8_channel_map():
+    """Observer's MEMORY_CHANNEL_LAYOUT must match the engine's documented map.
+
+    Per issue #144: the prior layout was wrong in 6 of 8 positions. This
+    test pins the corrected layout against the engine's documented channel
+    map from scripts/continuous_evolution_ca.py:634-655. If the engine
+    ever changes its memory_grid layout (e.g., a Phase 17b adds a 9th
+    channel), this test fails loudly and the observer must be updated
+    in lockstep.
+
+    The expected map is hand-maintained here rather than parsed from
+    engine source because:
+        - Hand-maintained = explicit & reviewable; every layout change
+          must touch both files & this test.
+        - Parsed = brittle to comment-formatting changes in engine code.
+    """
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT
+    engine_documented_layout = {
+        "compute_age":         0,
+        "structural_age":      1,
+        "memory_strength":     2,
+        "energy_reserve":      3,
+        "last_active_gen":     4,
+        "signal_field":        5,
+        "warmth":              6,
+        "compassion_cooldown": 7,
+    }
+    assert MEMORY_CHANNEL_LAYOUT == engine_documented_layout, (
+        f"MEMORY_CHANNEL_LAYOUT drift from engine documented map.\n"
+        f"  Observer: {MEMORY_CHANNEL_LAYOUT}\n"
+        f"  Engine:   {engine_documented_layout}\n"
+        f"If the engine's layout changed, update MEMORY_CHANNEL_LAYOUT "
+        f"AND update the expected layout in this test in the same PR."
+    )
+
+
+def test_layout_has_exactly_eight_channels():
+    """Engine has MEMORY_CHANNELS = 8 — observer must mirror exactly.
+
+    No more, no fewer. A 9th observer channel would index past the end
+    of the engine's memory_grid array and read undefined memory.
+    """
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT
+    assert len(MEMORY_CHANNEL_LAYOUT) == 8
+    # Indices must be exactly the contiguous range [0, 8)
+    assert sorted(MEMORY_CHANNEL_LAYOUT.values()) == list(range(8))
+
+
+def test_layout_does_not_contain_deprecated_channel_names():
+    """The observer must not silently expose access to channels that
+    don't exist in the engine.
+
+    Per issue #144: pre-fix MEMORY_CHANNEL_LAYOUT contained keys
+    "warmth"/"resonance"/"compassion"/"mindsight"/"magnon"/"ampere" that
+    either didn't match the engine's actual layout or referenced
+    non-stored channels. This test ensures none of those misleading
+    keys come back.
+
+    (Note: "warmth" IS a legitimate engine channel at idx 6 post-fix.
+    What this test forbids is the *old wrong-index* warmth + the
+    not-actually-stored channel names.)
+    """
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT
+    forbidden_names = {"resonance", "compassion", "mindsight", "magnon", "ampere"}
+    overlap = forbidden_names & set(MEMORY_CHANNEL_LAYOUT.keys())
+    assert overlap == set(), (
+        f"MEMORY_CHANNEL_LAYOUT contains channel names that don't exist "
+        f"in the engine: {sorted(overlap)}. These were the misleading "
+        f"names from the pre-#144 layout. If you genuinely need to "
+        f"reference these conceptually, add them to TOKEN_STATUS as "
+        f"deprecated_no_engine_channel or derived_future, not as a "
+        f"stored MEMORY_CHANNEL_LAYOUT entry."
+    )
+
+
+def test_token_status_covers_every_token_in_vocabulary():
+    """TOKEN_STATUS dict must have an entry for every TOKEN_NAMES entry."""
+    from scripts.nextness_observer import TOKEN_NAMES, TOKEN_STATUS
+    assert set(TOKEN_STATUS.keys()) == set(TOKEN_NAMES), (
+        f"TOKEN_STATUS does not match TOKEN_NAMES.\n"
+        f"  In TOKEN_NAMES but not TOKEN_STATUS: {set(TOKEN_NAMES) - set(TOKEN_STATUS.keys())}\n"
+        f"  In TOKEN_STATUS but not TOKEN_NAMES: {set(TOKEN_STATUS.keys()) - set(TOKEN_NAMES)}"
+    )
+
+
+def test_token_status_uses_only_documented_status_values():
+    """Every status value must be one of the four documented options."""
+    from scripts.nextness_observer import TOKEN_STATUS
+    valid_statuses = {
+        "state_only",
+        "stored",
+        "deprecated_no_engine_channel",
+        "derived_future",
+    }
+    for token, status in TOKEN_STATUS.items():
+        assert status in valid_statuses, (
+            f"Token {token!r} has invalid status {status!r}; "
+            f"must be one of {sorted(valid_statuses)}"
+        )
+
+
+def test_deprecated_tokens_never_appear_in_classifier_output():
+    """Tokens with deprecated/derived-future status must never fire.
+
+    Per issue #144: even if the prior triggering conditions for these
+    tokens happen to be met in a patch, classify_patch must skip them
+    and the patch must fall through to another predicate.
+
+    Exhaustive test: synthesize a wide range of patches and assert no
+    deprecated token ever appears in the output across all of them.
+    """
+    from scripts.nextness_observer import TOKEN_STATUS
+    deprecated_tokens = {
+        name for name, status in TOKEN_STATUS.items()
+        if status in {"deprecated_no_engine_channel", "derived_future"}
+    }
+    # Sanity: there ARE deprecated tokens to check (otherwise this test
+    # would silently pass).
+    assert len(deprecated_tokens) >= 3, (
+        "Expected at least 3 deprecated tokens post-#144"
+    )
+
+    # Try a wide variety of patch configurations
+    seed_configurations = [
+        # (lattice fill, channels-to-set-with-value)
+        (STATE_VOID, {}),
+        (STATE_COMPUTE, {}),
+        (STATE_COMPUTE, {"compute_age": AGE_SAGE}),
+        (STATE_COMPUTE, {"compute_age": AGE_LEGEND + 5.0}),
+        (STATE_COMPUTE, {"warmth": THRESHOLD_WARMTH + 0.1}),
+        (STATE_STRUCTURAL, {"structural_age": AGE_SAGE}),
+        (STATE_STRUCTURAL, {"structural_age": AGE_ANCIENT + 5.0}),
+        (STATE_ENERGY, {}),
+        (STATE_SENSOR, {}),
+    ]
+    observed_tokens = set()
+    for state_fill, channels in seed_configurations:
+        patch = _zero_patch(state_fill, channels)
+        token = classify_patch(patch)
+        observed_tokens.add(token)
+        assert token not in deprecated_tokens, (
+            f"Deprecated token {token!r} fired on config "
+            f"(state_fill={state_fill}, channels={channels}). "
+            f"Status: {TOKEN_STATUS[token]}. Classifier cascade must "
+            f"skip deprecated tokens entirely."
+        )
+
+
+def test_patch_features_does_not_attempt_to_read_nonexistent_channels():
+    """_patch_features must only request channels that exist in the layout.
+
+    Per issue #144: pre-fix _patch_features called _safe_mean("resonance"),
+    _safe_mean("compassion"), _safe_mean("magnon") — all of which were
+    bogus channel names. The corrected _patch_features removed those
+    calls. This test AST-walks the module to verify that any string
+    literal passed to a function that does memory-channel lookup names
+    a key that actually exists in MEMORY_CHANNEL_LAYOUT.
+    """
+    import ast
+    import inspect
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT
+    valid_channels = set(MEMORY_CHANNEL_LAYOUT.keys())
+    source = inspect.getsource(nextness_observer)
+    tree = ast.parse(source)
+    # Find calls to _safe_mean and any MEMORY_CHANNEL_LAYOUT[<literal>]
+    # subscript expressions.
+    bad_references: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        # Subscript: MEMORY_CHANNEL_LAYOUT["name"]
+        if isinstance(node, ast.Subscript):
+            value_node = node.value
+            if (isinstance(value_node, ast.Name)
+                    and value_node.id == "MEMORY_CHANNEL_LAYOUT"):
+                slice_node = node.slice
+                if (isinstance(slice_node, ast.Constant)
+                        and isinstance(slice_node.value, str)):
+                    if slice_node.value not in valid_channels:
+                        bad_references.append((slice_node.value, node.lineno))
+        # Call: _safe_mean("name")
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "_safe_mean":
+                if (node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)):
+                    if node.args[0].value not in valid_channels:
+                        bad_references.append(
+                            (node.args[0].value, node.lineno)
+                        )
+    assert not bad_references, (
+        f"Found references to channel names not in MEMORY_CHANNEL_LAYOUT:\n"
+        + "\n".join(
+            f"  line {lineno}: {name!r}"
+            for name, lineno in bad_references
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

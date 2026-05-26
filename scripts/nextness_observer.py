@@ -104,6 +104,57 @@ TOKEN_BY_INDEX: Final[dict[int, str]] = {i: name for i, name in enumerate(TOKEN_
 #: Name → index lookup.
 TOKEN_INDEX: Final[dict[str, int]] = {name: i for i, name in enumerate(TOKEN_NAMES)}
 
+#: Per-token status metadata. Added per issue #144 stop-the-line: some tokens
+#: that previously fired in the classifier cascade referenced memory channels
+#: that the engine either does not store ("compassion", "resonance",
+#: "mindsight") or computes on-the-fly ("magnon", "ampere"). Those tokens
+#: are now disabled in :func:`classify_patch` until either the engine adds
+#: the channel (no_engine_channel case) or the observer implements the
+#: derivation locally (derived_future case).
+#:
+#: Status values:
+#:   "state_only"                       — predicate reads only ``state``;
+#:                                        no memory-grid dependency.
+#:   "stored"                           — predicate reads stored memory
+#:                                        channels via ``MEMORY_CHANNEL_LAYOUT``.
+#:   "deprecated_no_engine_channel"     — predicate previously referenced
+#:                                        a memory channel that the engine
+#:                                        does not store. Disabled until
+#:                                        the engine adds the channel.
+#:   "derived_future"                   — predicate previously referenced
+#:                                        a value the engine derives on-
+#:                                        the-fly. Disabled until the
+#:                                        observer reimplements the
+#:                                        derivation (follow-up TODO).
+#:
+#: The classifier cascade skips any token with status
+#: ``"deprecated_no_engine_channel"`` or ``"derived_future"`` —
+#: ``vocabulary_occupancy`` will accordingly be capped at
+#: (active_tokens / total_tokens) until the deprecated tokens have a
+#: home in the engine.
+TOKEN_STATUS: Final[dict[str, str]] = {
+    "void_static":        "state_only",
+    "compute_static":     "state_only",
+    "void_birth":         "state_only",
+    "compute_aging":      "stored",      # reads compute_age (idx 0)
+    "compute_decay":      "stored",      # reads warmth (idx 6) post-#144 fix
+    "structural_growth":  "stored",      # reads structural_age (idx 1)
+    "structural_decay":   "stored",      # reads structural_age (idx 1)
+    "energy_pulse":       "state_only",
+    "sensor_alert":       "state_only",
+    "metta_warmth":       "stored",      # reads warmth (idx 6) post-#144 fix
+    "karuna_relief":      "deprecated_no_engine_channel",  # no compassion channel
+    "mudita_resonance":   "deprecated_no_engine_channel",  # no resonance channel
+    "magnon_lighthouse":  "derived_future",   # magnon is derived from compute_age, not stored
+    "acoustic_stress":    "state_only",
+    "phase_boundary":     "state_only",
+    "unclassified":       "state_only",
+}
+
+assert set(TOKEN_STATUS.keys()) == set(TOKEN_NAMES), (
+    "TOKEN_STATUS must cover every token in TOKEN_NAMES"
+)
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -286,6 +337,7 @@ __all__ = [
     "TOKEN_NAMES",
     "TOKEN_BY_INDEX",
     "TOKEN_INDEX",
+    "TOKEN_STATUS",
     # Configuration
     "SamplingMode",
     "ObserverConfig",
@@ -523,18 +575,48 @@ STATE_COMPUTE: Final[int] = 2
 STATE_ENERGY: Final[int] = 3
 STATE_SENSOR: Final[int] = 4
 
-# --- Memory-grid channel layout (BEST GUESS; verify when calibrating) ---
-# If wrong, update these and the classifier should still hold its shape.
+# --- Memory-grid channel layout (CORRECTED per issue #144) ---
+# Engine-actual layout per scripts/continuous_evolution_ca.py lines 634-655.
+# The observer's prior layout was wrong in 6 of 8 positions; this version
+# matches the engine documented channel map exactly.
+#
+# Engine convention (Phase 6 expansion, MEMORY_CHANNELS = 8):
+#   0: compute_age        (Phase 1+)
+#   1: structural_age     (Phase 1+)
+#   2: memory_strength    (Phase 1+; default 1.0 at init)
+#   3: energy_reserve     (Phase 1+; repurposed Phase 6c for compassion cost)
+#   4: last_active_gen    (Phase 1+)
+#   5: signal_field       (Phase 6c mycelial signal amplitude)
+#   6: warmth             (Phase 6a metta/loving-kindness accumulation)
+#   7: compassion_cooldown (Phase 6c; prevents echo/spam)
 MEMORY_CHANNEL_LAYOUT: Final[dict[str, int]] = {
-    "compute_age":       0,   # COMPUTE cell age (per Phase 4 onwards)
-    "structural_age":    1,   # STRUCTURAL cell age
-    "warmth":            2,   # Phase 6a metta accumulator
-    "resonance":         3,   # Phase 6b mudita joy/resonance signal
-    "compassion":        4,   # Phase 6c karuna relief signal
-    "mindsight":         5,   # Phase 6c mindsight signal magnitude
-    "magnon":            6,   # Phase 17a magnon field magnitude
-    "ampere":            7,   # Ampere unified-field accumulator
+    "compute_age":         0,
+    "structural_age":      1,
+    "memory_strength":     2,
+    "energy_reserve":      3,
+    "last_active_gen":     4,
+    "signal_field":        5,
+    "warmth":              6,
+    "compassion_cooldown": 7,
 }
+
+# Conceptual fields the observer USED to assume were stored but which the
+# engine either does not store or computes on the fly. Reading these via
+# MEMORY_CHANNEL_LAYOUT now raises KeyError loudly rather than silently
+# returning wrong data:
+#
+#   - "resonance"    (Phase 6b "mudita" — never landed as a stored channel)
+#   - "compassion"   (Phase 6c — the *cooldown* is stored at 7, but the raw
+#                     compassion signal itself is not a stored field)
+#   - "mindsight"    (Phase 6c — not stored as a channel)
+#   - "magnon"       (Phase 17a — DERIVED on-the-fly in
+#                     continuous_evolution_ca.py at line 884: Gaussian
+#                     convolution over compute_age >= magnon_sage_age_min)
+#   - "ampere"       (engine parameter + on-the-fly potential computation,
+#                     not a stored channel)
+#
+# Tokens that referenced these names are now marked
+# deprecated_no_engine_channel / derived_future via TOKEN_STATUS below.
 
 # --- Age thresholds (matched to the engine's MemoryParams Sage tiers) ---
 AGE_SAGE: Final[float] = 8.0       # magnon_sage_age_min default
@@ -544,8 +626,13 @@ AGE_LEGEND: Final[float] = 50.0    # Legend (5x; the 148 lighthouse Sages)
 # --- Memory-signal detection thresholds (normalised; tunable) ---
 # These are starting values. PR #4 may tune them via baseline calibration.
 THRESHOLD_WARMTH: Final[float] = 0.3
-THRESHOLD_RESONANCE: Final[float] = 0.3
-THRESHOLD_COMPASSION: Final[float] = 0.3
+# THRESHOLD_RESONANCE and THRESHOLD_COMPASSION are retained as documentation
+# of the original observer design but are not consumed by classify_patch
+# post-#144 — the mudita_resonance and karuna_relief predicates that read
+# them are disabled per TOKEN_STATUS until the engine adds the corresponding
+# stored channels.
+THRESHOLD_RESONANCE: Final[float] = 0.3   # unused post-#144
+THRESHOLD_COMPASSION: Final[float] = 0.3  # unused post-#144
 
 # --- State-fraction thresholds (over the patch's 27 cells at radius=1) ---
 FRACTION_DOMINANT: Final[float] = 0.5    # > 50% of cells (≥14 of 27)
@@ -579,9 +666,13 @@ class _PatchFeatures:
     compute_age_mean: float
     structural_age_mean: float
     warmth_mean: float
-    resonance_mean: float
-    compassion_mean: float
-    magnon_mean: float
+    # Per issue #144: resonance_mean, compassion_mean, magnon_mean fields
+    # were removed when the corresponding memory channels were found to
+    # not exist in the engine. The predicates that consumed them
+    # (mudita_resonance, karuna_relief, magnon_lighthouse) are disabled
+    # via TOKEN_STATUS until the engine adds the channels (resonance,
+    # compassion) or the observer implements the derivation locally
+    # (magnon from compute_age + Gaussian kernel).
 
 
 def _patch_features(patch: Patch) -> _PatchFeatures:
@@ -625,9 +716,10 @@ def _patch_features(patch: Patch) -> _PatchFeatures:
         compute_age_mean=_safe_mean("compute_age"),
         structural_age_mean=_safe_mean("structural_age"),
         warmth_mean=_safe_mean("warmth"),
-        resonance_mean=_safe_mean("resonance"),
-        compassion_mean=_safe_mean("compassion"),
-        magnon_mean=_safe_mean("magnon"),
+        # resonance_mean, compassion_mean, magnon_mean removed per issue
+        # #144: those channels are not stored in the engine's memory_grid.
+        # Their consumers (mudita_resonance, karuna_relief, magnon_lighthouse)
+        # are disabled in classify_patch via TOKEN_STATUS.
     )
 
 
@@ -645,23 +737,36 @@ def classify_patch(patch: Patch) -> str:
     if f.distinct_states >= DIVERSITY_BOUNDARY:
         return "phase_boundary"
 
-    # 2. Magnon lighthouse — COMPUTE-dominant under Legend-tier influence
-    if f.compute_frac >= FRACTION_DOMINANT and f.compute_age_mean >= AGE_LEGEND:
-        return "magnon_lighthouse"
+    # 2. (DEPRECATED per issue #144) magnon_lighthouse — was reading the
+    #    engine's warmth channel as if it were magnon. Disabled until the
+    #    observer implements derived-magnon (Gaussian convolution over
+    #    compute_age, mirroring continuous_evolution_ca.py line 884).
+    #    Original predicate kept here as comment for future resurrection:
+    #      if f.compute_frac >= FRACTION_DOMINANT and f.compute_age_mean >= AGE_LEGEND:
+    #          return "magnon_lighthouse"
 
     # 3. Compute aging — COMPUTE-dominant at Sage age tier (typical Sage)
     if f.compute_frac >= FRACTION_DOMINANT and f.compute_age_mean >= AGE_SAGE:
         return "compute_aging"
 
-    # 4. Mudita resonance — joy/resonance signal alongside any COMPUTE
-    if f.compute_count >= 1 and f.resonance_mean >= THRESHOLD_RESONANCE:
-        return "mudita_resonance"
+    # 4. (DEPRECATED per issue #144) mudita_resonance — was reading the
+    #    engine's energy_reserve channel as if it were resonance. The
+    #    engine has no resonance channel. Disabled until/unless the engine
+    #    adds one. Original predicate:
+    #      if f.compute_count >= 1 and f.resonance_mean >= THRESHOLD_RESONANCE:
+    #          return "mudita_resonance"
 
-    # 5. Karuna relief — compassion signal alongside any COMPUTE
-    if f.compute_count >= 1 and f.compassion_mean >= THRESHOLD_COMPASSION:
-        return "karuna_relief"
+    # 5. (DEPRECATED per issue #144) karuna_relief — was reading the
+    #    engine's last_active_gen channel as if it were compassion. The
+    #    engine has no compassion channel (only compassion_cooldown at
+    #    idx 7, which is a cooldown counter, not a compassion signal).
+    #    Disabled until/unless the engine adds a compassion field.
+    #    Original predicate:
+    #      if f.compute_count >= 1 and f.compassion_mean >= THRESHOLD_COMPASSION:
+    #          return "karuna_relief"
 
-    # 6. Metta warmth — warmth field around COMPUTE/ENERGY
+    # 6. Metta warmth — warmth field around COMPUTE/ENERGY.
+    #    Post-#144: now reads engine's actual warmth channel (idx 6).
     if (f.compute_count >= 1 or f.energy_count >= 1) and f.warmth_mean >= THRESHOLD_WARMTH:
         return "metta_warmth"
 
