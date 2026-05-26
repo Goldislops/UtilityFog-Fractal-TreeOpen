@@ -45,17 +45,20 @@ from scripts.nextness_calibration import (
     DEFAULT_CANONICAL_SEED,
     DEFAULT_GAP_SPECS_LONG,
     DEFAULT_GAP_SPECS_SHORT,
+    DEFAULT_PATCH_RADII,
     DEFAULT_STRIDES,
     DEFAULT_THRESHOLD_MULTIPLIERS,
     DEFAULT_THRESHOLD_NAME,
     DEFAULT_VARIANCE_SEEDS,
     EXPECTED_MEMORY_CHANNELS,
     EXPECTED_MEMORY_DTYPE,
+    PATCH_RADIUS_BASELINE,
     SHUFFLE_MODES,
     SPARSITY_EPSILON,
     _ACTIVE_CASCADE_ORDER,
     _ablation_modes_for_run,
     _classify_patch_ablation,
+    _clone_config_with_radius,
     _clone_config_with_stride,
     _content_fingerprint,
     _emerging_tokens_vs_baseline,
@@ -63,7 +66,9 @@ from scripts.nextness_calibration import (
     _interpret_signal_location,
     _make_aggregate_row,
     _make_per_snapshot_row,
+    _patch_cell_count,
     _per_channel_signature,
+    _rescale_count_threshold_for_radius,
     _shuffle_falsification_status,
     _shuffled_snapshot_arrays,
     _sort_snapshots_by_generation,
@@ -74,6 +79,7 @@ from scripts.nextness_calibration import (
     ablate_cascade,
     check_determinism,
     shuffle_test,
+    sweep_patch_radius,
     sweep_stride,
     sweep_temporal,
     sweep_threshold,
@@ -2885,3 +2891,419 @@ def test_sweep_temporal_sorts_input_by_generation(tmp_path):
     # Anchor snapshot in each row is the earlier one; gens 100, 200
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200]
+
+
+# ===========================================================================
+# Chapter 8 — sweep_patch_radius (design doc §3.3)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Module constants + helpers
+# ---------------------------------------------------------------------------
+
+
+def test_default_patch_radii_includes_baseline():
+    """DEFAULT_PATCH_RADII must include PATCH_RADIUS_BASELINE for the
+    §3.3 falsification criterion to have a denominator."""
+    assert PATCH_RADIUS_BASELINE in DEFAULT_PATCH_RADII
+
+
+def test_default_patch_radii_has_at_least_two_radii():
+    """A radius sweep needs at least 2 radii to compare anything."""
+    assert len(DEFAULT_PATCH_RADII) >= 2
+
+
+def test_patch_cell_count_correct_at_known_radii():
+    """(2r+1)^3 cells per Moore-neighbourhood patch."""
+    assert _patch_cell_count(1) == 27   # 3x3x3
+    assert _patch_cell_count(2) == 125  # 5x5x5
+    assert _patch_cell_count(3) == 343  # 7x7x7
+
+
+def test_rescale_count_threshold_for_baseline_radius_unchanged():
+    """A rescale from a radius to itself returns the same value."""
+    assert _rescale_count_threshold_for_radius(3, 1, 1) == 3
+    assert _rescale_count_threshold_for_radius(14, 2, 2) == 14
+
+
+def test_rescale_count_threshold_proportional_to_volume_ratio():
+    """ENERGY_PULSE_MIN_COUNT=3 at r=1 (27 cells, fraction 3/27 = 0.111)
+    rescales at r=2 (125 cells) to round(3 * 125/27) = 14
+    (fraction 14/125 = 0.112, matching baseline within rounding)."""
+    assert _rescale_count_threshold_for_radius(3, 1, 2) == 14
+
+
+def test_rescale_count_threshold_clamps_to_one_minimum():
+    """A rescaled threshold cannot drop below 1 (a count of 0 would be
+    a no-op trigger; clamp prevents that pathology)."""
+    # baseline=1 at r=2 rescales DOWN to r=1 → round(1 * 27/125) = round(0.216) = 0
+    # → clamped to 1.
+    assert _rescale_count_threshold_for_radius(1, 2, 1) == 1
+
+
+def test_clone_config_with_radius_preserves_other_fields(tmp_path):
+    """_clone_config_with_radius must change only patch_spatial_radius,
+    leaving stride/budget/log_directory etc. untouched."""
+    base = ObserverConfig(
+        log_directory="/tmp/test_log",
+        uniform_grid_stride=8,
+        budget_seconds=42.0,
+        patch_spatial_radius=1,
+    )
+    clone = _clone_config_with_radius(base, 2)
+    assert clone.patch_spatial_radius == 2
+    assert clone.log_directory == base.log_directory
+    assert clone.uniform_grid_stride == base.uniform_grid_stride
+    assert clone.budget_seconds == base.budget_seconds
+    # Original unchanged (frozen dataclass)
+    assert base.patch_spatial_radius == 1
+
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_patch_radius_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set must be 'short' or 'long'."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        sweep_patch_radius([snap], out, log_path, "weekend", config)
+
+
+def test_sweep_patch_radius_rejects_empty_radii(tmp_path):
+    """Empty radii tuple is an error."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="radii"):
+        sweep_patch_radius([snap], out, log_path, "short", config, radii=())
+
+
+def test_sweep_patch_radius_rejects_non_positive_radius(tmp_path):
+    """Radius must be a positive int."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="radius"):
+        sweep_patch_radius([snap], out, log_path, "short", config,
+                           radii=(0,))
+
+
+def test_sweep_patch_radius_rejects_outside_log_dir_output(tmp_path):
+    """Inherits the write-boundary contract."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = tmp_path / "elsewhere" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        sweep_patch_radius([snap], out, log_path, "short", config)
+
+
+def test_sweep_patch_radius_rejects_mismatched_config_log_directory(tmp_path):
+    """Inherits the PR #149 config-log-directory guard."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bad_config = ObserverConfig(
+        log_directory=str(tmp_path / "bogus_for_radius"),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(WriteOutsideLogDirError, match="config.log_directory"):
+        sweep_patch_radius([snap], out, log_path, "short", bad_config)
+
+
+# ---------------------------------------------------------------------------
+# Restore contract regression fences
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_patch_radius_restores_count_thresholds_after_run(tmp_path):
+    """After normal exit, observer count thresholds must be the original
+    values, not the rescaled per-radius values."""
+    from scripts import nextness_observer as _observer_module
+    original_pulse = _observer_module.ENERGY_PULSE_MIN_COUNT
+
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    sweep_patch_radius([snap], out, log_path, "short", config, radii=(1, 2))
+    assert _observer_module.ENERGY_PULSE_MIN_COUNT == original_pulse
+
+
+def test_sweep_patch_radius_restores_count_thresholds_even_if_process_snapshot_fails(
+    tmp_path, monkeypatch
+):
+    """Mid-loop exception still triggers the try/finally restore. Locks
+    the contract that no observer-state leak survives an exception."""
+    from scripts import nextness_observer as _observer_module
+    original_pulse = _observer_module.ENERGY_PULSE_MIN_COUNT
+
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+
+    def _exploding_process_snapshot(*args, **kwargs):
+        raise RuntimeError("simulated mid-sweep failure")
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        _exploding_process_snapshot,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        sweep_patch_radius([snap], out, log_path, "short", config, radii=(1, 2))
+
+    # ENERGY_PULSE_MIN_COUNT restored even though we crashed mid-loop.
+    assert _observer_module.ENERGY_PULSE_MIN_COUNT == original_pulse
+
+
+# ---------------------------------------------------------------------------
+# Output structure
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_patch_radius_row_count_matches_snapshots_times_radii(tmp_path):
+    """One per-snapshot row per (snapshot * radius), plus one aggregate row."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step1_a.npz", generation=1)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step2_b.npz", generation=2)
+    out = log_path.parent / "out.jsonl"
+    sweep_patch_radius([s1, s2], out, log_path, "short", config, radii=(1, 2))
+    lines = out.read_text().splitlines()
+    # 2 radii * 2 snapshots = 4 per-snapshot rows + 1 aggregate
+    assert len(lines) == 5
+
+
+def test_sweep_patch_radius_per_row_carries_radius_and_rescaled_thresholds(tmp_path):
+    """parameter_combination per row carries patch_spatial_radius,
+    patch_cell_count, and rescaled_count_thresholds."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    sweep_patch_radius([snap], out, log_path, "short", config, radii=(1, 2))
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    assert len(rows) == 2
+    # Row 0: radius 1
+    pc0 = rows[0]["parameter_combination"]
+    assert pc0["patch_spatial_radius"] == 1
+    assert pc0["patch_cell_count"] == 27
+    assert pc0["rescaled_count_thresholds"]["ENERGY_PULSE_MIN_COUNT"] == 3
+    # Row 1: radius 2
+    pc1 = rows[1]["parameter_combination"]
+    assert pc1["patch_spatial_radius"] == 2
+    assert pc1["patch_cell_count"] == 125
+    assert pc1["rescaled_count_thresholds"]["ENERGY_PULSE_MIN_COUNT"] == 14
+
+
+def test_sweep_patch_radius_aggregate_has_per_radius_summary_and_evidence(tmp_path):
+    """Aggregate must expose per_radius_summary, cross_radius_diffs,
+    falsification_evidence (with baseline_radius + threshold embedded)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_patch_radius(
+        [snap], out, log_path, "short", config, radii=(1, 2),
+    )
+    assert "per_radius_summary" in aggregate
+    assert "cross_radius_diffs" in aggregate
+    assert "falsification_evidence" in aggregate
+    assert aggregate["baseline_radius"] == 1
+    assert "ENERGY_PULSE_MIN_COUNT" in aggregate["rescaled_threshold_names"]
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["baseline_radius"] == 1
+    assert evidence["cci_falsification_threshold"] == 0.10
+
+
+# ---------------------------------------------------------------------------
+# Falsification logic
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_patch_radius_inconclusive_when_baseline_not_in_radii(tmp_path):
+    """Without baseline radius in the sweep, no reference to diff against
+    -> inconclusive with explicit reason."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_patch_radius(
+        [snap], out, log_path, "short", config, radii=(2,),
+    )
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert "baseline radius" in aggregate["falsification_evidence"]["reason"]
+
+
+def test_sweep_patch_radius_inconclusive_when_only_baseline_requested(tmp_path):
+    """Only baseline radius, no comparison radius -> inconclusive."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_patch_radius(
+        [snap], out, log_path, "short", config, radii=(1,),
+    )
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert "comparison radius" in aggregate["falsification_evidence"]["reason"]
+
+
+def test_sweep_patch_radius_falsified_when_cci_diff_exceeds_threshold(
+    tmp_path, monkeypatch
+):
+    """Integration test for the hypothesis_falsified branch.
+
+    Monkey-patches process_snapshot to return entries with hand-crafted
+    token_counts and per-snapshot fields that produce a CCI difference
+    larger than the 0.10 falsification threshold between radius 1 and
+    radius 2. Asserts:
+
+      1. falsification_status == "hypothesis_falsified"
+      2. max_abs_cci_diff > 0.10
+      3. The triggering radius is recorded
+
+    This exercises the actual sweep_patch_radius code path through the
+    falsification branch (closing the same class of gap Jack flagged
+    on PR #153)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+
+    call_count = {"n": 0}
+    # CCI = balance * boundary * (1 - entropy_norm). Engineer two entries
+    # such that the CCI difference exceeds the 0.10 falsification threshold.
+    #   r=1: balance=0.8, boundary=0.5, entropy_norm=0.0 -> CCI = 0.4
+    #   r=2: balance=0.0, boundary=0.0, entropy_norm=1.0 -> CCI = 0.0
+    #   |diff| = 0.4 > 0.10 -> hypothesis_falsified
+    fake_entries = [
+        {  # radius 1 invocation: high CCI
+            "snapshot_file": snap.name,
+            "generation": 1,
+            "token_counts": {"a": 60, "b": 40},
+            "vocabulary_occupancy": 0.4,
+            "shannon_entropy_bits": 0.97,
+            "entropy_normalized": 0.0,
+            "void_compute_balance": 0.8,
+            "boundary_rate": 0.5,
+            "budget": {"patches_processed": 100},
+        },
+        {  # radius 2 invocation: low CCI
+            "snapshot_file": snap.name,
+            "generation": 1,
+            "token_counts": {"a": 100},
+            "vocabulary_occupancy": 0.1,
+            "shannon_entropy_bits": 0.0,
+            "entropy_normalized": 1.0,
+            "void_compute_balance": 0.0,
+            "boundary_rate": 0.0,
+            "budget": {"patches_processed": 100},
+        },
+    ]
+
+    def _fake_process_snapshot(*args, **kwargs):
+        entry = fake_entries[call_count["n"]]
+        call_count["n"] += 1
+        return entry
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        _fake_process_snapshot,
+    )
+
+    aggregate = sweep_patch_radius(
+        [snap], out, log_path, "short", config, radii=(1, 2),
+    )
+
+    assert aggregate["falsification_status"] == "hypothesis_falsified"
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["max_abs_cci_diff"] > 0.10
+    assert evidence["max_abs_diff_radius"] == 2
+
+
+def test_sweep_patch_radius_supported_when_cci_diff_within_threshold(
+    tmp_path, monkeypatch
+):
+    """Integration test for the hypothesis_supported branch.
+
+    Engineer two entries where r=1 and r=2 produce nearly-identical CCI
+    (within 0.10 absolute). Assert falsification_status =
+    hypothesis_supported and max_abs_cci_diff is recorded below threshold."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+
+    call_count = {"n": 0}
+    # Both radii: identical metrics -> CCI diff = 0
+    fake_entry = {
+        "snapshot_file": snap.name,
+        "generation": 1,
+        "token_counts": {"a": 60, "b": 40},
+        "vocabulary_occupancy": 0.3,
+        "shannon_entropy_bits": 0.9,
+        "entropy_normalized": 0.9,
+        "void_compute_balance": 0.1,
+        "boundary_rate": 0.4,
+        "budget": {"patches_processed": 100},
+    }
+
+    def _fake_process_snapshot(*args, **kwargs):
+        call_count["n"] += 1
+        return dict(fake_entry)
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        _fake_process_snapshot,
+    )
+
+    aggregate = sweep_patch_radius(
+        [snap], out, log_path, "short", config, radii=(1, 2),
+    )
+
+    assert aggregate["falsification_status"] == "hypothesis_supported"
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["max_abs_cci_diff"] <= 0.10
+
+
+# ---------------------------------------------------------------------------
+# Determinism contract
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_patch_radius_no_fresh_generated_at_field(tmp_path):
+    """No fresh wallclock-derived generated_at field in any row."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    sweep_patch_radius([snap], out, log_path, "short", config, radii=(1, 2))
+    for line in out.read_text().splitlines():
+        assert "generated_at" not in json.loads(line)
+
+
+def test_sweep_patch_radius_byte_identical_on_rerun(tmp_path):
+    """Two back-to-back runs on the same input produce byte-identical output."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out_a = log_path.parent / "calibration_radius_a.jsonl"
+    out_b = log_path.parent / "calibration_radius_b.jsonl"
+    sweep_patch_radius([snap], out_a, log_path, "short", config, radii=(1, 2))
+    sweep_patch_radius([snap], out_b, log_path, "short", config, radii=(1, 2))
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_sweep_patch_radius_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows in generation-ascending order regardless of input."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s3 = _make_snapshot(snaps_dir / "v070_gen300_step3000_c.npz",
+                        generation=300, lattice=8)
+    s1 = _make_snapshot(snaps_dir / "v070_gen100_step1000_a.npz",
+                        generation=100, lattice=8)
+    s2 = _make_snapshot(snaps_dir / "v070_gen200_step2000_b.npz",
+                        generation=200, lattice=8)
+    out = log_path.parent / "out.jsonl"
+    sweep_patch_radius(
+        [s3, s1, s2], out, log_path, "short", config, radii=(1,),
+    )
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    generations = [r["snapshot_generation"] for r in rows]
+    assert generations == [100, 200, 300]
