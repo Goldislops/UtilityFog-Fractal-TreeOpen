@@ -43,6 +43,8 @@ from scripts.nextness_calibration import (
     CANONICAL_STRIDE,
     DEFAULT_ABLATION_DISABLED_TOKENS,
     DEFAULT_CANONICAL_SEED,
+    DEFAULT_GAP_SPECS_LONG,
+    DEFAULT_GAP_SPECS_SHORT,
     DEFAULT_STRIDES,
     DEFAULT_THRESHOLD_MULTIPLIERS,
     DEFAULT_THRESHOLD_NAME,
@@ -65,6 +67,7 @@ from scripts.nextness_calibration import (
     _shuffle_falsification_status,
     _shuffled_snapshot_arrays,
     _sort_snapshots_by_generation,
+    _temporal_pair_stats,
     _validate_calibration_output_path,
     _validate_config_log_directory,
     _verify_snapshot_memory_grid,
@@ -72,6 +75,7 @@ from scripts.nextness_calibration import (
     check_determinism,
     shuffle_test,
     sweep_stride,
+    sweep_temporal,
     sweep_threshold,
     verify_memory_channels,
 )
@@ -2389,3 +2393,495 @@ def test_ablate_cascade_sorts_input_by_generation(tmp_path):
     rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200, 300]
+
+
+# ===========================================================================
+# Chapter 7 — sweep_temporal (design doc §3.2)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+
+def test_default_gap_specs_short_has_valid_entries():
+    """Every DEFAULT_GAP_SPECS_SHORT entry is (str, positive int)."""
+    assert DEFAULT_GAP_SPECS_SHORT  # non-empty
+    for label, stride in DEFAULT_GAP_SPECS_SHORT:
+        assert isinstance(label, str) and label
+        assert isinstance(stride, int) and stride >= 1
+
+
+def test_default_gap_specs_long_has_valid_entries():
+    """Every DEFAULT_GAP_SPECS_LONG entry is (str, positive int)."""
+    assert DEFAULT_GAP_SPECS_LONG  # non-empty
+    for label, stride in DEFAULT_GAP_SPECS_LONG:
+        assert isinstance(label, str) and label
+        assert isinstance(stride, int) and stride >= 1
+
+
+def test_default_gap_specs_ordered_ascending_for_falsification_semantics():
+    """Last entry in gap_specs must be the LARGEST gap — the falsification
+    check picks the last entry as the 'largest' by convention. Ordering
+    short ascending: 1 < 6. Long ascending: 1 < 3 < 11."""
+    short_strides = [s for _, s in DEFAULT_GAP_SPECS_SHORT]
+    assert short_strides == sorted(short_strides)
+    long_strides = [s for _, s in DEFAULT_GAP_SPECS_LONG]
+    assert long_strides == sorted(long_strides)
+
+
+# ---------------------------------------------------------------------------
+# _temporal_pair_stats helper
+# ---------------------------------------------------------------------------
+
+
+def test_temporal_pair_stats_empty_list_returns_zeros():
+    """Empty input returns all zeros — no values to compute over."""
+    assert _temporal_pair_stats([]) == {"mean": 0.0, "std": 0.0, "max": 0.0}
+
+
+def test_temporal_pair_stats_single_value_has_zero_std():
+    """Sample std with n=1 has no denominator (n-1=0); helper returns 0.0
+    rather than NaN/error to keep aggregate JSON serializable."""
+    stats = _temporal_pair_stats([0.5])
+    assert stats["mean"] == 0.5
+    assert stats["std"] == 0.0
+    assert stats["max"] == 0.5
+
+
+def test_temporal_pair_stats_multiple_values_correct():
+    """Sample std (n-1 denominator) on a known input."""
+    # mean = 0.3, variance = ((0.1-0.3)^2 + (0.3-0.3)^2 + (0.5-0.3)^2) / 2
+    #      = (0.04 + 0 + 0.04) / 2 = 0.04, std = 0.2
+    stats = _temporal_pair_stats([0.1, 0.3, 0.5])
+    assert abs(stats["mean"] - 0.3) < 1e-9
+    assert abs(stats["std"] - 0.2) < 1e-9
+    assert stats["max"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — input validation
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set must be 'short' or 'long'."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        sweep_temporal([snap], out, log_path, "weekend", config)
+
+
+def test_sweep_temporal_rejects_empty_gap_specs_when_explicit(tmp_path):
+    """Empty gap_specs (when provided explicitly) is an error."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="gap_specs"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=())
+
+
+def test_sweep_temporal_rejects_non_positive_gap_stride(tmp_path):
+    """Index stride must be a positive int."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="index_stride"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=(("zero", 0),))
+
+
+def test_sweep_temporal_rejects_empty_gap_label(tmp_path):
+    """Each gap label must be a non-empty string."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="label"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=(("", 1),))
+
+
+def test_sweep_temporal_rejects_outside_log_dir_output(tmp_path):
+    """Inherits the write-boundary contract."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = tmp_path / "elsewhere" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        sweep_temporal([snap], out, log_path, "short", config)
+
+
+def test_sweep_temporal_rejects_mismatched_config_log_directory(tmp_path):
+    """Inherits the PR #149 config-log-directory guard."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bad_config = ObserverConfig(
+        log_directory=str(tmp_path / "bogus_for_temporal"),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(WriteOutsideLogDirError, match="config.log_directory"):
+        sweep_temporal([snap], out, log_path, "short", bad_config)
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — defaults selection
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_short_calibration_uses_short_default_gap_specs(tmp_path):
+    """When gap_specs is omitted, 'short' uses DEFAULT_GAP_SPECS_SHORT."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 13)  # 12 snapshots so all default gaps produce >= 1 pair
+    ]
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(snaps, out, log_path, "short", config)
+    expected = [list(g) for g in DEFAULT_GAP_SPECS_SHORT]
+    assert aggregate["gap_specs"] == expected
+
+
+def test_sweep_temporal_long_calibration_uses_long_default_gap_specs(tmp_path):
+    """When gap_specs is omitted, 'long' uses DEFAULT_GAP_SPECS_LONG."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 13)
+    ]
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(snaps, out, log_path, "long", config)
+    expected = [list(g) for g in DEFAULT_GAP_SPECS_LONG]
+    assert aggregate["gap_specs"] == expected
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — pair counting
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_pair_count_for_stride_one(tmp_path):
+    """N snapshots, gap stride 1 -> N-1 pairs."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    # 3 - 1 = 2 pairs
+    assert aggregate["per_gap_summary"]["adjacent"]["n_pairs"] == 2
+
+
+def test_sweep_temporal_pair_count_for_larger_stride(tmp_path):
+    """N snapshots, gap stride 2 -> N-2 pairs."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("gap2", 2),),
+    )
+    assert aggregate["per_gap_summary"]["gap2"]["n_pairs"] == 1
+
+
+def test_sweep_temporal_zero_pairs_when_stride_exceeds_snapshot_count(tmp_path):
+    """Stride >= N -> 0 pairs for that gap. Falsification status must
+    fall back to inconclusive with an explicit reason if the LARGEST
+    gap has 0 pairs."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 3)  # only 2 snapshots
+    ]
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("too_big", 5),),
+    )
+    assert aggregate["per_gap_summary"]["too_big"]["n_pairs"] == 0
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert "0 pairs" in aggregate["falsification_evidence"]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — falsification logic
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_identical_snapshots_supports_hypothesis(tmp_path):
+    """Identical snapshots produce JS=0 -> hypothesis_supported."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    # Make two snapshots with identical content but different generation
+    # (engine-state-wise, identical token distributions are the canonical
+    # "attractor confirmed" case).
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step10_a.npz",
+                        generation=1, lattice=8)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step20_b.npz",
+                        generation=2, lattice=8)
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(
+        [s1, s2], out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    # Identical content -> JS_divergence = 0.0 -> well below attractor
+    # threshold of 0.01 bits.
+    assert aggregate["per_gap_summary"]["adjacent"]["mean_js_divergence_bits"] == 0.0
+    assert aggregate["falsification_status"] == "hypothesis_supported"
+
+
+def test_sweep_temporal_falsified_when_largest_gap_js_above_threshold(
+    tmp_path, monkeypatch
+):
+    """Integration test for the hypothesis_falsified branch.
+
+    Monkey-patches ``scripts.nextness_calibration._js_divergence`` to
+    return a constant 0.2 bits (above the falsification threshold of
+    0.1), then runs sweep_temporal end-to-end and asserts:
+
+      1. falsification_status == "hypothesis_falsified"
+      2. The largest gap's recorded mean_js_divergence_bits == 0.2
+      3. The falsification_evidence carries the correct largest_gap_label
+         and largest_gap_mean_js values
+
+    This exercises the actual sweep_temporal code path through the
+    falsification branch, not just the threshold constants — closing
+    the gap Jack flagged in PR #153 review.
+    """
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    # Three snapshots so the "two" gap has at least one pair.
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration._js_divergence",
+        lambda a, b: 0.2,
+    )
+
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1), ("two", 2)),
+    )
+
+    assert aggregate["falsification_status"] == "hypothesis_falsified"
+    # Largest gap is "two" (last entry in gap_specs by convention).
+    assert aggregate["per_gap_summary"]["two"]["mean_js_divergence_bits"] == 0.2
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["largest_gap_label"] == "two"
+    assert evidence["largest_gap_mean_js"] == 0.2
+
+
+def test_sweep_temporal_inconclusive_when_largest_gap_js_in_middle_band(
+    tmp_path, monkeypatch
+):
+    """Integration test for the inconclusive-band branch of the
+    falsification logic. Mid-band JS (between 0.01 attractor threshold
+    and 0.1 falsification threshold) should yield inconclusive with an
+    explicit reason — not falsified, not supported."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration._js_divergence",
+        lambda a, b: 0.05,  # in the (0.01, 0.1) inconclusive band
+    )
+
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert aggregate["per_gap_summary"]["adjacent"]["mean_js_divergence_bits"] == 0.05
+    evidence = aggregate["falsification_evidence"]
+    assert "between the attractor threshold" in evidence["reason"]
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — output structure
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_row_count_matches_sum_of_pairs_plus_aggregate(tmp_path):
+    """Per-snapshot rows = sum over gap_specs of max(0, N - stride)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 5)  # N=4
+    ]
+    out = log_path.parent / "out.jsonl"
+    sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1), ("two", 2)),  # 3 + 2 = 5 pairs total
+    )
+    lines = out.read_text().splitlines()
+    # 5 per-snapshot rows + 1 aggregate
+    assert len(lines) == 6
+
+
+def test_sweep_temporal_per_row_carries_gap_label_and_snapshot_b(tmp_path):
+    """Each per-snapshot row's parameter_combination carries gap_label,
+    gap_index_stride, snapshot_b, generation_b, generation_diff."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step10_test.npz",
+                        generation=1, lattice=8)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step20_test.npz",
+                        generation=2, lattice=8)
+    out = log_path.parent / "out.jsonl"
+    sweep_temporal(
+        [s1, s2], out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    assert len(rows) == 1
+    row = rows[0]
+    pc = row["parameter_combination"]
+    assert pc["gap_label"] == "adjacent"
+    assert pc["gap_index_stride"] == 1
+    assert pc["snapshot_b"] == s2.name
+    assert pc["generation_b"] == 2
+    assert pc["generation_diff"] == 1
+    # metrics block carries js_divergence_bits + cci_drift
+    assert "js_divergence_bits" in row["metrics"]
+    assert "cci_drift" in row["metrics"]
+
+
+def test_sweep_temporal_aggregate_has_per_gap_summary_and_evidence(tmp_path):
+    """Aggregate must expose gap_specs, per_gap_summary, falsification_evidence."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step10_test.npz", generation=1)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step20_test.npz", generation=2)
+    out = log_path.parent / "out.jsonl"
+    aggregate = sweep_temporal(
+        [s1, s2], out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    assert "gap_specs" in aggregate
+    assert "per_gap_summary" in aggregate
+    assert "falsification_evidence" in aggregate
+    # Evidence carries the threshold constants
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["js_falsification_threshold_bits"] == 0.1
+    assert evidence["js_attractor_threshold_bits"] == 0.01
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — process_snapshot caching (cost-control invariant)
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_caches_process_snapshot_per_snapshot(tmp_path, monkeypatch):
+    """Each unique snapshot must be processed at most once even when it
+    appears in multiple gap-pair lists (e.g., snapshot[2] participates in
+    both the 'adjacent' pair (2,3) and the 'gap-2' pair (0,2))."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 5)  # 4 snapshots
+    ]
+    out = log_path.parent / "out.jsonl"
+
+    call_count = {"n": 0, "paths_seen": []}
+    original = __import__("scripts.nextness_calibration",
+                          fromlist=["process_snapshot"]).process_snapshot
+
+    def _counting_process_snapshot(*args, **kwargs):
+        call_count["n"] += 1
+        call_count["paths_seen"].append(str(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        _counting_process_snapshot,
+    )
+
+    sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1), ("two", 2)),  # both share endpoints
+    )
+    # Without cache: gap1 needs 4 entries (snap0..3 via pairs), gap2 needs
+    # 4 entries again. With cache: 4 unique snapshots -> 4 process_snapshot
+    # calls total.
+    assert call_count["n"] == 4
+    # Each snapshot path appears exactly once in the call list.
+    assert len(set(call_count["paths_seen"])) == 4
+
+
+# ---------------------------------------------------------------------------
+# sweep_temporal — determinism contract
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_temporal_no_fresh_generated_at_field(tmp_path):
+    """No fresh wallclock-derived generated_at field in any row."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step10_test.npz", generation=1)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step20_test.npz", generation=2)
+    out = log_path.parent / "out.jsonl"
+    sweep_temporal(
+        [s1, s2], out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    for line in out.read_text().splitlines():
+        assert "generated_at" not in json.loads(line)
+
+
+def test_sweep_temporal_byte_identical_on_rerun(tmp_path):
+    """Two back-to-back runs on the same input produce byte-identical output."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step10_test.npz",
+                        generation=1, lattice=16)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step20_test.npz",
+                        generation=2, lattice=16)
+    out_a = log_path.parent / "calibration_temporal_a.jsonl"
+    out_b = log_path.parent / "calibration_temporal_b.jsonl"
+    sweep_temporal([s1, s2], out_a, log_path, "short", config,
+                   gap_specs=(("adjacent", 1),))
+    sweep_temporal([s1, s2], out_b, log_path, "short", config,
+                   gap_specs=(("adjacent", 1),))
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_sweep_temporal_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows in generation-ascending order regardless of input."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s3 = _make_snapshot(snaps_dir / "v070_gen300_step3000_c.npz",
+                        generation=300, lattice=8)
+    s1 = _make_snapshot(snaps_dir / "v070_gen100_step1000_a.npz",
+                        generation=100, lattice=8)
+    s2 = _make_snapshot(snaps_dir / "v070_gen200_step2000_b.npz",
+                        generation=200, lattice=8)
+    out = log_path.parent / "out.jsonl"
+    sweep_temporal(
+        [s3, s1, s2], out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    # Anchor snapshot in each row is the earlier one; gens 100, 200
+    generations = [r["snapshot_generation"] for r in rows]
+    assert generations == [100, 200]

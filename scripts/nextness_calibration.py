@@ -2241,10 +2241,295 @@ def ablate_cascade(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Chapter 7 — sweep_temporal (design doc §3.2, Jack #7 in implementation order)
+# ---------------------------------------------------------------------------
+
+
+#: Default gap specs for the short calibration set (12 consecutive snapshots
+#: at ~10-min cadence). Each entry is ``(label, index_stride)``. Index stride
+#: is the number of positions to skip in the generation-sorted snapshot list.
+#: Short-set spacing: 1 = ~10min (adjacent); 6 = ~60min (~1h).
+DEFAULT_GAP_SPECS_SHORT: tuple[tuple[str, int], ...] = (
+    ("adjacent", 1),
+    ("1h", 6),
+)
+
+#: Default gap specs for the long calibration set (12 snapshots spread across
+#: ~24h at ~120-min cadence). Long-set spacing: 1 = ~2h (consecutive in long
+#: set); 3 = ~6h; 11 = ~24h (first to last of 12 snapshots).
+DEFAULT_GAP_SPECS_LONG: tuple[tuple[str, int], ...] = (
+    ("2h", 1),
+    ("6h", 3),
+    ("24h", 11),
+)
+
+#: §3.2 falsification threshold: mean JS divergence at the LARGEST gap above
+#: this value (in bits) indicates a drifting system, not a stable attractor.
+_TEMPORAL_DRIFT_JS_THRESHOLD_BITS: float = 0.1
+
+#: §3.2 attractor threshold: mean JS divergence at the largest gap below this
+#: value (in bits) is the "small JS" expectation for a stable attractor.
+#: Between this and the falsification threshold is the inconclusive band.
+_TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS: float = 0.01
+
+
+def _temporal_pair_stats(values: list[float]) -> dict[str, float]:
+    """Mean / std (sample, n-1 denominator) / max for a list of pair values.
+
+    Returns std=0.0 for n<=1 (no variance to estimate). Used for both JS
+    divergence and CCI drift summaries inside sweep_temporal.
+    """
+    if not values:
+        return {"mean": 0.0, "std": 0.0, "max": 0.0}
+    mean = sum(values) / len(values)
+    if len(values) > 1:
+        std = math.sqrt(
+            sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        )
+    else:
+        std = 0.0
+    return {"mean": mean, "std": std, "max": max(values)}
+
+
+def sweep_temporal(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+    config: ObserverConfig,
+    gap_specs: tuple[tuple[str, int], ...] | None = None,
+) -> dict[str, Any]:
+    """Temporal window sweep per design doc §3.2.
+
+    Tests whether the equilibrium is short-term stillness or genuine
+    longer-horizon stability. For each ``(gap_label, index_stride)`` in
+    ``gap_specs``, forms snapshot pairs ``(snapshots[i], snapshots[i+stride])``
+    after sorting by generation, then computes Jensen-Shannon divergence
+    (bits) between the pair's ``token_counts`` distributions and the
+    absolute CCI drift between the two endpoints.
+
+    Per design doc §2.5 + Jack PR #143 coherence note, this experiment
+    draws gaps from whichever calibration set actually contains that
+    spacing: short for ~10min and ~1h gaps, long for ~2h, ~6h, ~24h gaps.
+    A single ``sweep_temporal()`` call handles one set at a time —
+    callers run it twice (once per set) to cover the full temporal
+    discrimination matrix.
+
+    Mechanical falsification_status per the §3.2 criterion applied to
+    the LARGEST gap in ``gap_specs`` (the last entry by convention):
+
+      * ``"hypothesis_supported"``: mean JS at the largest gap is below
+        ``_TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS`` (= 0.01). System
+        has genuinely settled — attractor confirmed at this timescale.
+      * ``"hypothesis_falsified"``: mean JS at the largest gap exceeds
+        ``_TEMPORAL_DRIFT_JS_THRESHOLD_BITS`` (= 0.1). PR #142 50-min
+        stillness was a snapshot of a moving system, not a fixed point.
+      * ``"inconclusive"``: mean JS between the two thresholds (neither
+        obviously stable nor obviously drifting), OR the largest gap
+        produced no pairs (too few snapshots for the requested stride).
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths. Sorted by generation
+            before pair formation. Per-snapshot ``process_snapshot()``
+            calls are cached so each snapshot is processed at most once
+            even when it appears in multiple gap-pair lists.
+        out_path: where to write the temporal sweep JSONL.
+        log_path: write-boundary anchor; same canonical
+            ``nextness_runs.jsonl`` path used elsewhere.
+        calibration_set: ``"short"`` or ``"long"``. Controls the default
+            ``gap_specs`` when none is provided.
+        config: ``ObserverConfig`` for every ``process_snapshot()`` call.
+            Subject to the PR #149 config-log-dir guard.
+        gap_specs: tuple of ``(label, index_stride)``. Defaults to
+            :data:`DEFAULT_GAP_SPECS_SHORT` for the short set and
+            :data:`DEFAULT_GAP_SPECS_LONG` for the long set. Caller can
+            override to test custom spacings. ``label`` is the human-
+            readable name recorded in the output (e.g., ``"2h"``);
+            ``index_stride`` is the number of generation-sorted positions
+            to skip when forming pairs.
+
+    Returns the aggregate dict for callers that want to inspect it
+    without re-reading the output file.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir
+            or ``config.log_directory`` diverges from ``log_path.parent``.
+        ``ValueError`` for invalid calibration_set, empty gap_specs (when
+            provided explicitly), empty label, or non-positive stride.
+    """
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
+        )
+    if gap_specs is None:
+        gap_specs = (
+            DEFAULT_GAP_SPECS_SHORT if calibration_set == "short"
+            else DEFAULT_GAP_SPECS_LONG
+        )
+    if not gap_specs:
+        raise ValueError("gap_specs must be non-empty when provided explicitly")
+    for entry in gap_specs:
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            raise ValueError(
+                f"each gap_specs entry must be (label, index_stride), got {entry!r}"
+            )
+        label, stride = entry
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                f"gap_spec label must be a non-empty str, got {label!r}"
+            )
+        if not isinstance(stride, int) or stride < 1:
+            raise ValueError(
+                f"gap_spec index_stride must be a positive int, got {stride!r}"
+            )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    # Cache: snapshot path -> process_snapshot entry. Each snapshot is
+    # processed at most once even when it appears in multiple gap-pair
+    # lists (an 'adjacent' pair and a '1h' pair may share endpoints).
+    entry_cache: dict[pathlib.Path, dict[str, Any]] = {}
+
+    def _get_entry(snap: pathlib.Path) -> dict[str, Any]:
+        if snap not in entry_cache:
+            entry_cache[snap] = process_snapshot(snap, config, medusa_is_live=False)
+        return entry_cache[snap]
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    # Per-gap aggregator: gap_label -> {n_pairs, js stats, cci_drift stats}
+    per_gap_summary: dict[str, Any] = {}
+
+    for gap_label, gap_stride in gap_specs:
+        js_values: list[float] = []
+        cci_drifts: list[float] = []
+
+        for i in range(len(sorted_snapshots) - gap_stride):
+            snap_a = sorted_snapshots[i]
+            snap_b = sorted_snapshots[i + gap_stride]
+            entry_a = _get_entry(snap_a)
+            entry_b = _get_entry(snap_b)
+
+            tc_a = dict(entry_a.get("token_counts", {}) or {})
+            tc_b = dict(entry_b.get("token_counts", {}) or {})
+            cci_a = _cci_from_entry(entry_a)
+            cci_b = _cci_from_entry(entry_b)
+
+            js_val = _js_divergence(tc_a, tc_b)
+            cci_drift = abs(cci_a - cci_b)
+            js_values.append(js_val)
+            cci_drifts.append(cci_drift)
+
+            generation_a = _extract_generation_from_filename(snap_a)
+            generation_b = _extract_generation_from_filename(snap_b)
+
+            per_snapshot_rows.append(_make_per_snapshot_row(
+                experiment="temporal_sweep",
+                snapshot_path=snap_a,
+                generation=generation_a,
+                parameter_combination={
+                    "gap_label": gap_label,
+                    "gap_index_stride": gap_stride,
+                    "snapshot_b": snap_b.name,
+                    "generation_b": generation_b,
+                    "generation_diff": generation_b - generation_a,
+                },
+                metrics={
+                    "js_divergence_bits": js_val,
+                    "cci_drift": cci_drift,
+                    "cci_a": cci_a,
+                    "cci_b": cci_b,
+                },
+                run_metadata={
+                    # Both endpoints' patches_processed; deterministic.
+                    # elapsed_seconds intentionally omitted (wallclock).
+                    "patches_processed_a": entry_a.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                    "patches_processed_b": entry_b.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                },
+                calibration_set=calibration_set,
+            ))
+
+        if js_values:
+            js_stats = _temporal_pair_stats(js_values)
+            drift_stats = _temporal_pair_stats(cci_drifts)
+            per_gap_summary[gap_label] = {
+                "n_pairs": len(js_values),
+                "index_stride": gap_stride,
+                "mean_js_divergence_bits": js_stats["mean"],
+                "std_js_divergence_bits": js_stats["std"],
+                "max_js_divergence_bits": js_stats["max"],
+                "mean_cci_drift": drift_stats["mean"],
+                "std_cci_drift": drift_stats["std"],
+                "max_cci_drift": drift_stats["max"],
+            }
+        else:
+            per_gap_summary[gap_label] = {
+                "n_pairs": 0,
+                "index_stride": gap_stride,
+            }
+
+    # --- Falsification status — largest gap (last in gap_specs by convention)
+    falsification_status: str = "inconclusive"
+    falsification_evidence: dict[str, Any] = {
+        "js_falsification_threshold_bits": _TEMPORAL_DRIFT_JS_THRESHOLD_BITS,
+        "js_attractor_threshold_bits": _TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS,
+    }
+    largest_gap_label = gap_specs[-1][0]
+    largest_summary = per_gap_summary.get(largest_gap_label, {})
+    if largest_summary.get("n_pairs", 0) > 0:
+        largest_mean_js = largest_summary["mean_js_divergence_bits"]
+        falsification_evidence["largest_gap_label"] = largest_gap_label
+        falsification_evidence["largest_gap_mean_js"] = largest_mean_js
+        if largest_mean_js > _TEMPORAL_DRIFT_JS_THRESHOLD_BITS:
+            falsification_status = "hypothesis_falsified"
+        elif largest_mean_js < _TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS:
+            falsification_status = "hypothesis_supported"
+        else:
+            falsification_status = "inconclusive"
+            falsification_evidence["reason"] = (
+                "mean JS at the largest gap falls between the attractor "
+                "threshold and the falsification threshold; neither "
+                "obviously stable nor obviously drifting"
+            )
+    else:
+        falsification_evidence["reason"] = (
+            f"largest gap {largest_gap_label!r} produced 0 pairs "
+            f"(too few snapshots for the requested index_stride)"
+        )
+
+    extra_fields: dict[str, Any] = {
+        "gap_specs": [list(g) for g in gap_specs],
+        "per_gap_summary": per_gap_summary,
+        "falsification_evidence": falsification_evidence,
+    }
+
+    aggregate = _make_aggregate_row(
+        experiment="temporal_sweep",
+        calibration_set=calibration_set,
+        n_snapshots=len(sorted_snapshots),
+        extra_fields=extra_fields,
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
     "CANONICAL_STRIDE",
     "DEFAULT_ABLATION_DISABLED_TOKENS",
     "DEFAULT_CANONICAL_SEED",
+    "DEFAULT_GAP_SPECS_LONG",
+    "DEFAULT_GAP_SPECS_SHORT",
     "DEFAULT_STRIDES",
     "DEFAULT_THRESHOLD_MULTIPLIERS",
     "DEFAULT_THRESHOLD_NAME",
@@ -2257,6 +2542,7 @@ __all__ = [
     "check_determinism",
     "shuffle_test",
     "sweep_stride",
+    "sweep_temporal",
     "sweep_threshold",
     "verify_memory_channels",
 ]
