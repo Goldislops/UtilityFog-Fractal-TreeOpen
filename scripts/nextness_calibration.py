@@ -2,24 +2,34 @@
 
 Implements the eight calibration experiments designed in
 ``PHASE_19_PR4_CALIBRATION.md`` (merged as ``3346014``). Each experiment
-discriminates AURA's leading "Karuna/Boundary equilibrium" hypothesis from
-the alternates flagged in issue #139.
+discriminates the **phase-boundary stability hypothesis** from the
+alternate observer-artifact hypotheses flagged in issue #139.
+
+(The earlier "Karuna/Boundary equilibrium" semantic interpretation was
+superseded per issue #144 / PR #145: the pre-fix ``karuna_relief`` token
+was reading the engine's ``last_active_gen`` channel due to a
+``MEMORY_CHANNEL_LAYOUT`` mismatch. ``phase_boundary`` stability is the
+well-anchored part of the prior result and is what the calibration
+sweeps test for robustness.)
 
 Per Jack's implementation order from the design doc §12 Q7:
 
-    1. check_determinism                    <- THIS CHAPTER
-    2. verify_memory_channels               (upcoming)
-    3. shuffle_test                         (upcoming, two modes)
+    1. check_determinism                    LANDED (Chapter 1)
+    2. verify_memory_channels               (upcoming, runtime regression-fence
+                                             complementing PR #145's static check)
+    3. shuffle_test                         LANDED (Chapter 2, three-mode null-model)
     4. sweep_stride                         (upcoming)
     5. sweep_threshold                      (upcoming)
     6. ablate_cascade                       (upcoming)
     7. sweep_temporal                       (upcoming)
     8. sweep_patch_radius                   (upcoming, possibly deferred)
 
-This Chapter 1 lands the shared module infrastructure (write-boundary safety,
+Chapters 1 + 2 land the shared module infrastructure (write-boundary safety,
 deterministic snapshot ordering, content fingerprinting, JSONL output writer,
 falsification-status reporting) plus ``check_determinism()`` (Jack's #1 — the
-sanity floor for everything that follows).
+sanity floor) and ``shuffle_test()`` (Jack's #3 — the three-mode null-model
+test that pinpoints whether signal lives in lattice geometry, memory_grid
+spatial structure, or classifier behaviour).
 
 Scope guarantees (carried forward from PR #138 / PR #140 / PR #142 / PR #143):
     - No engine touch.
