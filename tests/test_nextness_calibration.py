@@ -2644,29 +2644,80 @@ def test_sweep_temporal_identical_snapshots_supports_hypothesis(tmp_path):
     assert aggregate["falsification_status"] == "hypothesis_supported"
 
 
-def test_sweep_temporal_falsified_when_largest_gap_js_above_threshold(tmp_path):
-    """Synthetic: mock per_gap_summary to a value above the falsification
-    threshold and assert the status is hypothesis_falsified.
+def test_sweep_temporal_falsified_when_largest_gap_js_above_threshold(
+    tmp_path, monkeypatch
+):
+    """Integration test for the hypothesis_falsified branch.
 
-    Tests the threshold logic directly without needing to engineer
-    snapshots that produce > 0.1 bits JS — that would be hard with the
-    synthetic _make_snapshot helper since it produces fairly uniform
-    token distributions."""
-    # Use _temporal_pair_stats + the threshold constants directly to
-    # verify the comparison logic. Verify the public function would
-    # falsify by checking the bare logic: any value > 0.1 should falsify.
-    from scripts.nextness_calibration import (
-        _TEMPORAL_DRIFT_JS_THRESHOLD_BITS,
-        _TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS,
+    Monkey-patches ``scripts.nextness_calibration._js_divergence`` to
+    return a constant 0.2 bits (above the falsification threshold of
+    0.1), then runs sweep_temporal end-to-end and asserts:
+
+      1. falsification_status == "hypothesis_falsified"
+      2. The largest gap's recorded mean_js_divergence_bits == 0.2
+      3. The falsification_evidence carries the correct largest_gap_label
+         and largest_gap_mean_js values
+
+    This exercises the actual sweep_temporal code path through the
+    falsification branch, not just the threshold constants — closing
+    the gap Jack flagged in PR #153 review.
+    """
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    # Three snapshots so the "two" gap has at least one pair.
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration._js_divergence",
+        lambda a, b: 0.2,
     )
-    assert _TEMPORAL_DRIFT_JS_THRESHOLD_BITS == 0.1
-    assert _TEMPORAL_DRIFT_ATTRACTOR_JS_THRESHOLD_BITS == 0.01
-    # A value in the inconclusive band: 0.01 < x < 0.1.
-    # 0.05 should produce inconclusive.
-    # This is a sanity check on the threshold-band semantics. The full
-    # integration test above (identical -> supported) and the 0-pair test
-    # (-> inconclusive) cover the active code paths; this test locks in
-    # the threshold constants themselves.
+
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1), ("two", 2)),
+    )
+
+    assert aggregate["falsification_status"] == "hypothesis_falsified"
+    # Largest gap is "two" (last entry in gap_specs by convention).
+    assert aggregate["per_gap_summary"]["two"]["mean_js_divergence_bits"] == 0.2
+    evidence = aggregate["falsification_evidence"]
+    assert evidence["largest_gap_label"] == "two"
+    assert evidence["largest_gap_mean_js"] == 0.2
+
+
+def test_sweep_temporal_inconclusive_when_largest_gap_js_in_middle_band(
+    tmp_path, monkeypatch
+):
+    """Integration test for the inconclusive-band branch of the
+    falsification logic. Mid-band JS (between 0.01 attractor threshold
+    and 0.1 falsification threshold) should yield inconclusive with an
+    explicit reason — not falsified, not supported."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i*10}_test.npz",
+                       generation=i, lattice=8)
+        for i in range(1, 4)
+    ]
+    out = log_path.parent / "out.jsonl"
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration._js_divergence",
+        lambda a, b: 0.05,  # in the (0.01, 0.1) inconclusive band
+    )
+
+    aggregate = sweep_temporal(
+        snaps, out, log_path, "short", config,
+        gap_specs=(("adjacent", 1),),
+    )
+
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert aggregate["per_gap_summary"]["adjacent"]["mean_js_divergence_bits"] == 0.05
+    evidence = aggregate["falsification_evidence"]
+    assert "between the attractor threshold" in evidence["reason"]
 
 
 # ---------------------------------------------------------------------------
