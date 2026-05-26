@@ -76,7 +76,12 @@ from scripts.nextness_observer import (
     WriteOutsideLogDirError,
     process_snapshot,
 )
-from scripts.nextness_metrics import cci as _cci
+import copy
+
+from scripts.nextness_metrics import (
+    cci as _cci,
+    js_divergence as _js_divergence,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1162,8 +1167,278 @@ def verify_memory_channels(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Experiment 3.1 — sweep_stride (spatial sampling sweep)
+# ---------------------------------------------------------------------------
+
+
+#: Default spatial strides to sweep per design doc §3.1. Stride 8 is the
+#: PR #142 baseline (kept as canonical reference); stride 4 quadruples
+#: patch count to test sampling-resolution sensitivity; stride 16 cuts
+#: patch count eighth-fold as a confirmation that coarsening doesn't
+#: hide structure either.
+DEFAULT_STRIDES: tuple[int, ...] = (4, 8, 16)
+
+#: Canonical reference stride against which the others are compared in
+#: the sweep aggregate. Matches PR #142's baseline so the per-stride
+#: differences map back to "what we previously thought."
+CANONICAL_STRIDE: int = 8
+
+#: Falsification threshold per design doc §3.1: if stride 4 produces
+#: ``|Δvocabulary_occupancy| > 0.15`` versus stride 8, the saturation
+#: result is at least partly a sampling artefact.
+_STRIDE_SAMPLING_ARTEFACT_THRESHOLD: float = 0.15
+
+#: Tolerance for "metrics are stable across strides" — if all pairwise
+#: voc_occ diffs across strides are below this, the equilibrium signal
+#: is judged stride-invariant (AURA's hypothesis supported on the
+#: sampling axis).
+_STRIDE_STABILITY_THRESHOLD: float = 0.05
+
+
+def _clone_config_with_stride(
+    base_config: ObserverConfig,
+    stride: int,
+) -> ObserverConfig:
+    """Return a copy of ``base_config`` with ``uniform_grid_stride`` set.
+
+    Uses ``dataclasses.replace`` since ``ObserverConfig`` is a frozen
+    dataclass — direct mutation would raise. Validation (e.g. stride
+    against budget) runs in ``ObserverConfig.__post_init__``; any
+    incompatible stride/budget combination raises here, not deep in
+    the sweep loop.
+    """
+    return dataclasses.replace(base_config, uniform_grid_stride=stride)
+
+
+def sweep_stride(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+    config: ObserverConfig,
+    strides: tuple[int, ...] = DEFAULT_STRIDES,
+) -> dict[str, Any]:
+    """Spatial stride sweep per design doc §3.1.
+
+    For each snapshot × stride combination, run ``process_snapshot()``
+    with the stride overridden and capture per-snapshot metrics
+    (vocabulary_occupancy, entropy, boundary_rate, CCI) plus the
+    full token_counts distribution. Aggregate compares metrics across
+    strides; mechanical falsification_status per the design-doc
+    criterion (stride 4 producing |Δvoc_occ| > 0.15 vs stride 8 →
+    sampling artefact).
+
+    The CANONICAL_STRIDE (= 8) is used as the reference against which
+    others are compared, mirroring PR #142's baseline so "what changes
+    relative to what we previously thought" is the natural read.
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths.
+        out_path: where to write the sweep JSONL.
+        log_path: write-boundary anchor; also where process_snapshot
+            writes its own log entries as a side effect.
+        calibration_set: ``"short"`` or ``"long"``; recorded on rows.
+        config: base ``ObserverConfig``; stride is overridden per sweep
+            value, other fields preserved.
+        strides: tuple of strides to sweep. Defaults to (4, 8, 16) per
+            :data:`DEFAULT_STRIDES`. Caller can supply other values
+            for experimental purposes.
+
+    Returns the aggregate dict for callers that want to inspect it
+    without re-reading the output file.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir.
+        ``ValueError`` for invalid calibration_set, empty strides tuple,
+        or non-positive stride values.
+
+    Mechanical falsification_status:
+        - ``"hypothesis_supported"``: all pairwise voc_occ diffs across
+          strides are below ``_STRIDE_STABILITY_THRESHOLD`` (= 0.05).
+          The signal is stride-invariant within tolerance.
+        - ``"hypothesis_falsified"``: the |stride 4 − stride 8| voc_occ
+          diff exceeds ``_STRIDE_SAMPLING_ARTEFACT_THRESHOLD`` (= 0.15).
+          The previous saturation result is at least partly a sampling
+          artefact.
+        - ``"inconclusive"``: middle ground. Worth running more
+          snapshots or tightening the predicates.
+    """
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got "
+            f"{calibration_set!r}"
+        )
+    if not strides:
+        raise ValueError("strides must be non-empty")
+    for s in strides:
+        if not isinstance(s, int) or s <= 0:
+            raise ValueError(
+                f"every stride must be a positive int, got {s!r}"
+            )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    # Per-stride aggregator: stride -> list of {snapshot_path, metrics, token_counts}
+    by_stride: dict[int, list[dict[str, Any]]] = {s: [] for s in strides}
+
+    for snap in sorted_snapshots:
+        generation = _extract_generation_from_filename(snap)
+        for stride in strides:
+            stride_config = _clone_config_with_stride(config, stride)
+            entry = process_snapshot(snap, stride_config, medusa_is_live=False)
+            cci_value = _cci_from_entry(entry)
+            token_counts = entry.get("token_counts", {}) or {}
+
+            metrics = _extract_metrics_subset(entry)
+            metrics["cci"] = cci_value
+
+            per_snapshot_rows.append(_make_per_snapshot_row(
+                experiment="stride_sweep",
+                snapshot_path=snap,
+                generation=generation,
+                parameter_combination={"stride": stride},
+                metrics=metrics,
+                run_metadata={
+                    # patches_processed is deterministic; elapsed_seconds
+                    # is wallclock-derived and would break byte-identical
+                    # re-run. Timing is available in process_snapshot's
+                    # own log entry, joinable on snapshot_file.
+                    "patches_processed": entry.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                    "stride_used": entry.get("stride_used"),
+                    "stride_backoff_fired": entry.get("stride_backoff_fired"),
+                },
+                calibration_set=calibration_set,
+            ))
+
+            by_stride[stride].append({
+                "snapshot": snap.name,
+                "generation": generation,
+                "metrics": metrics,
+                "token_counts": token_counts,
+            })
+
+    # --- Per-stride summary statistics ---
+    per_stride_summary: dict[str, Any] = {}
+    for stride, runs in by_stride.items():
+        if not runs:
+            per_stride_summary[str(stride)] = {
+                "n_snapshots": 0,
+            }
+            continue
+        voc_occs = [r["metrics"]["vocabulary_occupancy"] for r in runs]
+        entropies = [r["metrics"]["entropy_normalized"] for r in runs]
+        boundaries = [r["metrics"]["boundary_rate"] for r in runs]
+        ccis = [r["metrics"]["cci"] for r in runs]
+        per_stride_summary[str(stride)] = {
+            "n_snapshots": len(runs),
+            "mean_vocabulary_occupancy": sum(voc_occs) / len(voc_occs),
+            "mean_entropy_normalized": sum(entropies) / len(entropies),
+            "mean_boundary_rate": sum(boundaries) / len(boundaries),
+            "mean_cci": sum(ccis) / len(ccis),
+        }
+
+    # --- Cross-stride differences (vs canonical stride 8 when present) ---
+    cross_stride_diffs: dict[str, Any] = {}
+    if CANONICAL_STRIDE in by_stride and by_stride[CANONICAL_STRIDE]:
+        canon_voc = per_stride_summary[str(CANONICAL_STRIDE)]["mean_vocabulary_occupancy"]
+        canon_cci = per_stride_summary[str(CANONICAL_STRIDE)]["mean_cci"]
+        for stride in strides:
+            if stride == CANONICAL_STRIDE:
+                continue
+            stride_voc = per_stride_summary[str(stride)]["mean_vocabulary_occupancy"]
+            stride_cci = per_stride_summary[str(stride)]["mean_cci"]
+            cross_stride_diffs[f"voc_occ_diff_{stride}_vs_{CANONICAL_STRIDE}"] = (
+                stride_voc - canon_voc
+            )
+            cross_stride_diffs[f"cci_diff_{stride}_vs_{CANONICAL_STRIDE}"] = (
+                stride_cci - canon_cci
+            )
+
+    # --- Cross-stride JS divergence (per snapshot, pairwise) ---
+    # For each snapshot, compute JS divergence between each pair of strides'
+    # token_counts. Mean across snapshots tells us whether different strides
+    # see systematically different distributions.
+    cross_stride_js: dict[str, list[float]] = {}
+    if len(sorted_snapshots) > 0 and len(strides) >= 2:
+        for i, s_a in enumerate(strides):
+            for s_b in strides[i + 1:]:
+                key = f"js_divergence_stride_{s_a}_vs_{s_b}_bits"
+                js_values = []
+                # Build per-snapshot token_counts lookup
+                lookup_a = {r["snapshot"]: r["token_counts"]
+                            for r in by_stride[s_a]}
+                lookup_b = {r["snapshot"]: r["token_counts"]
+                            for r in by_stride[s_b]}
+                for snap_name in lookup_a:
+                    if snap_name not in lookup_b:
+                        continue
+                    js_val = _js_divergence(lookup_a[snap_name], lookup_b[snap_name])
+                    js_values.append(js_val)
+                if js_values:
+                    cross_stride_js[key + "_mean"] = sum(js_values) / len(js_values)
+                    cross_stride_js[key + "_max"] = max(js_values)
+
+    # --- Falsification status ---
+    falsification_status: str
+    if not sorted_snapshots:
+        falsification_status = "inconclusive"
+    elif CANONICAL_STRIDE not in by_stride or 4 not in by_stride:
+        # Without both stride 4 and stride 8, can't apply the §3.1 criterion
+        # — declare inconclusive rather than guess.
+        falsification_status = "inconclusive"
+    else:
+        diff_4_vs_8 = abs(
+            per_stride_summary["4"]["mean_vocabulary_occupancy"]
+            - per_stride_summary[str(CANONICAL_STRIDE)]["mean_vocabulary_occupancy"]
+        )
+        if diff_4_vs_8 > _STRIDE_SAMPLING_ARTEFACT_THRESHOLD:
+            falsification_status = "hypothesis_falsified"
+        else:
+            # Check all pairwise voc_occ diffs for general stability
+            voc_occs = [
+                per_stride_summary[str(s)]["mean_vocabulary_occupancy"]
+                for s in strides
+            ]
+            max_pairwise = max(voc_occs) - min(voc_occs)
+            if max_pairwise <= _STRIDE_STABILITY_THRESHOLD:
+                falsification_status = "hypothesis_supported"
+            else:
+                falsification_status = "inconclusive"
+
+    extra_fields: dict[str, Any] = {
+        "strides_swept": list(strides),
+        "canonical_stride": CANONICAL_STRIDE,
+        "per_stride_summary": per_stride_summary,
+        "cross_stride_diffs": cross_stride_diffs,
+        "cross_stride_js_divergence": cross_stride_js,
+        "stride_sampling_artefact_threshold": _STRIDE_SAMPLING_ARTEFACT_THRESHOLD,
+        "stride_stability_threshold": _STRIDE_STABILITY_THRESHOLD,
+    }
+
+    aggregate = _make_aggregate_row(
+        experiment="stride_sweep",
+        calibration_set=calibration_set,
+        n_snapshots=len(sorted_snapshots),
+        extra_fields=extra_fields,
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
+    "CANONICAL_STRIDE",
     "DEFAULT_CANONICAL_SEED",
+    "DEFAULT_STRIDES",
     "DEFAULT_VARIANCE_SEEDS",
     "EXPECTED_MEMORY_CHANNELS",
     "EXPECTED_MEMORY_DTYPE",
@@ -1171,5 +1446,6 @@ __all__ = [
     "SPARSITY_EPSILON",
     "check_determinism",
     "shuffle_test",
+    "sweep_stride",
     "verify_memory_channels",
 ]
