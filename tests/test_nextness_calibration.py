@@ -40,12 +40,15 @@ from scripts.nextness_observer import (
     WriteOutsideLogDirError,
 )
 from scripts.nextness_calibration import (
+    CANONICAL_STRIDE,
     DEFAULT_CANONICAL_SEED,
+    DEFAULT_STRIDES,
     DEFAULT_VARIANCE_SEEDS,
     EXPECTED_MEMORY_CHANNELS,
     EXPECTED_MEMORY_DTYPE,
     SHUFFLE_MODES,
     SPARSITY_EPSILON,
+    _clone_config_with_stride,
     _content_fingerprint,
     _extract_generation_from_filename,
     _interpret_signal_location,
@@ -59,6 +62,7 @@ from scripts.nextness_calibration import (
     _verify_snapshot_memory_grid,
     check_determinism,
     shuffle_test,
+    sweep_stride,
     verify_memory_channels,
 )
 
@@ -1185,3 +1189,220 @@ def test_verify_memory_channels_sorts_input_by_generation(tmp_path):
     rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200, 300]
+
+
+# ---------------------------------------------------------------------------
+# Chapter 4 — sweep_stride (spatial stride sweep, design doc §3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_default_strides_is_canonical_triple():
+    """Default strides per design doc §3.1: (4, 8, 16)."""
+    assert DEFAULT_STRIDES == (4, 8, 16)
+    assert CANONICAL_STRIDE == 8
+    assert CANONICAL_STRIDE in DEFAULT_STRIDES
+
+
+def test_clone_config_with_stride_preserves_other_fields():
+    """The clone overrides only uniform_grid_stride; other fields are kept."""
+    base = ObserverConfig(
+        log_directory="/tmp/test_log",
+        uniform_grid_stride=8,
+        budget_seconds=30.0,
+    )
+    clone = _clone_config_with_stride(base, 4)
+    assert clone.uniform_grid_stride == 4
+    assert clone.budget_seconds == base.budget_seconds
+    assert clone.log_directory == base.log_directory
+    # Original is unchanged (frozen dataclass)
+    assert base.uniform_grid_stride == 8
+
+
+def test_sweep_stride_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set validation."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_stride.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        sweep_stride([snap], out, log_path, "medium", config)
+
+
+def test_sweep_stride_rejects_empty_strides(tmp_path):
+    """At least one stride required."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    out = log_path.parent / "calibration_stride.jsonl"
+    with pytest.raises(ValueError, match="strides must be non-empty"):
+        sweep_stride([], out, log_path, "short", config, strides=())
+
+
+def test_sweep_stride_rejects_non_positive_stride(tmp_path):
+    """Stride values must be positive integers."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    out = log_path.parent / "calibration_stride.jsonl"
+    with pytest.raises(ValueError, match="positive int"):
+        sweep_stride([], out, log_path, "short", config, strides=(0,))
+    with pytest.raises(ValueError, match="positive int"):
+        sweep_stride([], out, log_path, "short", config, strides=(-1,))
+
+
+def test_sweep_stride_rejects_outside_log_dir_output(tmp_path):
+    """Write-boundary inheritance."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    bad_out = tmp_path / "outside_dir" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        sweep_stride([snap], bad_out, log_path, "short", config)
+    assert not (tmp_path / "outside_dir").exists()
+
+
+def test_sweep_stride_writes_expected_row_count(tmp_path):
+    """N snapshots × M strides = N*M per-snapshot rows + 1 aggregate."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i}_test.npz",
+                       generation=i, lattice=16)
+        for i in (1, 2)
+    ]
+    out = log_path.parent / "calibration_stride.jsonl"
+    sweep_stride(snaps, out, log_path, "short", config)
+
+    lines = out.read_text().splitlines()
+    # 2 snapshots × 3 default strides + 1 aggregate = 7
+    assert len(lines) == 2 * 3 + 1
+
+
+def test_sweep_stride_per_row_has_stride_parameter(tmp_path):
+    """Each per-snapshot row carries its stride in parameter_combination."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    sweep_stride([snap], out, log_path, "short", config)
+
+    pair_rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    observed_strides = sorted(r["parameter_combination"]["stride"]
+                              for r in pair_rows)
+    assert observed_strides == [4, 8, 16]
+
+
+def test_sweep_stride_aggregate_has_per_stride_summary(tmp_path):
+    """Aggregate row carries per-stride summary stats + cross-stride diffs."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    aggregate = sweep_stride([snap], out, log_path, "short", config)
+
+    assert aggregate["experiment"] == "stride_sweep"
+    assert aggregate["strides_swept"] == [4, 8, 16]
+    assert aggregate["canonical_stride"] == 8
+    per_stride = aggregate["per_stride_summary"]
+    assert set(per_stride.keys()) == {"4", "8", "16"}
+    for stride_key in ("4", "8", "16"):
+        assert "mean_vocabulary_occupancy" in per_stride[stride_key]
+        assert "mean_cci" in per_stride[stride_key]
+    # Cross-stride diffs (only for non-canonical strides)
+    diffs = aggregate["cross_stride_diffs"]
+    assert "voc_occ_diff_4_vs_8" in diffs
+    assert "voc_occ_diff_16_vs_8" in diffs
+    # JS divergence across pairs
+    js = aggregate["cross_stride_js_divergence"]
+    assert any("4_vs_8" in k for k in js.keys())
+    assert any("4_vs_16" in k for k in js.keys())
+    assert any("8_vs_16" in k for k in js.keys())
+
+
+def test_sweep_stride_falsification_status_supported_on_synthetic_stable(tmp_path):
+    """Synthetic snapshots produce stable metrics across strides → supported.
+
+    Our synthetic _make_snapshot has a sparse uniform pattern; classify_patch
+    output is dominated by predictable tokens. We expect all three strides to
+    give similar voc_occ on this artificial fixture.
+    """
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i}_test.npz",
+                       generation=i, lattice=16)
+        for i in (1, 2)
+    ]
+    out = log_path.parent / "calibration_stride.jsonl"
+    aggregate = sweep_stride(snaps, out, log_path, "short", config)
+
+    # On synthetic data the result is expected to be either supported or
+    # inconclusive — both are non-falsifying. The key thing this test
+    # asserts is that the falsification machinery doesn't spuriously
+    # report 'falsified' on stable input.
+    assert aggregate["falsification_status"] in {
+        "hypothesis_supported",
+        "inconclusive",
+    }
+
+
+def test_sweep_stride_falsification_inconclusive_without_canonical_stride(tmp_path):
+    """If strides tuple doesn't include CANONICAL_STRIDE (=8), can't apply
+    the §3.1 criterion → inconclusive."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    aggregate = sweep_stride([snap], out, log_path, "short", config,
+                             strides=(2, 4, 16))  # no 8
+    assert aggregate["falsification_status"] == "inconclusive"
+
+
+def test_sweep_stride_no_generated_at_field(tmp_path):
+    """Determinism contract — no fresh timestamps in output."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    sweep_stride([snap], out, log_path, "short", config)
+    assert "generated_at" not in out.read_text()
+
+
+def test_sweep_stride_byte_identical_on_rerun(tmp_path):
+    """Determinism — re-running on the same input produces byte-identical output."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i}_test.npz",
+                       generation=i, lattice=16)
+        for i in (1, 2)
+    ]
+    out_a = log_path.parent / "calibration_stride_a.jsonl"
+    out_b = log_path.parent / "calibration_stride_b.jsonl"
+    sweep_stride(snaps, out_a, log_path, "short", config)
+    sweep_stride(snaps, out_b, log_path, "short", config)
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_sweep_stride_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows appear in (generation-ascending, stride-iteration) order."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s3 = _make_snapshot(snaps_dir / "v070_gen300_step3000_test.npz",
+                        generation=300, lattice=16)
+    s1 = _make_snapshot(snaps_dir / "v070_gen100_step1000_test.npz",
+                        generation=100, lattice=16)
+    s2 = _make_snapshot(snaps_dir / "v070_gen200_step2000_test.npz",
+                        generation=200, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    sweep_stride([s3, s1, s2], out, log_path, "short", config)
+
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    # First 3 rows should be gen 100 (each stride); next 3 gen 200; next 3 gen 300
+    assert rows[0]["snapshot_generation"] == 100
+    assert rows[1]["snapshot_generation"] == 100
+    assert rows[2]["snapshot_generation"] == 100
+    assert rows[3]["snapshot_generation"] == 200
+    assert rows[6]["snapshot_generation"] == 300
+
+
+def test_sweep_stride_custom_strides_honored(tmp_path):
+    """Custom strides tuple changes the sweep."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_stride.jsonl"
+    aggregate = sweep_stride([snap], out, log_path, "short", config,
+                             strides=(2, 4, 8))
+    assert aggregate["strides_swept"] == [2, 4, 8]
+    assert set(aggregate["per_stride_summary"].keys()) == {"2", "4", "8"}
