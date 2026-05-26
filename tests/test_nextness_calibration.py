@@ -41,6 +41,7 @@ from scripts.nextness_observer import (
 )
 from scripts.nextness_calibration import (
     CANONICAL_STRIDE,
+    DEFAULT_ABLATION_DISABLED_TOKENS,
     DEFAULT_CANONICAL_SEED,
     DEFAULT_STRIDES,
     DEFAULT_THRESHOLD_MULTIPLIERS,
@@ -50,8 +51,12 @@ from scripts.nextness_calibration import (
     EXPECTED_MEMORY_DTYPE,
     SHUFFLE_MODES,
     SPARSITY_EPSILON,
+    _ACTIVE_CASCADE_ORDER,
+    _ablation_modes_for_run,
+    _classify_patch_ablation,
     _clone_config_with_stride,
     _content_fingerprint,
+    _emerging_tokens_vs_baseline,
     _extract_generation_from_filename,
     _interpret_signal_location,
     _make_aggregate_row,
@@ -63,6 +68,7 @@ from scripts.nextness_calibration import (
     _validate_calibration_output_path,
     _validate_config_log_directory,
     _verify_snapshot_memory_grid,
+    ablate_cascade,
     check_determinism,
     shuffle_test,
     sweep_stride,
@@ -1801,6 +1807,585 @@ def test_sweep_threshold_sorts_input_by_generation(tmp_path):
     sweep_threshold([s3, s1, s2], out, log_path, "short", config,
                     multipliers=(1.0,))  # single multiplier for predictable ordering
 
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    generations = [r["snapshot_generation"] for r in rows]
+    assert generations == [100, 200, 300]
+
+
+# ===========================================================================
+# Chapter 6 — ablate_cascade (design doc §3.5)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+
+def test_default_ablation_disabled_tokens_are_active_cascade_tokens():
+    """Every DEFAULT_ABLATION_DISABLED_TOKENS entry must be in the active
+    cascade — guards against typos and against accidentally trying to
+    ablate a deprecated token."""
+    for token in DEFAULT_ABLATION_DISABLED_TOKENS:
+        assert token in _ACTIVE_CASCADE_ORDER, (
+            f"default ablation token {token!r} not in active cascade"
+        )
+
+
+def test_active_cascade_order_excludes_deprecated_tokens():
+    """_ACTIVE_CASCADE_ORDER must NOT contain any deprecated tokens
+    (karuna_relief, mudita_resonance, magnon_lighthouse per #144).
+    Locks the post-#144 cascade composition."""
+    deprecated = {"karuna_relief", "mudita_resonance", "magnon_lighthouse"}
+    overlap = set(_ACTIVE_CASCADE_ORDER) & deprecated
+    assert not overlap, f"deprecated tokens in active cascade: {overlap}"
+
+
+# ---------------------------------------------------------------------------
+# _classify_patch_ablation — parity regression-fence + ablation correctness
+# ---------------------------------------------------------------------------
+
+
+def _make_synthetic_patch_for_branch(branch: str):
+    """Synthetic Patch built to trigger a specific cascade branch.
+
+    Returns a minimal Patch object with hand-built state + memory arrays.
+    Mirrors the lazy-import pattern used by the observer's _patch_features.
+    """
+    from scripts.nextness_observer import (
+        AGE_ANCIENT,
+        AGE_SAGE,
+        ENERGY_PULSE_MIN_COUNT,
+        Patch,
+        STATE_COMPUTE,
+        STATE_ENERGY,
+        STATE_SENSOR,
+        STATE_STRUCTURAL,
+        STATE_VOID,
+        THRESHOLD_WARMTH,
+    )
+    # 3x3x3 patches everywhere; deterministic content.
+    R = 1  # patch_spatial_radius -> 3x3x3 = 27 cells
+    state = np.full((3, 3, 3), STATE_VOID, dtype=np.uint8)
+    memory = np.zeros((8, 3, 3, 3), dtype=np.float32)
+    if branch == "phase_boundary":
+        # distinct_states >= DIVERSITY_BOUNDARY (>=4 by default).
+        state[0, 0, 0] = STATE_COMPUTE
+        state[0, 0, 1] = STATE_STRUCTURAL
+        state[0, 0, 2] = STATE_ENERGY
+        state[0, 1, 0] = STATE_SENSOR
+    elif branch == "compute_aging":
+        state[:, :, :] = STATE_COMPUTE  # compute_frac = 1.0
+        memory[CH["compute_age"], :, :, :] = float(AGE_SAGE + 5)
+    elif branch == "metta_warmth":
+        # compute_count>=1 + warmth_mean >= THRESHOLD_WARMTH, but NOT
+        # compute_frac dominant (so compute_static won't catch it first).
+        state[0, 0, 0] = STATE_COMPUTE
+        memory[CH["warmth"], :, :, :] = float(THRESHOLD_WARMTH + 0.1)
+    elif branch == "sensor_alert":
+        # sensor_count>=1, no compute/energy dominance, distinct_states<4
+        state[0, 0, 0] = STATE_SENSOR
+    elif branch == "energy_pulse":
+        # energy_count >= ENERGY_PULSE_MIN_COUNT, no compute, no sensors,
+        # not dominant in any single category.
+        for i in range(ENERGY_PULSE_MIN_COUNT):
+            state.flat[i] = STATE_ENERGY
+    elif branch == "compute_decay":
+        # compute_count>=1, void_frac dominant, warmth_mean < THRESHOLD_WARMTH
+        state[0, 0, 0] = STATE_COMPUTE
+        # rest stays VOID -> void_frac high
+        memory[CH["warmth"], :, :, :] = 0.0
+    elif branch == "compute_static":
+        # compute_frac >= FRACTION_DOMINANT, compute_age below SAGE,
+        # warmth below threshold (so metta_warmth/decay don't catch first).
+        state[:, :, :] = STATE_COMPUTE
+        memory[CH["compute_age"], :, :, :] = float(AGE_SAGE - 1)
+        memory[CH["warmth"], :, :, :] = 0.0
+    elif branch == "structural_growth":
+        state[:, :, :] = STATE_STRUCTURAL
+        memory[CH["structural_age"], :, :, :] = float(AGE_SAGE - 1)
+    elif branch == "structural_decay":
+        state[:, :, :] = STATE_STRUCTURAL
+        memory[CH["structural_age"], :, :, :] = float(AGE_ANCIENT + 1)
+    elif branch == "void_birth":
+        # void_frac dominant but distinct_states>=2 (and <4 so phase_boundary
+        # doesn't catch).
+        state[0, 0, 0] = STATE_STRUCTURAL
+        state[0, 0, 1] = STATE_STRUCTURAL
+    elif branch == "void_static":
+        # All void -> distinct_states=1, void_frac=1.0
+        pass  # state already all-VOID
+    elif branch == "acoustic_stress":
+        # distinct_states>=3, distinct<4 (else phase_boundary), warmth low,
+        # no compute/energy dominant, no sensors.
+        state[0, 0, 0] = STATE_STRUCTURAL
+        state[0, 0, 1] = STATE_ENERGY
+        # void + structural + energy = 3 distinct states; default
+        # DIVERSITY_BOUNDARY is 4 so phase_boundary won't catch.
+    elif branch == "unclassified":
+        # We want NO predicate to fire. Hardest to construct. A patch
+        # with: void_frac < FRACTION_MAJORITY, no dominance anywhere,
+        # distinct_states < 3, no sensors, energy_count < min.
+        # Try: half void, half structural with mature age (>= ANCIENT).
+        # If FRACTION_MAJORITY is 0.5 (typical), set void_frac < 0.5 too.
+        state[0, 0, 0] = STATE_STRUCTURAL
+        state[0, 0, 1] = STATE_STRUCTURAL
+        state[0, 0, 2] = STATE_STRUCTURAL
+        state[0, 1, 0] = STATE_STRUCTURAL
+        state[0, 1, 1] = STATE_STRUCTURAL
+        state[0, 1, 2] = STATE_STRUCTURAL
+        state[0, 2, 0] = STATE_STRUCTURAL
+        state[0, 2, 1] = STATE_STRUCTURAL
+        state[0, 2, 2] = STATE_STRUCTURAL
+        state[1, 0, 0] = STATE_STRUCTURAL
+        state[1, 0, 1] = STATE_STRUCTURAL
+        state[1, 0, 2] = STATE_STRUCTURAL
+        state[1, 1, 0] = STATE_STRUCTURAL
+        # 13 structural / 27 = 0.48 < FRACTION_MAJORITY (0.5) but high
+        # enough that void_frac is also < 0.5 -> nothing dominant.
+        memory[CH["structural_age"], :, :, :] = float(AGE_SAGE)
+        # structural_age_mean is SAGE (not < SAGE for growth, not >= ANCIENT
+        # for decay), structural_frac < DOMINANT so neither growth nor decay
+        # fire. distinct=2 not >=3. No sensors. compute=0, energy=0. The
+        # only risk is acoustic_stress (distinct>=3) - here distinct=2.
+    else:
+        raise ValueError(f"unknown branch {branch}")
+    return Patch(
+        center=(R, R, R),
+        state=state,
+        memory=memory,
+    )
+
+
+def test_classify_patch_ablation_parity_with_observer_on_synthetic_battery():
+    """Regression fence: non-ablated, non-reversed _classify_patch_ablation
+    must agree with observer.classify_patch bit-for-bit on synthetic
+    patches built to hit each ACTIVE cascade branch. Locks out silent
+    drift between the calibration cascade mirror and the observer's
+    source-of-truth cascade."""
+    from scripts.nextness_observer import classify_patch as observer_classify
+    branches = list(_ACTIVE_CASCADE_ORDER) + ["unclassified"]
+    for branch in branches:
+        patch = _make_synthetic_patch_for_branch(branch)
+        observer_result = observer_classify(patch)
+        calibration_result = _classify_patch_ablation(patch)
+        assert observer_result == calibration_result, (
+            f"parity drift on branch {branch!r}: "
+            f"observer={observer_result!r} vs calibration={calibration_result!r}"
+        )
+
+
+def test_classify_patch_ablation_skips_disabled_token():
+    """When a token's predicate would fire, disabling it must yield a
+    different result — proves the ablation knob actually skips."""
+    patch = _make_synthetic_patch_for_branch("phase_boundary")
+    # Baseline: fires phase_boundary
+    assert _classify_patch_ablation(patch) == "phase_boundary"
+    # Ablation: must NOT return phase_boundary
+    result = _classify_patch_ablation(
+        patch, disabled_tokens=frozenset({"phase_boundary"})
+    )
+    assert result != "phase_boundary", (
+        f"ablation did not skip phase_boundary; got {result!r}"
+    )
+
+
+def test_classify_patch_ablation_unclassified_when_all_active_disabled():
+    """If every active cascade token is disabled, the patch must fall
+    through to ``unclassified`` (the catch-all bucket)."""
+    patch = _make_synthetic_patch_for_branch("phase_boundary")
+    result = _classify_patch_ablation(
+        patch, disabled_tokens=frozenset(_ACTIVE_CASCADE_ORDER)
+    )
+    assert result == "unclassified"
+
+
+def test_classify_patch_ablation_reverse_order_differs_when_appropriate():
+    """Reverse order must produce a different result for at least one
+    patch where multiple predicates could fire (forward picks the
+    most-specific; reversed picks the least-specific). Otherwise the
+    reverse_order knob is a no-op and the chapter has nothing to probe."""
+    # A patch that triggers both phase_boundary (specific) and void_birth
+    # / void_static (less specific). Use the phase_boundary patch which
+    # has multiple distinct states.
+    patch = _make_synthetic_patch_for_branch("phase_boundary")
+    forward = _classify_patch_ablation(patch, reverse_order=False)
+    reversed_ = _classify_patch_ablation(patch, reverse_order=True)
+    # forward should pick phase_boundary; reversed should pick something
+    # later in the original cascade order (acoustic_stress / void_static).
+    assert forward != reversed_, (
+        f"reverse_order produced same result as forward: {forward!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _ablation_modes_for_run
+# ---------------------------------------------------------------------------
+
+
+def test_ablation_modes_for_run_includes_baseline_first():
+    """Baseline mode (when requested) must come first; downstream code
+    relies on it being the reference for emerging-token comparison."""
+    modes = _ablation_modes_for_run(
+        disabled_tokens=("phase_boundary",),
+        include_baseline=True,
+        include_reverse=True,
+    )
+    assert modes[0]["label"] == "baseline"
+    assert modes[0]["disabled_tokens"] == frozenset()
+    assert modes[0]["reverse_order"] is False
+
+
+def test_ablation_modes_for_run_skips_baseline_when_disabled():
+    """include_baseline=False must omit the baseline mode entirely."""
+    modes = _ablation_modes_for_run(
+        disabled_tokens=("phase_boundary",),
+        include_baseline=False,
+        include_reverse=False,
+    )
+    labels = [m["label"] for m in modes]
+    assert "baseline" not in labels
+
+
+def test_ablation_modes_for_run_disable_modes_in_order():
+    """disable_<token> modes must appear in disabled_tokens input order
+    so the parameter_combination output is deterministic."""
+    modes = _ablation_modes_for_run(
+        disabled_tokens=("compute_static", "phase_boundary", "void_static"),
+        include_baseline=False,
+        include_reverse=False,
+    )
+    labels = [m["label"] for m in modes]
+    assert labels == [
+        "disable_compute_static",
+        "disable_phase_boundary",
+        "disable_void_static",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _emerging_tokens_vs_baseline
+# ---------------------------------------------------------------------------
+
+
+def test_emerging_tokens_identifies_threshold_crossers():
+    """A token below rate_threshold in baseline and above it in mode is
+    emerging. Tokens that stay below or stay above don't count."""
+    baseline = {"phase_boundary": 100, "void_static": 5, "metta_warmth": 0}
+    # 100 total in baseline; phase_boundary=1.0, void_static=0.05, metta_warmth=0
+    mode = {"compute_static": 20, "void_static": 60, "metta_warmth": 20}
+    # 100 total in mode; compute_static=0.2 (emerging), void_static=0.6
+    # (already > 5% in baseline at exactly 5%, but baseline is <= 5%, mode > 5%
+    # -> qualifies), metta_warmth=0.2 (was 0, now 0.2 -> emerging)
+    result = _emerging_tokens_vs_baseline(
+        baseline_counts=baseline,
+        mode_counts=mode,
+        rate_threshold=0.05,
+    )
+    assert "compute_static" in result["emerging_tokens"]
+    assert "metta_warmth" in result["emerging_tokens"]
+    assert "phase_boundary" not in result["emerging_tokens"]  # was > 5%
+    assert result["emerging_token_count"] == len(result["emerging_tokens"])
+
+
+def test_emerging_tokens_handles_empty_baseline():
+    """Empty baseline counts produce baseline_rate of 0 for everything,
+    so any token above threshold in mode counts as emerging."""
+    result = _emerging_tokens_vs_baseline(
+        baseline_counts={},
+        mode_counts={"a": 50, "b": 50},
+        rate_threshold=0.05,
+    )
+    assert set(result["emerging_tokens"]) == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# ablate_cascade — input validation
+# ---------------------------------------------------------------------------
+
+
+def test_ablate_cascade_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set must be 'short' or 'long'."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        ablate_cascade([snap], out, log_path, "weekend", config)
+
+
+def test_ablate_cascade_rejects_unknown_disabled_token(tmp_path):
+    """Disabling a token name that isn't in the active cascade raises."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="not an active cascade token"):
+        ablate_cascade([snap], out, log_path, "short", config,
+                       disabled_tokens=("not_a_real_token",))
+
+
+def test_ablate_cascade_rejects_no_modes(tmp_path):
+    """Empty disabled_tokens + include_baseline=False + include_reverse=False
+    leaves no modes to run."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    with pytest.raises(ValueError, match="no modes selected"):
+        ablate_cascade(
+            [snap], out, log_path, "short", config,
+            disabled_tokens=(),
+            include_baseline=False,
+            include_reverse=False,
+        )
+
+
+def test_ablate_cascade_rejects_outside_log_dir_output(tmp_path):
+    """Inherits the write-boundary contract via
+    _validate_calibration_output_path."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = tmp_path / "elsewhere" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        ablate_cascade([snap], out, log_path, "short", config)
+
+
+def test_ablate_cascade_rejects_mismatched_config_log_directory(tmp_path):
+    """Inherits the config-log-directory guard from PR #149."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bad_config = ObserverConfig(
+        log_directory=str(tmp_path / "bogus_for_ablate"),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(WriteOutsideLogDirError, match="config.log_directory"):
+        ablate_cascade([snap], out, log_path, "short", bad_config)
+
+
+# ---------------------------------------------------------------------------
+# ablate_cascade — restore contract regression fences
+# ---------------------------------------------------------------------------
+
+
+def test_ablate_cascade_restores_classify_patch_after_run(tmp_path):
+    """After normal exit, observer.classify_patch must be the original
+    callable, not the monkey-patched ablating version."""
+    from scripts import nextness_observer as _observer_module
+    original_classifier = _observer_module.classify_patch
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_reverse=False,
+    )
+    assert _observer_module.classify_patch is original_classifier
+
+
+def test_ablate_cascade_restores_classify_patch_even_if_process_snapshot_fails(
+    tmp_path, monkeypatch
+):
+    """Mid-loop exception still triggers the try/finally restore. Locks
+    the contract that no observer-state leak survives an exception."""
+    from scripts import nextness_observer as _observer_module
+    original_classifier = _observer_module.classify_patch
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+
+    # Force process_snapshot to raise after one call to simulate mid-loop
+    # failure. Patch it on the calibration module (where it was imported).
+    call_count = {"n": 0}
+    def _exploding_process_snapshot(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("simulated mid-sweep failure")
+        # First call - delegate to a minimal fake entry so the row builder works
+        return {
+            "snapshot_file": str(args[0].name) if args else "x.npz",
+            "generation": 1,
+            "token_counts": {"phase_boundary": 1},
+            "vocabulary_occupancy": 0.5,
+            "shannon_entropy_bits": 0.0,
+            "entropy_normalized": 0.0,
+            "void_compute_balance": 0.0,
+            "boundary_rate": 0.0,
+            "budget": {"patches_processed": 1},
+        }
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        _exploding_process_snapshot,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated mid-sweep failure"):
+        ablate_cascade(
+            [snap], out, log_path, "short", config,
+            disabled_tokens=("phase_boundary",),
+            include_reverse=False,
+        )
+    # Even with mid-loop exception, classify_patch must be restored.
+    assert _observer_module.classify_patch is original_classifier
+
+
+# ---------------------------------------------------------------------------
+# ablate_cascade — output structure
+# ---------------------------------------------------------------------------
+
+
+def test_ablate_cascade_row_count_matches_snapshots_times_modes(tmp_path):
+    """One per-snapshot row per (snapshot * mode), plus one aggregate row."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s1 = _make_snapshot(snaps_dir / "v070_gen1_step1_a.npz", generation=1)
+    s2 = _make_snapshot(snaps_dir / "v070_gen2_step2_b.npz", generation=2)
+    out = log_path.parent / "out.jsonl"
+    ablate_cascade(
+        [s1, s2], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary", "compute_static"),  # 2 disable modes
+        include_baseline=True,   # +1
+        include_reverse=True,    # +1
+    )
+    # 4 modes per snapshot * 2 snapshots = 8 per-snapshot rows + 1 aggregate
+    lines = out.read_text().splitlines()
+    assert len(lines) == 9
+    rows = [json.loads(l) for l in lines[:-1]]
+    aggregate = json.loads(lines[-1])
+    assert all(r.get("experiment") == "cascade_ablation" for r in rows)
+    assert aggregate.get("experiment") == "cascade_ablation"
+
+
+def test_ablate_cascade_per_row_carries_mode_in_parameter_combination(tmp_path):
+    """parameter_combination per row carries mode + disabled_tokens + reverse_order."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_baseline=True,
+        include_reverse=True,
+    )
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    modes = [r["parameter_combination"]["mode"] for r in rows]
+    assert modes == ["baseline", "disable_phase_boundary", "reverse_order"]
+    # Disabled tokens echo back as sorted list
+    for r in rows:
+        if r["parameter_combination"]["mode"] == "disable_phase_boundary":
+            assert r["parameter_combination"]["disabled_tokens"] == ["phase_boundary"]
+            assert r["parameter_combination"]["reverse_order"] is False
+        elif r["parameter_combination"]["mode"] == "reverse_order":
+            assert r["parameter_combination"]["reverse_order"] is True
+
+
+def test_ablate_cascade_aggregate_has_emerging_token_evidence(tmp_path):
+    """Aggregate must expose per_mode_summary + emerging_token_evidence."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_baseline=True,
+        include_reverse=False,
+    )
+    assert "per_mode_summary" in aggregate
+    assert "emerging_token_evidence" in aggregate
+    assert "modes_run" in aggregate
+    assert aggregate["modes_run"] == ["baseline", "disable_phase_boundary"]
+
+
+# ---------------------------------------------------------------------------
+# ablate_cascade — falsification logic
+# ---------------------------------------------------------------------------
+
+
+def test_ablate_cascade_inconclusive_when_baseline_omitted(tmp_path):
+    """Without a baseline, the emerging-token criterion has no denominator
+    -> inconclusive (even if other modes run)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_baseline=False,
+        include_reverse=False,
+    )
+    assert aggregate["falsification_status"] == "inconclusive"
+
+
+def test_ablate_cascade_inconclusive_when_only_baseline_requested(tmp_path):
+    """Only baseline, no non-baseline modes -> no ablation to compare,
+    falsification_status is inconclusive."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    aggregate = ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=(),
+        include_baseline=True,
+        include_reverse=False,
+    )
+    assert aggregate["falsification_status"] == "inconclusive"
+
+
+# ---------------------------------------------------------------------------
+# ablate_cascade — determinism contract
+# ---------------------------------------------------------------------------
+
+
+def test_ablate_cascade_no_fresh_generated_at_field(tmp_path):
+    """No fresh wallclock-derived generated_at field in any row."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    ablate_cascade(
+        [snap], out, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_reverse=False,
+    )
+    for line in out.read_text().splitlines():
+        row = json.loads(line)
+        assert "generated_at" not in row
+
+
+def test_ablate_cascade_byte_identical_on_rerun(tmp_path):
+    """Two back-to-back runs on the same input produce byte-identical
+    output. Locks the determinism contract for this chapter."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out_a = log_path.parent / "calibration_ablate_a.jsonl"
+    out_b = log_path.parent / "calibration_ablate_b.jsonl"
+    ablate_cascade(
+        [snap], out_a, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_reverse=True,
+    )
+    ablate_cascade(
+        [snap], out_b, log_path, "short", config,
+        disabled_tokens=("phase_boundary",),
+        include_reverse=True,
+    )
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_ablate_cascade_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows in generation-ascending order regardless of input."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s3 = _make_snapshot(snaps_dir / "v070_gen300_step3000_test.npz",
+                        generation=300, lattice=16)
+    s1 = _make_snapshot(snaps_dir / "v070_gen100_step1000_test.npz",
+                        generation=100, lattice=16)
+    s2 = _make_snapshot(snaps_dir / "v070_gen200_step2000_test.npz",
+                        generation=200, lattice=16)
+    out = log_path.parent / "out.jsonl"
+    ablate_cascade(
+        [s3, s1, s2], out, log_path, "short", config,
+        disabled_tokens=(),
+        include_baseline=True,
+        include_reverse=False,
+    )
     rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200, 300]

@@ -1765,8 +1765,485 @@ def sweep_threshold(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Chapter 6 — ablate_cascade (design doc §3.5, Jack #6 in implementation order)
+# ---------------------------------------------------------------------------
+
+
+#: Default dominant tokens to disable one-at-a-time. Per the Chapter 6
+#: real-Medusa smoke pass (post-#145 layout fix), the currently dominant
+#: active tokens above the 5% rate threshold are:
+#:
+#:     phase_boundary 66.5%, sensor_alert 20.9%, void_birth 9.5%
+#:
+#: Disabling each in turn exposes whatever predicate would have fired
+#: "next" — the §3.5 cascade-ablation hidden-token probe. Aimed at the
+#: post-#145 dominant cascade rather than pre-#145 ghosts per Jack's
+#: PR #152 audit (``compute_static`` / ``void_static`` are no-ops in
+#: the corrected post-#145 distribution and were dropped from the default).
+DEFAULT_ABLATION_DISABLED_TOKENS: tuple[str, ...] = (
+    "phase_boundary",
+    "sensor_alert",
+    "void_birth",
+)
+
+#: The ACTIVE classifier cascade order (deprecated tokens excluded per
+#: TOKEN_STATUS post-#144). This must mirror :func:`classify_patch` in
+#: ``nextness_observer.py``; a parity regression-fence test locks the
+#: non-ablated calibration cascade against the observer cascade on
+#: synthetic patches covering every branch. ``unclassified`` is the
+#: fall-through bucket, not an explicit cascade step.
+_ACTIVE_CASCADE_ORDER: tuple[str, ...] = (
+    "phase_boundary",
+    "compute_aging",
+    "metta_warmth",
+    "sensor_alert",
+    "energy_pulse",
+    "compute_decay",
+    "compute_static",
+    "structural_growth",
+    "structural_decay",
+    "void_birth",
+    "void_static",
+    "acoustic_stress",
+)
+
+#: Per design doc §3.5: a non-baseline ablation mode that reveals more than
+#: this many additional tokens firing above the rate threshold indicates the
+#: cascade is hiding signal.
+_CASCADE_ABLATION_HIDDEN_TOKEN_COUNT_THRESHOLD: int = 5
+
+#: Per design doc §3.5: per-token rate threshold for "additional token firing"
+#: — tokens that go from < 5% in baseline to > 5% in an ablation mode count
+#: as emerging. Symmetric: tokens already > 5% in baseline don't re-count
+#: just because they shifted within the > 5% band.
+_CASCADE_ABLATION_HIDDEN_TOKEN_RATE_THRESHOLD: float = 0.05
+
+
+def _predicate_fires(token: str, features: Any) -> bool:
+    """Return True if the cascade predicate for ``token`` matches ``features``.
+
+    Mirrors the inline predicates in
+    :func:`scripts.nextness_observer.classify_patch` for ablation purposes.
+    Drift is locked out by the parity regression-fence test
+    ``test_classify_patch_ablation_parity_with_observer_on_synthetic_battery``
+    in ``test_nextness_calibration.py``.
+    """
+    # Lazy import so observer-module constants are picked up live (matches
+    # the sweep_threshold pattern of reading thresholds at call-time).
+    from scripts.nextness_observer import (
+        AGE_ANCIENT,
+        AGE_SAGE,
+        DIVERSITY_BOUNDARY,
+        ENERGY_PULSE_MIN_COUNT,
+        FRACTION_DOMINANT,
+        FRACTION_MAJORITY,
+        THRESHOLD_WARMTH,
+    )
+    f = features
+    if token == "phase_boundary":
+        return f.distinct_states >= DIVERSITY_BOUNDARY
+    if token == "compute_aging":
+        return f.compute_frac >= FRACTION_DOMINANT and f.compute_age_mean >= AGE_SAGE
+    if token == "metta_warmth":
+        return (f.compute_count >= 1 or f.energy_count >= 1) and f.warmth_mean >= THRESHOLD_WARMTH
+    if token == "sensor_alert":
+        return f.sensor_count >= 1
+    if token == "energy_pulse":
+        return f.energy_count >= ENERGY_PULSE_MIN_COUNT
+    if token == "compute_decay":
+        return (
+            f.compute_count >= 1
+            and f.void_frac >= FRACTION_DOMINANT
+            and f.warmth_mean < THRESHOLD_WARMTH
+        )
+    if token == "compute_static":
+        return f.compute_frac >= FRACTION_DOMINANT
+    if token == "structural_growth":
+        return f.structural_frac >= FRACTION_DOMINANT and f.structural_age_mean < AGE_SAGE
+    if token == "structural_decay":
+        return f.structural_frac >= FRACTION_DOMINANT and f.structural_age_mean >= AGE_ANCIENT
+    if token == "void_birth":
+        return f.void_frac >= FRACTION_DOMINANT and f.distinct_states >= 2
+    if token == "void_static":
+        return f.void_frac >= FRACTION_MAJORITY
+    if token == "acoustic_stress":
+        return f.distinct_states >= 3 and f.warmth_mean < THRESHOLD_WARMTH
+    raise ValueError(f"unknown cascade token {token!r}")
+
+
+def _classify_patch_ablation(
+    patch: Any,
+    *,
+    disabled_tokens: frozenset[str] = frozenset(),
+    reverse_order: bool = False,
+) -> str:
+    """Calibration-side classify_patch with cascade-ablation knobs.
+
+    Mirrors :func:`scripts.nextness_observer.classify_patch`'s ACTIVE
+    cascade (deprecated tokens skipped per TOKEN_STATUS). Two knobs:
+
+    * ``disabled_tokens`` — set of token names whose predicates are skipped.
+      If a disabled token's predicate would have fired, the cascade
+      continues to the next token instead, revealing what was "hiding"
+      one rung below.
+    * ``reverse_order`` — if True, cascade order is reversed (least-specific
+      first). Stress-tests the cascade-ordering decision per design doc §3.5.
+
+    With ``disabled_tokens=frozenset()`` and ``reverse_order=False`` this
+    function MUST agree with the observer's ``classify_patch`` bit-for-bit.
+    The parity regression-fence test enforces this.
+
+    Returns ``"unclassified"`` if no predicate fires (the cascade's
+    fall-through bucket).
+    """
+    from scripts.nextness_observer import _patch_features
+    f = _patch_features(patch)
+    order = (
+        tuple(reversed(_ACTIVE_CASCADE_ORDER)) if reverse_order
+        else _ACTIVE_CASCADE_ORDER
+    )
+    for token in order:
+        if token in disabled_tokens:
+            continue
+        if _predicate_fires(token, f):
+            return token
+    return "unclassified"
+
+
+def _make_ablating_classifier(
+    disabled_tokens: frozenset[str],
+    reverse_order: bool,
+):
+    """Return a closure suitable for monkey-patching observer.classify_patch.
+
+    The returned callable signature matches the observer's
+    ``classify_patch(patch) -> str``. Used by :func:`ablate_cascade` inside
+    a try/finally to install + restore the classifier for one ablation
+    mode at a time.
+    """
+    def _ablating_classifier(patch: Any) -> str:
+        return _classify_patch_ablation(
+            patch,
+            disabled_tokens=disabled_tokens,
+            reverse_order=reverse_order,
+        )
+    return _ablating_classifier
+
+
+def _ablation_modes_for_run(
+    disabled_tokens: tuple[str, ...],
+    include_baseline: bool,
+    include_reverse: bool,
+) -> list[dict[str, Any]]:
+    """Build the ordered list of modes to run.
+
+    Each mode is a dict with ``label`` (string for parameter_combination),
+    ``disabled_tokens`` (frozenset for the classifier), and ``reverse_order``
+    (bool). Order is: baseline (if requested) → one disable_<token> per
+    token (in input order) → reverse_order (if requested).
+    """
+    modes: list[dict[str, Any]] = []
+    if include_baseline:
+        modes.append({
+            "label": "baseline",
+            "disabled_tokens": frozenset(),
+            "reverse_order": False,
+        })
+    for token in disabled_tokens:
+        modes.append({
+            "label": f"disable_{token}",
+            "disabled_tokens": frozenset({token}),
+            "reverse_order": False,
+        })
+    if include_reverse:
+        modes.append({
+            "label": "reverse_order",
+            "disabled_tokens": frozenset(),
+            "reverse_order": True,
+        })
+    return modes
+
+
+def _emerging_tokens_vs_baseline(
+    baseline_counts: dict[str, int],
+    mode_counts: dict[str, int],
+    rate_threshold: float,
+) -> dict[str, Any]:
+    """Compute which tokens emerge in ``mode_counts`` vs ``baseline_counts``.
+
+    A token is "emerging" if its rate in mode_counts crosses
+    ``rate_threshold`` while its rate in baseline_counts was below it.
+    Returns the emerging-token list, both totals, and the count for the
+    falsification criterion.
+    """
+    baseline_total = sum(baseline_counts.values())
+    mode_total = sum(mode_counts.values())
+    baseline_rate = lambda t: (baseline_counts.get(t, 0) / baseline_total) if baseline_total else 0.0
+    mode_rate = lambda t: (mode_counts.get(t, 0) / mode_total) if mode_total else 0.0
+    all_tokens = set(baseline_counts) | set(mode_counts)
+    emerging = sorted(
+        t for t in all_tokens
+        if baseline_rate(t) <= rate_threshold and mode_rate(t) > rate_threshold
+    )
+    return {
+        "emerging_tokens": emerging,
+        "emerging_token_count": len(emerging),
+        "baseline_total": baseline_total,
+        "mode_total": mode_total,
+        "rate_threshold": rate_threshold,
+    }
+
+
+def ablate_cascade(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+    config: ObserverConfig,
+    disabled_tokens: tuple[str, ...] = DEFAULT_ABLATION_DISABLED_TOKENS,
+    include_baseline: bool = True,
+    include_reverse: bool = True,
+) -> dict[str, Any]:
+    """Cascade ablation / cascade-order test per design doc §3.5.
+
+    For each snapshot, run ``process_snapshot()`` once per ablation mode.
+    Modes:
+
+      * ``"baseline"`` — unmodified cascade (sanity reference; required
+        as denominator for the emerging-token criterion)
+      * ``"disable_<token>"`` — for each ``disabled_tokens`` entry, run
+        with that token's predicate skipped (observe what fires "next")
+      * ``"reverse_order"`` — run with the active cascade reversed
+        (least-specific first)
+
+    Each mode is installed by monkey-patching ``classify_patch`` on the
+    observer module with an ablating closure, wrapped in ``try/finally``
+    to guarantee restoration even on exception. Mirrors the
+    ``sweep_threshold`` monkey-patch + restore pattern.
+
+    Mechanical falsification_status per design doc §3.5:
+
+      * ``"hypothesis_supported"``: across all non-baseline modes, the
+        max additional-token count (tokens crossing the 5% rate threshold
+        in a mode while ≤ 5% in baseline) is ≤ 5. The cascade is sensibly
+        ordered; ablation does not expose a long tail.
+      * ``"hypothesis_falsified"``: at least one non-baseline mode reveals
+        > 5 additional tokens crossing the 5% rate threshold. The cascade
+        ordering is the dominant cause of the apparent two-token saturation.
+      * ``"inconclusive"``: no baseline mode requested (no denominator),
+        or baseline produced no patches, or only the baseline mode was run.
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths. Sorted by generation.
+        out_path: where to write the cascade ablation JSONL.
+        log_path: write-boundary anchor. Same canonical
+            ``nextness_runs.jsonl`` path used everywhere else.
+        calibration_set: ``"short"`` or ``"long"``.
+        config: ``ObserverConfig`` used for every ``process_snapshot()``
+            call. ``config.log_directory`` must equal ``log_path.parent``
+            (enforced by ``_validate_config_log_directory`` per Jack
+            PR #149 audit).
+        disabled_tokens: tuple of token names whose predicates to ablate
+            one-at-a-time. Defaults to the dominant tokens in current
+            Medusa state. Every entry must be an active cascade token.
+        include_baseline: whether to include the unmodified-cascade mode.
+            Defaults to True. Disabling this forces ``inconclusive``
+            because emerging-token computation has no denominator.
+        include_reverse: whether to include the cascade-order-reversal
+            mode. Defaults to True. Disabling skips that stress test.
+
+    Returns the aggregate dict for callers that want to inspect it
+    without re-reading the output file.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir
+            or ``config.log_directory`` diverges from ``log_path.parent``.
+        ``ValueError`` for invalid calibration_set, unknown token in
+            ``disabled_tokens``, or empty mode set.
+    """
+    # Lazy import of the observer module so we can monkeypatch its
+    # classify_patch attribute. Only place in the calibration module that
+    # mutates observer state besides sweep_threshold; only within try/finally.
+    from scripts import nextness_observer as _observer_module
+
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
+        )
+    for t in disabled_tokens:
+        if t not in _ACTIVE_CASCADE_ORDER:
+            raise ValueError(
+                f"disabled token {t!r} is not an active cascade token "
+                f"(active: {_ACTIVE_CASCADE_ORDER})"
+            )
+
+    modes = _ablation_modes_for_run(
+        disabled_tokens=disabled_tokens,
+        include_baseline=include_baseline,
+        include_reverse=include_reverse,
+    )
+    if not modes:
+        raise ValueError(
+            "no modes selected; at least one of include_baseline, "
+            "include_reverse, or non-empty disabled_tokens is required"
+        )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    # Per-mode aggregator: mode_label -> per-snapshot list of token_counts
+    # (for the aggregate's per_mode_summary and emerging-token analysis).
+    by_mode: dict[str, list[dict[str, Any]]] = {m["label"]: [] for m in modes}
+
+    for snap in sorted_snapshots:
+        generation = _extract_generation_from_filename(snap)
+        for mode in modes:
+            # Monkeypatch + restore inside try/finally. Single-threaded by
+            # construction (calibration is sequential).
+            original_classifier = _observer_module.classify_patch
+            ablating_classifier = _make_ablating_classifier(
+                disabled_tokens=mode["disabled_tokens"],
+                reverse_order=mode["reverse_order"],
+            )
+            try:
+                _observer_module.classify_patch = ablating_classifier
+                entry = process_snapshot(snap, config, medusa_is_live=False)
+            finally:
+                _observer_module.classify_patch = original_classifier
+
+            token_counts = dict(entry.get("token_counts", {}) or {})
+            metrics = _extract_metrics_subset(entry)
+            metrics["cci"] = _cci_from_entry(entry)
+
+            per_snapshot_rows.append(_make_per_snapshot_row(
+                experiment="cascade_ablation",
+                snapshot_path=snap,
+                generation=generation,
+                parameter_combination={
+                    "mode": mode["label"],
+                    "disabled_tokens": sorted(mode["disabled_tokens"]),
+                    "reverse_order": mode["reverse_order"],
+                },
+                metrics=metrics,
+                run_metadata={
+                    # patches_processed is deterministic; elapsed_seconds
+                    # is wallclock-derived and excluded to preserve
+                    # byte-identical re-run (Chapter 4 pattern).
+                    "patches_processed": entry.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                },
+                calibration_set=calibration_set,
+            ))
+
+            by_mode[mode["label"]].append({
+                "snapshot": snap.name,
+                "metrics": metrics,
+                "token_counts": token_counts,
+            })
+
+    # --- Per-mode summary statistics ---
+    per_mode_summary: dict[str, Any] = {}
+    # Aggregate token_counts across snapshots per mode for emerging-token
+    # computation. Per-snapshot rows above carry the raw per-snapshot
+    # distribution; the aggregate uses the summed distribution to avoid
+    # noise from any single snapshot dominating.
+    summed_counts_by_mode: dict[str, dict[str, int]] = {}
+    for mode_label, runs in by_mode.items():
+        summed: dict[str, int] = {}
+        for r in runs:
+            for tok, n in r["token_counts"].items():
+                summed[tok] = summed.get(tok, 0) + int(n)
+        summed_counts_by_mode[mode_label] = summed
+
+        if not runs:
+            per_mode_summary[mode_label] = {"n_snapshots": 0}
+            continue
+        voc_occs = [r["metrics"]["vocabulary_occupancy"] for r in runs]
+        ccis = [r["metrics"]["cci"] for r in runs]
+        per_mode_summary[mode_label] = {
+            "n_snapshots": len(runs),
+            "mean_vocabulary_occupancy": sum(voc_occs) / len(voc_occs),
+            "mean_cci": sum(ccis) / len(ccis),
+            "summed_token_counts": summed,
+        }
+
+    # --- Falsification logic (§3.5 cascade-hiding-signal criterion) ---
+    falsification_status: str = "inconclusive"
+    emerging_token_evidence: dict[str, Any] = {}
+    non_baseline_modes = [m["label"] for m in modes if m["label"] != "baseline"]
+
+    if not include_baseline or not by_mode.get("baseline"):
+        emerging_token_evidence["reason"] = (
+            "baseline mode not included or produced no patches; "
+            "emerging-token criterion has no denominator"
+        )
+    elif not non_baseline_modes:
+        emerging_token_evidence["reason"] = (
+            "only baseline mode requested; no ablation to compare against"
+        )
+    else:
+        baseline_counts = summed_counts_by_mode["baseline"]
+        per_mode_emerging: dict[str, Any] = {}
+        max_emerging_count = 0
+        max_emerging_mode = None
+        for mode_label in non_baseline_modes:
+            mode_counts = summed_counts_by_mode[mode_label]
+            evidence = _emerging_tokens_vs_baseline(
+                baseline_counts=baseline_counts,
+                mode_counts=mode_counts,
+                rate_threshold=_CASCADE_ABLATION_HIDDEN_TOKEN_RATE_THRESHOLD,
+            )
+            per_mode_emerging[mode_label] = evidence
+            if evidence["emerging_token_count"] > max_emerging_count:
+                max_emerging_count = evidence["emerging_token_count"]
+                max_emerging_mode = mode_label
+
+        emerging_token_evidence["per_mode"] = per_mode_emerging
+        emerging_token_evidence["max_emerging_token_count"] = max_emerging_count
+        emerging_token_evidence["max_emerging_mode"] = max_emerging_mode
+        emerging_token_evidence["hidden_token_count_threshold"] = (
+            _CASCADE_ABLATION_HIDDEN_TOKEN_COUNT_THRESHOLD
+        )
+        emerging_token_evidence["hidden_token_rate_threshold"] = (
+            _CASCADE_ABLATION_HIDDEN_TOKEN_RATE_THRESHOLD
+        )
+
+        if max_emerging_count > _CASCADE_ABLATION_HIDDEN_TOKEN_COUNT_THRESHOLD:
+            falsification_status = "hypothesis_falsified"
+        else:
+            falsification_status = "hypothesis_supported"
+
+    extra_fields: dict[str, Any] = {
+        "disabled_tokens": list(disabled_tokens),
+        "modes_run": [m["label"] for m in modes],
+        "include_baseline": include_baseline,
+        "include_reverse": include_reverse,
+        "per_mode_summary": per_mode_summary,
+        "emerging_token_evidence": emerging_token_evidence,
+    }
+
+    aggregate = _make_aggregate_row(
+        experiment="cascade_ablation",
+        calibration_set=calibration_set,
+        n_snapshots=len(sorted_snapshots),
+        extra_fields=extra_fields,
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
     "CANONICAL_STRIDE",
+    "DEFAULT_ABLATION_DISABLED_TOKENS",
     "DEFAULT_CANONICAL_SEED",
     "DEFAULT_STRIDES",
     "DEFAULT_THRESHOLD_MULTIPLIERS",
@@ -1776,6 +2253,7 @@ __all__ = [
     "EXPECTED_MEMORY_DTYPE",
     "SHUFFLE_MODES",
     "SPARSITY_EPSILON",
+    "ablate_cascade",
     "check_determinism",
     "shuffle_test",
     "sweep_stride",
