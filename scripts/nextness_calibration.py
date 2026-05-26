@@ -2524,23 +2524,360 @@ def sweep_temporal(
     return aggregate
 
 
+# ---------------------------------------------------------------------------
+# Chapter 8 — sweep_patch_radius (design doc §3.3, Jack #8 in implementation order)
+# ---------------------------------------------------------------------------
+
+
+#: Default patch radii to compare. Radius 1 is the PR #142 baseline
+#: (3x3x3 = 27 cells per patch); radius 2 is the coarse-grained variant
+#: (5x5x5 = 125 cells per patch).
+DEFAULT_PATCH_RADII: tuple[int, ...] = (1, 2)
+
+#: The canonical baseline radius (matches PR #142 + every prior chapter).
+#: Used as the reference against which other radii are compared in the
+#: §3.3 falsification criterion.
+PATCH_RADIUS_BASELINE: int = 1
+
+#: §3.3 falsification threshold: absolute CCI difference between any
+#: non-baseline radius and the baseline that exceeds this value indicates
+#: the baseline carries scale-specific structure (a patch-size artefact)
+#: rather than a real scale-robust feature.
+_PATCH_RADIUS_CCI_FALSIFICATION_THRESHOLD: float = 0.10
+
+#: Cell-count thresholds in the observer module that scale linearly with
+#: patch volume. ``ENERGY_PULSE_MIN_COUNT`` is currently the only such
+#: threshold post-#144: ``DIVERSITY_BOUNDARY`` is bounded by the state
+#: alphabet (5 states max), and the ``compute_count >= 1`` /
+#: ``sensor_count >= 1`` style predicates are intentionally minimum-
+#: presence checks that don't rescale. ``THRESHOLD_WARMTH``, ``AGE_*``,
+#: and ``FRACTION_*`` predicates are already scale-invariant.
+_COUNT_THRESHOLDS_TO_RESCALE: tuple[str, ...] = (
+    "ENERGY_PULSE_MIN_COUNT",
+)
+
+
+def _patch_cell_count(radius: int) -> int:
+    """Number of cells in a patch of the given Moore-neighbourhood radius."""
+    return (2 * radius + 1) ** 3
+
+
+def _rescale_count_threshold_for_radius(
+    baseline_value: int,
+    baseline_radius: int,
+    new_radius: int,
+) -> int:
+    """Linear rescaling of a cell-count threshold by patch volume ratio.
+
+    A patch of radius ``r`` has ``(2r+1)^3`` cells. The threshold scales
+    proportionally so the *fraction* of cells required stays constant
+    across radii. Result is rounded to the nearest integer and clamped
+    to a minimum of 1 (a count threshold of 0 would be a no-op).
+
+    Example: baseline ``ENERGY_PULSE_MIN_COUNT=3`` at radius 1 (27 cells,
+    fraction 3/27 = 0.111) rescales at radius 2 (125 cells) to
+    ``round(3 * 125/27) = round(13.89) = 14`` (fraction 14/125 = 0.112,
+    matching baseline within rounding).
+    """
+    baseline_volume = _patch_cell_count(baseline_radius)
+    new_volume = _patch_cell_count(new_radius)
+    rescaled = round(baseline_value * new_volume / baseline_volume)
+    return max(1, rescaled)
+
+
+def _clone_config_with_radius(
+    base_config: ObserverConfig,
+    radius: int,
+) -> ObserverConfig:
+    """Return a copy of ``base_config`` with ``patch_spatial_radius=radius``.
+
+    Mirrors :func:`_clone_config_with_stride` from Chapter 4 — uses
+    ``dataclasses.replace`` since ``ObserverConfig`` is frozen. Any
+    invariants on the new radius value (e.g., positive int) are enforced
+    by ``ObserverConfig.__post_init__`` at construction time, so invalid
+    combinations raise here rather than deep in the sweep loop.
+    """
+    return dataclasses.replace(base_config, patch_spatial_radius=radius)
+
+
+def sweep_patch_radius(
+    snapshots: list[pathlib.Path],
+    out_path: pathlib.Path,
+    log_path: pathlib.Path,
+    calibration_set: str,
+    config: ObserverConfig,
+    radii: tuple[int, ...] = DEFAULT_PATCH_RADII,
+) -> dict[str, Any]:
+    """Patch-size / coarse-graining check per design doc §3.3.
+
+    For each (snapshot, radius) pair:
+      1. Clone ``ObserverConfig`` with ``patch_spatial_radius=radius``.
+      2. Monkey-patch the count-based observer thresholds listed in
+         ``_COUNT_THRESHOLDS_TO_RESCALE`` to their volume-proportional
+         values at the new radius. Same try/finally restore pattern as
+         Chapter 5 (sweep_threshold).
+      3. Call ``process_snapshot()`` and capture per-snapshot metrics
+         (vocabulary_occupancy, shannon_entropy_bits, entropy_normalized,
+         void_compute_balance, boundary_rate) plus CCI and the full
+         ``token_counts`` distribution for cross-radius comparison.
+      4. Restore original threshold values.
+
+    Per Jack Chapter 8 guardrails from PR #153 review:
+      - Patch-radius / coarse-graining check ONLY
+      - Compare radius 1 vs radius 2
+      - Rescale ONLY count thresholds that truly need rescaling
+        (currently just ``ENERGY_PULSE_MIN_COUNT``)
+      - No engine touch, no CLI, no Lane A, no predicate redesign
+        beyond what the radius comparison requires
+      - No final "ignition" claim
+
+    Mechanical falsification_status per §3.3:
+
+      - ``"hypothesis_supported"``: |CCI(non-baseline) - CCI(baseline)|
+        stays at or below ``_PATCH_RADIUS_CCI_FALSIFICATION_THRESHOLD``
+        (= 0.10) for every non-baseline radius. The phenomenon is
+        scale-robust; the 3x3x3 baseline is not a patch-size artefact.
+      - ``"hypothesis_falsified"``: at least one non-baseline radius
+        produces |CCI diff| > 0.10. The baseline carries scale-specific
+        structure and needs reframing in a future PR.
+      - ``"inconclusive"``: ``PATCH_RADIUS_BASELINE`` not in ``radii``
+        (no reference to compare against), no snapshots, or only the
+        baseline radius requested.
+
+    Args:
+        snapshots: list of sandboxed ``.npz`` paths.
+        out_path: where to write the radius-sweep JSONL.
+        log_path: write-boundary anchor.
+        calibration_set: ``"short"`` or ``"long"``.
+        config: base ``ObserverConfig``; ``patch_spatial_radius`` is
+            overridden per sweep radius. Other fields preserved.
+        radii: tuple of integer radii to sweep. Defaults to
+            :data:`DEFAULT_PATCH_RADII` = ``(1, 2)``. Must all be
+            positive integers; baseline radius (``PATCH_RADIUS_BASELINE``
+            = 1) should be included or the falsification criterion is
+            undefined and the run falls back to ``inconclusive``.
+
+    Returns the aggregate dict for callers that want to inspect it
+    without re-reading the output file.
+
+    Raises:
+        :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir
+            or ``config.log_directory`` diverges from ``log_path.parent``.
+        ``ValueError`` for invalid calibration_set, empty radii, or
+            non-positive radius values.
+    """
+    # Lazy import of the observer module so we can monkeypatch its
+    # count threshold attributes. Same pattern as sweep_threshold (Ch5)
+    # and ablate_cascade (Ch6); only here within try/finally.
+    from scripts import nextness_observer as _observer_module
+
+    if calibration_set not in {"short", "long"}:
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
+        )
+    if not radii:
+        raise ValueError("radii must be non-empty")
+    for r in radii:
+        if not isinstance(r, int) or r <= 0:
+            raise ValueError(f"every radius must be a positive int, got {r!r}")
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
+
+    # Snapshot the baseline values of count thresholds so we can rescale
+    # them per-radius. ENERGY_PULSE_MIN_COUNT is the only entry today;
+    # the loop generalises if more get added.
+    baseline_threshold_values: dict[str, int] = {
+        name: int(getattr(_observer_module, name))
+        for name in _COUNT_THRESHOLDS_TO_RESCALE
+    }
+
+    per_snapshot_rows: list[dict[str, Any]] = []
+    # Per-radius aggregator: radius -> list of {snapshot, metrics, cci,
+    # rescaled_thresholds, token_counts}.
+    by_radius: dict[int, list[dict[str, Any]]] = {r: [] for r in radii}
+
+    for snap in sorted_snapshots:
+        generation = _extract_generation_from_filename(snap)
+        for radius in radii:
+            radius_config = _clone_config_with_radius(config, radius)
+
+            # Compute rescaled threshold values for this radius.
+            rescaled = {
+                name: _rescale_count_threshold_for_radius(
+                    baseline_value=baseline_threshold_values[name],
+                    baseline_radius=PATCH_RADIUS_BASELINE,
+                    new_radius=radius,
+                )
+                for name in _COUNT_THRESHOLDS_TO_RESCALE
+            }
+
+            # Monkey-patch + restore. Single-threaded by construction
+            # (calibration is sequential).
+            originals = {
+                name: getattr(_observer_module, name)
+                for name in _COUNT_THRESHOLDS_TO_RESCALE
+            }
+            try:
+                for name, value in rescaled.items():
+                    setattr(_observer_module, name, value)
+                entry = process_snapshot(snap, radius_config, medusa_is_live=False)
+            finally:
+                for name, value in originals.items():
+                    setattr(_observer_module, name, value)
+
+            cci_value = _cci_from_entry(entry)
+            token_counts = dict(entry.get("token_counts", {}) or {})
+            metrics = _extract_metrics_subset(entry)
+            metrics["cci"] = cci_value
+
+            per_snapshot_rows.append(_make_per_snapshot_row(
+                experiment="patch_radius_sweep",
+                snapshot_path=snap,
+                generation=generation,
+                parameter_combination={
+                    "patch_spatial_radius": radius,
+                    "patch_cell_count": _patch_cell_count(radius),
+                    "rescaled_count_thresholds": dict(sorted(rescaled.items())),
+                },
+                metrics=metrics,
+                run_metadata={
+                    # patches_processed is deterministic; elapsed_seconds
+                    # excluded per the Chapter 4 byte-identical pattern.
+                    "patches_processed": entry.get("budget", {}).get(
+                        "patches_processed"
+                    ),
+                },
+                calibration_set=calibration_set,
+            ))
+
+            by_radius[radius].append({
+                "snapshot": snap.name,
+                "metrics": metrics,
+                "token_counts": token_counts,
+            })
+
+    # --- Per-radius summary statistics ---
+    per_radius_summary: dict[str, Any] = {}
+    for radius, runs in by_radius.items():
+        if not runs:
+            per_radius_summary[str(radius)] = {"n_snapshots": 0}
+            continue
+        voc_occs = [r["metrics"]["vocabulary_occupancy"] for r in runs]
+        ccis = [r["metrics"]["cci"] for r in runs]
+        boundary_rates = [r["metrics"]["boundary_rate"] for r in runs]
+        per_radius_summary[str(radius)] = {
+            "n_snapshots": len(runs),
+            "patch_cell_count": _patch_cell_count(radius),
+            "mean_vocabulary_occupancy": sum(voc_occs) / len(voc_occs),
+            "mean_cci": sum(ccis) / len(ccis),
+            "mean_boundary_rate": sum(boundary_rates) / len(boundary_rates),
+        }
+
+    # --- Cross-radius diffs (vs baseline) ---
+    cross_radius_diffs: dict[str, float] = {}
+    if PATCH_RADIUS_BASELINE in by_radius and by_radius[PATCH_RADIUS_BASELINE]:
+        baseline_cci = per_radius_summary[str(PATCH_RADIUS_BASELINE)]["mean_cci"]
+        baseline_voc = per_radius_summary[str(PATCH_RADIUS_BASELINE)][
+            "mean_vocabulary_occupancy"
+        ]
+        for radius in radii:
+            if radius == PATCH_RADIUS_BASELINE:
+                continue
+            radius_cci = per_radius_summary[str(radius)]["mean_cci"]
+            radius_voc = per_radius_summary[str(radius)]["mean_vocabulary_occupancy"]
+            cross_radius_diffs[f"cci_diff_r{radius}_vs_r{PATCH_RADIUS_BASELINE}"] = (
+                radius_cci - baseline_cci
+            )
+            cross_radius_diffs[f"voc_occ_diff_r{radius}_vs_r{PATCH_RADIUS_BASELINE}"] = (
+                radius_voc - baseline_voc
+            )
+
+    # --- Falsification status (§3.3 |CCI diff| > 0.10 criterion) ---
+    falsification_status: str = "inconclusive"
+    falsification_evidence: dict[str, Any] = {
+        "baseline_radius": PATCH_RADIUS_BASELINE,
+        "cci_falsification_threshold": _PATCH_RADIUS_CCI_FALSIFICATION_THRESHOLD,
+    }
+    non_baseline_radii = [r for r in radii if r != PATCH_RADIUS_BASELINE]
+
+    if not sorted_snapshots:
+        falsification_evidence["reason"] = "no snapshots provided"
+    elif PATCH_RADIUS_BASELINE not in by_radius or not by_radius[PATCH_RADIUS_BASELINE]:
+        falsification_evidence["reason"] = (
+            f"baseline radius {PATCH_RADIUS_BASELINE} not in radii; "
+            f"falsification criterion needs a reference value"
+        )
+    elif not non_baseline_radii:
+        falsification_evidence["reason"] = (
+            "only baseline radius requested; no comparison radius to test against"
+        )
+    else:
+        # Max |CCI diff| across all non-baseline radii.
+        max_abs_cci_diff = 0.0
+        max_abs_diff_radius: int | None = None
+        per_radius_abs_diff: dict[str, float] = {}
+        for r in non_baseline_radii:
+            diff_key = f"cci_diff_r{r}_vs_r{PATCH_RADIUS_BASELINE}"
+            abs_diff = abs(cross_radius_diffs.get(diff_key, 0.0))
+            per_radius_abs_diff[str(r)] = abs_diff
+            if abs_diff > max_abs_cci_diff:
+                max_abs_cci_diff = abs_diff
+                max_abs_diff_radius = r
+        falsification_evidence["per_radius_abs_cci_diff"] = per_radius_abs_diff
+        falsification_evidence["max_abs_cci_diff"] = max_abs_cci_diff
+        falsification_evidence["max_abs_diff_radius"] = max_abs_diff_radius
+        if max_abs_cci_diff > _PATCH_RADIUS_CCI_FALSIFICATION_THRESHOLD:
+            falsification_status = "hypothesis_falsified"
+        else:
+            falsification_status = "hypothesis_supported"
+
+    extra_fields: dict[str, Any] = {
+        "radii_swept": list(radii),
+        "baseline_radius": PATCH_RADIUS_BASELINE,
+        "rescaled_threshold_names": list(_COUNT_THRESHOLDS_TO_RESCALE),
+        "baseline_threshold_values": baseline_threshold_values,
+        "per_radius_summary": per_radius_summary,
+        "cross_radius_diffs": cross_radius_diffs,
+        "falsification_evidence": falsification_evidence,
+    }
+
+    aggregate = _make_aggregate_row(
+        experiment="patch_radius_sweep",
+        calibration_set=calibration_set,
+        n_snapshots=len(sorted_snapshots),
+        extra_fields=extra_fields,
+        falsification_status=falsification_status,
+    )
+
+    _write_calibration_jsonl(out_path, per_snapshot_rows, aggregate)
+    return aggregate
+
+
 __all__ = [
     "CANONICAL_STRIDE",
     "DEFAULT_ABLATION_DISABLED_TOKENS",
     "DEFAULT_CANONICAL_SEED",
     "DEFAULT_GAP_SPECS_LONG",
     "DEFAULT_GAP_SPECS_SHORT",
+    "DEFAULT_PATCH_RADII",
     "DEFAULT_STRIDES",
     "DEFAULT_THRESHOLD_MULTIPLIERS",
     "DEFAULT_THRESHOLD_NAME",
     "DEFAULT_VARIANCE_SEEDS",
     "EXPECTED_MEMORY_CHANNELS",
     "EXPECTED_MEMORY_DTYPE",
+    "PATCH_RADIUS_BASELINE",
     "SHUFFLE_MODES",
     "SPARSITY_EPSILON",
     "ablate_cascade",
     "check_determinism",
     "shuffle_test",
+    "sweep_patch_radius",
     "sweep_stride",
     "sweep_temporal",
     "sweep_threshold",
