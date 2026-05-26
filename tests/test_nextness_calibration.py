@@ -43,6 +43,8 @@ from scripts.nextness_calibration import (
     CANONICAL_STRIDE,
     DEFAULT_CANONICAL_SEED,
     DEFAULT_STRIDES,
+    DEFAULT_THRESHOLD_MULTIPLIERS,
+    DEFAULT_THRESHOLD_NAME,
     DEFAULT_VARIANCE_SEEDS,
     EXPECTED_MEMORY_CHANNELS,
     EXPECTED_MEMORY_DTYPE,
@@ -59,10 +61,12 @@ from scripts.nextness_calibration import (
     _shuffled_snapshot_arrays,
     _sort_snapshots_by_generation,
     _validate_calibration_output_path,
+    _validate_config_log_directory,
     _verify_snapshot_memory_grid,
     check_determinism,
     shuffle_test,
     sweep_stride,
+    sweep_threshold,
     verify_memory_channels,
 )
 
@@ -287,6 +291,179 @@ def test_validate_output_traversal_escape_rejected(tmp_path):
     out_path = log_dir / ".." / ".." / "escape.jsonl"
     with pytest.raises(WriteOutsideLogDirError):
         _validate_calibration_output_path(out_path, log_path)
+
+
+# ---------------------------------------------------------------------------
+# _validate_config_log_directory (Jack PR #149 safety-contract guard)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_log_dir_matches_log_path_parent_succeeds(tmp_path):
+    """config.log_directory == log_path.parent passes silently."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    config = ObserverConfig(log_directory=str(log_dir))
+    # Should not raise.
+    _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_mismatch_raises(tmp_path):
+    """Mismatched config.log_directory raises WriteOutsideLogDirError."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    log_path = log_dir / "nextness_runs.jsonl"
+    config = ObserverConfig(log_directory=str(elsewhere))
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging from log_path.parent",
+    ):
+        _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_traversal_escape_rejected(tmp_path):
+    """``..`` traversal in config.log_directory is rejected via resolve()."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    # log_dir / ".." resolves to tmp_path / "data" — not the same as log_dir
+    config = ObserverConfig(log_directory=str(log_dir / ".."))
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_config_log_directory(config, log_path)
+
+
+def test_validate_config_log_dir_mismatch_creates_no_side_effect_directory(tmp_path):
+    """When the guard rejects a mismatched config, no stray log directory
+    must be created. Locks in the property that the guard fires BEFORE any
+    process_snapshot() call (which would trigger _ensure_log_dir on the
+    misconfigured path)."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    bogus_dir = tmp_path / "bogus_log_dir_should_never_be_created"
+    assert not bogus_dir.exists()
+    config = ObserverConfig(log_directory=str(bogus_dir))
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_config_log_directory(config, log_path)
+    # The bogus directory must NOT have been created as a side effect.
+    assert not bogus_dir.exists()
+
+
+def test_check_determinism_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: check_determinism must fire the config-log-dir guard
+    before any process_snapshot() call. Proves the helper is wired in."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_check_determinism"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        check_determinism(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+            repeats=2,
+        )
+    # Neither the bogus log dir nor the output file may have been created.
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_shuffle_test_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: shuffle_test must fire the config-log-dir guard
+    before any process_snapshot() call."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_shuffle_test"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        shuffle_test(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_sweep_stride_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: sweep_stride must fire the config-log-dir guard
+    before any process_snapshot() call."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_sweep_stride"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        sweep_stride(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+
+
+def test_sweep_threshold_rejects_mismatched_config_log_directory(tmp_path):
+    """Integration: sweep_threshold must fire the config-log-dir guard
+    before any process_snapshot() call AND before any threshold monkeypatch."""
+    snaps_dir, log_path, _ = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "out.jsonl"
+    bogus_dir = tmp_path / "bogus_for_sweep_threshold"
+    bad_config = ObserverConfig(
+        log_directory=str(bogus_dir),
+        uniform_grid_stride=4,
+        budget_seconds=30.0,
+    )
+    # Snapshot the threshold so we can also confirm the guard fired before
+    # any monkeypatch happened (no threshold mutation if the guard rejects).
+    from scripts import nextness_observer as _observer_module
+    original_threshold = getattr(_observer_module, "THRESHOLD_WARMTH")
+    with pytest.raises(
+        WriteOutsideLogDirError,
+        match="config.log_directory diverging",
+    ):
+        sweep_threshold(
+            snapshots=[snap],
+            out_path=out,
+            log_path=log_path,
+            calibration_set="short",
+            config=bad_config,
+        )
+    assert not bogus_dir.exists()
+    assert not out.exists()
+    assert getattr(_observer_module, "THRESHOLD_WARMTH") == original_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -1406,3 +1583,224 @@ def test_sweep_stride_custom_strides_honored(tmp_path):
                              strides=(2, 4, 8))
     assert aggregate["strides_swept"] == [2, 4, 8]
     assert set(aggregate["per_stride_summary"].keys()) == {"2", "4", "8"}
+
+
+# ---------------------------------------------------------------------------
+# Chapter 5 — sweep_threshold (threshold sensitivity sweep, design doc §3.4)
+# ---------------------------------------------------------------------------
+
+
+def test_default_threshold_multipliers_symmetric_around_one():
+    """Per design doc §12 Q3: ±10%, ±25%, ±50% + baseline."""
+    assert DEFAULT_THRESHOLD_MULTIPLIERS == (0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
+    # Baseline included
+    assert 1.0 in DEFAULT_THRESHOLD_MULTIPLIERS
+
+
+def test_default_threshold_name_is_warmth():
+    """Post-#144, THRESHOLD_WARMTH is the only active classifier threshold."""
+    assert DEFAULT_THRESHOLD_NAME == "THRESHOLD_WARMTH"
+
+
+def test_sweep_threshold_rejects_unknown_calibration_set(tmp_path):
+    """calibration_set validation."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="calibration_set"):
+        sweep_threshold([snap], out, log_path, "medium", config)
+
+
+def test_sweep_threshold_rejects_missing_threshold_attribute(tmp_path):
+    """threshold_name must exist on the observer module."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="not found on"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="THRESHOLD_NONEXISTENT")
+
+
+def test_sweep_threshold_rejects_empty_multipliers(tmp_path):
+    """At least one multiplier required."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="multipliers must be non-empty"):
+        sweep_threshold([], out, log_path, "short", config, multipliers=())
+
+
+def test_sweep_threshold_rejects_non_positive_multiplier(tmp_path):
+    """Multipliers must be positive."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="positive number"):
+        sweep_threshold([], out, log_path, "short", config, multipliers=(0.0,))
+    with pytest.raises(ValueError, match="positive number"):
+        sweep_threshold([], out, log_path, "short", config, multipliers=(-0.5,))
+
+
+def test_sweep_threshold_rejects_outside_log_dir_output(tmp_path):
+    """Write-boundary inheritance."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    bad_out = tmp_path / "outside_dir" / "out.jsonl"
+    with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
+        sweep_threshold([snap], bad_out, log_path, "short", config)
+    assert not (tmp_path / "outside_dir").exists()
+
+
+def test_sweep_threshold_restores_threshold_after_run(tmp_path):
+    """The monkeypatch must restore the original threshold value after the sweep.
+
+    Locks in the try/finally contract: even if the sweep succeeds normally,
+    the observer module's THRESHOLD_WARMTH constant must be exactly what
+    it was before the sweep started.
+    """
+    from scripts import nextness_observer as obs
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+
+    original = obs.THRESHOLD_WARMTH
+    sweep_threshold([snap], out, log_path, "short", config)
+    assert obs.THRESHOLD_WARMTH == original
+
+
+def test_sweep_threshold_restores_threshold_even_if_process_snapshot_fails(tmp_path, monkeypatch):
+    """If process_snapshot raises mid-sweep, the threshold must STILL be restored.
+
+    The whole point of the try/finally contract — observer state must not
+    leak from the calibration scope even under exception.
+    """
+    from scripts import nextness_observer as obs
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+
+    original = obs.THRESHOLD_WARMTH
+
+    # Monkeypatch process_snapshot to raise mid-iteration
+    def broken_process(*args, **kwargs):
+        raise RuntimeError("simulated mid-sweep failure")
+
+    monkeypatch.setattr(
+        "scripts.nextness_calibration.process_snapshot",
+        broken_process,
+    )
+    with pytest.raises(RuntimeError, match="simulated mid-sweep failure"):
+        sweep_threshold([snap], out, log_path, "short", config)
+    # Threshold must be restored despite the exception
+    assert obs.THRESHOLD_WARMTH == original
+
+
+def test_sweep_threshold_writes_expected_row_count(tmp_path):
+    """N snapshots × M multipliers = N*M per-snapshot rows + 1 aggregate."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i}_test.npz",
+                       generation=i, lattice=16)
+        for i in (1, 2)
+    ]
+    out = log_path.parent / "calibration_threshold.jsonl"
+    # Use a small multiplier set for test speed
+    sweep_threshold(snaps, out, log_path, "short", config,
+                    multipliers=(0.5, 1.0, 1.5))
+
+    lines = out.read_text().splitlines()
+    # 2 snapshots × 3 multipliers + 1 aggregate = 7
+    assert len(lines) == 2 * 3 + 1
+
+
+def test_sweep_threshold_per_row_has_effective_value(tmp_path):
+    """Each per-snapshot row carries the effective threshold value."""
+    from scripts import nextness_observer as obs
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    base = obs.THRESHOLD_WARMTH
+    sweep_threshold([snap], out, log_path, "short", config,
+                    multipliers=(0.5, 1.0, 2.0))
+
+    pair_rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    eff_values = sorted(r["parameter_combination"]["threshold_effective_value"]
+                        for r in pair_rows)
+    expected = sorted([0.5 * base, 1.0 * base, 2.0 * base])
+    for a, b in zip(eff_values, expected):
+        assert a == pytest.approx(b)
+
+
+def test_sweep_threshold_aggregate_has_knife_edge_evidence(tmp_path):
+    """Aggregate carries knife_edge_evidence dict + per_multiplier_summary."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    aggregate = sweep_threshold([snap], out, log_path, "short", config)
+
+    assert aggregate["experiment"] == "threshold_sweep"
+    assert "threshold_base_value" in aggregate
+    assert "per_multiplier_summary" in aggregate
+    assert "knife_edge_evidence" in aggregate
+    assert "1.0" in aggregate["per_multiplier_summary"]
+
+
+def test_sweep_threshold_inconclusive_when_token_never_fires(tmp_path):
+    """If the threshold_dependent_token never fires on any (snapshot, mult)
+    combo, the knife-edge criterion has no denominator → inconclusive."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    # Our synthetic snapshot has zero warmth (all-zero memory channel 6),
+    # so even at multiplier=0.5 metta_warmth won't fire — token count = 0
+    # across every multiplier. Status should be inconclusive, not falsified.
+    aggregate = sweep_threshold([snap], out, log_path, "short", config,
+                                multipliers=(0.5, 1.0, 1.5))
+    assert aggregate["falsification_status"] == "inconclusive"
+    assert "never fires" in aggregate["knife_edge_evidence"].get("reason", "")
+
+
+def test_sweep_threshold_no_generated_at_field(tmp_path):
+    """Determinism contract — no fresh timestamps."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    sweep_threshold([snap], out, log_path, "short", config,
+                    multipliers=(0.5, 1.0, 1.5))
+    assert "generated_at" not in out.read_text()
+
+
+def test_sweep_threshold_byte_identical_on_rerun(tmp_path):
+    """Determinism contract — byte-identical re-run on same input."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out_a = log_path.parent / "calibration_threshold_a.jsonl"
+    out_b = log_path.parent / "calibration_threshold_b.jsonl"
+    sweep_threshold([snap], out_a, log_path, "short", config,
+                    multipliers=(0.5, 1.0, 1.5))
+    sweep_threshold([snap], out_b, log_path, "short", config,
+                    multipliers=(0.5, 1.0, 1.5))
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_sweep_threshold_sorts_input_by_generation(tmp_path):
+    """Per-snapshot rows in generation-ascending order regardless of input."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    s3 = _make_snapshot(snaps_dir / "v070_gen300_step3000_test.npz",
+                        generation=300, lattice=16)
+    s1 = _make_snapshot(snaps_dir / "v070_gen100_step1000_test.npz",
+                        generation=100, lattice=16)
+    s2 = _make_snapshot(snaps_dir / "v070_gen200_step2000_test.npz",
+                        generation=200, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    sweep_threshold([s3, s1, s2], out, log_path, "short", config,
+                    multipliers=(1.0,))  # single multiplier for predictable ordering
+
+    rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    generations = [r["snapshot_generation"] for r in rows]
+    assert generations == [100, 200, 300]
