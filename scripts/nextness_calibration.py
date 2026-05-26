@@ -1770,14 +1770,21 @@ def sweep_threshold(
 # ---------------------------------------------------------------------------
 
 
-#: Default dominant tokens to disable one-at-a-time. Per PR #142 / #147 smoke
-#: results: phase_boundary, compute_static, void_static are the dominant tokens
-#: in current Medusa state. Disabling each in turn exposes whatever predicate
-#: would have fired "next" — the §3.5 cascade-ablation hidden-token probe.
+#: Default dominant tokens to disable one-at-a-time. Per the Chapter 6
+#: real-Medusa smoke pass (post-#145 layout fix), the currently dominant
+#: active tokens above the 5% rate threshold are:
+#:
+#:     phase_boundary 66.5%, sensor_alert 20.9%, void_birth 9.5%
+#:
+#: Disabling each in turn exposes whatever predicate would have fired
+#: "next" — the §3.5 cascade-ablation hidden-token probe. Aimed at the
+#: post-#145 dominant cascade rather than pre-#145 ghosts per Jack's
+#: PR #152 audit (``compute_static`` / ``void_static`` are no-ops in
+#: the corrected post-#145 distribution and were dropped from the default).
 DEFAULT_ABLATION_DISABLED_TOKENS: tuple[str, ...] = (
     "phase_boundary",
-    "compute_static",
-    "void_static",
+    "sensor_alert",
+    "void_birth",
 )
 
 #: The ACTIVE classifier cascade order (deprecated tokens excluded per
