@@ -15,9 +15,9 @@
 
 1. **The spatial story holds.** Stride, patch-radius, and cascade-ablation sweeps all support AURA's "real geometric structure" reading. The equilibrium is not a sampling artefact, not a patch-size artefact, and not a cascade-ordering artefact.
 2. **The biggest hypothesis was disproven before the calibration code shipped.** Issue #144 found that 6 of 8 memory-channel labels were misaligned with the engine. PR #145 fixed it. The vocabulary distribution we now measure is *different* from the one PR #142 reported — richer (4 tokens > 1% rate, not 2) and points at a different channel as "warmth."
-3. **The temporal story is genuinely strange.** JS divergence between snapshots is **highest at adjacent (10min) gaps and lowest at 24h gaps** — exactly the inverse of what an attractor should look like. The 24h "supported" reading rests on n=1.
-4. **One predicate is dead in current Medusa state.** `metta_warmth` never fires at any ±25% threshold multiplier because `warmth.max = 0.185` is below `THRESHOLD_WARMTH = 0.3` everywhere. Ch5's "inconclusive" is mechanically correct; the underlying finding (issue #150) is that the predicate as designed isn't discriminating anything.
-5. **Recommendation: park Lane A.** Not because the calibration "failed" — three of the eight chapters delivered clean wins for AURA's hypothesis — but because two of the three puzzles above are *exactly* the death-spiral pre-conditions the calibration was meant to inoculate against. Resolve the temporal anomaly and the predicate-aggregator question first; *then* open the Lane A gate.
+3. **The temporal story is genuinely strange.** JS divergence between snapshots is **highest at adjacent (10min) gaps and lowest at 24h gaps** — a shrinking-JS-with-gap pattern that doesn't fit any standard dynamical category cleanly. "Inverse attractor" is not a real category; the more likely candidates are **temporal aliasing on an environmental cycle**, **high-frequency oscillation under a slow mean**, or **n=1 statistical luck**. The 24h "supported" reading rests on n=1.
+4. **One predicate is dead in current Medusa state.** `metta_warmth` never fires across the 0.5–1.5 multiplier sweep. Even at the low end (0.5×, effective threshold 0.15), `warmth.max = 0.185` does cross the threshold in *some* voxels — but `metta_warmth` is a **patch-aggregate** predicate that needs multiple warmth voxels to co-occur within a 3×3×3 patch, and the warmth channel's 0.990 sparsity means isolated voxels rarely cluster densely enough for the aggregator to fire. Ch5's "inconclusive" is mechanically correct; the underlying finding (issue #150) is that the predicate's *aggregator design* (not its threshold value) is what's blocking discrimination.
+5. **Recommendation: park Lane A.** Not because the calibration "failed" — three of the eight chapters delivered clean wins for AURA's hypothesis — but because two of the three puzzles above are the kind of observer-uncertainty that can create death-spiral conditions in a self-improving Lane A loop, which is what the calibration was meant to inoculate against. Resolve the temporal anomaly and the predicate-aggregator question first; *then* open the Lane A gate.
 
 ---
 
@@ -30,7 +30,7 @@ Each chapter's `falsification_status` is computed mechanically per the criteria 
 | 1+2 | `check_determinism` + `shuffle_test` | sanity floor (3.7) + lattice-vs-classifier (3.8) | (foundation; not a sweep) | 51 tests pass, byte-identical reruns locked | `0dadc25` |
 | 3 | `verify_memory_channels` | post-#145 layout (3.6 as regression fence) | **supported** | 3 snapshots, zero drift | `16b5b9b` |
 | 4 | `sweep_stride` (4, 8, 16) | sampling resolution (3.1) | **supported** | JS(s4 vs s8) = 0.000000 bits; voc_occ identical at 0.375 | `2f386d6` |
-| 5 | `sweep_threshold` (THRESHOLD_WARMTH ±25%) | threshold calibration (3.4) | **inconclusive** | metta_warmth never fires (warmth.max = 0.185 < threshold = 0.3) | `c17ed8a` + safety guard `#149` |
+| 5 | `sweep_threshold` (THRESHOLD_WARMTH ×0.5–1.5) | threshold calibration (3.4) | **inconclusive** | metta_warmth never fires; warmth sparse (0.990) + patch-aggregate predicate washes isolated voxels out | `c17ed8a` + safety guard `#149` |
 | 6 | `ablate_cascade` (post-#145 dominant tokens) | cascade-order swallowing (3.5) | **supported** | max emerging tokens > 5% = 2 (in reverse_order only); forward cascade coherent | `8d3f6c3` |
 | 7 | `sweep_temporal` (short + long sets) | temporal stability (3.2) | **mixed** | short: inconclusive (10min JS=0.1121 > 0.1); long: supported (24h JS=0.0052) BUT n=1 | `a4101c0` |
 | 8 | `sweep_patch_radius` (r=1 vs r=2) | scale robustness (3.3) | **supported** | \|CCI diff\| = 0.034 (threshold = 0.10) | `c273359` |
@@ -46,7 +46,7 @@ Design doc §4 laid out a discrimination matrix predicting *which* experiment wo
 | Experiment | AURA (real attractor) | Memory-ch wrong | Threshold wrong | Sampling wrong | Cascade swallowing | Temporal-context missing | **Result** |
 |---|---|---|---|---|---|---|---|
 | 3.1 Stride | stable | stable | stable | **changes** | stable | stable | **Stable** → AURA, not-sampling |
-| 3.2 Temporal | stable | stable | stable | stable | stable | **JS grows** | **Inverse: JS *shrinks* with gap** ⚠️ unanticipated |
+| 3.2 Temporal | stable | stable | stable | stable | stable | **JS grows** | **Multi-timescale anomaly: JS *shrinks* with gap** ⚠️ unanticipated |
 | 3.3 Coarse-graining | stable | unclear | shifts | **changes** | stable | stable | **CCI stable** (vocab not) → AURA on CCI |
 | 3.4 Threshold | stable | stable | **cliff** | stable | stable | stable | **Predicate dead, not testable** ⚠️ |
 | 3.5 Cascade ablation | predictable | stable | stable | stable | **hidden tokens** | stable | **Predictable routing** → AURA |
@@ -58,7 +58,7 @@ Design doc §4 laid out a discrimination matrix predicting *which* experiment wo
 
 - **Three diagonals fire cleanly for AURA**: stride, cascade, coarse-graining (on CCI). These are independent tests aimed at three different alternate hypotheses. They all return "real structure, not artefact." That is the strongest convergent evidence in the bundle.
 - **One alternate hypothesis was confirmed and corrected**: memory-channel layout (`#144` → fix via `#145`). This is itself a calibration win — the inoculation worked exactly as advertised. But it means *every PR #142-era interpretation built on the pre-fix layout needs re-reading*, including the "Karuna/Boundary equilibrium" framing, because the channel we were calling "compassion" was reading a generation counter.
-- **One result lights up no row in the matrix** — temporal sweep's inverse JS pattern. The matrix anticipated "stable" (AURA) or "JS grows" (drifting). It did neither.
+- **One result lights up no row in the matrix** — temporal sweep's shrinking-JS-with-gap pattern. The matrix anticipated "stable" (AURA) or "JS grows" (drifting); the data did neither. Most plausible candidates are temporal aliasing on an environmental cycle or n=1 luck — see §4.1.
 - **One experiment is non-discriminating** in current Medusa state — threshold sweep, because the predicate it was perturbing doesn't fire. This is information about the *predicate*, not about the lattice.
 
 ---
@@ -92,7 +92,7 @@ This is exactly what calibration is supposed to surface, and exactly what AURA a
 
 These are not "the calibration failed." They are "the calibration surfaced three things that need a human-in-the-loop decision before any downstream agent acts on the signal." Each carries a recommended next step.
 
-### 4.1 The temporal-sweep inverse-JS anomaly
+### 4.1 The temporal-sweep multi-timescale anomaly (shrinking JS with gap)
 
 **The data:**
 
@@ -104,19 +104,35 @@ These are not "the calibration failed." They are "the calibration surfaced three
 | ~6 h | 0.0525 (inconclusive band) | long |
 | ~24 h | **0.0052** (well below attractor threshold) | long, n=1 |
 
-**Why it matters:** an attractor should produce low JS at *every* gap. A drifting transient should produce JS that *grows* with gap. This shows neither — it shows JS that *shrinks* monotonically with gap. The largest divergence is between snapshots taken 10 minutes apart, and the smallest is between snapshots taken 24 hours apart.
+**Why it matters:** an attractor should produce low JS at *every* gap. A drifting transient should produce JS that *grows* with gap. This data shows neither — JS *shrinks* monotonically with gap. "Inverse attractor" is not a real dynamical category; the pattern is more likely **temporal aliasing on an environmental cycle**, **high-frequency oscillation under a slow mean**, or **n=1 statistical luck**. The three hypotheses below are physically plausible and testable, *not* confirmed.
 
-**Three hypotheses worth considering** (none yet tested):
+**Three testable hypotheses** (none yet tested; pick the language carefully — these are candidates, not findings):
 
-1. **Snapshot-write-time aliasing.** Adjacent snapshots may be sampling the lattice mid-update or at consistently-different phases of a sub-snapshot-cadence cycle. Long-gap pairs average over many such cycles and look "smoother" by aggregation.
-2. **Genuine high-frequency oscillation under a slow drift baseline.** The lattice may have meaningful 10-minute-scale variation around a slow-moving mean. The "stillness" reading at 24h is the slow mean; the "noise" at 10min is the real local dynamics.
-3. **The 24h n=1 result is just a lucky pair.** With only one pair informing the 24h cell, "supported" carries large uncertainty. A re-run with multiple 24h pairs (achievable from the long set with different start anchors) would tighten this.
+1. **24h environmental / hardware-cycle aliasing.** Medusa runs on the **Area 51 head node** (Ultra Core 9 285K + RTX 5090), with **Folding@home using the RTX 5090 and one CPU core**, and **BOINC restricted to CPU-only** (BOINC GPU access was blocked because its prime-number workload was hammering the 5090). Any of: F@H work-unit scheduling, BOINC CPU pressure, GPU thermal/fan-curve cycles, machine-room power or HVAC rhythms, or daily user-presence patterns could impose a ~24h envelope on Medusa's effective stepping environment. Under aliasing, the 24h-apart pair lands at the *same phase* of that cycle and looks unusually similar; adjacent-gap pairs land at *different phases* of intra-cycle variation and look divergent. This is the most concrete testable candidate.
+2. **High-frequency oscillation around a slow mean.** Medusa may genuinely vary at 10-minute scale while remaining broadly similar over longer windows — meaning the short-scale noise is *real lattice dynamics* and the long-scale similarity is *real settling at long timescales*. Both readings can be simultaneously true; we just haven't disentangled them.
+3. **n=1 statistical luck.** With only one pair informing the 24h cell, "supported" carries large uncertainty. The single 24h pair may simply be unusually low; the real 24h-pair distribution could span the full 0–0.1 bit range.
 
-**Recommended next step:** **a temporal-sweep deepening pass before Lane A**. Specifically: rerun `sweep_temporal` with (a) at least 5 distinct 24h pairs from the long set so the headline result has actual variance bars, and (b) sub-cadence gaps (5min, 1min if snapshot frequency allows) to see whether the JS curve has a peak somewhere or just monotonically rises as you shorten the gap. This is *not* PR #4.5 scope creep — it's running PR #4's existing code differently. Should be a one-day pass.
+**Recommended next step — a temporal-sweep deepening pass with discriminator before Lane A.**
+
+The cleanest discriminator between hypothesis 1 (cycle aliasing) and hypotheses 2/3 (real dynamics or noise): **test 23h, 24h, and 25h pairs.** If 24h is uniquely low while 23h and 25h spike, that **supports** the 24h environmental-aliasing reading. If all three are similar (noisy or similar-low), the n=1 or high-frequency-oscillation reading **strengthens**. This is a one-day pass; it runs existing PR #4 code with different gap anchors.
+
+**For hypothesis 1, gather hardware telemetry concurrently** to cross-correlate environmental phase with lattice divergence dips. Metadata targets, where available:
+
+- snapshot timestamps (already in JSONL)
+- Medusa step rate (per-snapshot generation deltas)
+- GPU temperature and power draw (RTX 5090 telemetry)
+- CPU load (Ultra Core 9 285K)
+- Folding@home status (active / between-WU / idle)
+- BOINC status (active / between-tasks)
+- confirmed Medusa host machine (Area 51 head node)
+
+**Goal of the metadata pass:** cross-correlate hardware telemetry phase with lattice divergence dips. If 24h-aligned hardware cycles (F@H WU boundaries, GPU thermal cycles, etc.) phase-lock with the low-JS pair, that is **discriminating evidence** for environmental aliasing — *not* a smoking gun. Reserve stronger language for after the data lands.
+
+This is *not* PR #4.5 scope creep — it's running PR #4's existing code with different anchors plus telemetry capture. Should be a one-to-two-day pass.
 
 ### 4.2 The `metta_warmth` dead-predicate finding (Ch5 + issue #150)
 
-**The data:** `warmth.max = 0.185` across all 3 newest snapshots in the Ch3 smoke pass. `THRESHOLD_WARMTH = 0.3`. The predicate cannot fire on any snapshot at ±50% multipliers (range 0.15–0.45 — even the lowest still requires warmth > 0.15, which only a vanishingly small fraction of cells achieve).
+**The data:** `warmth.max = 0.185` across all 3 newest snapshots in the Ch3 smoke pass; warmth-channel sparsity is 0.990. `THRESHOLD_WARMTH = 0.3` at baseline; the ×0.5–1.5 sweep covers effective thresholds 0.15–0.45. At the low end (0.15), `warmth.max = 0.185` *does* cross the threshold in some voxels — so the predicate is not simply blocked by max-below-threshold. The actual block is that `metta_warmth` is a **patch-aggregate** predicate: it needs multiple warmth voxels to co-occur within a 3×3×3 patch, and the 0.990 sparsity means isolated voxels rarely cluster densely enough for the aggregator to fire. The predicate is dead in current Medusa state because of the *aggregator design*, not because of a mis-set threshold value.
 
 **Why "inconclusive" was the right mechanical answer but doesn't tell the full story:** the threshold sweep's job is to ask "is the classifier sitting on a cliff?" The answer here is "the classifier is sitting nowhere — the predicate it gates never fires." That is information *about predicate design*, not about threshold calibration. Issue #150 (predicate aggregator redesign) is the right place to land this; deferred from PR #4 per Jack's scope discipline.
 
@@ -158,7 +174,7 @@ The case *for* opening Lane A:
 - The test discipline (400/400 Lane B suite) is mature enough to catch regressions.
 
 The case *against*, which I judge stronger right now:
-- The temporal anomaly (§4.1) is exactly the kind of "stable-looking signal that isn't actually stable" pattern that the Continual Harness paper flagged as the death-spiral pre-condition. A Lane A agent acting on a metric that says "settled" while the underlying lattice has 0.11 bits of adjacent-snapshot variance would be misled by the observer in the way the calibration was designed to prevent.
+- The temporal anomaly (§4.1) is the kind of observer-uncertainty that can create death-spiral conditions in a self-improving Lane A loop — the "stable-looking signal that isn't actually stable" pattern the Continual Harness paper flagged. A Lane A agent acting on a metric that says "settled" while the underlying lattice has 0.11 bits of adjacent-snapshot variance would be misled by the observer in the way the calibration was designed to prevent.
 - The dead-predicate finding (§4.2) means part of the vocabulary the agent would consume is currently non-discriminating. Acting on "the lattice is not in a `metta_warmth` state" when it *cannot be* in a `metta_warmth` state is also misleading-by-construction.
 - The pre-#145 framing error (§3) was already a real shot across the bow. The interpretation we have today is *better* than PR #142's, but the Karuna/Boundary vocabulary has not been refreshed in design docs to match what the post-fix classifier actually measures. Lane A reading "Karuna saturation" would mean different things to different readers.
 
@@ -178,7 +194,7 @@ The case *against*, which I judge stronger right now:
 - Issue **#139** — finding (c) parent hub; alternate hypotheses 1–4 + null. **Stays open** pending Lane A decision; do not auto-close on this report.
 - Issue **#144** — memory-channel layout misalignment; **fixed** by `#145` before PR #4 code.
 - Issue **#150** — predicate aggregator redesign question; **stays open**; this report is the first time it's framed against the combined Ch5 + Ch8 evidence.
-- Issue **#151** — (follow-up filed during the gauntlet; recheck what it covers and whether this report touches it.)
+- Issue **#151** — Chapters 1+2 wallclock metadata cleanup / byte-identical rerun coverage. Not directly touched by this summary, but the determinism contract it tightens is the foundation Ch3–Ch8 all rely on.
 - PR **#142** — original 5-snapshot smoke that motivated PR #4. Findings *interpretation* superseded by post-#145; *determinism contracts* still authoritative.
 - PR **#143** — design doc (this report's companion).
 - PR **#145** — memory-channel layout fix.
