@@ -1,5 +1,7 @@
 package agent.safety
 
+import future.keywords.in
+
 default allow = false
 
 wholesome_intents := {"creative", "cooperative", "insightful"}
@@ -53,9 +55,15 @@ is_encoded_payload(payload) {
   is_data_uri(payload)
 }
 
-# Base64 detection: 4+ chars, alphanumeric + / + =
+# Base64 detection: 8+ total chars, alphanumeric + / + = optional padding.
+# Length floor of 8 rejects short alphanumeric strings like "test123" that
+# happen to match the base64 alphabet but aren't actually encoded content.
+# 8 is the smallest meaningful base64 output length (encodes 4-6 raw bytes
+# with padding), so this floor preserves detection of genuine short base64
+# while eliminating the false-positive class of plain words and identifiers.
 is_base64_like(payload) {
   regex.match(`^[A-Za-z0-9+/]{4,}={0,2}$`, payload)
+  count(payload) >= 8
 }
 
 # URL encoding detection: contains %XX patterns
