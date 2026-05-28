@@ -15,7 +15,13 @@ jobs:
       - name: Install OPA
         run: |
           set -euxo pipefail
-          curl -L -o opa https://openpolicyagent.org/downloads/v0.59.0/opa_linux_amd64_static
+          # Use GitHub Releases mirror (same binary, different host) — the
+          # openpolicyagent.org CDN has been flaky from the GitHub Actions
+          # runner IP range. --fail surfaces HTTP errors; --retry handles
+          # transient connection drops.
+          curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors \
+            -o opa \
+            https://github.com/open-policy-agent/opa/releases/download/v0.59.0/opa_linux_amd64_static
           chmod +x opa
           sudo mv opa /usr/local/bin/opa
           opa version
