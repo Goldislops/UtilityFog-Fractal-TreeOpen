@@ -1,5 +1,7 @@
 package agent.safety
 
+import future.keywords.in
+
 default allow = false
 
 wholesome_intents := {"creative", "cooperative", "insightful"}
