@@ -180,7 +180,7 @@ The case *against*, which I judge stronger right now:
 
 **Concrete proposed next step (not for Lane A; for *this* lane):**
 
-1. **One-day pass: temporal-sweep deepening** — multiple 24h pairs, sub-cadence gaps, JS variance bars. Either resolves the inverse-JS anomaly into one of the §4.1 hypotheses or sharpens the question.
+1. **One-day pass: temporal-sweep deepening** — multiple 24h pairs, sub-cadence gaps, JS variance bars, plus the 23h/24h/25h discriminator. Either resolves the temporal multi-timescale anomaly into one of the §4.1 hypotheses or sharpens the question.
 2. **One-day pass: predicate-aggregator review** — `metta_warmth` and `DIVERSITY_BOUNDARY` together, per #150. Either refit thresholds against actual distributional data or demote the predicates with reasons recorded.
 3. **One-day pass: vocabulary refresh** — update interpretive docs (and only docs; no code) to match the post-#145 distribution. Drop the Karuna/Boundary headline framing; replace with whatever language the post-fix data actually supports.
 4. **Then re-open the Lane A decision gate** with §1–3 in hand. The gate is its own gate; this report does not pre-decide it.
