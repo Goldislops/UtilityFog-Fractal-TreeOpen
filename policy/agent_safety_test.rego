@@ -172,13 +172,24 @@ test_allow_base64_when_flag_disabled if {
 	} with data.agent_limits.enforce_encoded_payload as false
 }
 
-# Test boundary conditions for Base64 detection
+# Test boundary conditions for Base64 detection.
+#
+# The tightened is_base64_like (post-PR-#156) requires count(payload) >= 8 in
+# addition to the base64-alphabet regex. So:
+#   - 3-char "abc"      : NOT detected (regex requires {4,}, separate floor)
+#   - 7-char "test123"  : NOT detected (regex matches but count < 8)
+#   - 8-char "dGVzdHM=" : detected (real base64 of "tests"; smallest
+#                         meaningful base64 output with padding)
 test_encoded_payload_short_base64 if {
 	not safety.encoded_payload_detected with input as {"payload": "abc"} with data.agent_limits.enforce_encoded_payload as true
 }
 
+# Minimum positive case: 8-char base64 of "tests" with padding. Replaces the
+# pre-fix test that asserted "abcd" was detected — that test was asserting
+# the false-positive bug the regex tightening fixes (any 4-char alphanumeric
+# string was getting flagged as base64).
 test_encoded_payload_minimum_base64 if {
-	safety.encoded_payload_detected with input as {"payload": "abcd"} with data.agent_limits.enforce_encoded_payload as true
+	safety.encoded_payload_detected with input as {"payload": "dGVzdHM="} with data.agent_limits.enforce_encoded_payload as true
 }
 
 # Test mixed content
