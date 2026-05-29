@@ -162,6 +162,8 @@ For each predicate: a recommended option, an empirical basis for it, and a note 
 
 Bring repo docs and the predicate naming surface into alignment with what the post-#145 classifier actually measures. Retire the pre-#145 "Karuna/Boundary equilibrium" framing in interpretive docs. The actual classifier code is unchanged in this PR; this is a documentation pass.
 
+**Why this matters beyond tidiness (AURA's framing):** the vocabulary refresh is not cosmetic cleanup; it defines the literal language the Swarm Hunter will later use to *see* Medusa. Token names and predicate descriptions must reflect the actual physics measured in the 256³ lattice, not the retired pre-#145 interpretive frame.
+
 ### C.2 Scope of what gets refreshed
 
 **In scope:**
@@ -232,7 +234,7 @@ These are **necessary, not sufficient.** Lane A still requires its own design do
 
 - ✅ No engine touch. Medusa untouched.
 - ✅ No writes outside the resolved output log directory.
-- ✅ No HTTP. No ZMQ. No network beyond hardware-telemetry reads from `nvidia-smi` / system files.
+- ✅ No HTTP. No ZMQ. No network calls. Hardware telemetry is local host-only via `nvidia-smi` / system files.
 - ✅ CPU-only default (telemetry collection doesn't require GPU compute).
 - ✅ `allow_pickle=False` preserved in all snapshot reads.
 - ✅ Bounded compute: O(N × G × P) where N=snapshots, G=gap_specs, P=pairs-per-gap. Small.
