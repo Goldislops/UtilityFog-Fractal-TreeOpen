@@ -6,7 +6,7 @@
 **Author**: 84, 2026-05-29 Sydney evening.
 **Guardrails**: Lane B only. No engine touch. No Lane A. No Swarm Hunter. No tuning API.
 
-> The calibration told us two predicates are broken. This document diagnoses *why* each is broken, evaluates candidate fixes, and recommends a direction per-predicate. The recommendation is a decision for AURA + Jack + Kevin to approve, not a unilateral call.
+> The calibration found two predicates non-discriminating under the current Medusa state. This document diagnoses *why* each fails to discriminate, evaluates candidate fixes, and presents a decision framework per-predicate. The final candidate selection is for AURA + Jack + Kevin to approve after the empirical profiling lands, not a unilateral call.
 
 ---
 
@@ -108,7 +108,7 @@ The following matrix presents the candidates side-by-side. **This is a decision 
 | **Patch max** | Highest single warmth value in patch | Catches sparse sparks; simple | Too sensitive to isolated hot voxels — one noisy cell triggers the whole patch | ~24% (any patch with ≥1 warm cell) |
 | **Count / cluster density** | Contiguous warm-cell clusters | Catches spatially meaningful warmth, not specks; most physically grounded | Introduces second parameter (min cluster size); may be too restrictive at current sparsity (P(≥2 adjacent warm cells in 27) is low) | ~3–5% (depending on adjacency definition) |
 
-**AURA's "Planck Star" framing for cluster density**: A single hot voxel is noise — thermal jitter, a rounding artefact, a speck. A *cluster* of hot voxels is structural compute: a localized, stable pocket of dense energy sustaining its neighbours. The cluster candidate is our search for the Planck Star — the point where warmth becomes structure rather than static. The design question is: what defines "cluster"? Options include:
+**AURA's "Planck Star" metaphor for cluster density** *(architectural analogy, not a literal physics claim)*: A single hot voxel is noise — thermal jitter, a rounding artefact, a speck. A *cluster* of hot voxels is structural compute: a localized, stable pocket of dense energy sustaining its neighbours. By analogy, the cluster candidate is our search for the "Planck Star" — AURA's metaphor for the point where warmth becomes structure rather than static, a localized density that the Swarm Hunter can reliably target. The design question is: what defines "cluster"? Options include:
 
 - **Minimum contiguous block**: ≥ N warm cells that share a face/edge/vertex in the 3D patch. Most physically meaningful (warmth that propagates must be spatially connected) but most expensive to compute (connected-component labelling per patch).
 - **Simple count threshold**: ≥ N warm cells anywhere in the patch, regardless of adjacency. Cheaper to compute; still distinguishes "one speck" from "meaningful warmth presence." Loses the spatial-structure guarantee.
@@ -180,7 +180,7 @@ These require **different fixes**. A single "repair the aggregator" approach wou
 # fires when: H_norm >= ENTROPY_BOUNDARY
 ```
 
-- **Strengths**: Scale-invariant by construction. Entropy doesn't care about patch volume; it cares about the *shape* of the distribution. A 125-cell patch with 120 VOID + 1 each of the other 4 states has low entropy (~0.30 normalized) despite having all 5 states present. A 27-cell patch with roughly equal states has high entropy (~0.95). This naturally separates "genuine boundary region" from "large patch that happens to contain a few rare cells."
+- **Strengths**: Less directly volume-dependent than raw distinct-state count. Entropy measures the shape/evenness of the state distribution rather than just whether a rare state appears at least once. It still requires radius-1 vs radius-2 validation because larger patches can sample multiple regions and change the observed distribution. Example: a 125-cell patch with 120 VOID + 1 each of the other 4 states has low entropy (~0.30 normalized) despite having all 5 states present; a 27-cell patch with roughly equal states has high entropy (~0.95). This distinction helps separate "genuine boundary region" from "large patch that happens to contain a few rare cells."
 - **Weaknesses**: More computationally expensive (log calls per patch). Changes the semantics from "diverse enough" to "evenly diverse enough" — a patch with 3 strongly-competing states might matter more than one with 5 states where 4 are negligible.
 - **Note**: `_PatchFeatures` already has the raw fractions (`void_frac`, `structural_frac`, etc.) so computing entropy is straightforward.
 
