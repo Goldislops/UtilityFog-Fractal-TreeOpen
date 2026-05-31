@@ -11,6 +11,10 @@ Guardrails:
   - Outputs go to docs/WORKSTREAM_B_EMPIRICAL_PROFILING_RESULTS.md
   - No predicate changes — evidence only
 
+Dependencies:
+  - numpy (required)
+  - scipy (required for cluster profiling — connected-component labelling)
+
 Usage:
     python scripts/workstream_b_profile_predicates.py [--snapshots N] [--stride S]
 """
@@ -25,6 +29,13 @@ import time
 from collections import Counter
 
 import numpy as np
+
+try:
+    from scipy import ndimage
+except ImportError as exc:
+    raise SystemExit(
+        "Cluster profiling requires scipy. Install scipy or run without cluster profiling."
+    ) from exc
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SNAPSHOT_GLOB = "data/v070_gen*.npz"
@@ -101,8 +112,6 @@ def compute_warmth_profile(patches_warmth):
 
 
 def compute_cluster_profile(patches_warmth, threshold=0.10):
-    from scipy import ndimage
-
     cluster_sizes_all = []
     patches_with_clusters = 0
     max_cluster_per_patch = []
@@ -168,8 +177,11 @@ def format_pct(val):
     return f"{val * 100:.1f}%"
 
 
+CLUSTER_THRESHOLDS = [0.05, 0.10, 0.15]
+
+
 def generate_results_markdown(
-    warmth_r1, cluster_r1, entropy_r1, entropy_r2,
+    warmth_r1, clusters_by_threshold, entropy_r1, entropy_r2,
     n_snapshots, n_patches_r1, n_patches_r2,
     snapshot_names, global_warmth_stats,
 ):
@@ -266,36 +278,42 @@ def generate_results_markdown(
 
     w("### 2.4 Cluster analysis (6-neighbour face adjacency)")
     w()
-    w("Connected-component labelling of warm cells (warmth >= 0.10) per patch. "
-      "Uses `scipy.ndimage.label` with default 6-neighbour face adjacency.")
+    w("Connected-component labelling of warm cells per patch at multiple thresholds. "
+      "Uses `scipy.ndimage.label` with default 6-neighbour face adjacency "
+      "(requires scipy).")
     w()
-    if cluster_r1["all_sizes"]:
-        size_counter = Counter(cluster_r1["all_sizes"])
-        w("**Cluster size histogram** (AURA's 'Planck Star' knee search — "
-          "architectural metaphor for localized density, not a physics claim):")
-        w()
-        w("| Cluster size | Count | Fraction of all clusters |")
-        w("|---|---|---|")
-        total_clusters = len(cluster_r1["all_sizes"])
-        for size in sorted(size_counter.keys()):
-            count = size_counter[size]
-            w(f"| {size} | {count:,} | {format_pct(count / total_clusters)} |")
-        w()
-        w(f"Total clusters found: {total_clusters:,}")
-        w(f"Patches with max cluster >= 2: {cluster_r1['patches_with_cluster_ge2']:,} "
-          f"({format_pct(cluster_r1['patches_with_cluster_ge2'] / n_patches_r1)})")
-        w()
+    w("AURA's 'Planck Star' knee search (architectural metaphor for localized "
+      "density, not a physics claim): we look for the threshold at which "
+      "isolated specks give way to multi-cell clusters.")
+    w()
 
-        max_clust = cluster_r1["max_per_patch"]
-        w("**Max cluster size per patch:**")
+    for thresh in CLUSTER_THRESHOLDS:
+        cluster_r1 = clusters_by_threshold.get(thresh, {})
+        w(f"#### Warmth >= {thresh:.2f}")
         w()
-        w(f"- Mean: {max_clust[max_clust > 0].mean():.2f}" if np.any(max_clust > 0) else "- Mean: N/A (no warm patches)")
-        w(f"- Median (among patches with warmth): {np.median(max_clust[max_clust > 0]):.1f}" if np.any(max_clust > 0) else "")
-        w(f"- Max: {max_clust.max()}")
-        w()
-    else:
-        w("No warm cells found at threshold 0.10 — cluster analysis returned empty.")
-        w()
+        if cluster_r1.get("all_sizes"):
+            size_counter = Counter(cluster_r1["all_sizes"])
+            w("| Cluster size | Count | Fraction of all clusters |")
+            w("|---|---|---|")
+            total_clusters = len(cluster_r1["all_sizes"])
+            for size in sorted(size_counter.keys()):
+                count = size_counter[size]
+                w(f"| {size} | {count:,} | {format_pct(count / total_clusters)} |")
+            w()
+            w(f"Total clusters found: {total_clusters:,}")
+            w(f"Patches with max cluster >= 2: {cluster_r1['patches_with_cluster_ge2']:,} "
+              f"({format_pct(cluster_r1['patches_with_cluster_ge2'] / n_patches_r1)})")
+            w()
+
+            max_clust = cluster_r1["max_per_patch"]
+            if np.any(max_clust > 0):
+                w(f"Max cluster size per patch — mean: {max_clust[max_clust > 0].mean():.2f}, "
+                  f"median: {np.median(max_clust[max_clust > 0]):.1f}, "
+                  f"max: {max_clust.max()}")
+            w()
+        else:
+            w(f"No warm cells found at this threshold — cluster analysis returned empty.")
+            w()
 
     # === Section 3: DIVERSITY_BOUNDARY / entropy profiling ===
     w("## 3. `DIVERSITY_BOUNDARY` / `phase_boundary` — entropy profiling")
@@ -385,22 +403,38 @@ def generate_results_markdown(
       "Compare against target range of 5-15% for an informative-but-not-dominant predicate.")
     w()
 
-    cluster_rate = cluster_r1["patches_with_cluster_ge2"] / n_patches_r1 if n_patches_r1 > 0 else 0
     w(f"**Q2: Does count/cluster density fire too rarely?**")
-    w(f"Patches with cluster >= 2 warm cells (face-adjacent): {format_pct(cluster_rate)}. "
-      "If this is below ~2%, the cluster candidate may be too restrictive at current sparsity.")
+    w("Per-threshold cluster rates (patches with max cluster >= 2, face-adjacent):")
+    w()
+    for thresh in CLUSTER_THRESHOLDS:
+        cr = clusters_by_threshold.get(thresh, {})
+        rate = cr.get("patches_with_cluster_ge2", 0) / n_patches_r1 if n_patches_r1 > 0 else 0
+        w(f"- Warmth >= {thresh:.2f}: {format_pct(rate)} ({cr.get('patches_with_cluster_ge2', 0):,} patches)")
+    w()
+    w("If all thresholds are below ~2%, the cluster candidate may be too restrictive at current sparsity.")
     w()
 
-    if cluster_r1["all_sizes"]:
-        sizes = sorted(Counter(cluster_r1["all_sizes"]).items())
-        size_1_frac = sum(c for s, c in sizes if s == 1) / sum(c for _, c in sizes)
-        w(f"**Q3: Is there a cluster-size knee?**")
-        w(f"Fraction of clusters that are size 1 (isolated specks): {format_pct(size_1_frac)}. "
-          "A strong knee would show a clear gap between size-1 and size-2+ clusters. "
-          "If nearly all clusters are size 1, the 'Planck Star' interpretation "
-          "(AURA's metaphor) has weak empirical support at current sparsity.")
-    else:
-        w("**Q3: Is there a cluster-size knee?** No warm cells found — cannot assess.")
+    w(f"**Q3: Is there a cluster-size knee?**")
+    w("Per-threshold breakdown of cluster sizes:")
+    w()
+    for thresh in CLUSTER_THRESHOLDS:
+        cr = clusters_by_threshold.get(thresh, {})
+        if cr.get("all_sizes"):
+            sizes = sorted(Counter(cr["all_sizes"]).items())
+            total = sum(c for _, c in sizes)
+            size_1 = sum(c for s, c in sizes if s == 1)
+            size_2plus = total - size_1
+            w(f"- Warmth >= {thresh:.2f}: {total:,} total clusters. "
+              f"Size 1: {format_pct(size_1 / total)} ({size_1:,}). "
+              f"Size >= 2: {format_pct(size_2plus / total)} ({size_2plus:,}).")
+        else:
+            w(f"- Warmth >= {thresh:.2f}: no warm cells found.")
+    w()
+    w("A strong 'Planck Star' knee (AURA's architectural metaphor) would show "
+      "a clear gap between isolated specks (size 1) and multi-cell clusters "
+      "(size >= 2) at some threshold. If all thresholds are dominated by size-1 "
+      "clusters, the localized-structure interpretation has weak empirical support "
+      "at current sparsity.")
     w()
 
     best_sep = max(
@@ -457,9 +491,8 @@ def main():
     all_warmth_r1 = {"means": [], "maxes": [], "warm_005": [], "warm_010": [], "warm_015": []}
     all_entropy_r1 = {"entropies": [], "distinct_counts": []}
     all_entropy_r2 = {"entropies": [], "distinct_counts": []}
-    all_cluster_sizes = []
-    cluster_patches_ge2 = 0
-    all_max_per_patch = []
+    clusters_by_thresh = {t: {"all_sizes": [], "patches_ge2": 0, "max_per_patch": []}
+                          for t in CLUSTER_THRESHOLDS}
     global_warmth_stats = []
     snapshot_names = []
     total_patches_r1 = 0
@@ -499,13 +532,14 @@ def main():
         for k in all_warmth_r1:
             all_warmth_r1[k].append(wp[k])
 
-        print("  Computing cluster profile (scipy.ndimage.label)...")
+        print("  Computing cluster profiles at 0.05/0.10/0.15 (scipy.ndimage.label)...")
         t0 = time.time()
-        cp = compute_cluster_profile(pw1, threshold=0.10)
-        all_cluster_sizes.extend(cp["all_sizes"])
-        cluster_patches_ge2 += cp["patches_with_cluster_ge2"]
-        all_max_per_patch.append(cp["max_per_patch"])
-        print(f"  Cluster analysis in {time.time()-t0:.1f}s")
+        for thresh in CLUSTER_THRESHOLDS:
+            cp = compute_cluster_profile(pw1, threshold=thresh)
+            clusters_by_thresh[thresh]["all_sizes"].extend(cp["all_sizes"])
+            clusters_by_thresh[thresh]["patches_ge2"] += cp["patches_with_cluster_ge2"]
+            clusters_by_thresh[thresh]["max_per_patch"].append(cp["max_per_patch"])
+        print(f"  Cluster analysis (3 thresholds) in {time.time()-t0:.1f}s")
 
         print("  Computing entropy profile r=1...")
         ep1 = compute_entropy_profile(ps1)
@@ -532,11 +566,14 @@ def main():
     warmth_r1_agg = {k: np.concatenate(v) for k, v in all_warmth_r1.items()}
     entropy_r1_agg = {k: np.concatenate(v) for k, v in all_entropy_r1.items()}
     entropy_r2_agg = {k: np.concatenate(v) for k, v in all_entropy_r2.items()}
-    cluster_r1_agg = {
-        "all_sizes": all_cluster_sizes,
-        "max_per_patch": np.concatenate(all_max_per_patch) if all_max_per_patch else np.array([]),
-        "patches_with_cluster_ge2": cluster_patches_ge2,
-    }
+    clusters_agg = {}
+    for thresh in CLUSTER_THRESHOLDS:
+        ct = clusters_by_thresh[thresh]
+        clusters_agg[thresh] = {
+            "all_sizes": ct["all_sizes"],
+            "max_per_patch": np.concatenate(ct["max_per_patch"]) if ct["max_per_patch"] else np.array([]),
+            "patches_with_cluster_ge2": ct["patches_ge2"],
+        }
 
     print(f"\n=== Generating results document ===")
     print(f"Total r=1 patches: {total_patches_r1:,}")
@@ -544,7 +581,7 @@ def main():
 
     md = generate_results_markdown(
         warmth_r1=warmth_r1_agg,
-        cluster_r1=cluster_r1_agg,
+        clusters_by_threshold=clusters_agg,
         entropy_r1=entropy_r1_agg,
         entropy_r2=entropy_r2_agg,
         n_snapshots=len(snapshot_paths),
