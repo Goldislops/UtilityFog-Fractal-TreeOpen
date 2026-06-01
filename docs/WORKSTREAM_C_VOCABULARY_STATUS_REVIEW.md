@@ -49,6 +49,8 @@ The key difference between `diagnostic_only` and `deprecated_no_engine_channel`:
 
 It is NOT an output-channel status. The diagnostic measurements (warmth_max, warm_cell_count) are added to the JSONL output as **top-level numeric fields**, not as a new output channel or a separate diagnostic dictionary. They sit alongside existing fields like `boundary_rate` and `void_compute_balance` — per-snapshot scalar metrics computed from data already in memory.
 
+**Room to grow**: top-level fields are the right call for the initial two diagnostics (keeps parsing trivial and consistent with the existing flat schema). If the JSONL entry later accumulates several diagnostics and the top level gets crowded, the implementation may migrate them into a nested `diagnostics` object at that point. Flagged here so the future option is explicit rather than a surprise refactor; the initial implementation stays flat.
+
 ### Q3: Should `metta_warmth` remain a named token?
 
 **Yes.** `metta_warmth` stays in `TOKEN_NAMES` with status `diagnostic_only`. Reasons:
@@ -56,7 +58,7 @@ It is NOT an output-channel status. The diagnostic measurements (warmth_max, war
 - **Historical continuity**: PR #142-era docs, calibration summary §4.2, and issue #150 all reference it by name. Removing it from the vocabulary would break cross-references.
 - **Future rehabilitation**: If Medusa's warmth channel becomes less sparse (e.g., under different initial conditions or engine evolution), the token can be re-promoted to `stored` status with a new profiling pass. Easier to re-promote than to re-invent.
 - **The assertion holds**: `set(TOKEN_STATUS.keys()) == set(TOKEN_NAMES)` continues to pass because the token is still in both sets.
-- **`vocabulary_occupancy` accounting**: With `metta_warmth` in `diagnostic_only`, the observer's vocabulary_occupancy metric accurately reflects that one fewer token is actively routing. (Same as the existing behavior for `deprecated_no_engine_channel` tokens.)
+- **Occupancy semantics must be explicit**: because `diagnostic_only` tokens remain in `TOKEN_NAMES` but do not route classification, future implementation should either document `vocabulary_occupancy` as full historical-vocabulary occupancy, or add a separate `active_vocabulary_occupancy` metric that excludes non-routing statuses. Jack's preference is to add/define an active occupancy metric in the implementation PR so Lane A does not mistake diagnostic vocabulary for active routing vocabulary.
 
 ### Q4: Should `metta_warmth` be renamed?
 
@@ -86,6 +88,9 @@ If a rename is ever desired, it belongs in a **separate, future PR** with corres
 |---|---|---|---|
 | `warmth_max` | float | Max warmth-channel value across all patches in this snapshot | `boundary_rate` |
 | `warm_cell_count` | int | Total cells with warmth >= 0.05 across all patches | `warmth_max` |
+| `active_vocabulary_occupancy` | float | Fraction of *routing* tokens (statuses that can fire) that appeared, excluding `diagnostic_only` / `deprecated_no_engine_channel` / `derived_future` | `vocabulary_occupancy` |
+
+The existing `vocabulary_occupancy` field is **retained and re-documented** as full historical-vocabulary occupancy (fraction of all 16 `TOKEN_NAMES` that appeared). The new `active_vocabulary_occupancy` gives the routing-only view. Keeping both means historical JSONL stays comparable while Lane A gets the disambiguated metric.
 
 These fields are:
 - **Top-level in the JSONL entry**, not nested inside `token_counts`.
@@ -126,12 +131,13 @@ These are **forward-pointer notes only** — they do not rewrite the historical 
    - Add `"diagnostic_only"` to `TOKEN_STATUS` for `metta_warmth`.
    - Skip the `metta_warmth` predicate in `classify_patch()` (same pattern as `deprecated_no_engine_channel` tokens).
    - Add `warmth_max` and `warm_cell_count` to the JSONL entry.
+   - Add/define an `active_vocabulary_occupancy` metric (per Q3's occupancy-semantics requirement) that excludes non-routing statuses, so Lane A does not mistake diagnostic vocabulary for active routing vocabulary. The existing `vocabulary_occupancy` field is retained and documented as full historical-vocabulary occupancy.
    - Update issue #150 with the decision record.
    - Update calibration tests.
 
 2. **Forward-pointer docs PR** — May:
    - Add the two preamble notes to PHASE_19_PR3_METRICS_PIPELINE.md and PHASE_19_PR4_CALIBRATION.md.
-   - Could be combined with the demotion PR if scope stays bounded.
+   - **Recommended to keep this as a separate PR from the demotion implementation** (Jack's lean), so the code-change PR stays tightly scoped to observer logic and the docs PR stays purely textual. Combine only if both stay genuinely small.
 
 3. **Optional `phase_boundary` labelling PR** — May:
    - Add JSONL schema comments documenting radius-specificity.
