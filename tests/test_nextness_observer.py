@@ -275,14 +275,28 @@ def test_classifier_magnon_lighthouse_disabled_post_144_falls_through_to_compute
     )
 
 
-def test_classifier_metta_warmth_with_compute():
+def test_classifier_metta_warmth_demoted_to_diagnostic_falls_through():
+    """Post-Workstream-B/C (PR #163): metta_warmth is status
+    "diagnostic_only" and no longer routes classification. A patch that
+    *would have* triggered the old predicate (a COMPUTE cell with warmth
+    above THRESHOLD_WARMTH) must now fall through the cascade instead of
+    returning metta_warmth.
+
+    Here: 1 COMPUTE in a 26-VOID patch with warmth filled to 0.4 (> 0.3).
+    metta_warmth is skipped; compute_decay needs warmth_mean < THRESHOLD
+    (fails, warmth is high); the patch lands on void_birth (void-dominant
+    with >1 distinct state).
+    """
     s = np.zeros((3, 3, 3), dtype=np.uint8); s[1, 1, 1] = STATE_COMPUTE
     m = np.zeros((8, 3, 3, 3), dtype=np.float32)
-    # Post-#144: CH["warmth"] now resolves to engine index 6 (the actual
-    # warmth channel). The predicate logic is unchanged; it just reads the
-    # correct field now.
     m[CH["warmth"]].fill(THRESHOLD_WARMTH + 0.1)
-    assert classify_patch(Patch((0, 0, 0), s, m)) == "metta_warmth"
+    result = classify_patch(Patch((0, 0, 0), s, m))
+    assert result != "metta_warmth", (
+        f"metta_warmth must not fire after diagnostic_only demotion; got {result!r}"
+    )
+    assert result == "void_birth", (
+        f"expected fall-through to void_birth; got {result!r}"
+    )
 
 
 def test_classifier_mudita_resonance_disabled_post_144_falls_through_to_compute_decay():
@@ -854,11 +868,12 @@ def test_token_status_covers_every_token_in_vocabulary():
 
 
 def test_token_status_uses_only_documented_status_values():
-    """Every status value must be one of the four documented options."""
+    """Every status value must be one of the documented options."""
     from scripts.nextness_observer import TOKEN_STATUS
     valid_statuses = {
         "state_only",
         "stored",
+        "diagnostic_only",  # Workstream C (PR #163): real-but-non-routing signal
         "deprecated_no_engine_channel",
         "derived_future",
     }
@@ -870,24 +885,30 @@ def test_token_status_uses_only_documented_status_values():
 
 
 def test_deprecated_tokens_never_appear_in_classifier_output():
-    """Tokens with deprecated/derived-future status must never fire.
+    """Tokens with a non-routing status must never fire.
 
-    Per issue #144: even if the prior triggering conditions for these
-    tokens happen to be met in a patch, classify_patch must skip them
-    and the patch must fall through to another predicate.
+    Per issue #144 (deprecated_no_engine_channel / derived_future) and
+    Workstream B/C (PR #163, diagnostic_only for metta_warmth): even if the
+    prior triggering conditions for these tokens happen to be met in a patch,
+    classify_patch must skip them and the patch must fall through to another
+    predicate.
 
     Exhaustive test: synthesize a wide range of patches and assert no
-    deprecated token ever appears in the output across all of them.
+    non-routing token ever appears in the output across all of them. The
+    ``warmth``-set config below specifically exercises the metta_warmth
+    demotion.
     """
-    from scripts.nextness_observer import TOKEN_STATUS
+    from scripts.nextness_observer import TOKEN_STATUS, NON_ROUTING_STATUSES
     deprecated_tokens = {
         name for name, status in TOKEN_STATUS.items()
-        if status in {"deprecated_no_engine_channel", "derived_future"}
+        if status in NON_ROUTING_STATUSES
     }
-    # Sanity: there ARE deprecated tokens to check (otherwise this test
-    # would silently pass).
-    assert len(deprecated_tokens) >= 3, (
-        "Expected at least 3 deprecated tokens post-#144"
+    # Sanity: there ARE non-routing tokens to check (karuna_relief,
+    # mudita_resonance, magnon_lighthouse, metta_warmth) — otherwise this
+    # test would silently pass.
+    assert len(deprecated_tokens) >= 4, (
+        "Expected at least 4 non-routing tokens (3 deprecated/derived + "
+        "metta_warmth diagnostic_only)"
     )
 
     # Try a wide variety of patch configurations
@@ -1185,5 +1206,55 @@ def test_process_snapshot_emits_all_pr3_per_snapshot_fields(tmp_path):
     for field in ("shannon_entropy_bits", "entropy_normalized",
                   "void_compute_balance", "boundary_rate",
                   "vocabulary_occupancy"):
+        assert entry[field] == summary[field], \
+            f"{field} differs between summary and JSONL: {summary[field]!r} vs {entry[field]!r}"
+
+
+def test_process_snapshot_emits_workstream_c_diagnostic_fields(tmp_path):
+    """Workstream C (PR #163): process_snapshot emits warmth_max,
+    warm_cell_count, and active_vocabulary_occupancy. metta_warmth is now
+    diagnostic_only, so its warmth signal surfaces as numeric diagnostics
+    instead of a classification token, and the active-occupancy metric is
+    distinct from the historical vocabulary_occupancy.
+    """
+    from scripts.nextness_observer import ROUTING_TOKENS, TOKEN_NAMES
+    snap = _make_snapshot(tmp_path / "v070_gen1.npz", lattice=16, generation=1)
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+
+    # New fields present
+    assert "warmth_max" in summary
+    assert "warm_cell_count" in summary
+    assert "active_vocabulary_occupancy" in summary
+
+    # Types
+    assert isinstance(summary["warmth_max"], float)
+    assert isinstance(summary["warm_cell_count"], int)
+    assert isinstance(summary["active_vocabulary_occupancy"], float)
+
+    # Ranges
+    assert summary["warmth_max"] >= 0.0
+    assert summary["warm_cell_count"] >= 0
+    assert 0.0 <= summary["active_vocabulary_occupancy"] <= 1.0
+
+    # The synthetic snapshot has an all-zero warmth channel -> no warmth.
+    assert summary["warmth_max"] == 0.0
+    assert summary["warm_cell_count"] == 0
+
+    # Demotion shrank the routing-token set below the full vocabulary.
+    assert len(ROUTING_TOKENS) < len(TOKEN_NAMES)
+    # Same appeared-token numerator, smaller denominator -> active >= historical.
+    assert summary["active_vocabulary_occupancy"] >= summary["vocabulary_occupancy"]
+
+    # metta_warmth must never appear in token_counts (it cannot route).
+    assert summary["token_counts"].get("metta_warmth", 0) == 0
+
+    # New fields round-trip through JSONL identically.
+    jsonl = (log_dir / "nextness_runs.jsonl").read_text().splitlines()
+    entry = json.loads(jsonl[-1])
+    for field in ("warmth_max", "warm_cell_count", "active_vocabulary_occupancy"):
         assert entry[field] == summary[field], \
             f"{field} differs between summary and JSONL: {summary[field]!r} vs {entry[field]!r}"

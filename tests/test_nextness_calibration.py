@@ -1842,13 +1842,17 @@ def test_default_ablation_disabled_tokens_are_active_cascade_tokens():
         )
 
 
-def test_active_cascade_order_excludes_deprecated_tokens():
-    """_ACTIVE_CASCADE_ORDER must NOT contain any deprecated tokens
-    (karuna_relief, mudita_resonance, magnon_lighthouse per #144).
-    Locks the post-#144 cascade composition."""
-    deprecated = {"karuna_relief", "mudita_resonance", "magnon_lighthouse"}
-    overlap = set(_ACTIVE_CASCADE_ORDER) & deprecated
-    assert not overlap, f"deprecated tokens in active cascade: {overlap}"
+def test_active_cascade_order_excludes_non_routing_tokens():
+    """_ACTIVE_CASCADE_ORDER must NOT contain any non-routing token:
+    the #144 deprecated tokens (karuna_relief, mudita_resonance,
+    magnon_lighthouse) and the Workstream B/C diagnostic_only token
+    (metta_warmth, PR #163). Locks the cascade composition against drift."""
+    non_routing = {
+        "karuna_relief", "mudita_resonance", "magnon_lighthouse",
+        "metta_warmth",
+    }
+    overlap = set(_ACTIVE_CASCADE_ORDER) & non_routing
+    assert not overlap, f"non-routing tokens in active cascade: {overlap}"
 
 
 # ---------------------------------------------------------------------------
@@ -1872,7 +1876,6 @@ def _make_synthetic_patch_for_branch(branch: str):
         STATE_SENSOR,
         STATE_STRUCTURAL,
         STATE_VOID,
-        THRESHOLD_WARMTH,
     )
     # 3x3x3 patches everywhere; deterministic content.
     R = 1  # patch_spatial_radius -> 3x3x3 = 27 cells
@@ -1887,11 +1890,9 @@ def _make_synthetic_patch_for_branch(branch: str):
     elif branch == "compute_aging":
         state[:, :, :] = STATE_COMPUTE  # compute_frac = 1.0
         memory[CH["compute_age"], :, :, :] = float(AGE_SAGE + 5)
-    elif branch == "metta_warmth":
-        # compute_count>=1 + warmth_mean >= THRESHOLD_WARMTH, but NOT
-        # compute_frac dominant (so compute_static won't catch it first).
-        state[0, 0, 0] = STATE_COMPUTE
-        memory[CH["warmth"], :, :, :] = float(THRESHOLD_WARMTH + 0.1)
+    # (metta_warmth branch removed: demoted to diagnostic_only per PR #163,
+    #  no longer in _ACTIVE_CASCADE_ORDER, so the parity battery never builds
+    #  a patch for it.)
     elif branch == "sensor_alert":
         # sensor_count>=1, no compute/energy dominance, distinct_states<4
         state[0, 0, 0] = STATE_SENSOR
