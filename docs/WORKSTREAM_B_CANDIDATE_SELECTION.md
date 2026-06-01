@@ -39,7 +39,7 @@ At the lowest tested threshold, 33 patches out of 163,840 contain a pair of adja
 
 The patch-max firing rate is 2.5% at threshold 0.05, dropping to 0.1% at 0.10. Even max-pooling catches only isolated specks.
 
-The current patch-mean aggregator (`warmth_mean >= 0.3`) is dead by arithmetic and cannot fire under any plausible Medusa state at current sparsity (0.990).
+The current patch-mean aggregator (`warmth_mean >= 0.3`) is dead by arithmetic and cannot fire under the profiled Medusa state at current sparsity (0.990).
 
 ### 2.2 Recommended selection
 
@@ -155,10 +155,13 @@ This overlaps with Workstream C (vocabulary refresh). The two could be combined 
 ### 5.3 Sequencing
 
 Recommended order:
-1. This conclusion doc (PR under review now).
-2. `metta_warmth` demotion PR (small, bounded, observer-only).
-3. Workstream C vocabulary refresh (docs-only, can run in parallel with or after the demotion PR).
-4. Full production sweeps (after the demotion lands, so canonical JSONL doesn't carry dead-predicate rows).
+1. This conclusion doc.
+2. Workstream C vocabulary refresh / naming-status review, docs-only.
+3. `metta_warmth` diagnostic-demotion implementation PR, if Workstream C confirms the status/naming model.
+4. Optional `phase_boundary` labelling/schema PR, if not covered by Workstream C.
+5. Full production sweeps, after the vocabulary/status decisions and any approved observer changes land.
+
+**Why this order (Jack's constraint):** If `TOKEN_STATUS` needs a new `"diagnostic_only"` value, that is vocabulary/status design. Workstream C should bless the naming/status model before implementation writes it into the observer. Define the language first, then build the logic.
 
 This sequence matches the production-run gate in PHASE_19_SECOND_PASS_CALIBRATION_PLAN.md §6.
 
