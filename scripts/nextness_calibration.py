@@ -1572,8 +1572,15 @@ def sweep_threshold(
             threshold's base value. Must be all positive.
         threshold_dependent_token: name of the token whose firing count
             we track across the sweep for the knife-edge criterion.
-            Defaults to ``"metta_warmth"`` (the only ``THRESHOLD_WARMTH``-
-            dependent active token post-#144).
+            Defaults to ``"metta_warmth"`` for backward compatibility.
+            NOTE (Workstream B/C, PR #163): metta_warmth was demoted to
+            status ``diagnostic_only`` and removed from the active cascade,
+            so it now never fires and the sweep reports ``inconclusive`` for
+            it by construction. The tokens that actually depend on
+            ``THRESHOLD_WARMTH`` post-demotion are ``compute_decay`` and
+            ``acoustic_stress`` (both gate on ``warmth_mean < THRESHOLD_WARMTH``);
+            a future calibration PR may repoint this default to one of them.
+            Left unchanged here to keep the demotion PR narrow.
 
     Returns the aggregate dict for callers that want to inspect it.
 
@@ -1793,10 +1800,13 @@ DEFAULT_ABLATION_DISABLED_TOKENS: tuple[str, ...] = (
 #: non-ablated calibration cascade against the observer cascade on
 #: synthetic patches covering every branch. ``unclassified`` is the
 #: fall-through bucket, not an explicit cascade step.
+# metta_warmth removed from the active cascade per Workstream B/C (PR #163):
+# it is now status "diagnostic_only" in the observer's TOKEN_STATUS and no
+# longer routes classification. The observer's classify_patch skips it; this
+# mirror must match (parity regression-fence test enforces agreement).
 _ACTIVE_CASCADE_ORDER: tuple[str, ...] = (
     "phase_boundary",
     "compute_aging",
-    "metta_warmth",
     "sensor_alert",
     "energy_pulse",
     "compute_decay",
@@ -1845,8 +1855,10 @@ def _predicate_fires(token: str, features: Any) -> bool:
         return f.distinct_states >= DIVERSITY_BOUNDARY
     if token == "compute_aging":
         return f.compute_frac >= FRACTION_DOMINANT and f.compute_age_mean >= AGE_SAGE
-    if token == "metta_warmth":
-        return (f.compute_count >= 1 or f.energy_count >= 1) and f.warmth_mean >= THRESHOLD_WARMTH
+    # metta_warmth intentionally absent: demoted to diagnostic_only (PR #163),
+    # no longer a routing token. It is not in _ACTIVE_CASCADE_ORDER, so this
+    # mirror is never asked to evaluate it; a stray call would (correctly)
+    # fall through to the ValueError below.
     if token == "sensor_alert":
         return f.sensor_count >= 1
     if token == "energy_pulse":

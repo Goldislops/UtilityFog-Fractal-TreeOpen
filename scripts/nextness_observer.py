@@ -117,6 +117,22 @@ TOKEN_INDEX: Final[dict[str, int]] = {name: i for i, name in enumerate(TOKEN_NAM
 #:                                        no memory-grid dependency.
 #:   "stored"                           — predicate reads stored memory
 #:                                        channels via ``MEMORY_CHANNEL_LAYOUT``.
+#:   "diagnostic_only"                  — the underlying signal is real and
+#:                                        measured, but too sparse / non-
+#:                                        discriminating to route patch
+#:                                        classification in current Medusa
+#:                                        state. Skipped by the cascade; the
+#:                                        signal is instead reported as a
+#:                                        numeric diagnostic field. Set for
+#:                                        ``metta_warmth`` per Workstream B/C
+#:                                        (PR #160–#163): warmth exists but
+#:                                        does not cluster (issue #150).
+#:                                        Distinct from ``deprecated_no_engine
+#:                                        _channel``: there is a real signal;
+#:                                        it is just not useful for routing.
+#:                                        Re-promotable to ``stored`` if a
+#:                                        future profiling pass shows a
+#:                                        stronger signal.
 #:   "deprecated_no_engine_channel"     — predicate previously referenced
 #:                                        a memory channel that the engine
 #:                                        does not store. Disabled until
@@ -127,11 +143,14 @@ TOKEN_INDEX: Final[dict[str, int]] = {name: i for i, name in enumerate(TOKEN_NAM
 #:                                        observer reimplements the
 #:                                        derivation (follow-up TODO).
 #:
-#: The classifier cascade skips any token with status
-#: ``"deprecated_no_engine_channel"`` or ``"derived_future"`` —
-#: ``vocabulary_occupancy`` will accordingly be capped at
-#: (active_tokens / total_tokens) until the deprecated tokens have a
-#: home in the engine.
+#: The classifier cascade skips any token whose status is in
+#: ``NON_ROUTING_STATUSES`` (``"diagnostic_only"``,
+#: ``"deprecated_no_engine_channel"``, ``"derived_future"``). Two occupancy
+#: metrics result: ``vocabulary_occupancy`` (fraction of all TOKEN_NAMES that
+#: appeared — full historical-vocabulary view) and
+#: ``active_vocabulary_occupancy`` (fraction of *routing* tokens that appeared
+#: — so Lane A does not mistake diagnostic vocabulary for active routing
+#: vocabulary). See Workstream C (PR #163) for the status/occupancy model.
 TOKEN_STATUS: Final[dict[str, str]] = {
     "void_static":        "state_only",
     "compute_static":     "state_only",
@@ -142,7 +161,7 @@ TOKEN_STATUS: Final[dict[str, str]] = {
     "structural_decay":   "stored",      # reads structural_age (idx 1)
     "energy_pulse":       "state_only",
     "sensor_alert":       "state_only",
-    "metta_warmth":       "stored",      # reads warmth (idx 6) post-#144 fix
+    "metta_warmth":       "diagnostic_only",  # warmth real but too sparse to route — Workstream B/C, issue #150
     "karuna_relief":      "deprecated_no_engine_channel",  # no compassion channel
     "mudita_resonance":   "deprecated_no_engine_channel",  # no resonance channel
     "magnon_lighthouse":  "derived_future",   # magnon is derived from compute_age, not stored
@@ -153,6 +172,22 @@ TOKEN_STATUS: Final[dict[str, str]] = {
 
 assert set(TOKEN_STATUS.keys()) == set(TOKEN_NAMES), (
     "TOKEN_STATUS must cover every token in TOKEN_NAMES"
+)
+
+#: Statuses whose tokens are skipped by the classifier cascade (they do not
+#: route patch classification). Used to derive the routing-token set for
+#: ``active_vocabulary_occupancy``.
+NON_ROUTING_STATUSES: Final[frozenset[str]] = frozenset({
+    "diagnostic_only",
+    "deprecated_no_engine_channel",
+    "derived_future",
+})
+
+#: Tokens that actively participate in cascade routing (status not in
+#: NON_ROUTING_STATUSES). Denominator for ``active_vocabulary_occupancy``.
+ROUTING_TOKENS: Final[frozenset[str]] = frozenset(
+    name for name, status in TOKEN_STATUS.items()
+    if status not in NON_ROUTING_STATUSES
 )
 
 
@@ -634,6 +669,12 @@ THRESHOLD_WARMTH: Final[float] = 0.3
 THRESHOLD_RESONANCE: Final[float] = 0.3   # unused post-#144
 THRESHOLD_COMPASSION: Final[float] = 0.3  # unused post-#144
 
+# Per-cell warmth floor for the ``warm_cell_count`` diagnostic (Workstream B/C,
+# PR #161 profiling used 0.05 as the lowest threshold at which any warm-cell
+# pairing was observed). Counts cells whose warmth >= this value across the
+# snapshot's warmth channel. Diagnostic only — not consumed by classify_patch.
+WARMTH_DIAGNOSTIC_FLOOR: Final[float] = 0.05
+
 # --- State-fraction thresholds (over the patch's 27 cells at radius=1) ---
 FRACTION_DOMINANT: Final[float] = 0.5    # > 50% of cells (≥14 of 27)
 FRACTION_MAJORITY: Final[float] = 0.7    # > 70% of cells (≥19 of 27)
@@ -765,10 +806,19 @@ def classify_patch(patch: Patch) -> str:
     #      if f.compute_count >= 1 and f.compassion_mean >= THRESHOLD_COMPASSION:
     #          return "karuna_relief"
 
-    # 6. Metta warmth — warmth field around COMPUTE/ENERGY.
-    #    Post-#144: now reads engine's actual warmth channel (idx 6).
-    if (f.compute_count >= 1 or f.energy_count >= 1) and f.warmth_mean >= THRESHOLD_WARMTH:
-        return "metta_warmth"
+    # 6. (DIAGNOSTIC-ONLY per Workstream B/C, PR #160–#163) metta_warmth —
+    #    warmth field around COMPUTE/ENERGY. Post-#144 it correctly reads the
+    #    engine's warmth channel (idx 6), but empirical profiling (PR #161)
+    #    showed warmth is real yet too sparse to cluster: at the 0.990-sparse
+    #    current state the patch-mean predicate never fires, and even max-
+    #    pooling finds only isolated single-cell specks (no multi-cell
+    #    clusters at any threshold). Demoted to status "diagnostic_only" —
+    #    the warmth signal is reported as the ``warmth_max`` / ``warm_cell_count``
+    #    JSONL diagnostics instead of routing classification. Re-promotable if
+    #    a future profiling pass shows a stronger signal (issue #150).
+    #    Original predicate, preserved for future rehabilitation:
+    #      if (f.compute_count >= 1 or f.energy_count >= 1) and f.warmth_mean >= THRESHOLD_WARMTH:
+    #          return "metta_warmth"
 
     # 7. Sensor alert — any SENSOR present (intrinsically rare and notable)
     if f.sensor_count >= 1:
@@ -1358,6 +1408,27 @@ def boundary_rate(token_counts: Mapping[str, int]) -> float:
     return token_counts.get("phase_boundary", 0) / total
 
 
+def active_vocabulary_occupancy(token_counts: Mapping[str, int]) -> float:
+    """Fraction of *routing* tokens that appeared in this snapshot.
+
+    Numerator: distinct routing tokens (status not in
+    ``NON_ROUTING_STATUSES``) with a positive count. Denominator:
+    ``len(ROUTING_TOKENS)`` — the count of tokens that can actually fire in
+    the cascade. Range [0, 1]; 0.0 if no routing tokens exist.
+
+    Distinct from ``vocabulary_occupancy`` (which divides by all 16
+    ``TOKEN_NAMES``, including ``diagnostic_only`` / deprecated / derived-
+    future tokens that cannot fire). Defined per Workstream C (PR #163) so a
+    downstream Lane A agent does not mistake diagnostic vocabulary for active
+    routing vocabulary: ``vocabulary_occupancy`` is the full historical-
+    vocabulary view; this is the routing-only view.
+    """
+    if not ROUTING_TOKENS:
+        return 0.0
+    appeared = sum(1 for t in ROUTING_TOKENS if token_counts.get(t, 0) > 0)
+    return appeared / len(ROUTING_TOKENS)
+
+
 def process_snapshot(
     snapshot_path: str | pathlib.Path,
     config: ObserverConfig,
@@ -1418,6 +1489,31 @@ def process_snapshot(
     budget_block: dict[str, object] = dict(dataclasses.asdict(report))
     budget_block["fraction_used"] = report.fraction_used
 
+    # Warmth diagnostics (Workstream B/C, PR #163): metta_warmth is now
+    # status "diagnostic_only" — it no longer routes classification, so its
+    # underlying warmth signal is reported here as numeric diagnostics instead.
+    # Computed over the whole warmth channel (deterministic regardless of the
+    # stride backoff, unlike the sampled patches).
+    #
+    # AXIS: the memory grid is CHANNEL-FIRST ``(channels, X, Y, Z)`` — the
+    # channel is axis 0. This matches load_snapshot's validation
+    # (``memory.shape[1:] == state.shape``), iter_uniform_grid_patches
+    # (``memory[:, sx, sy, sz]``), and _safe_mean (``memory[idx]``). So we
+    # index ``memory[warmth_idx]`` and guard on ``memory.shape[0]``, NOT
+    # ``memory[..., warmth_idx]`` / ``shape[-1]`` (a channel-last read would
+    # return a spatial cross-section — verified to surface the step counter,
+    # max ~1.7e7, not warmth). Locked by
+    # test_warmth_diagnostics_read_correct_memory_axis. Also defensive over
+    # grids with fewer than 7 channels (mirrors _safe_mean's guard).
+    warmth_idx = MEMORY_CHANNEL_LAYOUT["warmth"]
+    if warmth_idx < memory.shape[0]:
+        warmth_channel = memory[warmth_idx]
+        warmth_max = float(warmth_channel.max())
+        warm_cell_count = int(np.count_nonzero(warmth_channel >= WARMTH_DIAGNOSTIC_FLOOR))
+    else:
+        warmth_max = 0.0
+        warm_cell_count = 0
+
     # PR #3 per-snapshot metrics (PHASE_19_PR3_METRICS_PIPELINE.md §3).
     # All computed from data already in memory; total cost ≈ 50 µs at K=16
     # tokens on a 256³ lattice, negligible against the ~1s classification time.
@@ -1435,11 +1531,20 @@ def process_snapshot(
         "stride_backoff_fired": safe_stride != config.uniform_grid_stride,
         "medusa_is_live": medusa_is_live,
         "token_counts": dict(token_counts),
+        # Full historical-vocabulary occupancy: fraction of ALL 16 TOKEN_NAMES
+        # (including diagnostic_only / deprecated / derived-future) that appeared.
         "vocabulary_occupancy": len(token_counts) / max(1, len(TOKEN_NAMES)),
+        # Routing-only occupancy: fraction of tokens that can actually fire.
+        # Lane A should read this, not vocabulary_occupancy, to gauge how much
+        # of the *active* cascade lit up (Workstream C, PR #163).
+        "active_vocabulary_occupancy": active_vocabulary_occupancy(token_counts),
         "shannon_entropy_bits": shannon_h,
         "entropy_normalized": entropy_normalized(shannon_h, len(TOKEN_NAMES)),
         "void_compute_balance": void_compute_balance(state),
         "boundary_rate": boundary_rate(token_counts),
+        # Warmth diagnostics (metta_warmth demoted to diagnostic_only).
+        "warmth_max": warmth_max,
+        "warm_cell_count": warm_cell_count,
         "budget": budget_block,
     }
     write_log_entry(config.log_directory, entry)
@@ -1458,6 +1563,11 @@ __all__ += [  # type: ignore[misc]
     "entropy_normalized",
     "void_compute_balance",
     "boundary_rate",
+    # Workstream C (PR #163): routing-status model + occupancy/diagnostics
+    "active_vocabulary_occupancy",
+    "NON_ROUTING_STATUSES",
+    "ROUTING_TOKENS",
+    "WARMTH_DIAGNOSTIC_FLOOR",
 ]
 
 
