@@ -1493,8 +1493,18 @@ def process_snapshot(
     # status "diagnostic_only" — it no longer routes classification, so its
     # underlying warmth signal is reported here as numeric diagnostics instead.
     # Computed over the whole warmth channel (deterministic regardless of the
-    # stride backoff, unlike the sampled patches). Defensive over grids with
-    # fewer than 7 channels (mirrors _safe_mean's guard).
+    # stride backoff, unlike the sampled patches).
+    #
+    # AXIS: the memory grid is CHANNEL-FIRST ``(channels, X, Y, Z)`` — the
+    # channel is axis 0. This matches load_snapshot's validation
+    # (``memory.shape[1:] == state.shape``), iter_uniform_grid_patches
+    # (``memory[:, sx, sy, sz]``), and _safe_mean (``memory[idx]``). So we
+    # index ``memory[warmth_idx]`` and guard on ``memory.shape[0]``, NOT
+    # ``memory[..., warmth_idx]`` / ``shape[-1]`` (a channel-last read would
+    # return a spatial cross-section — verified to surface the step counter,
+    # max ~1.7e7, not warmth). Locked by
+    # test_warmth_diagnostics_read_correct_memory_axis. Also defensive over
+    # grids with fewer than 7 channels (mirrors _safe_mean's guard).
     warmth_idx = MEMORY_CHANNEL_LAYOUT["warmth"]
     if warmth_idx < memory.shape[0]:
         warmth_channel = memory[warmth_idx]

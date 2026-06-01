@@ -1258,3 +1258,57 @@ def test_process_snapshot_emits_workstream_c_diagnostic_fields(tmp_path):
     for field in ("warmth_max", "warm_cell_count", "active_vocabulary_occupancy"):
         assert entry[field] == summary[field], \
             f"{field} differs between summary and JSONL: {summary[field]!r} vs {entry[field]!r}"
+
+
+def test_warmth_diagnostics_read_correct_memory_axis(tmp_path):
+    """Axis regression fence (Jack's PR #164 audit): warmth_max /
+    warm_cell_count must read the warmth CHANNEL from the channel-first grid
+    (``memory[idx]``, axis 0), NOT a spatial cross-section
+    (``memory[..., idx]``, the channel-last layout Jack flagged).
+
+    The memory grid is channel-first ``(channels, X, Y, Z)`` — enforced by
+    load_snapshot's ``memory.shape[1:] == state.shape`` validation, and used
+    by ``iter_uniform_grid_patches`` (``memory[:, ...]``) and ``_safe_mean``
+    (``memory[idx]``). This test makes the convention executable: it injects
+    warmth ONLY into the true warmth channel while a DIFFERENT channel
+    (compute_age) holds a large distinctive value. A channel-first read sees
+    the injected 0.5; a wrong-axis ``memory[..., 6]`` read would pick up the
+    999.0 compute_age slice and fail these assertions. The prior all-zero
+    test cannot catch this because both axes read zero there.
+    """
+    from scripts.nextness_observer import WARMTH_DIAGNOSTIC_FLOOR
+    L = 16
+    state = np.zeros((L, L, L), dtype=np.uint8)
+    state[::4, ::4, ::4] = STATE_COMPUTE
+    memory = np.zeros((8, L, L, L), dtype=np.float32)
+    # A non-warmth channel holds a large distinctive value: a wrong-axis read
+    # would surface this instead of warmth.
+    memory[CH["compute_age"]].fill(999.0)
+    # Inject warmth ONLY into the true warmth channel at 7 known cells.
+    warm_value = 0.5
+    warm_cells = [(0, 0, 0), (1, 2, 3), (4, 5, 6), (7, 8, 9),
+                  (10, 11, 12), (13, 14, 15), (2, 9, 4)]
+    for (x, y, z) in warm_cells:
+        memory[CH["warmth"], x, y, z] = warm_value
+    snap = tmp_path / "v070_gen1.npz"
+    np.savez(str(snap), lattice=state, memory_grid=memory,
+             generation=np.array(1), best_fitness=np.array(0.5))
+
+    log_dir = tmp_path / "log"
+    log_dir.parent.mkdir(exist_ok=True)
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    summary = process_snapshot(snap, cfg, medusa_is_live=False)
+
+    # warm_value (0.5) is well above WARMTH_DIAGNOSTIC_FLOOR (0.05).
+    assert warm_value >= WARMTH_DIAGNOSTIC_FLOOR
+    assert summary["warmth_max"] == pytest.approx(warm_value), (
+        f"warmth_max={summary['warmth_max']!r}; expected {warm_value}. A value "
+        f"near 999 would indicate a wrong-axis (channel-last) read of the "
+        f"compute_age channel instead of the warmth channel."
+    )
+    assert summary["warm_cell_count"] == len(warm_cells), (
+        f"warm_cell_count={summary['warm_cell_count']!r}; expected "
+        f"{len(warm_cells)} warmth cells >= {WARMTH_DIAGNOSTIC_FLOOR}. A much "
+        f"larger count would indicate a wrong-axis read."
+    )
