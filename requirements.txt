@@ -1,0 +1,12 @@
+
+# Core dependencies for Fractal Tree MVP
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pyyaml>=6.0
+networkx>=3.0
+plotly>=5.0.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+websockets>=11.0
+pydantic>=2.0.0
