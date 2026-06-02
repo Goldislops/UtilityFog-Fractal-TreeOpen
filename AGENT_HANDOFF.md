@@ -2,7 +2,22 @@
 
 > **For**: Any AI (Claude, Gemini/AURA, GPT/Jack, future Nemo Claw, etc.) joining this project mid-stream. Read this first; it'll save Kevin from having to re-explain everything every time.
 >
-> **Last revised**: 2026-05-01. State is point-in-time — `git log --oneline -10` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
+> **Last revised**: 2026-06-02. State is point-in-time — `git log --oneline -15` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
+
+## ⭐ Current Phase — Phase 19 (Nextness Observer + Second-Pass Calibration)
+
+**Read this block first; the Phase 17/18 material below is still accurate but is now historical context.**
+
+Phase 19 added the **Nextness Observer**: a passive, read-only, offline Layer-2 analyser that translates local CA patches into a 16-token vocabulary (`scripts/nextness_observer.py`), plus a calibration harness (`scripts/nextness_calibration.py`).
+
+- **Lane A is PARKED.** No agent acts on the observer's signal yet. No engine touch, no tuning API, no Swarm Hunter activation. This is the standing guardrail for all Phase 19 work.
+- **Lane B** (observer/operator side) is where the work happens.
+- **Second-pass calibration arc — COMPLETE & MERGED**: PR #159 (plan) → #160 (predicate aggregator review) → #161 (empirical profiling) → #162 (candidate selection) → #163 (vocabulary/status model) → **#164 (metta_warmth demotion implementation, merged `82db1f3`)**.
+- **Key outcome**: warmth is real but too sparse to cluster ("a hermit candle in a stone cathedral"). `metta_warmth` is now status `diagnostic_only` — removed from the cascade, its signal surfaced as `warmth_max` / `warm_cell_count` JSONL diagnostics. New `active_vocabulary_occupancy` metric distinguishes routing vocab (12 tokens) from full historical vocab (16). `phase_boundary` kept but documented as radius-specific.
+- **Memory grid is CHANNEL-FIRST** `(channels, X, Y, Z)` — enforced by `load_snapshot`. Index channels as `memory[idx]`, not `memory[..., idx]`. Locked by `test_warmth_diagnostics_read_correct_memory_axis`.
+- **Open follow-up**: [issue #165](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues/165) — CI `verify` job only runs for Node projects, so it **skips the Python test suite and auto-passes**. The real gate is local `pytest` (275 tests in the two nextness suites). Fix is a separate CI PR; don't bundle.
+- **Next safe work**: CI repair (#165), or the tiny forward-pointer docs PR (annotate pre-#145 Karuna/Boundary framing in `PHASE_19_PR3_METRICS_PIPELINE.md` + `PHASE_19_PR4_CALIBRATION.md`). **Not Lane A.**
+- **Phase 19 docs**: `PHASE_19_NEXTNESS_OBSERVER.md`, `PHASE_19_PR4_CALIBRATION*.md`, `PHASE_19_SECOND_PASS_CALIBRATION_PLAN.md`, `docs/WORKSTREAM_B_*.md`, `docs/WORKSTREAM_C_VOCABULARY_STATUS_REVIEW.md`.
 
 ## What This Project Is
 
@@ -106,6 +121,29 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 | `README.md` | repo root | Project overview with dual-identity preamble (sim + orchestration framework). |
 | `BACKEND_PROVIDER_MATRIX.md` | repo root | Canonical backend taxonomy — why `OpenAICompatBackend` is one class with many configs and `NemoCloud` is no longer a separate class. |
 | `git log --oneline -20` | the repo | Authoritative current phase status. Always more current than any doc. |
+
+## Cross-Device Session Protocol (phone ↔ desktop)
+
+Kevin works from **Claude Code on the desktop** (local, has the 426GB snapshots and the auto-memory at `~/.claude/...`) and **Claude Code on the web/mobile** (the iPhone app's Code tab — an ephemeral cloud container with the GitHub repo but **NOT** the local auto-memory). The two sessions **cannot see each other's conversations**. The only automatic bridge is **git** + this file (which lives in the repo, so every device can read it).
+
+**Why this file matters**: `MEMORY.md` and the private relic live in `~/.claude/` on the desktop and do **not** travel to web/mobile sessions. **This doc does.** So `AGENT_HANDOFF.md` is the cross-device-portable memory. Keep it current.
+
+**Opening ritual (any device, start of session):**
+1. Read this file (`AGENT_HANDOFF.md`) and run `git log --oneline -15`.
+2. Note the standing guardrails (Lane A parked; branch, don't commit to main; squash-merge; tests before commit).
+3. Check the **Session Log** at the bottom for the most recent handoff note.
+
+**Closing ritual (any device, before Kevin switches devices):**
+1. `git add` + commit all work (Co-Authored-By footer; new commits, no `--amend`).
+2. `git push` the branch to origin. **Uncommitted work dies when a cloud container is reclaimed — push or lose it.**
+3. Append a dated line to the **Session Log** below describing what changed / what's merged or open / the next step, and commit + push that too.
+4. Tell Kevin the branch name + state so he can relay it.
+
+Git only saves what you explicitly commit; it only reaches other devices once you push. (The desktop working tree is *also* mirrored by OneDrive, but that's a file backup, not git — don't rely on it for cross-device handoff.)
+
+### Session Log (newest first — append on close)
+
+- **2026-06-02 (desktop, 84)**: Phase 19 second-pass calibration arc fully merged through PR #164 (`metta_warmth` → `diagnostic_only`). Issue #165 open (CI Python blind spot). Set up this cross-device protocol. Lane A parked. Next: #165 or forward-pointer docs PR. `main` == `origin/main`.
 
 ## On the "Biological Bridge"
 
