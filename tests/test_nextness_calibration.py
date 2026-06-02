@@ -476,6 +476,7 @@ def test_sweep_threshold_rejects_mismatched_config_log_directory(tmp_path):
             log_path=log_path,
             calibration_set="short",
             config=bad_config,
+            threshold_dependent_token="compute_decay",
         )
     assert not bogus_dir.exists()
     assert not out.exists()
@@ -1661,7 +1662,8 @@ def test_sweep_threshold_rejects_outside_log_dir_output(tmp_path):
     snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
     bad_out = tmp_path / "outside_dir" / "out.jsonl"
     with pytest.raises(WriteOutsideLogDirError, match="outside log_path"):
-        sweep_threshold([snap], bad_out, log_path, "short", config)
+        sweep_threshold([snap], bad_out, log_path, "short", config,
+                        threshold_dependent_token="compute_decay")
     assert not (tmp_path / "outside_dir").exists()
 
 
@@ -1679,7 +1681,8 @@ def test_sweep_threshold_restores_threshold_after_run(tmp_path):
     out = log_path.parent / "calibration_threshold.jsonl"
 
     original = obs.THRESHOLD_WARMTH
-    sweep_threshold([snap], out, log_path, "short", config)
+    sweep_threshold([snap], out, log_path, "short", config,
+                    threshold_dependent_token="compute_decay")
     assert obs.THRESHOLD_WARMTH == original
 
 
@@ -1706,7 +1709,8 @@ def test_sweep_threshold_restores_threshold_even_if_process_snapshot_fails(tmp_p
         broken_process,
     )
     with pytest.raises(RuntimeError, match="simulated mid-sweep failure"):
-        sweep_threshold([snap], out, log_path, "short", config)
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_dependent_token="compute_decay")
     # Threshold must be restored despite the exception
     assert obs.THRESHOLD_WARMTH == original
 
@@ -1722,7 +1726,8 @@ def test_sweep_threshold_writes_expected_row_count(tmp_path):
     out = log_path.parent / "calibration_threshold.jsonl"
     # Use a small multiplier set for test speed
     sweep_threshold(snaps, out, log_path, "short", config,
-                    multipliers=(0.5, 1.0, 1.5))
+                    multipliers=(0.5, 1.0, 1.5),
+                    threshold_dependent_token="compute_decay")
 
     lines = out.read_text().splitlines()
     # 2 snapshots × 3 multipliers + 1 aggregate = 7
@@ -1738,7 +1743,8 @@ def test_sweep_threshold_per_row_has_effective_value(tmp_path):
     out = log_path.parent / "calibration_threshold.jsonl"
     base = obs.THRESHOLD_WARMTH
     sweep_threshold([snap], out, log_path, "short", config,
-                    multipliers=(0.5, 1.0, 2.0))
+                    multipliers=(0.5, 1.0, 2.0),
+                    threshold_dependent_token="compute_decay")
 
     pair_rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     eff_values = sorted(r["parameter_combination"]["threshold_effective_value"]
@@ -1754,7 +1760,8 @@ def test_sweep_threshold_aggregate_has_knife_edge_evidence(tmp_path):
     snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
                           generation=1, lattice=16)
     out = log_path.parent / "calibration_threshold.jsonl"
-    aggregate = sweep_threshold([snap], out, log_path, "short", config)
+    aggregate = sweep_threshold([snap], out, log_path, "short", config,
+                                threshold_dependent_token="compute_decay")
 
     assert aggregate["experiment"] == "threshold_sweep"
     assert "threshold_base_value" in aggregate
@@ -1770,11 +1777,15 @@ def test_sweep_threshold_inconclusive_when_token_never_fires(tmp_path):
     snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
                           generation=1, lattice=16)
     out = log_path.parent / "calibration_threshold.jsonl"
-    # Our synthetic snapshot has zero warmth (all-zero memory channel 6),
-    # so even at multiplier=0.5 metta_warmth won't fire — token count = 0
-    # across every multiplier. Status should be inconclusive, not falsified.
+    # Use a real routing token that does not fire on this synthetic snapshot:
+    # the only token that classifies here is compute_decay (all cells are
+    # compute with compute_age=15 and zero warmth), so acoustic_stress has a
+    # firing count of 0 across every multiplier. Status should be inconclusive,
+    # not falsified. (Post-#164 the sweep refuses the old metta_warmth default
+    # outright, so the never-fires path must be exercised via a routing token.)
     aggregate = sweep_threshold([snap], out, log_path, "short", config,
-                                multipliers=(0.5, 1.0, 1.5))
+                                multipliers=(0.5, 1.0, 1.5),
+                                threshold_dependent_token="acoustic_stress")
     assert aggregate["falsification_status"] == "inconclusive"
     assert "never fires" in aggregate["knife_edge_evidence"].get("reason", "")
 
@@ -1786,7 +1797,8 @@ def test_sweep_threshold_no_generated_at_field(tmp_path):
                           generation=1, lattice=16)
     out = log_path.parent / "calibration_threshold.jsonl"
     sweep_threshold([snap], out, log_path, "short", config,
-                    multipliers=(0.5, 1.0, 1.5))
+                    multipliers=(0.5, 1.0, 1.5),
+                    threshold_dependent_token="compute_decay")
     assert "generated_at" not in out.read_text()
 
 
@@ -1798,9 +1810,11 @@ def test_sweep_threshold_byte_identical_on_rerun(tmp_path):
     out_a = log_path.parent / "calibration_threshold_a.jsonl"
     out_b = log_path.parent / "calibration_threshold_b.jsonl"
     sweep_threshold([snap], out_a, log_path, "short", config,
-                    multipliers=(0.5, 1.0, 1.5))
+                    multipliers=(0.5, 1.0, 1.5),
+                    threshold_dependent_token="compute_decay")
     sweep_threshold([snap], out_b, log_path, "short", config,
-                    multipliers=(0.5, 1.0, 1.5))
+                    multipliers=(0.5, 1.0, 1.5),
+                    threshold_dependent_token="compute_decay")
     assert out_a.read_bytes() == out_b.read_bytes()
 
 
@@ -1815,11 +1829,70 @@ def test_sweep_threshold_sorts_input_by_generation(tmp_path):
                         generation=200, lattice=16)
     out = log_path.parent / "calibration_threshold.jsonl"
     sweep_threshold([s3, s1, s2], out, log_path, "short", config,
-                    multipliers=(1.0,))  # single multiplier for predictable ordering
+                    multipliers=(1.0,),  # single multiplier for predictable ordering
+                    threshold_dependent_token="compute_decay")
 
     rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200, 300]
+
+
+def test_sweep_threshold_rejects_missing_token(tmp_path):
+    """Explicit-only (post-#164 hardening): there is no threshold_dependent_token
+    default. Omitting it must raise a clear ValueError rather than silently
+    sweeping the demoted metta_warmth token (inconclusive by construction)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="must be passed explicitly"):
+        sweep_threshold([snap], out, log_path, "short", config)
+
+
+def test_sweep_threshold_rejects_non_routing_token(tmp_path):
+    """A non-routing token (e.g. the demoted metta_warmth, status
+    diagnostic_only) never fires in the active cascade, so a sweep against it is
+    inconclusive by construction. It must be rejected with a clear message
+    rather than silently manufacturing useless calibration evidence."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="non-routing status"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_dependent_token="metta_warmth")
+
+
+def test_sweep_threshold_rejects_unknown_token(tmp_path):
+    """An unknown token name is rejected clearly (not silently treated as
+    never-firing)."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    with pytest.raises(ValueError, match="not a known token"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_dependent_token="not_a_real_token")
+
+
+def test_sweep_threshold_explicit_routing_token_is_recorded(tmp_path):
+    """Explicit routing-token selection still works and the chosen token name is
+    threaded into the aggregate + per-snapshot rows."""
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz",
+                          generation=1, lattice=16)
+    out = log_path.parent / "calibration_threshold.jsonl"
+    aggregate = sweep_threshold([snap], out, log_path, "short", config,
+                                multipliers=(1.0,),
+                                threshold_dependent_token="compute_decay")
+    assert aggregate["threshold_dependent_token"] == "compute_decay"
+    pair_rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
+    assert pair_rows  # sanity: at least one per-snapshot row
+    assert all(
+        r["parameter_combination"]["threshold_dependent_token"] == "compute_decay"
+        for r in pair_rows
+    )
+    assert all(
+        r["metrics"]["threshold_dependent_token_name"] == "compute_decay"
+        for r in pair_rows
+    )
 
 
 # ===========================================================================

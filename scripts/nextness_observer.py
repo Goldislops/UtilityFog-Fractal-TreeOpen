@@ -1429,6 +1429,41 @@ def active_vocabulary_occupancy(token_counts: Mapping[str, int]) -> float:
     return appeared / len(ROUTING_TOKENS)
 
 
+def _warmth_diagnostics(memory: np.ndarray) -> tuple[float, int]:
+    """Compute ``(warmth_max, warm_cell_count)`` from the memory grid.
+
+    Computed over the whole warmth channel (deterministic regardless of the
+    stride backoff, unlike the sampled patches). metta_warmth is status
+    ``diagnostic_only`` — it no longer routes classification, so its signal
+    surfaces here as JSONL diagnostics instead.
+
+    AXIS: the memory grid is CHANNEL-FIRST ``(channels, X, Y, Z)`` — the
+    channel is axis 0. This matches load_snapshot's validation
+    (``memory.shape[1:] == state.shape``), iter_uniform_grid_patches
+    (``memory[:, sx, sy, sz]``), and _safe_mean (``memory[idx]``). So we index
+    ``memory[warmth_idx]`` and guard on ``memory.shape[0]``, NOT
+    ``memory[..., warmth_idx]`` / ``shape[-1]`` (a channel-last read would
+    return a spatial cross-section — verified to surface the step counter, max
+    ~1.7e7, not warmth). Locked by test_warmth_diagnostics_read_correct_memory_axis.
+
+    Defensive on two axes: grids with fewer than 7 channels (mirrors
+    _safe_mean's guard) AND a present-but-empty warmth channel —
+    ``ndarray.max()`` raises ``ValueError`` on a zero-size array ("zero-size
+    array to reduction operation maximum which has no identity"). Real Medusa
+    grids are never empty, but the ``.size > 0`` guard keeps this diagnostic
+    total rather than letting a degenerate snapshot crash the whole pass.
+    Absent or empty warmth channel → safe ``(0.0, 0)``.
+    """
+    warmth_idx = MEMORY_CHANNEL_LAYOUT["warmth"]
+    if warmth_idx < memory.shape[0] and memory[warmth_idx].size > 0:
+        warmth_channel = memory[warmth_idx]
+        return (
+            float(warmth_channel.max()),
+            int(np.count_nonzero(warmth_channel >= WARMTH_DIAGNOSTIC_FLOOR)),
+        )
+    return 0.0, 0
+
+
 def process_snapshot(
     snapshot_path: str | pathlib.Path,
     config: ObserverConfig,
@@ -1492,27 +1527,9 @@ def process_snapshot(
     # Warmth diagnostics (Workstream B/C, PR #163): metta_warmth is now
     # status "diagnostic_only" — it no longer routes classification, so its
     # underlying warmth signal is reported here as numeric diagnostics instead.
-    # Computed over the whole warmth channel (deterministic regardless of the
-    # stride backoff, unlike the sampled patches).
-    #
-    # AXIS: the memory grid is CHANNEL-FIRST ``(channels, X, Y, Z)`` — the
-    # channel is axis 0. This matches load_snapshot's validation
-    # (``memory.shape[1:] == state.shape``), iter_uniform_grid_patches
-    # (``memory[:, sx, sy, sz]``), and _safe_mean (``memory[idx]``). So we
-    # index ``memory[warmth_idx]`` and guard on ``memory.shape[0]``, NOT
-    # ``memory[..., warmth_idx]`` / ``shape[-1]`` (a channel-last read would
-    # return a spatial cross-section — verified to surface the step counter,
-    # max ~1.7e7, not warmth). Locked by
-    # test_warmth_diagnostics_read_correct_memory_axis. Also defensive over
-    # grids with fewer than 7 channels (mirrors _safe_mean's guard).
-    warmth_idx = MEMORY_CHANNEL_LAYOUT["warmth"]
-    if warmth_idx < memory.shape[0]:
-        warmth_channel = memory[warmth_idx]
-        warmth_max = float(warmth_channel.max())
-        warm_cell_count = int(np.count_nonzero(warmth_channel >= WARMTH_DIAGNOSTIC_FLOOR))
-    else:
-        warmth_max = 0.0
-        warm_cell_count = 0
+    # Warmth diagnostics over the whole channel (see _warmth_diagnostics for
+    # the channel-first AXIS contract + the empty/absent-channel guards).
+    warmth_max, warm_cell_count = _warmth_diagnostics(memory)
 
     # PR #3 per-snapshot metrics (PHASE_19_PR3_METRICS_PIPELINE.md §3).
     # All computed from data already in memory; total cost ≈ 50 µs at K=16
