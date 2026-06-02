@@ -1520,7 +1520,7 @@ def sweep_threshold(
     config: ObserverConfig,
     threshold_name: str = DEFAULT_THRESHOLD_NAME,
     multipliers: tuple[float, ...] = DEFAULT_THRESHOLD_MULTIPLIERS,
-    threshold_dependent_token: str = "metta_warmth",
+    threshold_dependent_token: str | None = None,
 ) -> dict[str, Any]:
     """Threshold sensitivity sweep per design doc §3.4.
 
@@ -1572,22 +1572,29 @@ def sweep_threshold(
             threshold's base value. Must be all positive.
         threshold_dependent_token: name of the token whose firing count
             we track across the sweep for the knife-edge criterion.
-            Defaults to ``"metta_warmth"`` for backward compatibility.
-            NOTE (Workstream B/C, PR #163): metta_warmth was demoted to
-            status ``diagnostic_only`` and removed from the active cascade,
-            so it now never fires and the sweep reports ``inconclusive`` for
-            it by construction. The tokens that actually depend on
-            ``THRESHOLD_WARMTH`` post-demotion are ``compute_decay`` and
-            ``acoustic_stress`` (both gate on ``warmth_mean < THRESHOLD_WARMTH``);
-            a future calibration PR may repoint this default to one of them.
-            Left unchanged here to keep the demotion PR narrow.
+            **Required and explicit-only** (post-#164 hardening): there is no
+            default. The former silent default ``"metta_warmth"`` was demoted
+            to status ``diagnostic_only`` and removed from the active cascade
+            (Workstream B/C, PR #163/#164), so it never fires and a sweep
+            against it is ``inconclusive`` *by construction* — silently
+            defaulting to it produced guaranteed-inconclusive calibration
+            evidence. We refuse to pick a replacement default silently either:
+            the caller must name a routing token (status not in
+            ``NON_ROUTING_STATUSES``) whose firing count genuinely depends on
+            the swept threshold. The tokens that actually gate on
+            ``THRESHOLD_WARMTH`` post-#144 are ``compute_decay`` and
+            ``acoustic_stress`` (both gate on ``warmth_mean < THRESHOLD_WARMTH``).
+            Passing ``None``, an unknown token, or a non-routing token raises
+            ``ValueError``.
 
     Returns the aggregate dict for callers that want to inspect it.
 
     Raises:
         :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir.
         ``ValueError`` for invalid calibration_set, missing threshold
-            attribute, empty multipliers, or non-positive multipliers.
+            attribute, empty multipliers, non-positive multipliers, or a
+            ``threshold_dependent_token`` that is ``None`` (not passed
+            explicitly), unknown, or non-routing.
     """
     # Lazy import of the observer module so we can monkeypatch its
     # threshold attribute. This is the only place in the calibration
@@ -1611,6 +1618,36 @@ def sweep_threshold(
             raise ValueError(
                 f"every multiplier must be a positive number, got {m!r}"
             )
+
+    # threshold_dependent_token is explicit-only (post-#164 hardening). We
+    # refuse to silently default to a non-routing token: metta_warmth (the
+    # former default) is diagnostic_only and a sweep against it is inconclusive
+    # by construction, so a silent default manufactures guaranteed-inconclusive
+    # evidence. Force the caller to name a routing token explicitly.
+    if threshold_dependent_token is None:
+        raise ValueError(
+            "threshold_dependent_token must be passed explicitly; there is no "
+            "default. The former silent default 'metta_warmth' is now status "
+            "'diagnostic_only' (non-routing, Workstream B/C PR #163/#164): it "
+            "never fires in the active cascade, so sweeping against it is "
+            "inconclusive by construction. Choose a routing token whose firing "
+            "count actually depends on the swept threshold, e.g. one of: "
+            f"{sorted(_observer_module.ROUTING_TOKENS)}."
+        )
+    if threshold_dependent_token not in _observer_module.TOKEN_NAMES:
+        raise ValueError(
+            f"threshold_dependent_token {threshold_dependent_token!r} is not a "
+            f"known token. Valid tokens: {sorted(_observer_module.TOKEN_NAMES)}."
+        )
+    if threshold_dependent_token not in _observer_module.ROUTING_TOKENS:
+        status = _observer_module.TOKEN_STATUS[threshold_dependent_token]
+        raise ValueError(
+            f"threshold_dependent_token {threshold_dependent_token!r} has "
+            f"non-routing status {status!r}: it never fires in the active "
+            "cascade, so the sweep would be inconclusive by construction. Pass "
+            "a routing token instead, e.g. one of: "
+            f"{sorted(_observer_module.ROUTING_TOKENS)}."
+        )
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)

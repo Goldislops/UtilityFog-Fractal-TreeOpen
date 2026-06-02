@@ -1312,3 +1312,45 @@ def test_warmth_diagnostics_read_correct_memory_axis(tmp_path):
         f"{len(warm_cells)} warmth cells >= {WARMTH_DIAGNOSTIC_FLOOR}. A much "
         f"larger count would indicate a wrong-axis read."
     )
+
+
+def test_warmth_diagnostics_empty_channel_returns_safe_zeros():
+    """Post-#164 hardening: a present-but-empty warmth channel must not crash.
+
+    ``ndarray.max()`` raises ValueError on a zero-size array ("zero-size array
+    to reduction operation maximum which has no identity"). Real Medusa grids
+    are never empty, but _warmth_diagnostics guards on ``.size > 0`` so a
+    degenerate snapshot yields safe ``(0.0, 0)`` diagnostics instead of taking
+    down the whole observation pass. (process_snapshot rejects zero-size
+    lattices upstream, so the guard is exercised here at the helper boundary.)
+    """
+    from scripts.nextness_observer import _warmth_diagnostics
+    # Warmth channel (idx 6) present but zero-size on a spatial axis.
+    empty = np.zeros((8, 0, 4, 4), dtype=np.float32)
+    assert _warmth_diagnostics(empty) == (0.0, 0)
+
+
+def test_warmth_diagnostics_absent_channel_returns_safe_zeros():
+    """Defensive: a grid with fewer channels than the warmth index returns safe
+    zeros (mirrors _safe_mean's channel-count guard)."""
+    from scripts.nextness_observer import _warmth_diagnostics
+    too_few = np.ones((3, 4, 4, 4), dtype=np.float32)
+    assert _warmth_diagnostics(too_few) == (0.0, 0)
+
+
+def test_warmth_diagnostics_nonempty_channel_computes_max_and_count():
+    """Sanity: a populated warmth channel returns the channel max and the count
+    of cells at or above WARMTH_DIAGNOSTIC_FLOOR."""
+    from scripts.nextness_observer import (
+        _warmth_diagnostics,
+        WARMTH_DIAGNOSTIC_FLOOR,
+        MEMORY_CHANNEL_LAYOUT,
+    )
+    memory = np.zeros((8, 4, 4, 4), dtype=np.float32)
+    widx = MEMORY_CHANNEL_LAYOUT["warmth"]
+    memory[widx, 0, 0, 0] = 0.9
+    memory[widx, 1, 1, 1] = WARMTH_DIAGNOSTIC_FLOOR          # exactly at floor counts
+    memory[widx, 2, 2, 2] = WARMTH_DIAGNOSTIC_FLOOR / 2.0    # below floor, excluded
+    warmth_max, warm_count = _warmth_diagnostics(memory)
+    assert warmth_max == pytest.approx(0.9)
+    assert warm_count == 2
