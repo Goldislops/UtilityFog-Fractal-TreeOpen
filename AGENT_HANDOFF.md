@@ -15,8 +15,8 @@ Phase 19 added the **Nextness Observer**: a passive, read-only, offline Layer-2 
 - **Second-pass calibration arc — COMPLETE & MERGED**: PR #159 (plan) → #160 (predicate aggregator review) → #161 (empirical profiling) → #162 (candidate selection) → #163 (vocabulary/status model) → **#164 (metta_warmth demotion implementation, merged `82db1f3`)**.
 - **Key outcome**: warmth is real but too sparse to cluster ("a hermit candle in a stone cathedral"). `metta_warmth` is now status `diagnostic_only` — removed from the cascade, its signal surfaced as `warmth_max` / `warm_cell_count` JSONL diagnostics. New `active_vocabulary_occupancy` metric distinguishes routing vocab (12 tokens) from full historical vocab (16). `phase_boundary` kept but documented as radius-specific.
 - **Memory grid is CHANNEL-FIRST** `(channels, X, Y, Z)` — enforced by `load_snapshot`. Index channels as `memory[idx]`, not `memory[..., idx]`. Locked by `test_warmth_diagnostics_read_correct_memory_axis`.
-- **Open follow-up**: [issue #165](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues/165) — CI `verify` job only runs for Node projects, so it **skips the Python test suite and auto-passes**. The real gate is local `pytest` (275 tests in the two nextness suites). Fix is a separate CI PR; don't bundle.
-- **Next safe work**: CI repair (#165), or the tiny forward-pointer docs PR (annotate pre-#145 Karuna/Boundary framing in `PHASE_19_PR3_METRICS_PIPELINE.md` + `PHASE_19_PR4_CALIBRATION.md`). **Not Lane A.**
+- **CI gate (core landed)**: PR #167 added a `verify-python` job — CI now runs `tests/test_nextness_observer.py` + `tests/test_nextness_calibration.py` (275 tests) on every PR/push and fails visibly on regression. [Issue #165](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/issues/165) stays **open** only for coverage-broadening (the pre-existing broken collectors: `uft_ca`, `utilityfog_frontend.cli_viz`, root `*_test.py`).
+- **Next safe work** (now protected by the CI gate): (1) post-#164 hardening PR — make `sweep_threshold()` token **explicit-only** (AURA's call: don't silently default to another routing token) + add a `warmth_channel.size > 0` guard before `.max()`; (2) #165 coverage-broadening; (3) tiny forward-pointer docs PR (annotate pre-#145 Karuna/Boundary framing in `PHASE_19_PR3_METRICS_PIPELINE.md` + `PHASE_19_PR4_CALIBRATION.md`). **Not Lane A.**
 - **Phase 19 docs**: `PHASE_19_NEXTNESS_OBSERVER.md`, `PHASE_19_PR4_CALIBRATION*.md`, `PHASE_19_SECOND_PASS_CALIBRATION_PLAN.md`, `docs/WORKSTREAM_B_*.md`, `docs/WORKSTREAM_C_VOCABULARY_STATUS_REVIEW.md`.
 
 ## What This Project Is
@@ -143,6 +143,7 @@ Git only saves what you explicitly commit; it only reaches other devices once yo
 
 ### Session Log (newest first — append on close)
 
+- **2026-06-02 (desktop, 84) — later**: CI Python gate landed (PR #167) — `verify-python` runs the 275-test nextness suite on GitHub, verified green live. #165 reopened for coverage-broadening only. Next: post-#164 hardening PR (sweep_threshold explicit-only + warmth `.size` guard), then #165 coverage, then forward-pointer docs. Lane A parked. `main` == `origin/main`.
 - **2026-06-02 (desktop, 84)**: Phase 19 second-pass calibration arc fully merged through PR #164 (`metta_warmth` → `diagnostic_only`). Issue #165 open (CI Python blind spot). Set up this cross-device protocol. Lane A parked. Next: #165 or forward-pointer docs PR. `main` == `origin/main`.
 
 ## On the "Biological Bridge"
