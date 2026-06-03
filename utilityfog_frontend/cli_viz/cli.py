@@ -59,7 +59,7 @@ Examples:
         tree_parser = subparsers.add_parser('tree', help='Display tree structure')
         tree_parser.add_argument('--input', '-i', required=True, help='Input JSON file')
         tree_parser.add_argument('--width', '-w', type=int, default=80, help='Display width')
-        tree_parser.add_argument('--height', '-h', type=int, default=24, help='Display height')
+        tree_parser.add_argument('--height', type=int, default=24, help='Display height')
         tree_parser.add_argument('--color-scheme', choices=['default', 'dark', 'colorblind'], 
                                default='default', help='Color scheme')
         tree_parser.add_argument('--show-ids', action='store_true', help='Show node IDs')
@@ -68,7 +68,7 @@ Examples:
         flow_parser = subparsers.add_parser('flow', help='Display message flows')
         flow_parser.add_argument('--input', '-i', required=True, help='Input JSON file')
         flow_parser.add_argument('--width', '-w', type=int, default=80, help='Display width')
-        flow_parser.add_argument('--height', '-h', type=int, default=24, help='Display height')
+        flow_parser.add_argument('--height', type=int, default=24, help='Display height')
         flow_parser.add_argument('--time-window', '-t', type=float, default=60.0, 
                                help='Time window in seconds')
         flow_parser.add_argument('--color-scheme', choices=['default', 'dark', 'colorblind'], 
@@ -78,7 +78,7 @@ Examples:
         state_parser = subparsers.add_parser('state', help='Display state transitions')
         state_parser.add_argument('--input', '-i', required=True, help='Input JSON file')
         state_parser.add_argument('--width', '-w', type=int, default=80, help='Display width')
-        state_parser.add_argument('--height', '-h', type=int, default=24, help='Display height')
+        state_parser.add_argument('--height', type=int, default=24, help='Display height')
         state_parser.add_argument('--time-window', '-t', type=float, default=300.0, 
                                help='Time window in seconds')
         state_parser.add_argument('--color-scheme', choices=['default', 'dark', 'colorblind'], 
@@ -88,7 +88,7 @@ Examples:
         interactive_parser = subparsers.add_parser('interactive', help='Interactive visualization')
         interactive_parser.add_argument('--input', '-i', required=True, help='Input JSON file')
         interactive_parser.add_argument('--width', '-w', type=int, default=80, help='Display width')
-        interactive_parser.add_argument('--height', '-h', type=int, default=24, help='Display height')
+        interactive_parser.add_argument('--height', type=int, default=24, help='Display height')
         interactive_parser.add_argument('--refresh-rate', '-r', type=float, default=1.0, 
                                       help='Refresh rate in seconds')
         interactive_parser.add_argument('--color-scheme', choices=['default', 'dark', 'colorblind'], 
