@@ -39,6 +39,10 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
+
+# flask is an optional dependency for the provider HTTP surface. Skip this
+# module when it is absent rather than erroring at collection. (#165 Tier 1)
+pytest.importorskip("flask")
 from flask import Flask
 
 from scripts.agent_backends import (

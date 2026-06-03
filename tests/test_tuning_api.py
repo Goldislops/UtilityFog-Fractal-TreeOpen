@@ -17,6 +17,10 @@ import json
 from pathlib import Path
 
 import pytest
+
+# flask is an optional dependency for the tuning HTTP API. Skip this module
+# when it is absent rather than erroring at collection. (#165 Tier 1)
+pytest.importorskip("flask")
 from flask import Flask
 
 from scripts.tuning_api import (

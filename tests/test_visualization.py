@@ -5,6 +5,10 @@ import tempfile
 
 import pytest
 import numpy as np
+
+# matplotlib is an optional, heavy visualization dependency. Skip this module
+# when it is absent rather than erroring at collection. (#165 Tier 1)
+pytest.importorskip("matplotlib")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
