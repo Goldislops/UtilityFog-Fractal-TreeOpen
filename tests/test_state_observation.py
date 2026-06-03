@@ -1,4 +1,10 @@
 import pytest
+
+# uft_ca is a Rust/pyo3 extension (crates/uft_ca) that must be built (maturin)
+# to be importable. Skip this module when the built extension is absent rather
+# than erroring at collection. Building it in CI is tracked as a follow-up.
+# (#165 Tier 3B)
+pytest.importorskip("uft_ca")
 from uft_ca import MultiStateGraphLattice
 
 VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR = 0, 1, 2, 3, 4
