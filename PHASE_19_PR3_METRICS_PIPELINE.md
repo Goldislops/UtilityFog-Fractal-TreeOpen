@@ -4,6 +4,8 @@
 **Origin**: Issue #139 calibration findings; AURA's "Karuna/Boundary equilibrium" reframe + Sakana "God Simulator" conceptual blueprint; Jack's audit cautions; 84's "formalize the metaphors as testable metrics" engineering layer.
 **Predecessors**: PR #137 (Phase 19 design doc), PR #138 (PR #2 observer skeleton, merged as `d651f2c`), PR #140 (PR #2 follow-up snapshot-validity + `fraction_used` fix, merged as `d2b5db9`).
 
+> ⚠️ **Historical note (added 2026-06-02)** — read the framing below as period thinking, not current truth. This document predates the **#145** memory-channel-layout correction and the **Workstream B/C** follow-up (**PRs #160–#164**). The "Karuna/Boundary equilibrium" framing and `metta_warmth` language here are **historical**. *Current observer semantics*: post-#145 the dominant token is `phase_boundary` (the pre-fix `karuna_relief` dominance was a mislabelled-channel artefact); `metta_warmth` is now status `diagnostic_only` (removed from the classification cascade, surfaced as `warmth_max`/`warm_cell_count` diagnostics); `phase_boundary` is radius/lens-specific; and routing occupancy (`active_vocabulary_occupancy`) is reported separately from full historical vocabulary occupancy. **Canonical current docs**: `PHASE_19_PR4_CALIBRATION_SUMMARY.md` §3, `docs/WORKSTREAM_B_*.md`, `docs/WORKSTREAM_C_VOCABULARY_STATUS_REVIEW.md`.
+
 > *"The current `karuna_relief` / `phase_boundary` saturation might be a stable attractor. It might also be a threshold/cascade artefact. Treat it as hypothesis, not conclusion."* — Jack
 >
 > *"Treat saturation as the first real research result, not a bug. The question is which of model state, sampling, thresholds, cascade order, and missing temporal context caused the collapse."* — AURA
