@@ -6,20 +6,28 @@ This module provides command-line visualization tools for state transitions,
 message flow rendering, and interactive tree visualization.
 """
 
-from .renderer import TreeRenderer, FlowRenderer, StateRenderer
+from .renderer import TreeRenderer, FlowRenderer, StateRenderer, InteractiveRenderer
 from .cli import VisualizationCLI
-from .exporters import HTMLExporter, SVGExporter, TextExporter
-from .models import TreeNode, MessageFlow, StateTransition
+from .exporters import HTMLExporter, SVGExporter, TextExporter, JSONExporter
+from .models import (
+    TreeNode, MessageFlow, StateTransition, VisualizationData,
+    NodeState, MessageType,
+)
 
 __all__ = [
     'TreeRenderer',
-    'FlowRenderer', 
+    'FlowRenderer',
     'StateRenderer',
+    'InteractiveRenderer',
     'VisualizationCLI',
     'HTMLExporter',
     'SVGExporter',
     'TextExporter',
+    'JSONExporter',
     'TreeNode',
     'MessageFlow',
-    'StateTransition'
+    'StateTransition',
+    'VisualizationData',
+    'NodeState',
+    'MessageType',
 ]
