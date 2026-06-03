@@ -10,8 +10,8 @@ import tempfile
 from unittest.mock import patch, mock_open
 import sys
 
-# Import the feature flags module
-sys.path.append('/home/ubuntu/github_repos/UtilityFog-Fractal-TreeOpen/UtilityFog_Agent_Package')
+# Import the feature flags module (canonical package lives in UtilityFog_Agent_Package)
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "UtilityFog_Agent_Package"))
 from agent.feature_flags import (
     FeatureFlags, FeatureFlagManager,
     get_feature_flags, initialize_feature_flags,
