@@ -438,9 +438,12 @@ class TestCLI:
 class TestIntegration:
     """Integration tests for complete visualization workflow."""
     
-    @pytest.mark.asyncio
-    async def test_full_visualization_workflow(self, tmp_path):
-        """Test complete workflow from data generation to export."""
+    def test_full_visualization_workflow(self, tmp_path):
+        """Test complete workflow from data generation to export.
+
+        Note: this test is fully synchronous (no awaits); the previous
+        @pytest.mark.asyncio / async def was spurious. (#165 Tier 2.1)
+        """
         cli = VisualizationCLI()
         
         # Generate demo data
