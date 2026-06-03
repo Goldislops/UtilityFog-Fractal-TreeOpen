@@ -15,6 +15,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+# vis.observatory rendering pulls in matplotlib (optional, heavy). Skip the
+# whole module when it is absent rather than erroring at collection. (#165 Tier 1)
+pytest.importorskip("matplotlib")
+
 # ---------------------------------------------------------------------------
 # Observatory imports
 # ---------------------------------------------------------------------------
