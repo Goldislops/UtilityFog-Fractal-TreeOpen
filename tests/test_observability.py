@@ -13,8 +13,9 @@ from unittest.mock import patch, MagicMock
 from io import StringIO
 import sys
 
-# Import the observability modules
-sys.path.append('/home/ubuntu/github_repos/UtilityFog-Fractal-TreeOpen/UtilityFog_Agent_Package')
+# Import the observability modules (canonical package lives in UtilityFog_Agent_Package)
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "UtilityFog_Agent_Package"))
 from agent.observability import (
     TraceContext, StructuredLogger, RateLimitedErrorLogger,
     EventLogger, TracingDecorator, ObservabilityManager,
