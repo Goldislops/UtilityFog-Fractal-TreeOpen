@@ -87,14 +87,26 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # The nextness observer + calibration modules and their tests depend
-          # only on numpy + pytest (scipy is used by the profiling script, not
-          # by these suites). Kept minimal on purpose.
+          # The gated suites below depend only on numpy + pytest. Optional-dep
+          # modules (matplotlib/flask/openai/pyzmq) and the uft_ca Rust extension
+          # are intentionally NOT gated yet (#165 Tier 4B/4C/4D). Kept lean.
           pip install numpy pytest
 
       - name: Run maintained Python test suites
         run: |
+          # #165 Tier 4A: explicit allowlist of fully-green, dependency-free
+          # modules (verified pass under numpy+pytest only). Not bare `pytest`.
           python -m pytest \
             tests/test_nextness_observer.py \
             tests/test_nextness_calibration.py \
+            tests/test_nextness_metrics.py \
+            tests/test_agent_backend.py \
+            tests/test_anthropic_backend.py \
+            tests/test_cli_viz.py \
+            tests/test_continuous_evolution_ca.py \
+            tests/test_feature_flags.py \
+            tests/test_observability.py \
+            tests/test_params_schema.py \
+            tests/test_shard_protocol.py \
+            tests/test_ising_tempering.py \
             -q
