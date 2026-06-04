@@ -87,15 +87,16 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # The gated suites below depend only on numpy + pytest. Optional-dep
-          # modules (matplotlib/flask/openai/pyzmq) and the uft_ca Rust extension
-          # are intentionally NOT gated yet (#165 Tier 4B/4C/4D). Kept lean.
-          pip install numpy pytest
+          # The gated suites below depend only on numpy + pytest (+ pytest-asyncio
+          # for the genuinely-async test_telemetry suite). Optional-dep modules
+          # (matplotlib/flask/openai/pyzmq) and the uft_ca Rust extension are
+          # intentionally NOT gated yet (#165 Tier 4D). Kept lean.
+          pip install numpy pytest pytest-asyncio
 
       - name: Run maintained Python test suites
         run: |
-          # #165 Tier 4A: explicit allowlist of fully-green, dependency-free
-          # modules (verified pass under numpy+pytest only). Not bare `pytest`.
+          # #165 Tier 4A/4C: explicit allowlist of fully-green modules
+          # (verified pass under the install above). Not bare `pytest`.
           python -m pytest \
             tests/test_nextness_observer.py \
             tests/test_nextness_calibration.py \
@@ -109,4 +110,5 @@ jobs:
             tests/test_params_schema.py \
             tests/test_shard_protocol.py \
             tests/test_ising_tempering.py \
+            tests/test_telemetry.py \
             -q
