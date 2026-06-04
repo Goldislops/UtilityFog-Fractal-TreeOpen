@@ -486,6 +486,7 @@ def test_construction_without_api_key_or_env_var_does_not_crash(monkeypatch):
     passwordless local server (Ollama, vLLM, llama.cpp). PR 7b: supply a
     placeholder so local setups Just Work; real auth-required providers
     fail later with a clearer 401."""
+    pytest.importorskip("openai")  # backend construction instantiates the real SDK
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     backend = OpenAICompatBackend(
         base_url="http://localhost:11434/v1",
@@ -496,6 +497,7 @@ def test_construction_without_api_key_or_env_var_does_not_crash(monkeypatch):
 
 def test_explicit_api_key_arg_is_passed_through(monkeypatch):
     """An explicit api_key arg must NOT be overridden by the dummy."""
+    pytest.importorskip("openai")  # backend construction instantiates the real SDK
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     backend = OpenAICompatBackend(
         base_url="https://api.deepseek.com/v1",
@@ -509,6 +511,7 @@ def test_explicit_api_key_arg_is_passed_through(monkeypatch):
 def test_env_var_api_key_does_not_trigger_dummy(monkeypatch):
     """If OPENAI_API_KEY is set, the backend should let the SDK read it
     rather than overwriting with a placeholder."""
+    pytest.importorskip("openai")  # backend construction instantiates the real SDK
     monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
     backend = OpenAICompatBackend(
         base_url="http://localhost:11434/v1",

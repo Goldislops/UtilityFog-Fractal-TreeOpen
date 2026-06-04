@@ -458,8 +458,7 @@ def test_create_backend_openai_compat():
     """PR 7a wiring: MEDUSA_AGENT_BACKEND=openai-compat instantiates
     OpenAICompatBackend with config-supplied base_url / model / api_key."""
     from scripts.agent_backends import OpenAICompatBackend
-    if OpenAICompatBackend is None:
-        pytest.skip("openai SDK not installed")
+    pytest.importorskip("openai")  # construction needs the real openai SDK
     cfg = OrchestratorConfig(
         backend_name="openai-compat",
         openai_base_url="https://api.deepseek.com/v1",
@@ -477,8 +476,7 @@ def test_create_backend_underscore_alias_accepted():
     openai-compat. Humans will inevitably type the underscore — env vars
     historically use underscores and the shell hyphen is awkward."""
     from scripts.agent_backends import OpenAICompatBackend
-    if OpenAICompatBackend is None:
-        pytest.skip("openai SDK not installed")
+    pytest.importorskip("openai")  # construction needs the real openai SDK
     cfg = OrchestratorConfig(
         backend_name="openai_compat",  # underscore!
         openai_base_url="https://api.deepseek.com/v1",
