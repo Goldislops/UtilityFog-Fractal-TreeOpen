@@ -46,7 +46,7 @@ Treat them as **one project with two surfaces**, not two projects in a trenchcoa
 | `crates/vanguard-mcp/` | Vanguard MCP cluster orchestrator (Phase 13/16c). | Coordinate. |
 | `vis/observatory/` | Phase 8: 3-tier visualization. | Off-engine. |
 | `data/` | Snapshots + telemetry + ledgers + pending-tuning. | **Read-only for agents.** |
-| `tests/` | pytest suite — 181/181 Phase 17b+18 tests passing as of 2026-04-29. | Run before every commit. |
+| `tests/` | Maintained pytest suite — full-suite CI gate live as of 2026-06-06: `python -m pytest tests/ -q` → 592 passed, 37 deliberate dependency-gated skips, 0 failed, 0 collection errors. | Run before every commit. |
 | `PHASE_17B.md`, `PHASE_18.md`, `BACKEND_PROVIDER_MATRIX.md` | Architecture design docs. | Source of truth on intent. |
 
 ## The Three-AI Collaboration (Default Roles, Not Contracts)
