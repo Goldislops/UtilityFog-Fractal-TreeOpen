@@ -120,6 +120,7 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 | `PHASE_18.md` | repo root | Orchestration framework design, four-layer model, safety contract. |
 | `README.md` | repo root | Project overview with dual-identity preamble (sim + orchestration framework). |
 | `BACKEND_PROVIDER_MATRIX.md` | repo root | Canonical backend taxonomy — why `OpenAICompatBackend` is one class with many configs and `NemoCloud` is no longer a separate class. |
+| `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` | repo root | Cross-thread theory/physics/tech inputs, **status-labelled** (canonical guardrail / candidate / speculative / strategic background / not-yet-actionable). Read before any architecture decision; nothing in it is validated engine architecture until promoted via review. |
 | `git log --oneline -20` | the repo | Authoritative current phase status. Always more current than any doc. |
 
 ## Cross-Device Session Protocol (phone ↔ desktop)
