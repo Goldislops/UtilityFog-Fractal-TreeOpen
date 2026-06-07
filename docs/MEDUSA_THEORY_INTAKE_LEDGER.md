@@ -46,7 +46,7 @@ Per-entry fields (Jack's required structure): **Source/thread · Claim · Status
 
 ### 3. Thurston eight geometries / spatial folding
 - **Source/thread**: AURA spatial-physics relay; Jack's tungsten-diverter correction.
-- **Claim (corrected)**: Thurston's geometrization (proved via Perelman) says every **closed 3-manifold** decomposes canonically into pieces, **each modeled on one of eight geometries**. It is **not** a claim that "all 3D spatial chaos reduces to eight outfits" in any direct engineering sense.
+- **Claim (corrected)**: The geometrization theorem (conjectured by Thurston, proved by Perelman) says every **closed 3-manifold** decomposes canonically into pieces, **each modeled on one of eight geometries**. It is **not** a claim that "all 3D spatial chaos reduces to eight outfits" in any direct engineering sense.
 - **Status**: **speculative inspiration**.
 - **Repo relevance**: Possible long-horizon muse for a *spatial-scaffold vocabulary* (how local patches might be typed/folded). Inspiration only.
 - **Current action**: Record with careful wording. No implementation, no vocabulary change.
