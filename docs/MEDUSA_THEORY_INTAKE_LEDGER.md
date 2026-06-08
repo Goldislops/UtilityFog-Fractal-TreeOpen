@@ -95,6 +95,40 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 
 ---
 
+> **Entries 8–10 — "Triumvirate Tech Stack" (relayed 2026-06-08):** three *related but distinct* inputs — a **harness** method (RHO), a **kinetic** metaphor (Janus), and an **energetic** metaphor (MOST/Dewar pyrimidone). They are inputs to *future* architecture decisions, each separately gated. **Do not merge them into a single "new architecture."** Jack's wording rule applies: *not* "these breakthroughs completely change Medusa" — rather *"these concepts may inform future architecture if verified and if they pass later design gates."*
+
+### 8. Retrospective Harness Optimization (RHO)
+- **Source/thread**: AURA + Kev thread (external RHO paper to verify/cite if practical — **not independently confirmed here**).
+- **Core claim**: A harness-level self-improvement method: an agent improves its *tool/workflow harness* by revisiting past trajectories, selecting difficult examples, re-solving them, using self-validation / self-consistency, and choosing harness updates via self-preference.
+- **Status**: **candidate design principle / strategic background** — not canonical. (Sibling of entry 4, Continual Harness.)
+- **Repo relevance**: Potential future Lane A / Swarm Hunter *planning* input. Supports the idea that any self-improving loop should improve the **harness around trusted evidence**, not rewrite the engine blindly.
+- **Current action**: **Record only. No implementation.**
+- **Revisit when**: before a Lane A readiness review · before Swarm Hunter design · before any self-modifying agent / harness-optimization work · before agent memory/tooling updates.
+- **Guardrails/caveats**: RHO is **agent-harness methodology, not a Medusa physics law**. It must **not** justify autonomous engine mutation. Observer calibration + CI gates remain preconditions. **Death-spiral risk** persists if the system optimizes against ambiguous/wrong signals. The RHO paper itself is **unverified here** — cite/confirm before any use.
+- **Linked**: entry 4 (Continual Harness / AlphaProof), entry 2 (Swarm Hunter).
+
+### 9. Janus Gradient Kinetics / active asymmetric propulsion
+- **Source/thread**: AURA + Kev video synthesis (Janus particles / chemical gradients / non-Brownian propulsion).
+- **Core claim**: Asymmetric ("Janus") particles can move by converting a *local* chemical/field asymmetry into directed motion. Medusa metaphor: future node motion / influence vectors might arise from **local gradient sensing + internal asymmetry**, not global commands.
+- **Status**: **speculative inspiration / candidate design principle** — not current engine design. *(Note: catalytic Janus colloids / self-phoretic propulsion are real, established colloidal science; the **Medusa mapping** is the speculative part, not the physics.)*
+- **Repo relevance**: Possible future *kinetic local-rule vocabulary* for Medusa or physical-export thinking. Aligns with entry 1 (local-rule emergence).
+- **Current action**: **Record only. No physics implementation.**
+- **Revisit when**: before any node-motion model · before local gradient-field simulation · before physical embodiment / utility-fog export · before Swarm Hunter local-threshold tuning design.
+- **Guardrails/caveats**: Do **not** claim current Medusa nodes are Janus particles. Do **not** replace current CA update rules. Do **not** add propulsion fields or gradient mechanics now. Treat "ballistic curves" as a possible *modelling analogy*, not a proven target behaviour. Any future kinetic rule must remain **local, testable, observer-measured**.
+- **Linked**: entry 1 (emergence / local rules), entry 7 (physical export).
+
+### 10. MOST — Molecular Solar Thermal latent storage / Dewar pyrimidone
+- **Source/thread**: AURA + Kev video synthesis; corrected by Kev's *Science* DOI search → **`10.1126/science.aec6413`**. Corrected chemical wording: **Dewar pyrimidone** (was mis-relayed as "Perimeodone").
+- **Core claim**: MOST systems store energy by **photoisomerization** into a higher-energy metastable state, then release it on a heat/catalyst trigger. Per Kev's source, a 2026 *Science* article reports molecular solar thermal storage in **Dewar pyrimidone** (relayed energy density **>1.6 MJ/kg**). Medusa metaphor: a future energy-state idea of **latent stored tension / release thresholds** rather than simple binary power states.
+- **Status**: **speculative inspiration / candidate design principle** — not the current node schema.
+- **Repo relevance**: Possible future *node-energy vocabulary* or physical-embodiment metaphor.
+- **Current action**: **Record only. No schema change.**
+- **Revisit when**: before any node-energy schema redesign · before physical embodiment / synthetic-material simulation · before energy-flow observer tokens · before a Lane A readiness review.
+- **Guardrails/caveats**: MOST is a **real, established field** (e.g. norbornadiene↔quadricyclane, azobenzene systems), and **Dewar valence isomers are real high-energy metastable isomers** that fit MOST photoisomerization — so "Dewar pyrimidone" is *chemically plausible*. **BUT** the specific paper, DOI, and 1.6 MJ/kg figure are **cited as provided by Kev and NOT independently verified here** (assistant knowledge cutoff; verify the paper before any use). Do **not** add `latent_thermal_tension` / `catalyst_threshold_triggers` to code; do **not** alter node-metadata schema; do **not** claim MOST maps directly onto Medusa energy dynamics. Use **Dewar pyrimidone**, not "Perimeodone."
+- **Linked**: entry 5 (NVIDIA / embodiment), entry 7 (physical export); DOI `10.1126/science.aec6413` (cite-as-provided, unverified).
+
+---
+
 ## How an entry graduates out of this ledger
 
 1. Someone proposes promotion (e.g. "make entry 2 a canonical guardrail").
