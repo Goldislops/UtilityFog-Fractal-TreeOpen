@@ -67,6 +67,7 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 - **Tests**: every code change runs the full pytest suite before commit. Regression numbers go in the commit message and PR body.
 - **Co-resident loads**: Kevin's machine runs **BOINC** on CPU and **Folding@Home** on GPU intermittently alongside Medusa. Don't run heavy benchmarks without checking with him; we can starve Medusa or his @home contributions.
 - **OneDrive quirk**: the repo lives under OneDrive. The `Edit` tool occasionally races with sync and emits EEXIST. Fall back to atomic `python3` writes if it happens.
+- **On `send_later` / delayed self-checks**: `send_later` is a *runtime-provided* tool — if a session doesn't expose it, that's a host/tool-availability fact, **not** a repo problem; don't try to "enable" it via the repo. Fallbacks: (1) rely on GitHub PR/issue **subscriptions** for review comments + CI failures; (2) check CI **inline before merging** — remote/web sessions use the GitHub **MCP** `get_check_runs`, desktop-local sessions with `gh` can use `gh pr checks <PR> --watch`; (3) **no noisy polling loops** on green docs-only PRs; (4) if CI is green and the PR awaits Jack/AURA review, **just stop and report**.
 
 ## Active Safety Rails (CA Engine + Tuning API)
 
