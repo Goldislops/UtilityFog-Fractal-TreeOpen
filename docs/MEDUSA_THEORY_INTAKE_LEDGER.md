@@ -22,7 +22,7 @@ Every entry carries exactly one **Status**:
 | **strategic background** | Context for the long arc (hardware, industry, embodiment). | No. |
 | **not yet actionable** | Real but blocked on a precondition (e.g. trusted observer signals). | No, until precondition met. |
 
-Per-entry fields (Jack's required structure): **Source/thread · Claim · Status · Repo relevance · Current action · Guardrails/caveats.**
+Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Current action · Guardrails/caveats.** Entries may add optional **Revisit when** (trigger conditions to re-evaluate) and **Linked docs/PRs/issues** fields where useful (see entry 7).
 
 ---
 
@@ -75,6 +75,23 @@ Per-entry fields (Jack's required structure): **Source/thread · Claim · Status
 - **Repo relevance**: Already folded into Workstream B/C: empirical profiling found **isolated warmth sparks, not stable clusters** ("a hermit candle in a stone cathedral").
 - **Current action**: None — already actioned. `metta_warmth` is **`diagnostic_only`** (PR #164); surfaced as `warmth_max` / `warm_cell_count` diagnostics.
 - **Guardrails/caveats**: Kept here only as the cautionary example of a beautiful metaphor that the data did **not** support — exactly why this ledger labels confidence.
+
+### 7. Physical Export / bionic load-path manufacturing
+- **Source/thread**: AURA summary of a YouTube video (relayed 2026-06-07) about a high-speed European manufacturing process — described as continuous-fibre / "bionic" load-path fabrication, reportedly **~50× faster than conventional 3D printing** ("fibionic" wording per the relay).
+- **Core claim**: A non-layered fabrication method exists that is dramatically faster than layer-by-layer 3D printing and follows continuous load paths.
+- **Status**: **speculative inspiration** (could become a *candidate design principle* once verified). **Not canonical.**
+- **Repo relevance**: Medusa's outputs today are **volumetric / grid-snapshot** oriented (voxel state + STL/mesh). A fast continuous-path fabrication future would need a **voxel/state → continuous-representation** bridge (vector fields, splines, skeleton graphs, toolpaths) — a possible *future* physical-export pathway, not a current need.
+- **Current action**: **Record only. No code, no export pipeline, no format choice.**
+- **Revisit when**: before any physical-export pipeline design · before any voxel→toolpath implementation · before a Lane A readiness review · before any robotics / embodiment / manufacturing roadmap. **First trigger: verify the source.**
+- **Guardrails/caveats**:
+  - ⚠️ **Unverified.** The "fibionic / 50× faster" claim is **video/AURA-relayed and not independently confirmed** (Jack's quick public search couldn't pin the exact term). Do **not** treat as engineering fact. The relayed description also appears to **blend two distinct families** — high-speed *volumetric* printing vs. *continuous-fibre / bionic load-path* fabrication — so verification should first establish *which* the video actually shows.
+  - This is **not** "Medusa is moving away from 3D printing." It is "remember a possible future physical-export pathway."
+  - **Load-path honesty**: Medusa's observer tokens are **symbolic CA structure, not mechanical stress/FEA**. Any future "load-path" export must not conflate the two.
+  - **Swarm Hunter caveat**: must never become a global fabrication boss; at most it could surface *candidate local-rule structures / export hypotheses*, never impose global physical shape. **Lane A stays PARKED.**
+- **Open questions to preserve** (candidate approaches only — none chosen):
+  1. *Volumetric→vector bridge*: skeletonization, graph extraction, iso-surface extraction, streamline tracing, spline fitting, stress-field approximation.
+  2. *Format transition*: STL/mesh/voxel may be insufficient; future candidates include graph formats, parametric curves/spline control points, 5-axis toolpaths, CAM formats. **Do not pick a format yet.**
+- **Linked docs/PRs/issues**: this ledger; related strategic-background entries 3 (Thurston/spatial) & 5 (NVIDIA/robotics/embodiment).
 
 ---
 
