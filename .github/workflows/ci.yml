@@ -87,16 +87,17 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # Lean install: numpy + pytest + pytest-asyncio. Optional-dep modules
-          # (matplotlib/flask/openai/pyzmq) and the uft_ca Rust extension are NOT
-          # installed — their tests self-skip cleanly (importorskip). Converting
-          # those skips into real runs is future work (uft_ca tracked by #180).
-          pip install numpy pytest pytest-asyncio
+          # numpy + pytest + pytest-asyncio, plus the cheap pip-installable test
+          # deps (matplotlib/flask/pyzmq) so their suites RUN instead of skip
+          # (#165 skip-conversion). Still NOT installed: openai (deferred) and the
+          # uft_ca Rust extension (needs a maturin build — tracked by #180); those
+          # tests self-skip cleanly via importorskip.
+          pip install numpy pytest pytest-asyncio matplotlib flask pyzmq
 
       - name: Run maintained Python test suite
         run: |
-          # #165 Tier 4D: gate the full tests/ suite. Under the lean install
-          # every module either passes or self-skips (verified: 592 passed,
-          # 37 skipped, 0 failed, 0 errors). pytest.ini scopes collection to
+          # #165: gate the full tests/ suite. Under this install every module
+          # either passes or self-skips (verified locally: 713 passed,
+          # 38 skipped, 0 failed, 0 errors). pytest.ini scopes collection to
           # tests/ and keeps root-level legacy scripts out.
           python -m pytest tests/ -q
