@@ -122,6 +122,7 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 | `README.md` | repo root | Project overview with dual-identity preamble (sim + orchestration framework). |
 | `BACKEND_PROVIDER_MATRIX.md` | repo root | Canonical backend taxonomy — why `OpenAICompatBackend` is one class with many configs and `NemoCloud` is no longer a separate class. |
 | `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` | repo root | Cross-thread theory/physics/tech inputs, **status-labelled** (canonical guardrail / candidate / speculative / strategic background / not-yet-actionable). Read before any architecture decision; nothing in it is validated engine architecture until promoted via review. |
+| `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` | repo root | Status-labelled "preflight map" of the larger AURA/Kev physics synthesis (Swarm-Hunter/RHO, Janus, MOST, geometry, fault-tolerance, etc.). **Not** an engine redesign and **not** part of #180's scope (#180 = `uft_ca` Rust/pyo3 build only). Promotion to architecture requires the gate in its final section. |
 | `git log --oneline -20` | the repo | Authoritative current phase status. Always more current than any doc. |
 
 ## Cross-Device Session Protocol (phone ↔ desktop)
