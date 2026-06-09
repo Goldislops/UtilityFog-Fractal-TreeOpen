@@ -124,5 +124,23 @@
 
 ---
 
+## AURA follow-up mechanisms — not implemented here
+
+This preflight preserves theory and "revisit when" triggers, but **does not itself enforce them**. AURA's pushback is accepted in principle — *passive markdown can be missed; memory eventually needs teeth* — but teeth change how future work behaves, so they are **separate future arcs, not part of this docs PR**:
+
+1. **Theory Tripwire Action** *(candidate future GitHub Action / PR check)*
+   - If a PR is labelled/titled around `lane-a-activation`, `swarm-hunter`, observer-semantics changes, or other architecture-triggering scopes, it could post a reminder linking the relevant sections of `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` + `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`.
+   - **Not implemented here.** Needs its own design to avoid noisy/false-positive auto-commenting.
+
+2. **Theory Sandbox / proving ground** *(candidate future directory)*
+   - For toy experiments (Janus kinetics, Galton/Fourier diffusion, stochastic-escape, …).
+   - Location: **`experiments/theory_sandbox/`** — explicitly **not** under `tests/`, because `tests/` is now the maintained CI floor (`pytest tests/ -q`); loose exploratory scripts must not join the gate.
+   - Must be non-canonical, outside engine imports, outside default CI, no writes to `data/` except explicit temp/output folders, with a README marking it experimental / non-Lane-A.
+   - **Not implemented here.** Requires its own README/policy PR before any scripts are added.
+
+Both are deliberately-named future arcs; promoting either follows the gate above.
+
+---
+
 ## Guardrails (whole document)
 docs only · no code · no CI changes · no schema changes · no type/interface definitions · no engine touch · no observer semantics · **Lane A parked** · no Swarm Hunter implementation · no tuning API · no production sweeps. Labelled theory, not marching orders.
