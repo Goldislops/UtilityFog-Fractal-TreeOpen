@@ -26,7 +26,7 @@
 
 ## 3. Directory rules (the quarantine)
 
-1. **No imports from engine runtime** (`scripts/continuous_evolution_ca.py`, `medusa_api`, tuning/event-bus modules) unless explicitly reviewed and noted in the script header. Importing the *built* `uft_ca` extension read-only for toy lattices is acceptable — it's a library, not the running engine.
+1. **No imports from engine runtime** (`scripts/continuous_evolution_ca.py`, `medusa_api`, tuning/event-bus modules) unless explicitly reviewed and noted in the script header. Importing the *built* `uft_ca` extension read-only for toy lattices is acceptable — it's a library, not the running engine. **Read that narrowly**: `uft_ca` here is for **small, isolated toy lattices only** — not a bridge into production Medusa state/snapshots, not for sweeps, and never as evidence that an engine claim is validated.
 2. **No writes to `data/`** — ever. Toy outputs go to a git-ignored `experiments/theory_sandbox/out/` (or tempfiles).
 3. **No production sweeps**, no long-running jobs, no GPU grabs without coordinating with Kevin (BOINC/F@H/Medusa share the box).
 4. **No heavy new dependencies** (and no notebooks) without review — the lean-install discipline applies here too.
