@@ -63,3 +63,5 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+# Theory sandbox outputs (experiments are non-canonical; outputs never committed)
+experiments/theory_sandbox/out/
