@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "uft_ca"
+# Version is inherited from Cargo.toml via maturin (PEP 621 dynamic fields),
+# avoiding duplication/desync between the two manifests.
+dynamic = ["version"]
+description = "Cellular automata kernel for 3D lattices and arbitrary graphs (pyo3 extension for the UtilityFog Medusa engine)"
+license = { text = "MIT OR Apache-2.0" }
+# pyo3 0.20 supports CPython 3.7-3.12; bump pyo3 before targeting 3.13+.
+requires-python = ">=3.8,<3.13"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# The crate's Python bindings are behind the `python` cargo feature
+# (which pulls in pyo3 with extension-module). Without this, maturin
+# builds a cdylib with no #[pymodule] inside.
+features = ["python"]
+module-name = "uft_ca"
