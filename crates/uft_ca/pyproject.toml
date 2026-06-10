@@ -4,7 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "uft_ca"
-version = "0.2.0"
+# Version is inherited from Cargo.toml via maturin (PEP 621 dynamic fields),
+# avoiding duplication/desync between the two manifests.
+dynamic = ["version"]
 description = "Cellular automata kernel for 3D lattices and arbitrary graphs (pyo3 extension for the UtilityFog Medusa engine)"
 license = { text = "MIT OR Apache-2.0" }
 # pyo3 0.20 supports CPython 3.7-3.12; bump pyo3 before targeting 3.13+.
