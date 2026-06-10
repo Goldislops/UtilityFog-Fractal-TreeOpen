@@ -89,15 +89,24 @@ jobs:
           python -m pip install --upgrade pip
           # numpy + pytest + pytest-asyncio, plus the pip-installable test deps
           # (matplotlib/flask/pyzmq/openai) so their suites RUN instead of skip
-          # (#165 skip-conversion). Still NOT installed: the uft_ca Rust extension
-          # (needs a maturin build — tracked by #180); its tests self-skip
-          # cleanly via importorskip.
+          # (#165 skip-conversion).
           pip install numpy pytest pytest-asyncio matplotlib flask pyzmq openai
+
+      - name: Setup Rust toolchain (uft_ca pyo3 extension)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build & install uft_ca (maturin via pip)
+        run: |
+          # #180: build the Rust pyo3 extension so its ~95 tests RUN instead
+          # of self-skipping. pip drives the maturin build backend declared
+          # in crates/uft_ca/pyproject.toml.
+          pip install ./crates/uft_ca
 
       - name: Run maintained Python test suite
         run: |
-          # #165: gate the full tests/ suite. Under this install every module
-          # either passes or self-skips (verified locally: 718 passed,
-          # 33 skipped, 0 failed, 0 errors). pytest.ini scopes collection to
-          # tests/ and keeps root-level legacy scripts out.
+          # Gate the full tests/ suite with the Rust extension built (#165 +
+          # #180). Under this install every module either passes or
+          # self-skips (verified locally: 832 passed, 8 skipped, 0 failed,
+          # 0 errors). pytest.ini scopes collection to tests/ and keeps
+          # root-level legacy scripts out.
           python -m pytest tests/ -q

@@ -1,3 +1,15 @@
+"""Fractal topology generators + stepping behavior for uft_ca.
+
+CONTRACT NOTE (#180 test reconciliation, 2026-06-10): since Phase 14a,
+`step()`/`step_n()` is the memory-augmented path and `step_par()`/
+`step_auto()` the (memoryless) stochastic path — different algorithms by
+design. seq==par equivalence is asserted on the stochastic pair
+(`step_auto()` is sequential below PAR_THRESHOLD=10_000 nodes, parallel
+at/above it); memory-path behavior is pinned via determinism and
+mechanism-derived invariants, not via old all-states-static expectations.
+See tests/test_parallel_stepping.py docstring for the full rationale.
+"""
+
 import pytest
 
 try:
@@ -43,10 +55,12 @@ class TestSierpinskiTetrahedron:
         assert len(result) == 16
         assert all(0 <= s <= 4 for s in result)
 
-    def test_step_auto_matches_step(self):
+    def test_step_auto_matches_step_par(self):
+        # seq==par on the stochastic path (16 nodes < PAR_THRESHOLD,
+        # so step_auto is the sequential stochastic stepper).
         a = MultiStateGraphLattice.sierpinski(1, ENERGY)
         b = MultiStateGraphLattice.sierpinski(1, ENERGY)
-        assert a.step() == b.step_auto()
+        assert a.step_auto() == b.step_par()
 
     def test_multi_step_convergence(self):
         lattice = MultiStateGraphLattice.sierpinski(1, ENERGY)
@@ -82,16 +96,26 @@ class TestMengerSponge:
         assert len(result) == 20
         assert all(0 <= s <= 4 for s in result)
 
-    def test_step_auto_matches_step(self):
+    def test_step_auto_matches_step_par(self):
+        # seq==par on the stochastic path (20 nodes < PAR_THRESHOLD).
         a = MultiStateGraphLattice.menger(1, ENERGY)
         b = MultiStateGraphLattice.menger(1, ENERGY)
-        assert a.step() == b.step_auto()
+        assert a.step_auto() == b.step_par()
 
-    def test_structural_stability(self):
-        lattice = MultiStateGraphLattice.menger(1, STRUCTURAL)
+    def test_structural_block_evolves_deterministically(self):
+        # Old contract ("all cells stay STRUCTURAL forever") died with the
+        # memory path: bamboo rebirth, reverse contagion, and analogue
+        # mutation legitimately convert STRUCTURAL cells (apply_with_memory).
+        # The surviving contracts: node count is conserved, states stay
+        # valid, and evolution is deterministic given identical state.
+        a = MultiStateGraphLattice.menger(1, STRUCTURAL)
+        b = MultiStateGraphLattice.menger(1, STRUCTURAL)
         for _ in range(5):
-            states = lattice.step()
-        assert all(s == STRUCTURAL for s in states)
+            sa = a.step()
+            sb = b.step()
+            assert sa == sb
+            assert len(sa) == 20
+            assert all(0 <= s <= 4 for s in sa)
 
 
 class TestOctahedralFogLattice:
@@ -125,25 +149,40 @@ class TestOctahedralFogLattice:
         assert len(result) == 27
         assert all(0 <= s <= 4 for s in result)
 
-    def test_step_auto_matches_step(self):
+    def test_step_auto_matches_step_par(self):
+        # seq==par on the stochastic path (27 nodes < PAR_THRESHOLD).
         a = MultiStateGraphLattice.octahedral(3, ENERGY)
         b = MultiStateGraphLattice.octahedral(3, ENERGY)
-        assert a.step() == b.step_auto()
+        assert a.step_auto() == b.step_par()
 
-    def test_energy_sustains_in_dense_lattice(self):
+    def test_energy_lattice_evolves_into_active_states(self):
+        # Mechanism-derived (apply_with_memory): from all-ENERGY, where every
+        # cell has >=1 ENERGY neighbor, one memory step can only yield
+        # ENERGY (base rule), COMPUTE (energy_to_compute conversion), or
+        # SENSOR (analogue mutation) — never VOID or STRUCTURAL.
         lattice = MultiStateGraphLattice.octahedral(3, ENERGY)
-        for _ in range(10):
-            states = lattice.step()
-        assert all(s == ENERGY for s in states)
+        after_one = lattice.step()
+        assert set(after_one) <= {ENERGY, COMPUTE, SENSOR}
+        # Longer horizons cascade; pin determinism + validity instead of
+        # the old "stays all-ENERGY forever" contract.
+        a = MultiStateGraphLattice.octahedral(3, ENERGY)
+        b = MultiStateGraphLattice.octahedral(3, ENERGY)
+        ra = a.step_n(10)
+        rb = b.step_n(10)
+        assert ra == rb
+        assert len(ra) == 27
+        assert all(0 <= s <= 4 for s in ra)
 
 
 class TestAutoThreshold:
     def test_small_graph_auto(self):
+        # Below PAR_THRESHOLD, step_auto takes the sequential stochastic
+        # path; it must agree exactly with the parallel stochastic path.
         lattice = MultiStateGraphLattice.sierpinski(1, ENERGY)
         assert lattice.node_count() < 10000
         a = MultiStateGraphLattice.sierpinski(1, ENERGY)
         b = MultiStateGraphLattice.sierpinski(1, ENERGY)
-        assert a.step() == b.step_auto()
+        assert a.step_auto() == b.step_par()
 
     def test_large_graph_auto(self):
         lattice = MultiStateGraphLattice.octahedral(22, ENERGY)
@@ -194,22 +233,25 @@ class TestSetStates:
 
 
 class TestParallelOnFractals:
+    # seq==par on the stochastic path (see module docstring): step_auto is
+    # sequential below PAR_THRESHOLD and parallel at/above it; either way
+    # it must agree exactly with step_par.
     def test_sierpinski_par_matches_seq(self):
         a = MultiStateGraphLattice.sierpinski(2, ENERGY)
         b = MultiStateGraphLattice.sierpinski(2, ENERGY)
-        assert a.step() == b.step_par()
+        assert a.step_auto() == b.step_par()
 
     def test_menger_par_matches_seq(self):
         a = MultiStateGraphLattice.menger(2, ENERGY)
         b = MultiStateGraphLattice.menger(2, ENERGY)
-        assert a.step() == b.step_par()
+        assert a.step_auto() == b.step_par()
 
     def test_octahedral_par_matches_seq(self):
         a = MultiStateGraphLattice.octahedral(10, ENERGY)
         b = MultiStateGraphLattice.octahedral(10, ENERGY)
-        assert a.step() == b.step_par()
+        assert a.step_auto() == b.step_par()
 
     def test_large_octahedral_par_multi_step(self):
         a = MultiStateGraphLattice.octahedral(22, ENERGY)
         b = MultiStateGraphLattice.octahedral(22, ENERGY)
-        assert a.step_n(3) == b.step_par_n(3)
+        assert a.step_auto_n(3) == b.step_par_n(3)

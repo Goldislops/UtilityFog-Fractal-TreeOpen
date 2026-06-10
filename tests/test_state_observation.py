@@ -269,11 +269,19 @@ class TestCensusEvolution:
         for h in history:
             assert sum(h) == 20
 
-    def test_structural_stability(self):
+    def test_structural_lattice_census_conserved(self):
+        # #180 reconciliation: the old contract ("STRUCTURAL count stays 27
+        # forever") died with the memory path — bamboo rebirth, reverse
+        # contagion, and analogue mutation legitimately convert STRUCTURAL
+        # cells (apply_with_memory). Surviving contracts: total census is
+        # conserved each generation, and evolution is deterministic given
+        # identical initial state.
         lattice = MultiStateGraphLattice.octahedral(3, STRUCTURAL)
         history = lattice.run_and_record(10)
         for h in history:
-            assert h[STRUCTURAL] == 27
+            assert sum(h.values()) == 27
+        twin = MultiStateGraphLattice.octahedral(3, STRUCTURAL)
+        assert twin.run_and_record(10) == history
 
     def test_void_lattice_stays_void(self):
         lattice = MultiStateGraphLattice.octahedral(3, VOID)
