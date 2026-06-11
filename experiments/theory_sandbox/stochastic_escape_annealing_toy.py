@@ -33,8 +33,9 @@ What this toy CAN show
   the same seed/config; all probabilities/frequencies within [0, 1];
   trial-count conservation; theoretical Metropolis uphill acceptance
   falling as dE rises at fixed T and rising as T rises at fixed dE;
-  zero-temperature uphill acceptance exactly 0.0 (negative temperature
-  and non-positive dE rejected); no NaN/inf anywhere. Soft diagnostics (reported, never fatal): sampled
+  zero-temperature uphill acceptance exactly 0.0; negative temperature
+  rejected by both walkers regardless of move direction (non-positive dE
+  rejected by the uphill-only helper); no NaN/inf anywhere. Soft diagnostics (reported, never fatal): sampled
   escape trends vs barrier and temperature, cooling-vs-quench basin
   preference, Monte Carlo vs theoretical acceptance. Strict empirical
   monotonicity is deliberately NOT hard-asserted from finite samples.
@@ -124,6 +125,17 @@ def landscape_features(energies: list[float]) -> tuple[int, int, int]:
 
 # --- walker ------------------------------------------------------------------
 
+def validate_temperature(temperature: float) -> None:
+    """Reject negative temperature unconditionally.
+
+    Both walkers call this before (and independently of) move direction,
+    so a negative temperature can never slip through unnoticed on a run
+    whose proposed moves happen to be downhill or flat.
+    """
+    if temperature < 0.0:
+        raise ValueError(f"temperature must be >= 0, got {temperature!r}")
+
+
 def theoretical_uphill_acceptance(d_e: float, temperature: float) -> float:
     """Metropolis acceptance probability for an uphill move (d_e > 0).
 
@@ -134,8 +146,7 @@ def theoretical_uphill_acceptance(d_e: float, temperature: float) -> float:
     """
     if d_e <= 0.0:
         raise ValueError(f"d_e must be > 0 for an uphill move, got {d_e!r}")
-    if temperature < 0.0:
-        raise ValueError(f"temperature must be >= 0, got {temperature!r}")
+    validate_temperature(temperature)
     if temperature == 0.0:
         return 0.0
     return math.exp(-d_e / temperature)
@@ -150,6 +161,7 @@ def escape_trial(energies: list[float], start: int, target: int,
     accumulates [proposal count, acceptance count, sum of theoretical
     acceptance probabilities] for the Monte-Carlo-vs-theory diagnostic.
     """
+    validate_temperature(temperature)
     pos = start
     last = len(energies) - 1
     rand = rng.random
@@ -186,6 +198,7 @@ def schedule_trial(energies: list[float], start: int,
     last = len(energies) - 1
     rand = rng.random
     for temperature in temperatures:
+        validate_temperature(temperature)
         nxt = pos + 1 if rand() < 0.5 else pos - 1
         if nxt < 0 or nxt > last:
             continue
@@ -372,6 +385,37 @@ def hard_theory_checks(tracked: list[float]) -> None:
                     f"temperature={bad_t!r} must be rejected with "
                     f"ValueError")
 
+    try:
+        validate_temperature(-1.0)
+    except ValueError:
+        pass
+    else:
+        require(False,
+                "validate_temperature must reject negative temperature")
+
+    # Direction-independence: on a strictly downhill probe landscape the
+    # uphill helper is never consulted, yet both walkers must still refuse
+    # to run at negative temperature.
+    probe_energies = [1.0, 0.5, 0.0]
+    probe_rng = random.Random(0)
+    try:
+        escape_trial(probe_energies, 0, 2, -1.0, 10, probe_rng,
+                     [0, 0, 0.0])
+    except ValueError:
+        pass
+    else:
+        require(False,
+                "escape_trial must reject negative temperature regardless "
+                "of move direction")
+    try:
+        schedule_trial(probe_energies, 0, [-1.0, -1.0], probe_rng)
+    except ValueError:
+        pass
+    else:
+        require(False,
+                "schedule_trial must reject negative temperature "
+                "regardless of move direction")
+
 
 # --- soft diagnostics --------------------------------------------------------
 
@@ -472,6 +516,8 @@ def build_report(seed: int) -> str:
                  "fixed dE .. OK")
     lines.append("  [hard] zero-T uphill acceptance is 0.0; bad args "
                  "rejected ... OK")
+    lines.append("  [hard] negative T rejected by both walkers, any "
+                 "direction .. OK")
     lines.append(f"  [hard] no NaN or infinite value "
                  f"({len(tracked)} tracked quantities) ... OK")
     lines.append("")
