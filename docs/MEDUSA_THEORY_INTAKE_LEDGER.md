@@ -124,7 +124,7 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 - **Repo relevance**: Possible future *node-energy vocabulary* or physical-embodiment metaphor.
 - **Current action**: **Record only. No schema change.**
 - **Revisit when**: before any node-energy schema redesign · before physical embodiment / synthetic-material simulation · before energy-flow observer tokens · before a Lane A readiness review.
-- **Guardrails/caveats**: MOST is a **real, established field** (e.g. norbornadiene↔quadricyclane, azobenzene systems), and **Dewar valence isomers are real high-energy metastable isomers** that fit MOST photoisomerization — so "Dewar pyrimidone" is *chemically plausible*. **BUT** the specific paper, DOI, and 1.6 MJ/kg figure are **cited as provided by Kev and NOT independently verified in this PR; verify the paper before any use**. Do **not** add `latent_thermal_tension` / `catalyst_threshold_triggers` to code; do **not** alter node-metadata schema; do **not** claim MOST maps directly onto Medusa energy dynamics. Use **Dewar pyrimidone**, not "Perimeodone."
+- **Guardrails/caveats**: MOST is a **real, established field** (e.g. norbornadiene↔quadricyclane, azobenzene systems), and **Dewar valence isomers are real high-energy metastable isomers** that fit MOST photoisomerization — so "Dewar pyrimidone" is *chemically plausible*. **BUT** the specific paper, DOI, and 1.6 MJ/kg figure are **cited as provided by Kev and NOT independently verified at the time this entry was recorded; verify the paper before any use**. Do **not** add `latent_thermal_tension` / `catalyst_threshold_triggers` to code; do **not** alter node-metadata schema; do **not** claim MOST maps directly onto Medusa energy dynamics. Use **Dewar pyrimidone**, not "Perimeodone."
 - **Linked**: entry 5 (NVIDIA / embodiment), entry 7 (physical export); DOI `10.1126/science.aec6413` (cite-as-provided, unverified).
 
 ---
@@ -149,7 +149,7 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 - **Current action**: Record only. **No new rules, no signal-field, no observer-token changes.**
 - **Revisit when**: before any event-emission / state-transition design · before message-mediated CA rules · before any noncommutative-update experiment.
 - **Guardrails/caveats**: Do **not** claim Medusa signals are gauge fields. Do **not** claim signals interact physically in empty space. Do **not** reject the current force/vector metaphors. Do **not** add stress-triggered pulse emission / voxel transmutation to production. **Avoid "non-Abelian"** unless/until a later design actually defines order-dependent / noncommutative update operations.
-- **Linked**: entry 1 (emergence), entry 8 (geometry/eight-fold "borrow the maths carefully" rule).
+- **Linked**: entry 1 (emergence), entry 3 (geometry/eight-fold caveat — same "borrow the maths carefully" rule).
 
 ### 13. Bistable auxetic metamaterials — passive state retention
 - **Source**: AURA/Kev video intake. Durable reference: **Ahmad Rafsanjani & Damiano Pasini, "Bistable Auxetic Mechanical Metamaterials Inspired by Ancient Geometric Motifs," arXiv:`1612.05988`** (directly supports the rotating-units + bistability claim). *(Confirm this is the source the video referenced; the relayed `T` / `θ` parameter names remain **pending the original cited source or video timestamp**.)*
