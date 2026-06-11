@@ -129,50 +129,37 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 
 ---
 
-> **Entries 11–14 — four-video intake (relayed 2026-06-11, AURA).** Three physics/materials metaphors (12–14) plus one *documentation-discipline* principle (11). As always: labelled theory, not law. Entry 11 is deliberately **reframed** from its relayed form — see its caveats.
+> **Entries 11–13 — four-topic intake (relayed 2026-06-11 by AURA/Kev; cross-checked by Jack; key claims web-verified in the introducing PR).** Three physics/materials metaphors. The relay's *fourth* item (a model-seat / model-fallback note) is **not** a physics entry — it lives in `AGENT_HANDOFF.md` → Operational Conventions, reframed away from any classifier-evasion framing. As always: labelled theory, not law.
 
-### 11. Canonical description discipline (Medusa is topology + computation)
-- **Source/thread**: AURA four-video relay, item 1 — **reframed by Fab5**. The relay's framing ("avoid bio/chem jargon to prevent a safety classifier silently dropping the model to Opus mid-session") is **not** adopted here; see caveats.
-- **Core claim (as adopted)**: Medusa's substrate is **3D cellular automata + distributed computation + structural topology**. The biological and chemical items in this ledger (entries 6, 9, 10; bacteria/Janus/MOST) are **labelled metaphors**, not the implementation. Canonical descriptions — in docs, commits, and design — should **lead with the structural/mathematical reality** and reach for bio/chem only as explicitly-flagged metaphor.
-- **Status**: **candidate design principle** (documentation/communication hygiene). Low-risk; arguably already implicit in how the ledger labels its own entries.
-- **Repo relevance**: Keeps the canonical record *accurate* (Medusa is not wet biology) and keeps metaphors from being mistaken for substrate — the same anti-overclaim posture as the whole ledger.
-- **Current action**: Record as a writing principle. No code, no renames.
-- **Guardrails/caveats**:
-  - ⚠️ **Reframed, not transcribed.** The relayed rationale — wording things to **avoid triggering a safety classifier** / "prevent silent model degradation" — is **deliberately not canonized**. This repo does not adopt classifier-evasion as doctrine; describing a voxel automaton in topological terms is *accuracy*, not evasion, and the project is benign, so there is nothing to evade.
-  - ⚠️ **Unverified infrastructure claim.** The specific mechanism (Fable 5 silently falling back to Opus on bio/chem prompts mid-session) is **inference about model internals, not independently confirmed**; it is recorded here only as the *origin* of the (reframed) principle, not as fact.
-- **Linked**: entries 6, 9, 10 (the metaphor entries this principle keeps honest).
-
-### 12. Passive alignment via a global field (avian-magnetoreception metaphor)
-- **Source/thread**: AURA four-video relay, item 2 — Max-Planck-adjacent work on superparamagnetic iron-nanoparticle clusters in avian macrophages as a candidate magnetic compass.
-- **Core claim**: Nature can derive orientation from a **passive structural response to a global field** at near-zero active compute — a redundant fallback to active sensing. Medusa metaphor: a future **Swarm Hunter manipulates a simulated global mathematical field** across the lattice, and nodes **self-align passively via local cell state** rather than the Hunter pushing per-node orientation commands.
-- **Status**: **real research area, Medusa mapping speculative** → candidate design principle for a *future* Swarm Hunter.
-- **Repo relevance**: Strongly **reinforces entry 2's guardrail** — Swarm Hunter as a *field/threshold influence*, never a per-cell master controller. A global-field nudge that lets local rules do the aligning is the emergence-respecting shape (entry 1).
+### 11. Passive alignment under a global field (pigeon-liver magnetoreception)
+- **Source**: AURA/Kev video intake → *Science* (2026), "Homing pigeon navigation relies on superparamagnetic macrophages under overcast conditions," **DOI `10.1126/science.ady2486`** (Max-Planck-led). Web-verified in the introducing PR; skeptical coverage exists (*Scientific American*).
+- **Core claim**: Iron-rich, ferritin/oxide-nanoparticle-laden **macrophages in the pigeon liver** appear **superparamagnetic** and contribute to magnetic navigation — notably **as a fallback when solar cues are unavailable** (depleting the macrophages impaired orientation under overcast skies but not in sun). Medusa metaphor: a future **passive alignment under a global field**, where local elements respond to a field without per-element central commands.
+- **Status**: **real recent biological finding; sensory mechanism still under investigation; Medusa mapping speculative.**
+- **Repo relevance**: Possible future metaphor for global-field passive alignment — and it **reinforces entry 2's guardrail**: a future Swarm Hunter as a *field/threshold influence* that lets local rules do the aligning, never a per-cell master controller (emergence-respecting, cf. entry 1).
 - **Current action**: Record only. No field code, no Swarm Hunter, Lane A parked.
-- **Revisit when**: before any Swarm Hunter design · before any global-field / node-orientation modelling · before a Lane A readiness review.
-- **Guardrails/caveats**: Animal **magnetoreception is a genuine, active research area, but the specific mechanism is debated** — the well-known pigeon "magnetite in the beak" finding was later attributed to **macrophages** (a cautionary retraction). Treat the biophysics as *inspiration with an asterisk*, the Medusa mapping as speculative, and do **not** add field/orientation mechanics now.
+- **Revisit when**: before any global-field sandbox work · before passive-alignment models · before Swarm Hunter local-vs-global control-plane design · before a Lane A readiness review.
+- **Guardrails/caveats**: Do **not** call it a "proven quantum compass" — it is **superparamagnetic (classical)**, not quantum. Do **not** claim "zero compute" or zero biological energy cost. Do **not** claim the transduction mechanism is settled (it is contested). Do **not** introduce "superparamagnetic nodes" into architecture.
 - **Linked**: entry 1 (emergence), entry 2 (Swarm Hunter guardrail).
 
-### 13. Self-interacting fields & stress transmutation (non-Abelian metaphor)
-- **Source/thread**: AURA four-video relay, item 3 — particle-physics field-to-field interactions / weak-force flavour change.
-- **Core claim**: Forces aren't primitive push/pull; fields **self-interact**, and a particle can emit a boson and **transmute state**. Medusa metaphors: (a) signals between nodes could **interact in the space between them** (not just point-to-point), and (b) **structural transmutation** — a node under threshold stress doesn't "break" but **emits a pulse and changes state** (e.g. load-bearing → flexible sensor).
-- **Status**: **speculative inspiration** (physics real; Medusa mapping speculative).
-- **Repo relevance**: The CA already does **stress-/neighbourhood-driven state transitions** (`apply_with_memory`: ENERGY→COMPUTE, bamboo rebirth STRUCTURAL→COMPUTE, reverse contagion) — so "transmute rather than break" is *partly already represented in spirit*. The genuinely new ideas are **signal-field self-interaction in empty space** and an explicit **emit-a-pulse-on-transmute** event. Both are far-future and unspecified.
+### 12. Event-driven state change (weak-interaction metaphor)
+- **Source**: AURA/Kev video intake — established particle physics (charged-current weak interactions; CKM flavour mixing). General textbook physics; no single citation needed.
+- **Core claim**: Charged-current **W** interactions couple different particle flavours/types — a particle can emit a boson and change *type*, not merely be pushed. Medusa metaphor: a future idea of **event-driven local state transitions** rather than permanent node identities (a stressed node *changes state* rather than "breaking").
+- **Status**: **real particle-physics inspiration; CA mapping speculative.**
+- **Repo relevance**: The CA *already* does neighbourhood-/stress-driven transitions (`apply_with_memory`: ENERGY→COMPUTE, bamboo rebirth STRUCTURAL→COMPUTE, reverse contagion) — so "transmute rather than break" is *partly already represented in spirit*. Genuinely new (and far-future, unspecified): explicit **emit-a-pulse-on-transition** events and any **signal interaction in the space between nodes**.
 - **Current action**: Record only. **No new rules, no signal-field, no observer-token changes.**
-- **Revisit when**: before any inter-signal interaction modelling · before any event/pulse emission design · before CA-rule vocabulary changes.
-- **Guardrails/caveats**: "Non-Abelian" is a precise mathematical property; do **not** claim Medusa's rules are non-Abelian without a derivation. Do not conflate the real weak-force physics with a CA metaphor. Observer semantics untouched; Lane A parked.
-- **Linked**: entry 1 (emergence), entry 8 (geometry/eight-fold caveat — same "borrow the maths carefully" rule).
+- **Revisit when**: before any event-emission / state-transition design · before message-mediated CA rules · before any noncommutative-update experiment.
+- **Guardrails/caveats**: Do **not** claim Medusa signals are gauge fields. Do **not** claim signals interact physically in empty space. Do **not** reject the current force/vector metaphors. Do **not** add stress-triggered pulse emission / voxel transmutation to production. **Avoid "non-Abelian"** unless/until a later design actually defines order-dependent / noncommutative update operations.
+- **Linked**: entry 1 (emergence), entry 8 (geometry/eight-fold "borrow the maths carefully" rule).
 
-### 14. Bistable auxetic metamaterials — zero-energy structural lock-in
-- **Source/thread**: AURA four-video relay, item 4 — flat 2D sheets with localized geometric cuts (parameterized by length *T*, angle *θ*) that snap into rigid 3D forms (domes/warps) and **hold mechanically without continuous energy** (kirigami / bistable auxetic metamaterials).
-- **Core claim**: Materials can have **bistable states** that lock into rigid geometry under a brief tension, then **hold form for free**. Medusa metaphor: the bionic load-path / utility-fog skeleton uses a **bistable cellular rule set** — the Swarm Hunter applies a *brief* tension gradient, local node geometries rotate / expand auxetically and **mechanically lock**, so no continuous energy is spent maintaining the skeleton.
-- **Status**: **real materials science, Medusa mapping speculative** → candidate design principle for the physical-export / load-path line.
-- **Repo relevance**: Extends entry 7 (physical export / bionic load-path) and pairs with entry 10 (MOST latent-strain): a future **node-energy model where structure is *latched*, not *powered*.** AURA's note that the **sandbox could later run optimization heatmaps** over (*T*, *θ*) to find geometric sweet spots is a legitimate *future toy* candidate (subject to the sandbox policy + promotion gate).
+### 13. Bistable auxetic metamaterials — passive state retention
+- **Source**: AURA/Kev video intake → closest matching source **arXiv `1612.05988`** (Rafsanjani & Pasini, "Bistable Auxetic Mechanical Metamaterials Inspired by Ancient Geometric Motifs"). Web-verified in the introducing PR. *(Confirm this is the source AURA's video referenced; exact parameter names — the relayed `T` / `θ` — are **pending the original source**.)*
+- **Core claim**: Patterned auxetic sheets built from **rotating units + compliant flexure hinges** can be **bistable** — they transform and **retain a second stable shape after the load is removed** (a local energy minimum at non-zero deformation). Medusa metaphor: a future **load-path / skeleton that is *latched*, not *powered*** — a brief gradient sets a locked geometry that then holds with no continuous input.
+- **Status**: **real, well-established metamaterials principle; candidate physical-export inspiration; exact source/parameter claim pending verification.**
+- **Repo relevance**: Extends entry 7 (physical export / bionic load-path) and pairs with entry 10 (MOST latent strain). AURA's note that a future **sandbox toy could optimise the geometry parameters** is a legitimate candidate *under the sandbox policy + promotion gate* (`experiments/theory_sandbox/README.md`).
 - **Current action**: Record only. **No rule set, no geometry code, no schema change.**
-- **Revisit when**: before any load-path / skeleton design · before a node-energy schema redesign · before a physical-export roadmap · before proposing a (*T*, *θ*) sandbox toy.
-- **Guardrails/caveats**: Kirigami / auxetic / bistable metamaterials are **real and well-established** — this entry's *physics* is on firmer ground than most. The **Medusa mapping is still speculative**: current cells have no geometry/rotation/latch state, and adding one is a major engine question gated by the promotion path. Do not imply Medusa already does this.
+- **Revisit when**: before any physical-export design · before any deployable/bistable structure experiment · before a node-energy schema redesign · before a geometry-optimisation sandbox toy.
+- **Guardrails/caveats**: Say **"passive state retention" / "no continuous holding input,"** NOT "zero-energy structure" — **switching states still requires work and has real material losses; this is not free energy.** Do **not** preserve the exact `T` / `θ` parameterisation until the original source is supplied and checked. Do **not** update continuous-fibre or any runtime architecture. Current cells have no geometry/rotation/latch state; adding one is a major, gated engine question.
 - **Linked**: entry 7 (physical export), entry 10 (MOST latent energy), entry 2 (Swarm Hunter applies the *brief* gradient, never holds it).
-
----
 
 ## How an entry graduates out of this ledger
 
