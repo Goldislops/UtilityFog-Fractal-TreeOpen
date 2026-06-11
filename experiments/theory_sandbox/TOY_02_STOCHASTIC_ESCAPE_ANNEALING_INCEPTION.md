@@ -57,4 +57,27 @@ Explore, in toy algorithmic language only, the cluster of ideas around **trapped
 
 ---
 
+## 9. Review decisions (Jack, 2026-06-11 — §8 resolved; binding for the script PR)
+
+**Conceptual refinement (supersedes the §8.3 lean):** stochastic escape and simulated annealing are related but are **not two vocabulary lenses on one experiment** — they are **two distinct experiments** sharing one walker, and the toy's output must keep them as clearly separated sections:
+1. **Fixed-temperature stochastic escape** — barrier-crossing frequency at constant temperature/noise.
+2. **Geometric simulated annealing** — final-basin selection under a changing temperature schedule.
+
+**Resolved decisions:**
+1. **Landscape**: 1D double-well for v0 (2D waits for a sequel, if earned).
+2. **Barriers**: fixed, parametric. No random landscapes in v0.
+3. **Vocabulary**: both terms, but each owning its own experiment section (per the refinement above). Quantum-language ban stands.
+4. **Output**: text/tables only. No plots in v0.
+5. **Self-checks** —
+   *Hard asserts*: byte-identical determinism for the same seed · all probabilities/frequencies in [0, 1] · trial/state counts conserved · theoretical Metropolis uphill-acceptance decreases as ΔE rises at fixed T · theoretical acceptance increases as T rises at fixed ΔE.
+   *Soft / tolerance-based diagnostics*: sampled escape rate generally falls with barrier height · generally rises with temperature · geometric cooling favours the deeper basin more often than an abrupt quench · Monte Carlo ≈ theory.
+   **Do not hard-assert strict empirical monotonicity from finite stochastic samples.**
+6. **Schedules**: constant-temperature sweep + one geometric cooling schedule. No schedule zoology in v0.
+
+**Specified mechanism**: a small **discrete Metropolis-style walker on a 1D double-well energy landscape**, dimensionless toy units only — no claim of physical time, real tunnelling, or Medusa dynamics.
+
+With §8 resolved, the future script PR implements exactly this section. Any deviation returns here first.
+
+---
+
 *Glass box rules apply. The marble may rattle; the cathedral does not.*
