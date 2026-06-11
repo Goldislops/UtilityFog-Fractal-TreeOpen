@@ -10,6 +10,9 @@ mod superdeterminism;
 mod hyper_agent;
 mod dark_energy;
 mod lucid_ui;
+mod four_immeasurables;
+mod proprioception;
+mod acoustic_hydrotropism;
 
 use cuda::{VanguardCudaContext, Phase13Config, detect_gpus};
 use superdeterminism::SuperdeterministicSync;
