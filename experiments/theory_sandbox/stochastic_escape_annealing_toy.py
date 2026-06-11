@@ -32,8 +32,9 @@ What this toy CAN show
 * Hard self-checks that can fail the run: byte-identical determinism for
   the same seed/config; all probabilities/frequencies within [0, 1];
   trial-count conservation; theoretical Metropolis uphill acceptance
-  falling as dE rises at fixed T and rising as T rises at fixed dE; no
-  NaN/inf anywhere. Soft diagnostics (reported, never fatal): sampled
+  falling as dE rises at fixed T and rising as T rises at fixed dE;
+  zero-temperature uphill acceptance exactly 0.0 (negative temperature
+  and non-positive dE rejected); no NaN/inf anywhere. Soft diagnostics (reported, never fatal): sampled
   escape trends vs barrier and temperature, cooling-vs-quench basin
   preference, Monte Carlo vs theoretical acceptance. Strict empirical
   monotonicity is deliberately NOT hard-asserted from finite samples.
@@ -124,7 +125,19 @@ def landscape_features(energies: list[float]) -> tuple[int, int, int]:
 # --- walker ------------------------------------------------------------------
 
 def theoretical_uphill_acceptance(d_e: float, temperature: float) -> float:
-    """Metropolis acceptance probability for an uphill move (d_e > 0)."""
+    """Metropolis acceptance probability for an uphill move (d_e > 0).
+
+    Zero-temperature rule: uphill moves are never accepted (probability
+    exactly 0.0). Downhill/equal-energy moves are accepted by the callers
+    before this function is consulted. Negative temperature has no meaning
+    here and is rejected loudly instead of being fed to exp().
+    """
+    if d_e <= 0.0:
+        raise ValueError(f"d_e must be > 0 for an uphill move, got {d_e!r}")
+    if temperature < 0.0:
+        raise ValueError(f"temperature must be >= 0, got {temperature!r}")
+    if temperature == 0.0:
+        return 0.0
     return math.exp(-d_e / temperature)
 
 
@@ -140,7 +153,6 @@ def escape_trial(energies: list[float], start: int, target: int,
     pos = start
     last = len(energies) - 1
     rand = rng.random
-    exp = math.exp
     proposals = accepted = 0
     theory_sum = 0.0
     escaped = False
@@ -152,7 +164,7 @@ def escape_trial(energies: list[float], start: int, target: int,
         if d_e <= 0.0:
             pos = nxt
         else:
-            acceptance = exp(-d_e / temperature)
+            acceptance = theoretical_uphill_acceptance(d_e, temperature)
             proposals += 1
             theory_sum += acceptance
             if rand() < acceptance:
@@ -173,13 +185,14 @@ def schedule_trial(energies: list[float], start: int,
     pos = start
     last = len(energies) - 1
     rand = rng.random
-    exp = math.exp
     for temperature in temperatures:
         nxt = pos + 1 if rand() < 0.5 else pos - 1
         if nxt < 0 or nxt > last:
             continue
         d_e = energies[nxt] - energies[pos]
-        if d_e <= 0.0 or rand() < exp(-d_e / temperature):
+        if d_e <= 0.0:
+            pos = nxt
+        elif rand() < theoretical_uphill_acceptance(d_e, temperature):
             pos = nxt
     return pos
 
@@ -346,6 +359,19 @@ def hard_theory_checks(tracked: list[float]) -> None:
     require(all(a < b for a, b in zip(accs_t, accs_t[1:])),
             "theoretical uphill acceptance must rise as T rises at fixed dE")
 
+    require(theoretical_uphill_acceptance(1.0, 0.0) == 0.0,
+            "zero-temperature uphill acceptance must be exactly 0.0")
+    for bad_d_e, bad_t in ((1.0, -1.0), (0.0, 1.0), (-1.0, 1.0)):
+        try:
+            theoretical_uphill_acceptance(bad_d_e, bad_t)
+        except ValueError:
+            pass
+        else:
+            require(False,
+                    f"acceptance arguments d_e={bad_d_e!r}, "
+                    f"temperature={bad_t!r} must be rejected with "
+                    f"ValueError")
+
 
 # --- soft diagnostics --------------------------------------------------------
 
@@ -444,6 +470,8 @@ def build_report(seed: int) -> str:
                  "fixed T .. OK")
     lines.append("  [hard] theoretical acceptance rises as T rises at "
                  "fixed dE .. OK")
+    lines.append("  [hard] zero-T uphill acceptance is 0.0; bad args "
+                 "rejected ... OK")
     lines.append(f"  [hard] no NaN or infinite value "
                  f"({len(tracked)} tracked quantities) ... OK")
     lines.append("")
