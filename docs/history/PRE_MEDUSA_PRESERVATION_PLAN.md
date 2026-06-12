@@ -7,7 +7,7 @@
 
 ## Implementation Record — Phase 2A.1 (2026-06-12)
 
-Both approved anchors were created as **annotated tag objects** and pushed in a single **atomic** operation (`git push --atomic origin` naming exactly the two `refs/tags/…` refs; `--tags` was not used; no branch and no other tag was pushed). Verification was performed **against the remote** — `git ls-remote` ref+peel listings, content-addressed inspection of the remote-advertised tag-object SHAs, and per-tag `FETCH_HEAD` fetch probes — not the GitHub UI.
+Both approved anchors were created as **annotated tag objects** and pushed in a single **atomic** operation (`git push --atomic origin` naming exactly the two `refs/tags/<approved-tag-name>` refs; `--tags` was not used; no branch and no other tag was pushed). Verification was performed **against the remote** — `git ls-remote` ref+peel listings, content-addressed inspection of the remote-advertised tag-object SHAs, and per-tag `FETCH_HEAD` fetch probes — not the GitHub UI.
 
 | Tag | Tag-object SHA | Peeled commit SHA | Annotation verified | Remote verified | Status |
 |---|---|---|---|---|---|
@@ -115,7 +115,7 @@ Assessed for both material sets against the verified topology (each set has a si
 | Cosmic-Garden / hungry-nash design history | `origin/claude/hungry-nash` | `3df3d335d02782b61c440ef5772445ddb04c8225` | 3 linear commits (+ full pre-pivot ancestry) — §11–§16 of `work.md`, 1,177 lines | overnight analyses, the OpenClaw spec (an early design record of voxel memory), **Premise Veto Rulings**, vetted Cosmic-Garden spec, operational directives | **No** (verbatim absent; *outcomes* implemented via #110/#111) | annotated tag + manifest row | `archive/cosmic-garden-hungry-nash-2026-03` | §14/§16 misread as live doctrine → mitigated by annotation text |
 | Pre-Medusa research & design docs | PR #17 head `docs/research-and-design` | `33449a74daa8bc44dc0261222d374d09a92c5b38` | 1 commit (+ ancestry) — 6 concept docs + 6 PDF twins | founding BEAM/mindfulness/memetics philosophy + 3 algorithm concept specs | **No** (zero history for all 12 paths) | annotated tag + manifest row | `archive/pre-medusa-research-design-2025-09` | RESEARCH_INDEX/PROJECT_LOG misleading if surfaced without framing; PDFs are dead weight (acceptable inside an anchor) |
 
-Naming uses the **material's** date (more informative as a museum label); the **preservation** date lives in the annotation. Alternative (preservation-dated `…-2026-06`) listed as open question H-2. Both names verified uncreated locally and on `origin` (only `v0.1.0`, `v0.1.0-rc1`, `v0.1.1` exist). [verified]
+Naming uses the **material's** date (more informative as a museum label); the **preservation** date lives in the annotation. Alternative (preservation-dated, e.g. `archive/<set-name>-2026-06`) listed as open question H-2. Both names verified uncreated locally and on `origin` (only `v0.1.0`, `v0.1.0-rc1`, `v0.1.1` exist). [verified]
 
 **The annotation message should include all of**: source branch/PR · source SHA · preservation date · "historical, non-canonical" warning · relationship to current Medusa architecture · links to the Phase-1 audit and this manifest. Draft texts:
 
@@ -182,7 +182,7 @@ Explicit statements, as required:
 7. **Actions explicitly NOT authorised by this plan**: creating tags or branches; closing/merging/commenting PRs or issues; deleting or pruning anything; copying historical prose onto `main`; altering branch protection, settings, workflows, `.gitignore`, Vanguard, frontend, CI, Lane A, Swarm Hunter.
 8. **Questions for Kevin, Jack and AURA — all RESOLVED at the curator gate (AURA + Jack, 2026-06-12)**:
    - **H-1**: Confirm PR #25's divergent doc variants are *excluded* from anchoring — **Decided: excluded; no third anchor.**
-   - **H-2**: Naming-date convention — material date vs preservation date — **Decided: material dates adopted** (`…-2026-03` / `…-2025-09`).
+   - **H-2**: Naming-date convention — material date vs preservation date — **Decided: material dates adopted** (`archive/cosmic-garden-hungry-nash-2026-03` / `archive/pre-medusa-research-design-2025-09`).
    - **H-3**: GitHub **tag-protection ruleset** for `archive/*`? — **Decided: deferred to the later repository-settings arc**; not part of this or the tag-creation arc.
    - **H-4**: Pointer in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`? — **Decided: no** — this manifest plus `AGENT_HANDOFF.md` provide sufficient discoverability without mixing archives into active theory intake.
 9. **Binary status**:
