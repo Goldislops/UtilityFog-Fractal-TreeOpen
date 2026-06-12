@@ -4,6 +4,7 @@
 >
 > **Date**: 2026-06-12 · **Auditor seat**: Fab5 (Claude Fable 5, desktop/84) · **Requested by**: Kevin, protocol authored by Jack
 > **Scope**: inventory + diagnosis only. No deletion, cleanup, closing, pruning, restoring, merging, implementation or source modification was performed.
+> **Revision**: 2026-06-12 audit-polish pass applying Jack's PR #206 review — corrections C1 (remote-ref wording), C2 (PR dates), C3 (count reconciliation), C4 (size semantics), C5 (agent accounting), C6 (#112/#113 behind-count), plus Phase 2B sequencing split. Substance of all classifications unchanged.
 > **Evidence rule**: every claim below is tagged **[verified]** (commands run this session), **[strong]** (inference from verified facts), **[weak]** (plausible, unproven), or **[unknown]**.
 
 ---
@@ -46,6 +47,8 @@ Audit branch `audit/repository-health-phase-1` was created from `main` only afte
 
 **Method**: every open PR was analysed by a dedicated read-only agent against current `main` (`32484d2`); every PR classified *likely obsolete* or *superseded* was then **adversarially re-checked by a second, independent skeptic agent instructed to refute the classification** by hunting for unique salvageable value in the actual diff/branch content. 24 of 26 PRs went through this two-pass gauntlet; 23 verdicts were confirmed, 1 was **challenged and corrected** (PR #72 — see its record). Nothing was closed, commented on, labelled, or otherwise mutated.
 
+**Agent accounting (post-review)**: the completed classification run executed **59 read-only agents** — 26 PR analysts + 24 adversarial skeptics + 7 issue-cluster agents + 2 branch deep-divers (26+24+7+2 = 59). An earlier invocation of the same workflow was interrupted by server-side rate limiting after ~50 of its agents had run; its progress card (“50 Agents”) reflects that interrupted run. Its journal did not satisfy the resume cache, so all 59 agents re-ran fresh in the completed run, and **no results from the interrupted run were used**.
+
 **Classification totals (26 open PRs)**: superseded 11 · likely obsolete 13 · potentially salvageable 2 (#75, #17) · architecture-review-required 0 · unknown 0.
 
 **Answers to the protocol's special-attention list:**
@@ -55,61 +58,63 @@ Audit branch `audit/repository-health-phase-1` was created from `main` only afte
 - **Release PRs** (#63, #65): fully superseded by the published `v0.1.0-rc1` and `v0.1.0` GA releases (both shipped 2025-09-22 via other paths); merging #63 would *regress* version strings from GA back to rc1 [verified].
 - **Experimental CA/sweep PRs**: #89's configs are schema-incompatible with the merged runner (`KeyError` on load, verified against `src/uft_orch/ca/runner.py`) and its blocker #81 merged 2025-10-07 without #89 ever moving.
 - **PRs #112 and #113**: both **superseded — verified fact, skeptic-confirmed**. They are Codex re-rolls of work that landed via merged #111 (`5821bcb`), #114 (`c661e30`) and #115 (`475a98d`). For #112, 5 of 8 files are byte-identical to the post-#114 tree, and the residual diffs are main-side *fixes* — merging would reintroduce a real double-mutation bug (`pre_mut`) and the 8-Step-Cliff decay regression (0.005 → 0.025).
-- **PRs based on substantially obsolete `main`**: all 26 — bases range from 117 to 183 commits behind `32484d2`.
+- **PRs based on substantially obsolete `main`**: all 26 — merge-base staleness ranges from 144 to 183 commits behind `32484d2`.
 
 ### Open PR summary table
 
 
-| PR | Head branch | Created | Merge state | Classification | Verified by skeptic? | Confidence |
-|---|---|---|---|---|---|---|
-| #113 | `codex/redesign-initial-state-generator-for-ca-lattice-my6q4s` |  | CONFLICTING / mergeable_state=dirty (verified via gh api) | **superseded** | confirmed | verified fact |
-| #112 | `codex/redesign-initial-state-generator-for-ca-lattice-v1n4ys` |  | CONFLICTING / mergeable_state=dirty (gh verified) | **superseded** | confirmed | verified fact |
-| #89 | `exp/branching3-sweep` |  | MERGEABLE / behind (gh API: mergeable=true, mergeable_state=behind; all 4 files are new, no collisions) | **likely obsolete** | confirmed | verified fact |
-| #79 | `garden/status-badges` |  | CONFLICTING / mergeStateStatus=DIRTY (gh api: mergeable=false, mergeable_state=dirty) | **likely obsolete** | confirmed | verified fact |
-| #78 | `garden/garden-gate` |  | MERGEABLE per gh (mergeable=true, mergeable_state=behind / mergeStateStatus=BEHIND) — no conflicts because both files are pure additions not present on main | **superseded** | confirmed | verified fact |
-| #77 | `garden/spec-seed` |  | MERGEABLE per gh (no textual conflict) but mergeStateStatus=BEHIND | **likely obsolete** | confirmed | verified fact |
-| #75 | `garden/prod-workflows` |  | MERGEABLE / mergeable_state=behind (no conflicts — it only adds files that still don't exist on main; gh confirmed mergeable=true) | **potentially salvageable** | n/a (not obsolete/superseded) | verified fact |
-| #72 | `hardening/ci-docs-main` |  | CONFLICTING / mergeable_state=dirty (verified via gh pr view and gh api) | **likely obsolete** | **CHALLENGED** | verified fact |
-| #65 | `automation-feed-v0.1.0-rc1-update` |  | MERGEABLE / mergeStateStatus=BEHIND (no conflicts, just behind) | **superseded** | confirmed | verified fact |
-| #63 | `release/v0.1.0-rc1` |  | mergeable=true per gh, but mergeable_state/mergeStateStatus=BEHIND (no conflicts, just 183 commits stale) | **superseded** | confirmed | verified fact |
-| #62 | `chore/phase-3-integration` |  | CONFLICTING / mergeable_state=dirty per gh | **superseded** | confirmed | verified fact |
-| #58 | `feat/FT-007-heartbeat` |  | mergeable=true, merge_state=BEHIND (adds only new files, so no textual conflict despite ~9 months staleness) | **likely obsolete** | confirmed | strong inference |
-| #57 | `feat/FT-006-reliable-messaging` |  | CONFLICTING / mergeStateStatus=DIRTY (mergeable=false, mergeable_state=dirty per API) | **likely obsolete** | confirmed | strong inference |
-| #56 | `feat/FT-005-coordination` |  | CONFLICTING / mergeable_state=dirty (gh pr view + REST both confirm) | **likely obsolete** | confirmed | strong inference |
-| #55 | `feat/FT-004-test-harness` |  | MERGEABLE / BEHIND (no conflicts — all 6 files are pure additions absent from main) | **likely obsolete** | confirmed | verified fact |
-| #54 | `feat/FT-003-message-passing` |  | MERGEABLE per gh (mergeable=true, mergeable_state=behind); add-only diff so no textual conflicts, just very stale | **superseded** | confirmed | strong inference |
-| #53 | `feat/FT-002-tree-structure` |  | MERGEABLE / BEHIND (adds-only diff, no conflicts, but base 183 commits stale) | **likely obsolete** | confirmed | strong inference |
-| #52 | `feat/FT-001-base-treenode` |  | CONFLICTING / mergeStateStatus=DIRTY (gh api: mergeable=false, mergeable_state=dirty) | **superseded** | confirmed | strong inference |
-| #34 | `docs/specify-quick-start` |  | mergeable=true, mergeable_state=behind (GitHub: MERGEABLE/BEHIND) | **superseded** | confirmed | verified fact |
-| #33 | `ci/specify-enable` |  | CONFLICTING / mergeable_state=dirty (both sides add tools/specify/README.md and .env.example with different content) | **superseded** | confirmed | verified fact |
-| #27 | `specify-onboarding` |  | CONFLICTING / dirty per gh (mergeable=false) | **superseded** | confirmed | verified fact |
-| #25 | `docs-cohesion` |  | CONFLICTING (mergeable=false, mergeable_state=dirty per gh API; mergeStateStatus=DIRTY) | **likely obsolete** | confirmed | strong inference |
-| #17 | `docs/research-and-design` |  | MERGEABLE per gh (mergeable_state=behind); purely additive (12 new files, +1447/-0), no conflicting paths on main | **potentially salvageable** | n/a (not obsolete/superseded) | strong inference |
-| #16 | `chore/specify-ci` |  | CONFLICTING / mergeable_state=dirty (verified via gh api; conflict is tools/specify/README.md, which exists on main with different content from commit da7eea0) | **likely obsolete** | confirmed | verified fact |
-| #15 | `chore/policy-check-ci` |  | CONFLICTING / mergeable_state=dirty (verified via gh api) | **likely obsolete** | confirmed | verified fact |
-| #11 | `rfc/specify-design-tokens` |  | CONFLICTING / mergeStateStatus=DIRTY (gh api mergeable=false, state=dirty) | **likely obsolete** | confirmed | strong inference |
+| PR | Head branch | Created | Updated | Behind (merge-base) | Merge state | Classification | Verified by skeptic? | Confidence |
+|---|---|---|---|---|---|---|---|---|
+| #113 | `codex/redesign-initial-state-generator-for-ca-lattice-my6q4s` | 2026-03-12 | 2026-03-13 | 144 | CONFLICTING / mergeable_state=dirty (verified via gh api) | **superseded** | confirmed | verified fact |
+| #112 | `codex/redesign-initial-state-generator-for-ca-lattice-v1n4ys` | 2026-03-12 | 2026-03-12 | 144 | CONFLICTING / mergeable_state=dirty (gh verified) | **superseded** | confirmed | verified fact |
+| #89 | `exp/branching3-sweep` | 2025-10-03 | 2025-10-03 | 166 | MERGEABLE / behind (gh API: mergeable=true, mergeable_state=behind; all 4 files are new, no collisions) | **likely obsolete** | confirmed | verified fact |
+| #79 | `garden/status-badges` | 2025-09-27 | 2025-09-28 | 169 | CONFLICTING / mergeStateStatus=DIRTY (gh api: mergeable=false, mergeable_state=dirty) | **likely obsolete** | confirmed | verified fact |
+| #78 | `garden/garden-gate` | 2025-09-27 | 2025-09-27 | 169 | MERGEABLE per gh (mergeable=true, mergeable_state=behind / mergeStateStatus=BEHIND) — no conflicts because both files are pure additions not present on main | **superseded** | confirmed | verified fact |
+| #77 | `garden/spec-seed` | 2025-09-27 | 2025-09-27 | 169 | MERGEABLE per gh (no textual conflict) but mergeStateStatus=BEHIND | **likely obsolete** | confirmed | verified fact |
+| #75 | `garden/prod-workflows` | 2025-09-27 | 2025-09-27 | 169 | MERGEABLE / mergeable_state=behind (no conflicts — it only adds files that still don't exist on main; gh confirmed mergeable=true) | **potentially salvageable** | n/a (not obsolete/superseded) | verified fact |
+| #72 | `hardening/ci-docs-main` | 2025-09-22 | 2025-09-23 | 170 | CONFLICTING / mergeable_state=dirty (verified via gh pr view and gh api) | **likely obsolete** | **CHALLENGED** | verified fact |
+| #65 | `automation-feed-v0.1.0-rc1-update` | 2025-09-22 | 2025-09-22 | 174 | MERGEABLE / mergeStateStatus=BEHIND (no conflicts, just behind) | **superseded** | confirmed | verified fact |
+| #63 | `release/v0.1.0-rc1` | 2025-09-22 | 2025-09-22 | 183 | mergeable=true per gh, but mergeable_state/mergeStateStatus=BEHIND (no conflicts, just 183 commits stale) | **superseded** | confirmed | verified fact |
+| #62 | `chore/phase-3-integration` | 2025-09-21 | 2025-09-22 | 183 | CONFLICTING / mergeable_state=dirty per gh | **superseded** | confirmed | verified fact |
+| #58 | `feat/FT-007-heartbeat` | 2025-09-21 | 2025-09-21 | 183 | mergeable=true, merge_state=BEHIND (adds only new files, so no textual conflict despite ~9 months staleness) | **likely obsolete** | confirmed | strong inference |
+| #57 | `feat/FT-006-reliable-messaging` | 2025-09-21 | 2025-09-21 | 183 | CONFLICTING / mergeStateStatus=DIRTY (mergeable=false, mergeable_state=dirty per API) | **likely obsolete** | confirmed | strong inference |
+| #56 | `feat/FT-005-coordination` | 2025-09-21 | 2025-09-21 | 183 | CONFLICTING / mergeable_state=dirty (gh pr view + REST both confirm) | **likely obsolete** | confirmed | strong inference |
+| #55 | `feat/FT-004-test-harness` | 2025-09-21 | 2025-09-21 | 183 | MERGEABLE / BEHIND (no conflicts — all 6 files are pure additions absent from main) | **likely obsolete** | confirmed | verified fact |
+| #54 | `feat/FT-003-message-passing` | 2025-09-21 | 2025-09-21 | 183 | MERGEABLE per gh (mergeable=true, mergeable_state=behind); add-only diff so no textual conflicts, just very stale | **superseded** | confirmed | strong inference |
+| #53 | `feat/FT-002-tree-structure` | 2025-09-21 | 2025-09-21 | 183 | MERGEABLE / BEHIND (adds-only diff, no conflicts, but base 183 commits stale) | **likely obsolete** | confirmed | strong inference |
+| #52 | `feat/FT-001-base-treenode` | 2025-09-21 | 2025-09-21 | 183 | CONFLICTING / mergeStateStatus=DIRTY (gh api: mergeable=false, mergeable_state=dirty) | **superseded** | confirmed | strong inference |
+| #34 | `docs/specify-quick-start` | 2025-09-20 | 2025-09-20 | 183 | mergeable=true, mergeable_state=behind (GitHub: MERGEABLE/BEHIND) | **superseded** | confirmed | verified fact |
+| #33 | `ci/specify-enable` | 2025-09-20 | 2025-09-20 | 183 | CONFLICTING / mergeable_state=dirty (both sides add tools/specify/README.md and .env.example with different content) | **superseded** | confirmed | verified fact |
+| #27 | `specify-onboarding` | 2025-09-20 | 2025-09-20 | 183 | CONFLICTING / dirty per gh (mergeable=false) | **superseded** | confirmed | verified fact |
+| #25 | `docs-cohesion` | 2025-09-20 | 2025-09-20 | 183 | CONFLICTING (mergeable=false, mergeable_state=dirty per gh API; mergeStateStatus=DIRTY) | **likely obsolete** | confirmed | strong inference |
+| #17 | `docs/research-and-design` | 2025-09-20 | 2025-09-20 | 183 | MERGEABLE per gh (mergeable_state=behind); purely additive (12 new files, +1447/-0), no conflicting paths on main | **potentially salvageable** | n/a (not obsolete/superseded) | strong inference |
+| #16 | `chore/specify-ci` | 2025-09-20 | 2025-09-20 | 183 | CONFLICTING / mergeable_state=dirty (verified via gh api; conflict is tools/specify/README.md, which exists on main with different content from commit da7eea0) | **likely obsolete** | confirmed | verified fact |
+| #15 | `chore/policy-check-ci` | 2025-09-20 | 2025-09-20 | 183 | CONFLICTING / mergeable_state=dirty (verified via gh api) | **likely obsolete** | confirmed | verified fact |
+| #11 | `rfc/specify-design-tokens` | 2025-09-18 | 2025-09-20 | 183 | CONFLICTING / mergeStateStatus=DIRTY (gh api mergeable=false, state=dirty) | **likely obsolete** | confirmed | strong inference |
+
+*“Behind (merge-base)” = `git rev-list --count $(git merge-base origin/main <head>)..origin/main` against `32484d2` — the authoritative staleness measure, computed once for all 26 PRs (post-review). Where a per-PR record below cites a different behind-figure (#113: 117; #112: 120), that record measured from the GitHub-API-recorded `base.sha`, which for these two Codex PRs is **newer than the true fork point**; `main` did not move during the audit. All other 24 records match the merge-base values exactly.*
 
 ### Per-PR records
 
 #### PR #113
 
 - **Head**: `codex/redesign-initial-state-generator-for-ca-lattice-my6q4s (head b213996)`
-- **Base**: base=main @ e82e290 ("fix: add missing telemetry init in engine launcher", 2026-03-12 era); e82e290 is an ancestor of main but 117 commits behind current main 32484d2 (2026-06-12)
+- **Base**: base=main @ e82e290 ("fix: add missing telemetry init in engine launcher", 2026-03-12 era); e82e290 is the GitHub-API-recorded `base.sha` (an ancestor of main, itself 117 behind `32484d2`); the **authoritative merge-base** of this branch with main is `a24be28`, **144 commits behind** [verified post-review]
 - **Merge state**: CONFLICTING / mergeable_state=dirty (verified via gh api)
 - **Area**: CA engine (Rust crate crates/uft_ca, Python harness scripts/continuous_evolution_ca.py), evolution/fitness (agent/evolution_engine.py), CA rules (ca/rules/example.toml), docs, tests
 - **Supersession**: Every component already exists on main, mostly verbatim-equivalent or newer: (1) differentiation fitness (_differentiation_score/_extract_state_counts) landed in agent/evolution_engine.py via merged PR #111 (5821bcb, v0.7.5 Cosmic Garden); (2) feature-flagged Phase 3 experimental CA modules incl. docs/experimental_phase3_modules.md landed via merged PR #114 (c661e30); (3) VoxelMemory/DensityPhaseDetector/apply_with_memory/apply_stochastic exist across crates/uft_ca (72 hits in lib.rs, memory.rs, params.rs, stepper.rs, phase4-6c modules); (4) scripts/continuous_evolution_ca.py exists and has since evolved through Phases 14-17a; (5) generate_primordial_seed_cube + --seed-cube-size exist in scripts/continuous_evolution.py; (6) both test files (tests/test_continuous_evolution_ca.py, tests/test_differentiation_fitness.py) exist on main; (7) ca/rules/example.toml on main is v0.6.0 with contagion/stochastic/decay sections — the rule line evolved past this PR's branching-growth-v0.7.5 proposal via main's own v0.4→v0.7.x progression
 - **Classification**: **superseded** [verified fact]
-- **Evidence**: gh pr view: created 2026-03-12, codex-generated twin of #112 (1987+/28-, 8 files), CONFLICTING. git rev-list: base 117 commits behind main. git log --diff-filter=A confirms its three novel files were added to main by other commits: c661e30 (#114 Phase 3 experimental modules), f2d5a04/8a9c9e0 (survival/contagion rewrites, cf. #115 lineage). Grep on working tree (== main 32484d2) confirms all named symbols (VoxelMemory, DensityPhaseDetector, apply_with_memory, apply_stochastic, _differentiation_score, generate_primordial_seed_cube) present. PR body itself matches the #111/#114 feature set that merged.
+- **Evidence**: gh pr view: created 2026-03-12, codex-generated twin of #112 (1987+/28-, 8 files), CONFLICTING. git rev-list: API-recorded base.sha 117 behind main; authoritative merge-base `a24be28` is 144 behind [corrected post-review]. git log --diff-filter=A confirms its three novel files were added to main by other commits: c661e30 (#114 Phase 3 experimental modules), f2d5a04/8a9c9e0 (survival/contagion rewrites, cf. #115 lineage). Grep on working tree (== main 32484d2) confirms all named symbols (VoxelMemory, DensityPhaseDetector, apply_with_memory, apply_stochastic, _differentiation_score, generate_primordial_seed_cube) present. PR body itself matches the #111/#114 feature set that merged.
 - **Risk if ignored**: Low — confusion/clutter only. An open conflicting PR proposing already-merged March-2026 CA features could mislead future contributors or auto-tooling into re-landing stale code over the Phase 4-19 evolution. No unique salvage target identified: every file/symbol has an equal-or-better counterpart on main; the only deltas are cosmetic (old rule-version naming in ca/rules/example.toml), not worth extracting.
-- **Smallest reversible next action**: Close PR #113 unmerged with a comment citing supersession by merged PRs #111 (differentiation fitness) and #114 (Phase 3 experimental CA modules); reversible via reopen. Do not attempt rebase — 117-commit drift across the engine's Phase 4-19 rewrites makes conflict resolution pointless.
+- **Smallest reversible next action**: Close PR #113 unmerged with a comment citing supersession by merged PRs #111 (differentiation fitness) and #114 (Phase 3 experimental CA modules); reversible via reopen. Do not attempt rebase — 144-commit merge-base drift across the engine's Phase 4-19 rewrites makes conflict resolution pointless.
 - **Prerequisites**: None — supersession is fully verified; no code extraction or testing needed before closing.
 - **Approval required**: none
-- **Adversarial verification**: confirmed — unique value: none found. Verified per-file vs main (32484d2) using git diff origin/main..origin/codex/redesign-initial-state-generator-for-ca-lattice-my6q4s (head b213996, 2 commits, base now 144 behind — auditor's 117 likely measured earlier). (1) scripts/continuous_evolution.py: byte-identical to main (empty diff) — landed verbatim. (2) agent/evolution_engine.py: PR delta is only REMOVED docstrings; main strictly newer. (3) ca/rules/example.toml: main evolved far past (Phase 10.5/10.6 tuning, equanimity/ice_battery/trash_battery sections PR lacks); and main's config loader (scripts/continuous_evolution_ca.py:326-328) accepts both the PR's theta_c/alpha_c/savgol keys and newer ones. (4) lib.rs: PR's Phase-3 mechanisms (void sanctuary 50x, half-step aging, epsilon-buffer P_reg equation, selective decay, DensityPhaseDetector w/ theta_c/alpha_c) all exist on main in evolved form with Phase 3 comments, plus Phase 10 modules/wasm the PR would delete; PR's variant formulation (epsilon buffer as separate survival roll vs main's resistance floor) was superseded by #115's chosen implementation. (5) doc: main's version documents the same 4 modules incl. Savitzky-Golay trigger with identical parameters. (6) CA harness: main implements savgol detector (lines 416-453), TelemetryWindow, mini-lattice trials, sandboxed memory — strict superset (magnon/mycelial/cosmic-garden added). (7) Tests: PR's behavioral test names (e.g. test_contagion_promotes_structural_with_energy_neighbors) historically existed on main (added 8a9c9e0) and were deliberately replaced in #115's Phase 3 rewrite (475a98d) when transition tables changed — restoring them would test obsolete rules. Lineage: PR #113 is a Codex twin of #114 (c661e30) + #115 (475a98d); patch-ids differ (re-implementations, not cherry-picks) but content-equivalent. Only nano-delta found: PR has a fitness test for list-form cell_state_counts (test_list_state_vector_is_supported) that main's suite lacks, but main's code identically supports list form (same _extract_state_counts body) — trivial coverage gap, not salvageable value. Strong inference → verified fact level: superseded; safe to close.
+- **Adversarial verification**: confirmed — unique value: none found. Verified per-file vs main (32484d2) using git diff origin/main..origin/codex/redesign-initial-state-generator-for-ca-lattice-my6q4s (head b213996, 2 commits; merge-base `a24be28` is 144 behind — the first pass's 117 was measured from the API-recorded `base.sha` `e82e290`, not the merge-base; `main` did not move during the audit). (1) scripts/continuous_evolution.py: byte-identical to main (empty diff) — landed verbatim. (2) agent/evolution_engine.py: PR delta is only REMOVED docstrings; main strictly newer. (3) ca/rules/example.toml: main evolved far past (Phase 10.5/10.6 tuning, equanimity/ice_battery/trash_battery sections PR lacks); and main's config loader (scripts/continuous_evolution_ca.py:326-328) accepts both the PR's theta_c/alpha_c/savgol keys and newer ones. (4) lib.rs: PR's Phase-3 mechanisms (void sanctuary 50x, half-step aging, epsilon-buffer P_reg equation, selective decay, DensityPhaseDetector w/ theta_c/alpha_c) all exist on main in evolved form with Phase 3 comments, plus Phase 10 modules/wasm the PR would delete; PR's variant formulation (epsilon buffer as separate survival roll vs main's resistance floor) was superseded by #115's chosen implementation. (5) doc: main's version documents the same 4 modules incl. Savitzky-Golay trigger with identical parameters. (6) CA harness: main implements savgol detector (lines 416-453), TelemetryWindow, mini-lattice trials, sandboxed memory — strict superset (magnon/mycelial/cosmic-garden added). (7) Tests: PR's behavioral test names (e.g. test_contagion_promotes_structural_with_energy_neighbors) historically existed on main (added 8a9c9e0) and were deliberately replaced in #115's Phase 3 rewrite (475a98d) when transition tables changed — restoring them would test obsolete rules. Lineage: PR #113 is a Codex twin of #114 (c661e30) + #115 (475a98d); patch-ids differ (re-implementations, not cherry-picks) but content-equivalent. Only nano-delta found: PR has a fitness test for list-form cell_state_counts (test_list_state_vector_is_supported) that main's suite lacks, but main's code identically supports list form (same _extract_state_counts body) — trivial coverage gap, not salvageable value. Strong inference → verified fact level: superseded; safe to close.
 
 #### PR #112
 
 - **Head**: `codex/redesign-initial-state-generator-for-ca-lattice-v1n4ys (head 580ea2d)`
-- **Base**: base=main @ 96ae76a ("fix: add 3->5 channel memory grid migration for v0.7.5 resume"); 120 commits behind origin/main (32484d2)
+- **Base**: base=main @ 96ae76a ("fix: add 3->5 channel memory grid migration for v0.7.5 resume") — the API-recorded `base.sha`, itself 120 behind; the **authoritative merge-base** is `a24be28`, **144 commits behind** `32484d2` [verified post-review; consistent with this record’s own skeptic note]
 - **Merge state**: CONFLICTING / mergeable_state=dirty (gh verified)
 - **Area**: CA engine (Python scripts/continuous_evolution_ca.py + Rust crates/uft_ca), evolution-engine fitness, CA rules TOML, tests, docs
 - **Supersession**: Fully superseded. PR #111 (sibling Codex branch ...-wvgtf5, MERGED 2026-03-11, commit 5821bcb "v0.7.5 Cosmic Garden") landed the same voxel-memory CA, differentiation fitness, and v0.7.5 rules. Verified on main: agent/evolution_engine.py has identical _differentiation_score/ENTROPY_BONUS_WEIGHT 0.25/STRUCTURAL_DOMINANCE_TARGET 0.55; crates/uft_ca/src/lib.rs has VoxelMemory/apply_with_memory/memory_grid (29 hits); scripts/continuous_evolution.py has generate_primordial_seed_cube + --seed-cube-size (commit 482f8fd); both test files and docs/experimental_phase3_modules.md exist (#114/#115). CA file since evolved through Phases 10-17a.
@@ -761,7 +766,7 @@ This worktree holds the only tracked modifications anywhere on the desktop [veri
 
 ## 1D. Desktop Untracked, Ignored and Generated-State Inventory
 
-Primary working tree: **34,907 untracked entries** at audit start (34,908 by mid-audit — a live process is still writing telemetry; see note below) [verified]. Grouped by top-level directory:
+Primary working tree: **34,907 untracked entries** at audit start [verified]. Grouped by top-level directory (see the **count-reconciliation block** below for measurement semantics — these are *collapsed* `git status` entries, not filesystem file counts):
 
 | Top-level | Entries | What it is |
 |---|---|---|
@@ -779,7 +784,7 @@ Primary working tree: **34,907 untracked entries** at audit start (34,908 by mid
 
 | Category | Path / pattern | Count / size | Classification | Should stay local? | `.gitignore` protects it? | Smallest safe future remedy |
 |---|---|---|---|---|---|---|
-| Engine snapshots | `data/*.npz` | 11,612 files (bulk of 520.16 GB total in `data/`, 39,030 files) | reproducible-ish generated output — **but these are Medusa's warm history; treat as operationally precious** | **Yes** — never push | **No** | add `data/` to `.gitignore` (Phase 2, with Kevin's sign-off) |
+| Engine snapshots | `data/*.npz` | 11,612 files (bulk of `data/`’s ≈520.16 GB **logical** aggregate across 39,030 filesystem files at T2 — see reconciliation block) | reproducible-ish generated output — **but these are Medusa's warm history; treat as operationally precious** | **Yes** — never push | **No** | add `data/` to `.gitignore` (Phase 2, with Kevin's sign-off) |
 | Telemetry | `data/telemetry_*.json` | 23,233 files | operational metadata, append-only, still being written ~every 5 min by a live collector | Yes | **No** | same `.gitignore` remedy; consider rotation policy later |
 | Geometry / organism exports | `data/geometry/`, `data/organism_body.{glb,stl}`, `data/organism_v075_phase6c_epi.genome.json`, `data/voxel_slices/` | 4 entries (dirs collapsed) | reproducible generated output | Yes | **No** | `.gitignore` |
 | Observatory outputs | `data/observatory_morning_*.{html,png}` | 5 files | reproducible generated output | Yes | **No** | `.gitignore` |
@@ -800,11 +805,26 @@ Primary working tree: **34,907 untracked entries** at audit start (34,908 by mid
 
 The tracked `.gitignore` is **from the repository's JavaScript era**: node_modules, dist, .vite, npm/yarn artifacts, `.env`, IDE files. The only Python/Rust/data-aware line is `experiments/theory_sandbox/out/` (added with the sandbox policy). **It protects effectively none of the 34,907 untracked entries.** [verified]
 
-Consequence: a careless `git add -A` (or an agent without this audit's context) could stage ~34.9k files / ~520 GB toward history. Probability is low (conventions here are disciplined), impact would be severe-but-recoverable (history surgery before push, or a 520 GB push failure). Recorded as finding **F-04**; remedy deferred to Phase 2 by protocol (no `.gitignore` change during Phase 1).
+Consequence: a careless `git add -A` (or an agent without this audit's context) could stage ~34.9k files / ≈520 GB (logical) toward history. Probability is low (conventions here are disciplined), impact would be severe-but-recoverable (history surgery before push, or a ≈520 GB push failure). Recorded as finding **F-04**; remedy deferred to Phase 2 by protocol (no `.gitignore` change during Phase 1).
 
-### Live-process note
+### Count reconciliation, measurement semantics and live-process note (post-review)
 
-`data/` gained a new telemetry file *during* the audit (untracked count 34,907 → 34,908) [verified]. The telemetry collector (and presumably Medusa) is live. Phase 2 cleanup work must treat `data/` as a **hot operational surface**, not a static junk drawer.
+The audit's three originally published figures describe **different populations measured at different times**. Reconciliation [all verified]:
+
+| Label | When (2026-06-12, UTC+10) | Method | Figure | Population semantics |
+|---|---|---|---|---|
+| T0 | ~01:15 (audit open) | `git status --porcelain`, line count | **34,907** untracked entries (34,855 under `data/`) | **directories collapsed** — an untracked directory is ONE entry; exactly 2 `data/` entries are collapsed dirs (`data/geometry/`, `data/voxel_slices/`) |
+| T1 | mid-audit | same | 34,908 | one new telemetry file (live growth) |
+| T2 | mid-audit (~1 h after T0) | `Get-ChildItem data -Recurse -File` | **39,030** files / **520.16 GB** | **filesystem files, dirs expanded**, includes the 5 tracked `data/` files |
+| T3 | 10:50 (post-review re-measure) | both methods, seconds apart | 35,081 entries (35,029 `data/`); 39,232 files / 523.25 GB | collapsed dirs expand to 4,074 (`geometry/`) + 64 (`voxel_slices/`) = 4,138 files |
+
+**Arithmetic (T3)**: 35,027 single-file untracked entries + 4,138 files inside the 2 collapsed dirs + 5 tracked files = 39,170 ≈ 39,232 measured; the ~62-file residual (≈0.15%) is concurrent live growth between the sub-measurements of a hot directory. So the T0→T2 gap (34,855 entries vs 39,030 files) is ~4,140 collapsed-directory files + 5 tracked files + minor growth — **not** a counting error.
+
+**Genuine live growth during the audit (T0→T3, ~9.5 h)**: +174 untracked entries, +202 `data/` files, +3.1 GB logical — consistent with the ~5-minute telemetry cadence plus geometry output.
+
+**Size semantics (post-review)**: every GB figure in this report is **logical aggregate size** (sum of `FileInfo.Length`). `data/` files carry OneDrive **reparse-point attributes** (Files-On-Demand plumbing, verified on the `.npz` population), so **physical on-disk allocation was not measured** and may differ in either direction. Read “≈520 GB” throughout as “≈520.16 GB logical aggregate at T2 (523.25 GB at T3); physical allocation not measured.”
+
+The telemetry collector (and presumably Medusa) is live. Phase 2 cleanup work must treat `data/` as a **hot operational surface**, not a static junk drawer.
 
 ---
 
@@ -844,7 +864,9 @@ Corroborating local evidence: untracked `crates/vanguard-mcp/target/` (1.62 GB) 
 - **Submodules / LFS / nested repos**: none / none / none [verified]
 - **Reflog evidence**: recent HEAD reflog shows exactly the expected Toy #2 flow (sandbox branch commits → main ff-pulls → toy-02-closeout commit → main → audit branch checkout). No anomalous resets, no orphaned states. [verified]
 
-#### Local commits not reachable from ANY remote ref — the complete list (5) [verified]
+#### Local commits not currently reachable from ANY remote ref — the complete list (5) [verified]
+
+*Wording note (post-review): "not currently reachable" is the precise condition. Four of these five commits WERE pushed — as the head commits of PRs #204/#205 — and became unreachable only when those merged remote branches were deleted. Only `f6cc8f5` (local-only branch, no upstream ever configured) may genuinely never have been pushed.*
 
 | Commit | Branch | Content | Durably represented? |
 |---|---|---|---|
@@ -890,7 +912,7 @@ Corroborating local evidence: untracked `crates/vanguard-mcp/target/` (1.62 GB) 
 | Item | Why it may matter | In Desktop bundle? | In Git history? | Smallest safe preservation action | Approval |
 |---|---|---|---|---|---|
 | Desktop bundle `UtilityFog_Local_Recovery_2026-06-11\` | Only off-git record of the Vanguard build-proof (cargo logs) + 2026-06-11 forensic snapshot | is the bundle | diff/patch content yes; cargo logs no | leave in place; optionally copy to a second disk (Kevin, outside audit scope) | Kevin |
-| `data/` snapshots (520 GB incl. `v070_gen*.npz`) | Medusa's warm history; expensive/impossible to regenerate identically | No (far too large) | No (intentionally) | none for git; backup strategy is an operational (non-git) question for Kevin | Kevin |
+| `data/` snapshots (≈520 GB logical incl. `v070_gen*.npz`) | Medusa's warm history; expensive/impossible to regenerate identically | No (far too large) | No (intentionally) | none for git; backup strategy is an operational (non-git) question for Kevin | Kevin |
 | Stash `stash@{0}` | redundant draft of merged #149 guard [strong] | No | parent commit yes; stash content no (but equivalent landed) | keep until Phase 2 diff confirms redundancy | Kevin |
 | Worktree `amazing-visvesvaraya` untracked `*-MEGA.py` files | probable intermediates of merged chapters [strong], unproven | No | equivalents merged via #146–#154 | diff vs `main` before any cleanup | Kevin |
 | `f6cc8f5` (`codex/v075-cosmic-garden`) | 8-line migration fix | No | content-equivalent block verified on `main` | none needed; branch deletable in Phase 2 after sign-off | Kevin |
@@ -904,8 +926,8 @@ Telemetry, snapshots (`*.npz`), generated geometry/organism exports, observatory
 | Surface | State | Valuable unique material | Safe next action |
 |---|---|---|---|
 | GitHub remote | healthy; `main` canonical at `32484d2`; 116 branches (83 merged/contained legacy, 1 potentially valuable); 26 stale-era open PRs; 56 open issues | the canonical project; recovery branch `a3ead14`; `claude/hungry-nash` unmerged specs (protect, F-05) | Phase 2: PR/issue triage per §1A classifications (approval-gated) |
-| Desktop tracked Git state | clean; `main == origin/main`; 0 tracked mods in primary tree; all 5 never-pushed commits content-represented remotely | none unrepresented | Phase 2: delete merged-stale local branches (after per-branch sign-off) |
-| Desktop untracked/ignored state | 34.9k entries; 100% generated/cache/operational outside `data/`; `data/` = 520 GB live operational surface | `data/` operationally (not for git) | Phase 2: modernise `.gitignore`; never `git clean` while Medusa writes |
+| Desktop tracked Git state | clean; `main == origin/main`; 0 tracked mods in primary tree; all 5 local commits not currently reachable from any remote ref are content-represented remotely | none unrepresented | Phase 2: delete merged-stale local branches (after per-branch sign-off) |
+| Desktop untracked/ignored state | 34.9k entries; 100% generated/cache/operational outside `data/`; `data/` ≈ 520 GB logical, live operational surface | `data/` operationally (not for git) | Phase 2: modernise `.gitignore`; never `git clean` while Medusa writes |
 | Worktrees | 12; 11 stale; 1 (`amazing-visvesvaraya`) dirty with regressive abandoned state | none proven; `*-MEGA.py` files unproven-but-probably-redundant | Phase 2: diff MEGA files, then prune worktrees one at a time |
 | Recovery branches and bundles | `recovery/vanguard-phase13-wiring` @ `a3ead14` pushed, unmerged, verified 3-line diff; Desktop bundle intact w/ cargo proofs | the branch + bundle (preserve both) | none — leave untouched per standing policy |
 
@@ -935,7 +957,7 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 
 ### F-03 — 26 stale open PRs, several deceptively MERGEABLE and actively regressive if merged
 - **Severity**: P2 · **Category**: PR-surface debt
-- **Evidence**: §1A — 24/26 verified obsolete or superseded (skeptic-confirmed); 11 report MERGEABLE despite 117–183-commit-stale bases. Verified regression hazards if merged: #77 clobbers the Medusa-era README with docs for a nonexistent `utilityfog` package; #63 downgrades version strings GA→rc1; #55/#78 would break `verify-python` collection; #112/#113 reintroduce fixed engine bugs.
+- **Evidence**: §1A — 24/26 verified obsolete or superseded (skeptic-confirmed); 11 report MERGEABLE despite 144–183-commit-stale merge-bases. Verified regression hazards if merged: #77 clobbers the Medusa-era README with docs for a nonexistent `utilityfog` package; #63 downgrades version strings GA→rc1; #55/#78 would break `verify-python` collection; #112/#113 reintroduce fixed engine bugs.
 - **Affected**: PRs #11–#113 (the 26 in §1A).
 - **Risk if ignored**: confusion about what is pending; one accidental merge of a "green-looking" stale PR does real damage.
 - **Smallest reversible remedy**: Phase 2 approval-gated batch closure with one-line evidence comments (all reversible via reopen). **Salvage first**: #72's branch-history workflows (`08072c9`/`1077741`), #75's codeql/scorecard/sbom files, #17's four concept docs (Kevin's call).
@@ -943,8 +965,8 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 
 ### F-04 — `.gitignore` protects effectively none of the 34,907 untracked entries
 - **Severity**: P2 · **Category**: hygiene / loss-prevention
-- **Evidence**: §1D — tracked `.gitignore` is JavaScript-era; `git check-ignore` confirms `data/` (520 GB), `__pycache__`, `*.pyc`, `target/`, `Cargo.lock` are all unprotected. [verified]
-- **Risk if ignored**: a careless `git add -A` stages ~34.9k files / ~520 GB; recoverable before push but messy, and a 520 GB push attempt would fail painfully.
+- **Evidence**: §1D — tracked `.gitignore` is JavaScript-era; `git check-ignore` confirms `data/` (≈520 GB logical), `__pycache__`, `*.pyc`, `target/`, `Cargo.lock` are all unprotected. [verified]
+- **Risk if ignored**: a careless `git add -A` stages ~34.9k files / ≈520 GB logical; recoverable before push but messy, and a ≈520 GB push attempt would fail painfully.
 - **Smallest reversible remedy**: Phase 2 single-file `.gitignore` modernisation PR (`data/`, `__pycache__/`, `*.py[cod]`, `target/`; plus a Cargo.lock policy decision for the binary crate).
 - **Prerequisites**: Kevin confirms the 5 already-tracked `data/` files stay tracked (ignore rules don't affect tracked files, but list them in the PR for clarity). **Approval**: Kevin; Jack review.
 
@@ -959,7 +981,7 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 - **Severity**: P3 · **Category**: issue-surface hygiene
 - **Evidence**: §1A issues table. Completed-but-unclosed: #6, #64, #83, #84, #85, #139, #150, #158 — each with the landing PR/commit named. #139 and #150 even have explicit unfinished "post the decision record back" instructions in merged docs. [verified/strong per row]
 - **Risk if ignored**: the issue tracker misrepresents pending work; contributors may re-do finished work.
-- **Smallest reversible remedy**: Phase 2 batch closure with the evidence comments this audit already drafted per row; the 3 genuinely active issues (#80, #151, #157) stay open.
+- **Smallest reversible remedy**: staged closure per Conclusion §7 — 2B-1 (the 8 completed) first with a stop-and-report, then the 45 obsolete/superseded in themed clusters with a checkpoint after each; the 3 genuinely active issues (#80, #151, #157) stay open.
 - **Prerequisites**: none. **Approval**: Kevin.
 
 ### F-07 — local branch hygiene debris (43 local branches)
@@ -999,9 +1021,9 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 - **Evidence**: §1F — parent pushed; content (`_validate_config_log_directory` + tests) landed via `62a12af` / PR #149. [strong]
 - **Smallest reversible remedy**: Phase 2 — final diff, then `git stash drop`. **Approval**: Kevin.
 
-### F-14 — 520 GB of operational `data/` lives inside a OneDrive-synced folder
+### F-14 — ≈520 GB (logical) of operational `data/` lives inside a OneDrive-synced folder
 - **Severity**: informational · **Category**: operational (non-git)
-- **Evidence**: §1D — 39,030 files / 520.16 GB, growing ~every 5 minutes while the collector runs; OneDrive mirrors the repo folder (known Edit-race quirk already documented in `AGENT_HANDOFF.md`). [verified size; known-quirk context]
+- **Evidence**: §1D — 39,030 files / ≈520.16 GB logical at T2 (39,232 / 523.25 GB at the T3 re-measure; physical allocation not measured — OneDrive reparse points present), growing ~every 5 minutes while the collector runs; OneDrive mirrors the repo folder (known Edit-race quirk already documented in `AGENT_HANDOFF.md`). [verified size; known-quirk context]
 - **Risk**: sync churn/quota pressure; not a git problem. **Remedy**: none in-repo; flag for Kevin's operational backup/exclusion thinking. **Approval**: Kevin.
 
 
@@ -1011,7 +1033,7 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 
 ### 1. Verified current state
 
-`main == origin/main == 32484d2` (the #205 squash) — canonical, clean, fast-forwarded. Every expected-canonical-state claim in the protocol independently verified (§0). Tracked history is fully reconciled: all 5 never-pushed local commits are squash- or content-represented on GitHub; tags and releases match; Vanguard recovery state verified byte-for-byte including the Desktop bundle's cargo proofs (30/30 tests). The mess Kevin suspected is real but almost entirely *perimeter* mess — stale PRs, unclosed issues, undeleted merged branches, unprotected generated data — not lost work.
+`main == origin/main == 32484d2` (the #205 squash) — canonical, clean, fast-forwarded. Every expected-canonical-state claim in the protocol independently verified (§0). Tracked history is fully reconciled: all 5 local commits not currently reachable from any remote ref are squash- or content-represented on GitHub (four were previously pushed as PR heads whose remote branches were deleted after squash-merge; the fifth, `f6cc8f5`, has no evidence of ever being pushed); tags and releases match; Vanguard recovery state verified byte-for-byte including the Desktop bundle's cargo proofs (30/30 tests). The mess Kevin suspected is real but almost entirely *perimeter* mess — stale PRs, unclosed issues, undeleted merged branches, unprotected generated data — not lost work.
 
 ### 2. Counts (each verified twice)
 
@@ -1031,7 +1053,7 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 1. **The real test gate isn't enforced** — `verify-python` absent from required checks while `verify` auto-skips (F-02).
 2. **`ca-search.yml` fails on every push** — live CI noise that trains failure-blindness (F-01).
 3. **Deceptively MERGEABLE stale PRs** — several of the 26 would actively regress `main` if merged (#77, #63, #55, #112/#113) (F-03).
-4. **Zero `.gitignore` protection** over 34.9k untracked entries / 520 GB (F-04).
+4. **Zero `.gitignore` protection** over 34.9k untracked entries / ≈520 GB logical (F-04).
 5. **`claude/hungry-nash` unique design history** would be destroyed by a naive merged-branch sweep (F-05).
 
 ### 4. Top five easy hygiene wins
@@ -1045,7 +1067,7 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 ### 5. Valuable local-only material requiring preservation
 
 - **Desktop recovery bundle** `C:\Users\kevin\Desktop\UtilityFog_Local_Recovery_2026-06-11\` — only off-git copy of the Vanguard cargo proofs; preserve in place (optional second-disk copy is Kevin's call).
-- **`data/` snapshots (520 GB)** — Medusa's warm history; operationally precious, intentionally non-git; backup strategy is an operational question for Kevin, outside this audit.
+- **`data/` snapshots (≈520 GB logical)** — Medusa's warm history; operationally precious, intentionally non-git; backup strategy is an operational question for Kevin, outside this audit.
 - **Nothing in tracked git terms** — no local commit, branch, source file or configuration is unrepresented (§1F item 8).
 - *(Remote-side, recorded here for completeness: `origin/claude/hungry-nash`'s 1,177 unmerged `work.md` lines — durable on GitHub today, but flagged for salvage-before-deletion, F-05.)*
 
@@ -1065,7 +1087,8 @@ All findings follow the protocol's format. Severities deliberately resist inflat
 All items approval-gated, smallest-reversible-step style, no engine work, Lane A stays parked:
 
 - **2A — PR triage execution**: salvage #72 branch-history workflows + decide #75 and #17; then batch-close the 24 verified obsolete/superseded PRs with evidence comments.
-- **2B — Issue closure batch**: close 8 completed + 45 obsolete/superseded with the audit's per-row evidence; dispatch the 3 active ones (#80 toggle, #151 small implementation PR, #157 yes/no decision).
+- **2B-1 — Completed-issue closures**: close ONLY the 8 completed-but-unclosed issues (#6, #64, #83, #84, #85, #139, #150, #158), each with its evidence comment; **stop and report**.
+- **2B-2…n — Obsolete-issue clusters**: the 45 obsolete/superseded issues in small thematic, reviewable clusters with a Kevin/Jack checkpoint after each: (i) FT-001–FT-014 series; (ii) SpecKit/Specify/design-token era; (iii) Rocket/research-evaluation placeholders; (iv) NVIDIA evaluation placeholders; (v) CA-track set (#82–#88); (vi) v0.1.x release/automation era; (vii) remaining miscellany. The 3 active issues are dispatched separately (#80 settings toggle, #151 small implementation PR, #157 yes/no decision). No closure is pre-authorised by this audit.
 - **2C — Repo settings**: `verify-python` required check; *Delete branches on merge*.
 - **2D — CI defect**: remove/fix `ca-search.yml`.
 - **2E — `.gitignore` modernisation** (+ Cargo.lock policy decision).
@@ -1078,7 +1101,7 @@ All items approval-gated, smallest-reversible-step style, no engine work, Lane A
 2. Security-scanning CI (CodeQL/Scorecard/SBOM/dependabot): adopt now via fresh PR, or explicitly decline for a research repo? (Kevin + Jack)
 3. Is the old web frontend (`utilityfog_frontend/frontend` + `ui-smoke.yml`) officially dormant-legacy? Affects issue #2's closure wording and whether ui-smoke stays in CI. (Kevin)
 4. Cargo.lock policy for the `vanguard-mcp` binary crate: track it (binary-crate convention) or ignore it? (Jack/AURA)
-5. `data/` (520 GB, OneDrive-synced) operational backup/exclusion strategy. (Kevin — outside git scope)
+5. `data/` (≈520 GB logical, OneDrive-synced) operational backup/exclusion strategy. (Kevin — outside git scope)
 6. Should `agent-safety`'s embedded-base64 question (#157) be decided in Phase 2 or deferred again? (Jack)
 
 ### 9. Desktop ↔ GitHub sync verdict
