@@ -31,9 +31,9 @@ The terminal commit actually contains **four** section groups, so the material i
 | Section (work.md) | Commit | Lines (approx.) | Historical value | Current explanatory value | Implemented / superseded? | Doctrine-confusion risk | Treatment |
 |---|---|---|---|---|---|---|---|
 | **§11** Overnight v0.6.0 Analysis (13-hr stable limit cycle) | 1 | 117 | High — first long-run stability evidence for the engine lineage | Medium | Superseded by later runs + live telemetry | Low (self-dated metrics) | preserve raw via anchor |
-| **§12** v0.7.0 Spec "OpenClaw Memory Update" (Voxel Memory / Spatial RAG + Machine Economy; tasks for Nemo & Jack) | 2 | 534 | High — the **origin document of the voxel-memory concept** that became the engine's memory grid | High — explains *why* memory channels exist | Implemented in v0.7.0 then evolved (memory grid now 5-channel, post-#110/#111) | Medium (stale parameters read as current) | preserve raw via anchor |
+| **§12** v0.7.0 Spec "OpenClaw Memory Update" (Voxel Memory / Spatial RAG + Machine Economy; tasks for Nemo & Jack) | 2 | 534 | High — an **early design record of voxel memory**, the concept that became the engine's memory grid (generative provenance may have been distributed across sessions; no unique-origin claim is made) | High — explains *why* memory channels exist | Implemented in v0.7.0 then evolved (memory grid now 5-channel, post-#110/#111) | Medium (stale parameters read as current) | preserve raw via anchor |
 | **§13** Overnight v0.7.0 Analysis (22-hr run; root cause: voxel memory inert) | 3 | ~88 | Medium | High — motivates the v0.7.1/v0.7.5 changes that *are* on `main` | Superseded by merged #110/#111 | Low | preserve raw via anchor |
-| **§14** Premise Veto Rulings — Cosmic Garden proposals (7 rulings: Quantum Sync ⚠️, Halbach ✅, Agentic Micro-Economy ⚠️, Bamboo ✅, Chaos Avoidance ⚠️, Multiplexed State Passing ❌ REJECTED, CUDA 🔶 DEFERRED) | 3 | ~190 | **Highest — the governance/decision record** behind rulings still cited today | High | Decisions executed; record itself never landed on `main` | Medium — verdicts could be misread as *currently binding text*; they are a historical record (current authority = `main` docs + Theory Intake Ledger) | preserve raw via anchor; manifest carries explicit warning |
+| **§14** Premise Veto Rulings — Cosmic Garden proposals (7 rulings: Quantum Sync ⚠️, Halbach ✅, Agentic Micro-Economy ⚠️, Bamboo ✅, Chaos Avoidance ⚠️, Multiplexed State Passing ❌ REJECTED, CUDA 🔶 DEFERRED) | 3 | ~190 | **Highest — the governance/decision record** behind rulings still cited today | High | Decisions executed; record itself never landed on `main` | Medium — verdicts could be misread as *currently binding text*; they are a historical record, not permanently binding future decisions (operational authority: `AGENT_HANDOFF.md`; theory status: the Intake Ledger; executable truth: code + tests on `main`) | preserve raw via anchor; manifest carries explicit warning |
 | **§15** v0.7.x Spec "Cosmic Garden (Vetted)" (5 mechanisms; 5-channel memory design incl. `structural_age` ch3 and `structural_stress` ch4 "reserved for v0.8.0") | 3 | ~190 | High — the spec that v0.7.5 (#110/#111) implemented; documents the design intent of today's channel layout | High | Implemented & since evolved | Medium (stale parameters) | preserve raw via anchor |
 | **§16** Operational Directives (Hybrid Memory/RAG directive incl. "Jack: create `scripts/snapshot_indexer.py`"; Quarantine Vault zero-trust protocol; closing signature) | 3 | ~50 | Medium | Low | **Never implemented** — no `snapshot_indexer.py`, no `quarantine/` on `main` [verified]; role superseded by current governance (sandbox policy #199, intake ledger #188, tripwire design #198) | **High — imperative, addressee-directed instructions read as live ops** | preserve raw via anchor; manifest warning names this section specifically |
 
@@ -87,6 +87,8 @@ Assessed for both material sets against the verified topology (each set has a si
 | Raw ancestry visible | **Yes — full chain + all pre-pivot parents** | Yes | **No** (prose only) | Yes | **Yes** |
 | Branch-protection changes needed | **No** (optional GitHub tag-protection ruleset later = settings change, **not** part of this proposal) | Yes, realistically (to survive sweeps) | No | No | **No** |
 
+**What tags do and do not guarantee**: annotated tags preserve reachability, ancestry and an explicit historical label; they do **not** make commits immutable, inaccessible, or impossible to cherry-pick into current code. The non-canonical boundary is enforced by repository governance — review gates and the annotation/manifest framing — not by the tag mechanism itself: **museum artifact, not current instruction**.
+
 **Recommendation: Option 5, with two annotated tags** — one per material set. AURA's tag instinct is **confirmed by the verified topology**, not assumed: each set has a clean single terminal commit; tags preserve raw ancestry without protection changes; the upcoming Phase-2F branch sweeps cannot touch tags; and the manifest on `main` (this document, §D updated at implementation time) provides discoverability without promoting stale prose into active doctrine. Option 3 is explicitly rejected for the bulk text per the preferred principle; Option 2 is rejected because a preservation mechanism should not live inside the demolition zone it guards against.
 
 ---
@@ -95,7 +97,7 @@ Assessed for both material sets against the verified topology (each set has a si
 
 | Material set | Source ref | Exact anchor SHA | Included history | Unique value | Already represented on `main` | Proposed mechanism | Candidate archive name | Risks |
 |---|---|---|---|---|---|---|---|---|
-| Cosmic-Garden / hungry-nash design history | `origin/claude/hungry-nash` | `3df3d335d02782b61c440ef5772445ddb04c8225` | 3 linear commits (+ full pre-pivot ancestry) — §11–§16 of `work.md`, 1,177 lines | overnight analyses, OpenClaw/voxel-memory origin spec, **Premise Veto Rulings**, vetted Cosmic-Garden spec, operational directives | **No** (verbatim absent; *outcomes* implemented via #110/#111) | annotated tag + manifest row | `archive/cosmic-garden-hungry-nash-2026-03` | §14/§16 misread as live doctrine → mitigated by annotation text |
+| Cosmic-Garden / hungry-nash design history | `origin/claude/hungry-nash` | `3df3d335d02782b61c440ef5772445ddb04c8225` | 3 linear commits (+ full pre-pivot ancestry) — §11–§16 of `work.md`, 1,177 lines | overnight analyses, the OpenClaw spec (an early design record of voxel memory), **Premise Veto Rulings**, vetted Cosmic-Garden spec, operational directives | **No** (verbatim absent; *outcomes* implemented via #110/#111) | annotated tag + manifest row | `archive/cosmic-garden-hungry-nash-2026-03` | §14/§16 misread as live doctrine → mitigated by annotation text |
 | Pre-Medusa research & design docs | PR #17 head `docs/research-and-design` | `33449a74daa8bc44dc0261222d374d09a92c5b38` | 1 commit (+ ancestry) — 6 concept docs + 6 PDF twins | founding BEAM/mindfulness/memetics philosophy + 3 algorithm concept specs | **No** (zero history for all 12 paths) | annotated tag + manifest row | `archive/pre-medusa-research-design-2025-09` | RESEARCH_INDEX/PROJECT_LOG misleading if surfaced without framing; PDFs are dead weight (acceptable inside an anchor) |
 
 Naming uses the **material's** date (more informative as a museum label); the **preservation** date lives in the annotation. Alternative (preservation-dated `…-2026-06`) listed as open question H-2. Both names verified uncreated locally and on `origin` (only `v0.1.0`, `v0.1.0-rc1`, `v0.1.1` exist). [verified]
@@ -104,15 +106,15 @@ Naming uses the **material's** date (more informative as a museum label); the **
 
 > **Draft annotation — `archive/cosmic-garden-hungry-nash-2026-03`**
 > Historical archive — NOT current doctrine.
-> Preserves the pre-/early-Medusa design history from branch `claude/hungry-nash` (terminal commit `3df3d33`, authored 2026-03-09/10): overnight v0.6.0/v0.7.0 analyses, the v0.7.0 "OpenClaw Memory Update" spec (origin of voxel memory), the **Premise Veto Rulings** for the Cosmic-Garden proposals, the vetted v0.7.x spec, and period operational directives (§16 — never implemented; superseded by the Theory Sandbox policy and Theory Intake Ledger).
-> The *outcomes* of this material were implemented and then evolved on `main` (v0.7.5, PRs #110/#111); the text here is a primary source, not implementation guidance. Current architectural authority lives on `main` (`AGENT_HANDOFF.md`, `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`).
+> Preserves the pre-/early-Medusa design history from branch `claude/hungry-nash` (terminal commit `3df3d33`, authored 2026-03-09/10): overnight v0.6.0/v0.7.0 analyses, the v0.7.0 "OpenClaw Memory Update" spec (an early design record of voxel memory), the **Premise Veto Rulings** for the Cosmic-Garden proposals, the vetted v0.7.x spec, and period operational directives (§16 — never implemented; superseded by the Theory Sandbox policy and Theory Intake Ledger).
+> The *outcomes* of this material were implemented and then evolved on `main` (v0.7.5, PRs #110/#111); the text here is a primary source, not implementation guidance. Operational authority is recorded in `AGENT_HANDOFF.md`; current theory status is recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`; executable truth is the current code and tests on `main`.
 > Preserved 2026-06 under Phase 2A (see `docs/history/PRE_MEDUSA_PRESERVATION_PLAN.md` and `docs/REPOSITORY_HEALTH_AUDIT_2026-06.md`, finding F-05).
 > The fog breathes. The veto officer watches. The garden grows.
 
 > **Draft annotation — `archive/pre-medusa-research-design-2025-09`**
 > Historical archive — NOT current doctrine.
 > Preserves the founding research-and-design documentation set from PR #17 (head `docs/research-and-design`, commit `33449a7`, authored 2025-09-20): BEAM/mindful-replication design philosophy, research index, project log, and three algorithm concept specs (mindfulness protocol, replication rules, meme propagation), with PDF twins.
-> This material predates the February-2026 pivot to the Medusa CA engine and has **no binding current architectural authority**; it is preserved as the project's founding lore and ideation record. Current architectural authority lives on `main`.
+> This material predates the February-2026 pivot to the Medusa CA engine and has **no binding current architectural authority**; it is preserved as the project's founding lore and ideation record. Operational authority is recorded in `AGENT_HANDOFF.md`; current theory status is recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`; executable truth is the current code and tests on `main`.
 > Preserved 2026-06 under Phase 2A (see `docs/history/PRE_MEDUSA_PRESERVATION_PLAN.md` and `docs/REPOSITORY_HEALTH_AUDIT_2026-06.md`, finding F-03/PR #17 record).
 
 ---
@@ -144,6 +146,12 @@ Explicit statements, as required:
 - **Vanguard** remains a separate, preserved-but-unapproved concern: passing tests prove compilation, not validity; module names alone prove neither validity nor invalidity; integration discussion requires a **mechanism-first specification and naming review**.
 - **Passing tests do not promote architecture.**
 - **Lane A remains parked. Swarm Hunter remains unimplemented. Sandbox evidence remains non-canonical.**
+
+**Historical-boundary confirmations (curator-required, explicit):**
+- the archived Premise Veto Rulings (§14) are **historical governance records, not permanently binding future decisions**;
+- the §16 operational directives were **never implemented** [verified] and are superseded/non-operative;
+- the founding memetics and mindfulness documents are **historical lore and philosophical context, not instructions to revive the pre-Medusa architecture**;
+- **archive tags preserve history; they do not promote it.**
 
 ---
 
