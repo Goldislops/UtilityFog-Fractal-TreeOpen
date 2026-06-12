@@ -1,7 +1,22 @@
 # Pre-Medusa Historical Preservation Plan (Phase 2A — Evidence & Design)
 
 > **Date**: 2026-06-12 · **Seat**: Fab5 (desktop/84) · **Arc**: Phase 2A — Historical Preservation Anchors: Evidence and Design
-> **Status**: **DESIGN ONLY.** No archive tag, frozen branch, or prose-copy has been created. Nothing was deleted, closed, pruned, cleaned or mutated. This document and one `AGENT_HANDOFF.md` Session Log entry are the only tracked changes of this arc.
+> **Status**: **PRESERVATION ANCHORS CREATED AND VERIFIED** (Phase 2A.1, 2026-06-12 — see the Implementation Record below). The forensic evidence in Parts A–F below is the unmodified Phase-2A design record. Nothing historical was deleted, closed, pruned, cleaned or mutated in either arc.
+
+---
+
+## Implementation Record — Phase 2A.1 (2026-06-12)
+
+Both approved anchors were created as **annotated tag objects** and pushed in a single **atomic** operation (`git push --atomic origin` naming exactly the two `refs/tags/<approved-tag-name>` refs; `--tags` was not used; no branch and no other tag was pushed). Verification was performed **against the remote** — `git ls-remote` ref+peel listings, content-addressed inspection of the remote-advertised tag-object SHAs, and per-tag `FETCH_HEAD` fetch probes — not the GitHub UI.
+
+| Tag | Tag-object SHA | Peeled commit SHA | Annotation verified | Remote verified | Status |
+|---|---|---|---|---|---|
+| `archive/cosmic-garden-hungry-nash-2026-03` | `6cd5ed09cb236d0c88bb47e954ed783e8bb231c6` | `3df3d335d02782b61c440ef5772445ddb04c8225` | yes (local + remote object) | yes | **CREATED AND VERIFIED** |
+| `archive/pre-medusa-research-design-2025-09` | `21385bf1d5efe7c1dec1f9afc1106d2a96822d34` | `33449a74daa8bc44dc0261222d374d09a92c5b38` | yes (local + remote object) | yes | **CREATED AND VERIFIED** |
+
+- Exactly two `archive/*` tags exist on the remote; **no third archive ref was created**. Source refs unmoved (`claude/hungry-nash` @ `3df3d33`, `docs/research-and-design` @ `33449a7`); **PRs #17 and #25 remain open**; no cleanup has begun.
+- **Curator decisions (AURA + Jack, 2026-06-12), binding**: H-1 — PR #25 excluded, no third anchor · H-2 — material-date tag names adopted · H-3 — `archive/*` tag-protection ruleset deferred to the repository-settings arc · H-4 — no Theory Intake Ledger pointer (this manifest plus `AGENT_HANDOFF.md` provide discoverability).
+- **Governance statement**: these tags preserve reachability, ancestry and explicit historical labels; they do **not** make the commits immutable or impossible to reuse. What keeps the archived material non-canonical is governance — review gates and this archival framing — museum artifact, not current instruction.
 > **Parent record**: Phase-1 audit `docs/REPOSITORY_HEALTH_AUDIT_2026-06.md` (merged as `3e188a4`, PR #206). Findings F-03/F-05 and AURA's 2026-06-12 architecture review motivated this arc.
 > **Evidence labels**: [verified] = command run this arc · [strong]/[weak] inference · [unknown].
 
@@ -93,14 +108,14 @@ Assessed for both material sets against the verified topology (each set has a si
 
 ---
 
-## Part D — Proposed preservation anchors (PROPOSALS ONLY — nothing created)
+## Part D — Preservation anchors (designed here as proposals; **CREATED AND VERIFIED** in Phase 2A.1 — see Implementation Record)
 
 | Material set | Source ref | Exact anchor SHA | Included history | Unique value | Already represented on `main` | Proposed mechanism | Candidate archive name | Risks |
 |---|---|---|---|---|---|---|---|---|
 | Cosmic-Garden / hungry-nash design history | `origin/claude/hungry-nash` | `3df3d335d02782b61c440ef5772445ddb04c8225` | 3 linear commits (+ full pre-pivot ancestry) — §11–§16 of `work.md`, 1,177 lines | overnight analyses, the OpenClaw spec (an early design record of voxel memory), **Premise Veto Rulings**, vetted Cosmic-Garden spec, operational directives | **No** (verbatim absent; *outcomes* implemented via #110/#111) | annotated tag + manifest row | `archive/cosmic-garden-hungry-nash-2026-03` | §14/§16 misread as live doctrine → mitigated by annotation text |
 | Pre-Medusa research & design docs | PR #17 head `docs/research-and-design` | `33449a74daa8bc44dc0261222d374d09a92c5b38` | 1 commit (+ ancestry) — 6 concept docs + 6 PDF twins | founding BEAM/mindfulness/memetics philosophy + 3 algorithm concept specs | **No** (zero history for all 12 paths) | annotated tag + manifest row | `archive/pre-medusa-research-design-2025-09` | RESEARCH_INDEX/PROJECT_LOG misleading if surfaced without framing; PDFs are dead weight (acceptable inside an anchor) |
 
-Naming uses the **material's** date (more informative as a museum label); the **preservation** date lives in the annotation. Alternative (preservation-dated `…-2026-06`) listed as open question H-2. Both names verified uncreated locally and on `origin` (only `v0.1.0`, `v0.1.0-rc1`, `v0.1.1` exist). [verified]
+Naming uses the **material's** date (more informative as a museum label); the **preservation** date lives in the annotation. Alternative (preservation-dated, e.g. `archive/<set-name>-2026-06`) listed as open question H-2. Both names verified uncreated locally and on `origin` (only `v0.1.0`, `v0.1.0-rc1`, `v0.1.1` exist). [verified]
 
 **The annotation message should include all of**: source branch/PR · source SHA · preservation date · "historical, non-canonical" warning · relationship to current Medusa architecture · links to the Phase-1 audit and this manifest. Draft texts:
 
@@ -165,13 +180,13 @@ Explicit statements, as required:
 5. **Proposed names & annotations**: `archive/cosmic-garden-hungry-nash-2026-03` and `archive/pre-medusa-research-design-2025-09`; draft annotation texts in Part D. Both names verified uncreated.
 6. **Refs that must remain protected**: the Part E list (PR #17 + its branch, hungry-nash remote branch + 3 commits + local branch/worktree).
 7. **Actions explicitly NOT authorised by this plan**: creating tags or branches; closing/merging/commenting PRs or issues; deleting or pruning anything; copying historical prose onto `main`; altering branch protection, settings, workflows, `.gitignore`, Vanguard, frontend, CI, Lane A, Swarm Hunter.
-8. **Unresolved questions for Kevin, Jack and AURA**:
-   - **H-1**: Confirm PR #25's divergent doc variants are *excluded* from anchoring (Phase-1 skeptic verdict: shallower variants + stubs, nothing uniquely valuable) — or include a third anchor?
-   - **H-2**: Naming-date convention — material date (proposed: `…-2026-03` / `…-2025-09`) vs preservation date (`…-2026-06`)?
-   - **H-3**: After anchors are verified, add a GitHub **tag-protection ruleset** for `archive/*`? (Settings change — would belong to Phase 2C, not this arc.)
-   - **H-4**: Should the implementation arc also append a two-line "archives exist; history not doctrine" pointer to `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`, or does the manifest + handoff suffice?
-9. **Binary recommendation**:
+8. **Questions for Kevin, Jack and AURA — all RESOLVED at the curator gate (AURA + Jack, 2026-06-12)**:
+   - **H-1**: Confirm PR #25's divergent doc variants are *excluded* from anchoring — **Decided: excluded; no third anchor.**
+   - **H-2**: Naming-date convention — material date vs preservation date — **Decided: material dates adopted** (`archive/cosmic-garden-hungry-nash-2026-03` / `archive/pre-medusa-research-design-2025-09`).
+   - **H-3**: GitHub **tag-protection ruleset** for `archive/*`? — **Decided: deferred to the later repository-settings arc**; not part of this or the tag-creation arc.
+   - **H-4**: Pointer in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md`? — **Decided: no** — this manifest plus `AGENT_HANDOFF.md` provide sufficient discoverability without mixing archives into active theory intake.
+9. **Binary status**:
 
-**`READY FOR PRESERVATION-ANCHOR IMPLEMENTATION`**
+**`PRESERVATION ANCHORS CREATED AND VERIFIED`** *(Phase 2A.1, 2026-06-12 — supersedes this design arc's `READY FOR PRESERVATION-ANCHOR IMPLEMENTATION` verdict; details in the Implementation Record above)*
 
-— source set is complete and verified, topology is clean (two terminal commits suffice), content is safe (no secrets/personal/oversized-beyond-PDF concerns), names are free, and the only open questions (H-1…H-4) are preference-level, not source- or scope-uncertainty.
+— source set was complete and verified, topology clean (two terminal commits suffice), content safe (no secrets/personal/oversized-beyond-PDF concerns), names were free at design and at creation time.
