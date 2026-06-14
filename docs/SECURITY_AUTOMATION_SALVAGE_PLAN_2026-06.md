@@ -46,7 +46,7 @@ Live workflows (5): `agent-safety.yml`, `ca-search.yml`, `ci-seeder.yml`, `ci.ym
 | Python verification | **PRESENT (scoped)** | `ci.yml` job `verify-python`: Python 3.12, builds `crates/uft_ca` (maturin), runs `pytest tests/` (~832 passed). Required status check (`verify`). |
 | Node / frontend verification | **PARTIAL** | `ci.yml` `verify` runs tsc/lint/build/test if scripts exist; `ui-smoke.yml` Playwright on `utilityfog_frontend/frontend/**` (conditional, **not** a required check). |
 | Rust / CA verification | **PARTIAL** | `uft_ca` built+tested via `ca-search.yml` (manual) and built in `verify-python`; `crates/vanguard-mcp` not gated in CI. |
-| Dependency updates (Dependabot PRs) | **ABSENT** | No `.github/dependabot.yml` on `main`. (GitHub-native Dependabot *alerts* availability not verified — see §13.6.) |
+| Dependency updates (Dependabot PRs) | **ABSENT** | No `.github/dependabot.yml` on `main`. (GitHub-native Dependabot *alerts* availability not verified — see §12.6.) |
 | Static analysis (CodeQL) | **ABSENT** | No CodeQL workflow on `main`. |
 | SBOM / provenance | **ABSENT** | None. |
 | Container scan / publish | **ABSENT** | No `Dockerfile` on `main`. |
@@ -83,7 +83,7 @@ PR #75 (`garden/prod-workflows`), adds 8 workflows (+324/−0).
 
 | Workflow | Runs on `main` today? | Key issue | Disposition |
 |---|---|---|---|
-| `scorecard.yml` | Yes | Permission depends on publication mode (see §13.3); mutable action tag | **Adopt-soon** (design perms first) |
+| `scorecard.yml` | Yes | Permission depends on publication mode (see §12.3); mutable action tag | **Adopt-soon** (design perms first) |
 | `codeql.yml` | Yes (but unscoped) | Analyzes legacy code → noise; mutable tags; no Rust | **Redesign** |
 | `quality.yml` | **No** | Repo-wide `ruff`/`mypy`/`bandit` unconfigured → always-red; root `npm ci` fails (no root package); SARIF upload never fires | **Redesign** (concept) / discard impl |
 | `sbom.yml` | Partial (no-op) | No root manifest; monorepo unhandled; unused perms | **Defer** |
@@ -129,7 +129,7 @@ Exactly one primary status per item.
 
 ### Adopt freshly soon (via a later bounded implementation arc)
 - **Truthful `SECURITY.md`** — document the real vuln-reporting route + current OPA Agent-Safety and human review; make **no** claim about unimplemented scanning/publishing/protection.
-- **OpenSSF Scorecard** — low-maintenance governance/supply-chain signal. Permission/publication design deferred to 2B-5B (see §13.3). Requirements: immutable SHA pinning; smallest valid permissions for the chosen results mode; no unnecessary badge/external publication by default; first verify whether GitHub-native/hosted Scorecard already suffices.
+- **OpenSSF Scorecard** — low-maintenance governance/supply-chain signal. Permission/publication design deferred to 2B-5B (see §12.3). Requirements: immutable SHA pinning; smallest valid permissions for the chosen results mode; no unnecessary badge/external publication by default; first verify whether GitHub-native/hosted Scorecard already suffices.
 
 ### Redesign before implementation
 - **Dependabot** — enumerate **actual live manifests** on `main`; scope by ecosystem + manifest directory (not source dirs); exclude retired/legacy/vendored/generated manifests; low PR limit + solo-appropriate cadence.
@@ -152,11 +152,11 @@ PR #72's recoverable workflow commits `08072c9` and `1077741`; PR #72 and #75 br
 ## 10. Threat / permission / maintenance blockers
 
 - **`release-smoke.yml`** imports a placeholder `your_package` → fails every release (verified).
-- **`container.yml`** verified blockers: unquoted expression interpolation in shell construction (`${{ github.repository }}`); PR-controlled Docker build execution; unnecessary `packages: write` / `security-events: write` at workflow scope; mutable third-party action versions; no approved Dockerfile/image target/GHCR goal/maintenance model. *(Note: "arbitrary command execution via a maliciously named fork" is **not** established by the evidence — see §13.5.)*
+- **`container.yml`** verified blockers: unquoted expression interpolation in shell construction (`${{ github.repository }}`); PR-controlled Docker build execution; unnecessary `packages: write` / `security-events: write` at workflow scope; mutable third-party action versions; no approved Dockerfile/image target/GHCR goal/maintenance model. *(Note: "arbitrary command execution via a maliciously named fork" is **not** established by the evidence — see §12.5.)*
 - **`quality.yml`** repo-wide `ruff`/`mypy`/`bandit` over an unconfigured monorepo → always-red on legacy; root `npm ci` fails (no root `package.json`); SARIF upload condition never satisfied.
-- **`sbom.yml` / `scorecard.yml`** carry `id-token: write` that may be unnecessary depending on mode (Scorecard's depends on `publish_results`; see §13.3); mutable action tags.
+- **`sbom.yml` / `scorecard.yml`** carry `id-token: write` that may be unnecessary depending on mode (Scorecard's depends on `publish_results`; see §12.3); mutable action tags.
 - **OPA binary download** (live `agent-safety.yml` and #72 history) lacks checksum/signature verification.
-- **Maintenance:** unconfigured/always-red gates and silent no-op workflows are net-negative for a solo, budget-constrained repo; GitHub-native free controls may cover several gaps with less overhead (availability to be verified — §13.6).
+- **Maintenance:** unconfigured/always-red gates and silent no-op workflows are net-negative for a solo, budget-constrained repo; GitHub-native free controls may cover several gaps with less overhead (availability to be verified — §12.6).
 
 ---
 
