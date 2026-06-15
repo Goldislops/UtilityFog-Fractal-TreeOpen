@@ -1642,8 +1642,8 @@ impl MultiStateGraphLattice {
 }
 
 #[cfg(feature = "python")]
-#[pymodule]
-fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
+#[pymodule(gil_used = true)]
+fn uft_ca(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[pyfn(m)]
     fn step_lattice_py(
         width: usize,
