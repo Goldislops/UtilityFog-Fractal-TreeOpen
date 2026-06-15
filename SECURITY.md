@@ -48,10 +48,10 @@ We will not promise a fixed response time.
 
 The following controls are currently active on this repository:
 
-- **Continuous integration** verification on pull requests (Python and, where applicable, Node).
-- **Agent-Safety / OPA** policy validation (Open Policy Agent format, check, and tests) as a required check.
-- **GitHub secret scanning.**
-- **GitHub secret-scanning push protection.**
+- **Continuous integration** verification on pull requests, including Python tests, a Maturin build of the Rust-backed `uft_ca` extension, and Node checks where applicable;
+- **Agent-Safety / OPA** policy validation (Open Policy Agent format, check, and tests) as a required check;
+- **GitHub secret scanning**;
+- **GitHub secret-scanning push protection**; and
 - **GitHub private vulnerability reporting** (the private "Report a vulnerability" route described above).
 
 The following are **not** currently in place and should not be assumed:
