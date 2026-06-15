@@ -1320,6 +1320,17 @@ pub fn conway_3d_rule(current: u8, neighbor_count: usize) -> u8 {
 }
 
 #[cfg(feature = "python")]
+use pyo3::types::PyList;
+
+/// Convert a Rust `Vec<u8>` state vector into a Python `list[int]` at the FFI
+/// boundary. PyO3 >= 0.23 maps `Vec<u8>` returns to Python `bytes` by default;
+/// this helper preserves the established mutable `list[int]` public contract.
+#[cfg(feature = "python")]
+fn py_u8_list<'py>(py: Python<'py>, values: Vec<u8>) -> PyResult<Bound<'py, PyList>> {
+    PyList::new(py, values)
+}
+
+#[cfg(feature = "python")]
 #[pyclass]
 pub struct GraphLattice {
     state: GraphState,
@@ -1335,16 +1346,16 @@ impl GraphLattice {
         }
     }
 
-    fn step(&self, rule: HashMap<String, Vec<usize>>) -> Vec<u8> {
+    fn step<'py>(&self, py: Python<'py>, rule: HashMap<String, Vec<usize>>) -> PyResult<Bound<'py, PyList>> {
         let birth = rule.get("birth").cloned().unwrap_or_default();
         let survival = rule.get("survival").cloned().unwrap_or_default();
         let r = Rule::new(birth, survival);
         let next = self.state.step(&r);
-        next.nodes
+        py_u8_list(py, next.nodes)
     }
 
-    fn get_states(&self) -> Vec<u8> {
-        self.state.nodes.clone()
+    fn get_states<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        py_u8_list(py, self.state.nodes.clone())
     }
 }
 
@@ -1440,15 +1451,15 @@ impl MultiStateGraphLattice {
         }
     }
 
-    fn step(&mut self) -> Vec<u8> {
+    fn step<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
         self.state = next;
         self.generation = self.generation.saturating_add(1);
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
-    fn get_states(&self) -> Vec<u8> {
-        self.state.nodes.clone()
+    fn get_states<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        py_u8_list(py, self.state.nodes.clone())
     }
 
     fn node_count(&self) -> usize {
@@ -1467,45 +1478,45 @@ impl MultiStateGraphLattice {
         total as f64 / self.state.nodes.len() as f64
     }
 
-    fn step_n(&mut self, n: usize) -> Vec<u8> {
+    fn step_n<'py>(&mut self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
         for _ in 0..n {
             let next = self.state.step_multi_with_memory(&self.rule, &mut self.memory_grid, self.generation);
             self.state = next;
             self.generation = self.generation.saturating_add(1);
         }
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
-    fn step_par(&mut self) -> Vec<u8> {
+    fn step_par<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let next = self.state.step_multi_par_stochastic(&self.rule);
         self.state = next;
         self.generation = self.generation.saturating_add(1);
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
-    fn step_par_n(&mut self, n: usize) -> Vec<u8> {
+    fn step_par_n<'py>(&mut self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
         for _ in 0..n {
             let next = self.state.step_multi_par_stochastic(&self.rule);
             self.state = next;
             self.generation = self.generation.saturating_add(1);
         }
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
-    fn step_auto(&mut self) -> Vec<u8> {
+    fn step_auto<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let next = self.state.step_auto_stochastic(&self.rule);
         self.state = next;
         self.generation = self.generation.saturating_add(1);
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
-    fn step_auto_n(&mut self, n: usize) -> Vec<u8> {
+    fn step_auto_n<'py>(&mut self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
         for _ in 0..n {
             let next = self.state.step_auto_stochastic(&self.rule);
             self.state = next;
             self.generation = self.generation.saturating_add(1);
         }
-        self.state.nodes.clone()
+        py_u8_list(py, self.state.nodes.clone())
     }
 
     fn set_states(&mut self, states: Vec<u8>) {
@@ -1581,7 +1592,7 @@ impl MultiStateGraphLattice {
         history.iter().map(|arr| arr.to_vec()).collect()
     }
 
-    fn snapshot(&self) -> Vec<u8> {
+    fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let mut data = self.state.snapshot();
         if let Some(ref coords) = self.coords {
             data.push(1);
@@ -1593,7 +1604,7 @@ impl MultiStateGraphLattice {
         } else {
             data.push(0);
         }
-        data
+        py_u8_list(py, data)
     }
 
     #[staticmethod]
@@ -1642,22 +1653,24 @@ impl MultiStateGraphLattice {
 }
 
 #[cfg(feature = "python")]
-#[pymodule]
-fn uft_ca(_py: Python, m: &PyModule) -> PyResult<()> {
+#[pymodule(gil_used = true)]
+fn uft_ca(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[pyfn(m)]
-    fn step_lattice_py(
+    fn step_lattice_py<'py>(
+        py: Python<'py>,
         width: usize,
         height: usize,
         depth: usize,
         states: Vec<u8>,
-    ) -> PyResult<Vec<u8>> {
+    ) -> PyResult<Bound<'py, PyList>> {
         let lattice = Lattice3D::new(width, height, depth);
-        Ok(step_lattice_3d(&lattice, &states, conway_3d_rule))
+        let result = step_lattice_3d(&lattice, &states, conway_3d_rule);
+        py_u8_list(py, result)
     }
 
     #[pyfn(m)]
-    fn create_graph(num_nodes: usize) -> PyResult<Vec<u8>> {
-        Ok(vec![0; num_nodes])
+    fn create_graph<'py>(py: Python<'py>, num_nodes: usize) -> PyResult<Bound<'py, PyList>> {
+        py_u8_list(py, vec![0; num_nodes])
     }
 
     #[pyfn(m)]
