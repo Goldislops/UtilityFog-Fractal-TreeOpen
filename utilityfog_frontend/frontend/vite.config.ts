@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    host: true,
+    host: '127.0.0.1',
   },
   optimizeDeps: {
     include: ['three', '@react-three/fiber', '@react-three/drei'],
