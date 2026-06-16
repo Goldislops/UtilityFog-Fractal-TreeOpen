@@ -3,10 +3,11 @@
 # Deliberately narrow: only the two surfaces the dependency-surface audit
 # (2B-5B-2A) classified as maintained core and exercised by required CI —
 # the live GitHub Actions workflows, and the Cargo crate crates/uft_ca.
-# All other dependency surfaces (vanguard-mcp, the three frontends,
-# src/uft_orch/ca/requirements.txt, testing_requirements.txt, the maturin
-# pyproject, FT/Specify remnants) are intentionally deferred/excluded pending
-# the maintained-surface inventory (2B-5C).
+# All other dependency surfaces (vanguard-mcp, the retained
+# utilityfog_frontend dependency surface, src/uft_orch/ca/requirements.txt,
+# testing_requirements.txt, the maturin pyproject, and FT/Specify remnants)
+# remain intentionally deferred or excluded. The retired web/ and
+# visualization/ manifests are no longer present on main.
 #
 # This configures ROUTINE version-update PRs only. Dependabot vulnerability
 # *alerts* are already enabled separately; Dependabot *security updates*
