@@ -18,6 +18,13 @@ jobs:
       - name: Install OPA
         run: |
           set -euxo pipefail
+          # Trust anchor: SHA-256 of opa_linux_amd64_static at OPA v0.59.0,
+          # independently verified against the official release checksum asset
+          # (opa_linux_amd64_static.sha256). Embedded statically — NOT fetched
+          # at CI time, NOT derived from the downloaded binary — and checked
+          # before chmod/mv/exec so a tampered or corrupted download fails
+          # the job closed.
+          readonly OPA_SHA256="5f615343a1cae1deb2f2f514b2f4b46456495fe1c828b17e779eb583aced0cc3"
           # Use GitHub Releases mirror (same binary, different host) — the
           # openpolicyagent.org CDN has been flaky from the GitHub Actions
           # runner IP range. --fail surfaces HTTP errors; --retry handles
@@ -25,6 +32,7 @@ jobs:
           curl -L --fail --retry 5 --retry-delay 5 --retry-all-errors \
             -o opa \
             https://github.com/open-policy-agent/opa/releases/download/v0.59.0/opa_linux_amd64_static
+          printf '%s  %s\n' "${OPA_SHA256}" opa | sha256sum --check --strict -
           chmod +x opa
           sudo mv opa /usr/local/bin/opa
           opa version
