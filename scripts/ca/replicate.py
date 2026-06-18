@@ -246,7 +246,7 @@ def run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m: Mapping[str, Any
             state = np.array(data["lattice"], dtype=np.uint8)
             memory = np.array(data["memory_grid"], dtype=np.float32)
             inactivity = np.array(data["inactivity_steps"], dtype=np.int16)
-            meta = json.loads(str(data["meta_json"]))
+            meta = json.loads(data["meta_json"].item())
         # Identity checks — never silently continue an incompatible checkpoint.
         if meta.get("manifest_sha256") != manifest_sha:
             raise ValueError("checkpoint manifest hash mismatch; refusing to resume")

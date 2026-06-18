@@ -28,6 +28,10 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# These runs are tiny (8^3 lattice, single-digit steps) and finish in well under a
+# second; a generous cap just guarantees a hang fails fast instead of stalling CI.
+CLI_TIMEOUT = 120
+
 from scripts.ca import engine_adapter as ea  # noqa: E402
 from scripts.ca import replicate as R  # noqa: E402
 
@@ -63,6 +67,7 @@ def _run_cli(*args):
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
+        timeout=CLI_TIMEOUT,
     )
     assert proc.returncode == 0, f"CLI failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
     return json.loads(proc.stdout)
@@ -185,7 +190,7 @@ def test_resume_rejects_checkpoint_mismatch(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "scripts.ca.replicate", "--resume", str(run_dir),
          "--out", str(tmp_path / "run")],
-        cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+        cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=CLI_TIMEOUT,
     )
     assert proc.returncode != 0
     assert "mismatch" in (proc.stdout + proc.stderr).lower()

@@ -213,9 +213,13 @@ def get_rng_state(rng: "np.random.Generator") -> Dict[str, Any]:
 
 
 def restore_rng(seed: int, state: Mapping[str, Any]) -> "np.random.Generator":
-    """Rebuild a Generator and restore an exact stream position from get_rng_state()."""
+    """Rebuild a Generator and restore an exact stream position from get_rng_state().
+
+    ``state`` is already a plain dict (parsed from checkpoint JSON), so it can be
+    assigned directly; ``dict(state)`` only guards against an aliased Mapping arg.
+    """
     rng = np.random.default_rng(int(seed))
-    rng.bit_generator.state = json.loads(json.dumps(state))
+    rng.bit_generator.state = dict(state)
     return rng
 
 
