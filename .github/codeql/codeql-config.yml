@@ -1,0 +1,21 @@
+# CodeQL configuration — Phase 2B-5D-1 scoped Python baseline.
+#
+# Analysis is deliberately restricted to the maintained, CI-exercised Python
+# surfaces only (scripts/ + src/uft_orch/). This is a staged-security decision:
+# dormant/legacy/uncertain and generated/vendored surfaces are excluded from this
+# first baseline and may be scanned in a later, evidence-based phase.
+#
+# Query suite: CodeQL DEFAULT (high-confidence) queries only — no security-extended,
+# no security-and-quality, no custom query packs. We measure baseline signal first.
+name: "UtilityFog scoped Python CodeQL baseline (2B-5D-1)"
+
+# `paths` scopes the ACTUAL CodeQL analysis (honored for interpreted languages
+# such as Python). Only these directories are analyzed.
+paths:
+  - scripts
+  - src/uft_orch
+
+# Belt-and-suspenders: never analyze Python bytecode/cache artifacts.
+paths-ignore:
+  - "**/__pycache__"
+  - "**/*.pyc"
