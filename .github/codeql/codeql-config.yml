@@ -5,8 +5,10 @@
 # dormant/legacy/uncertain and generated/vendored surfaces are excluded from this
 # first baseline and may be scanned in a later, evidence-based phase.
 #
-# Query suite: CodeQL DEFAULT (high-confidence) queries only — no security-extended,
-# no security-and-quality, no custom query packs. We measure baseline signal first.
+# Query suite (Phase 2B-5D-2A evaluation): the `security-extended` suite — i.e. the
+# CodeQL DEFAULT (high-confidence) queries PLUS lower-severity / lower-precision queries.
+# This is a draft-only signal-vs-noise measurement on the SAME Python scope; default
+# queries stay enabled (no disable-default-queries), no security-and-quality, no custom packs.
 name: "UtilityFog scoped Python CodeQL baseline (2B-5D-1)"
 
 # `paths` scopes the ACTUAL CodeQL analysis (honored for interpreted languages
@@ -19,3 +21,8 @@ paths:
 paths-ignore:
   - "**/__pycache__"
   - "**/*.pyc"
+
+# Phase 2B-5D-2A: add the security-extended suite (default + lower-severity/precision)
+# on the unchanged scope, to measure whether the extra depth adds signal or noise.
+queries:
+  - uses: security-extended
