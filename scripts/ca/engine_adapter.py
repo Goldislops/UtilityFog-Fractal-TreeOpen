@@ -19,6 +19,7 @@ Nothing here mutates the engine source, the dormant ``src/uft_orch/ca/runner.py`
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib
 import json
@@ -30,8 +31,64 @@ from typing import Any, Dict, Iterator, Mapping, Tuple
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Source-of-record for the canonical rule. NOTE: it is *not parsed at runtime* —
+# `ca/rules/example.toml` uses multi-line inline tables, which the stdlib `tomllib`
+# (the engine's fallback parser when no third-party `tomli` is installed, e.g. on CI)
+# rejects. We therefore carry the rule as an in-code dict (DEFAULT_RULE_SPEC), which
+# is exactly how the engine's own test-suite drives `step_ca_lattice`. This constant
+# stays only as a provenance pointer to where the values came from.
 DEFAULT_RULE = PROJECT_ROOT / "ca" / "rules" / "example.toml"
 STRUCTURAL = 1  # STATE_NAME_TO_ID["STRUCTURAL"] in the engine
+
+# In-code transcription of ca/rules/example.toml (v0.7.5) — the four sections the
+# bounded stepper actually consumes. Stochastic/contagion/decay are kept ENABLED so
+# the engine genuinely draws from the explicit RNG (otherwise the RNG-state
+# checkpoint/resume guarantee would be vacuous). The remaining example.toml sections
+# (cosmic_garden/equanimity/ice_battery/trash_battery/experimental) are optional and
+# default gracefully inside the engine — verified empirically.
+DEFAULT_RULE_SPEC: Dict[str, Any] = {
+    "rule": {
+        "name": "branching-growth-v0.7.5",
+        "states": ["VOID", "STRUCTURAL", "COMPUTE", "ENERGY", "SENSOR"],
+        "neighborhood": "moore-3d",
+        "transition": "outer-totalistic",
+    },
+    "params": {
+        "transitions": {
+            "VOID": {3: "STRUCTURAL", 4: "STRUCTURAL", 5: "STRUCTURAL", 6: "STRUCTURAL"},
+            "STRUCTURAL": {0: "STRUCTURAL", 1: "STRUCTURAL", 2: "STRUCTURAL", 3: "COMPUTE",
+                           4: "COMPUTE", 5: "ENERGY", 6: "SENSOR", 7: "SENSOR", 8: "SENSOR"},
+            "COMPUTE": {0: "COMPUTE", 1: "COMPUTE", 2: "COMPUTE", 3: "COMPUTE", 4: "COMPUTE",
+                        5: "COMPUTE", 6: "ENERGY", 7: "SENSOR"},
+            "ENERGY": {0: "ENERGY", 1: "ENERGY", 2: "ENERGY", 3: "ENERGY", 4: "ENERGY",
+                       5: "ENERGY", 6: "SENSOR", 7: "SENSOR", 8: "SENSOR"},
+            "SENSOR": {0: "SENSOR", 1: "SENSOR", 2: "SENSOR", 3: "SENSOR", 4: "SENSOR",
+                       5: "SENSOR", 6: "SENSOR"},
+        },
+        "contagion": {
+            "enabled": True,
+            "energy_neighbor_threshold": 4, "sensor_neighbor_threshold": 4,
+            "structural_energy_conversion_prob": 0.34, "structural_sensor_conversion_prob": 0.34,
+            "compute_energy_conversion_prob": 0.08, "compute_sensor_conversion_prob": 0.15,
+        },
+        "stochastic": {
+            "enabled": True,
+            "baseline_transition_prob": 0.08,
+            "structural_to_energy_prob": 0.08, "structural_to_sensor_prob": 0.08,
+            "compute_to_energy_prob": 0.05, "compute_to_sensor_prob": 0.05,
+            "structural_to_void_decay_prob": 0.005, "energy_to_void_decay_prob": 0.004,
+            "sensor_to_void_decay_prob": 0.003,
+        },
+        "decay": {
+            "enabled": True,
+            "inactivity_neighbor_threshold": 1, "structural_inactive_steps_to_decay": 6,
+        },
+        "meta": {
+            "description": "v0.7.5 cosmic garden lock (in-code transcription for CPU replication)",
+            "author": "UtilityFog Team", "version": "0.7.5", "target_lambda": 1.7,
+        },
+    },
+}
 
 _ENGINE_NAME = "scripts.continuous_evolution_ca"
 _GPU_NAME = "scripts.gpu_accelerator"
@@ -125,6 +182,22 @@ def make_seed(lattice_size: int, cube_size: int) -> np.ndarray:
     hi = min(L, lo + c)
     arr[lo:hi, lo:hi, lo:hi] = STRUCTURAL
     return arr
+
+
+# --------------------------------------------------------------------------- #
+# Rule spec (in-code; see DEFAULT_RULE_SPEC note above)
+# --------------------------------------------------------------------------- #
+def default_rule_spec() -> Dict[str, Any]:
+    """Return a fresh deep copy of the canonical rule spec (engine never mutates it,
+    but copy defensively so callers can record/serialise without aliasing)."""
+    return copy.deepcopy(DEFAULT_RULE_SPEC)
+
+
+def rule_spec_hash(spec: Mapping[str, Any]) -> str:
+    """Stable sha256 over the rule's canonical JSON form (for provenance)."""
+    return hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 # --------------------------------------------------------------------------- #

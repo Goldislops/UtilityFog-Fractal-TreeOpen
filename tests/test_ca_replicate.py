@@ -213,7 +213,7 @@ def test_seed_and_scientific_hash_are_deterministic():
 
     def one_run(rng_seed):
         with ea.cpu_engine() as ce:
-            rule = ce.load_rule_spec(ea.DEFAULT_RULE)
+            rule = ea.default_rule_spec()
             state = ea.make_seed(m["lattice_size"], m["cube_size"])
             memory = np.array(ce.init_memory_grid(state.shape), dtype=np.float32)
             inactivity = np.zeros(state.shape, dtype=np.int16)

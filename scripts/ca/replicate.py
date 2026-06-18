@@ -135,15 +135,6 @@ def _git(*args: str) -> str:
         return ""
 
 
-def _sha256_file(path: Path) -> str:
-    import hashlib
-    h = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def _sha256_text(text: str) -> str:
     import hashlib
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -336,10 +327,13 @@ def main(argv=None) -> int:
         sys.path.insert(0, str(PROJECT_ROOT))
     from scripts.ca import engine_adapter as ea  # noqa: E402  (after thread caps)
 
+    rule_spec = ea.default_rule_spec()
+    rule_sha = ea.rule_spec_hash(rule_spec)
     manifest_sha = _sha256_text(json.dumps(m, sort_keys=True))
-    rule_sha = _sha256_file(DEFAULT_RULE)
     base_prov = base_provenance(manifest_sha, rule_sha, m["thread_cap"], priority)
-    base_prov["rule_path"] = str(DEFAULT_RULE.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    base_prov["rule_name"] = rule_spec["rule"]["name"]
+    base_prov["rule_source"] = str(DEFAULT_RULE.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    base_prov["rule_delivery"] = "in-code (DEFAULT_RULE_SPEC); source TOML not parsed at runtime"
 
     if resuming:
         run_id = run_dir.name
@@ -354,7 +348,6 @@ def main(argv=None) -> int:
     index_rows = []
     rep_hashes = []
     with ea.cpu_engine() as ce:
-        rule_spec = ce.load_rule_spec(DEFAULT_RULE)
         for rep in range(int(m["replicates"])):
             rep_dir = run_dir / f"replicate_{rep:03d}"
             result_path = rep_dir / "result.json"
