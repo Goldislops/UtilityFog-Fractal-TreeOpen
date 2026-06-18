@@ -1,0 +1,55 @@
+name: "CodeQL (Python baseline)"
+
+# Phase 2B-5D-1 — scoped Python-only CodeQL baseline (advanced setup, NOT default setup).
+# Scope: scripts/ + src/uft_orch/ only (see .github/codeql/codeql-config.yml).
+# Query suite: CodeQL default high-confidence queries only.
+#
+# Note on the two distinct path mechanisms (kept explicit on purpose):
+#   * the on.<event>.paths filters below decide WHETHER a run STARTS;
+#   * the config-file `paths:` decides WHAT SOURCE CodeQL ANALYZES.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monthly, off-peak (12th @ 04:37 UTC) — low-noise baseline cadence.
+    - cron: "37 4 12 * *"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "src/uft_orch/**"
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/codeql-config.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "src/uft_orch/**"
+      - ".github/workflows/codeql.yml"
+      - ".github/codeql/codeql-config.yml"
+
+# Least-privilege default for the whole workflow.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # checkout source
+      security-events: write  # upload CodeQL results to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: python
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: "/language:python"
