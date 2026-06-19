@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -149,7 +150,7 @@ def test_checkpoint_resume_equivalence(tmp_path):
         {"mode": "trial"},             # only replicate is supported
         {"mode": "sweep"},
         {"replicates": 1},             # replicate mode needs >= 2
-        {"steps": 0},                  # bounds
+        {"steps": 0},                  # lower bounds
         {"lattice_size": 0},
         {"cube_size": 0},
         {"checkpoint_every_steps": 0},
@@ -157,6 +158,15 @@ def test_checkpoint_resume_equivalence(tmp_path):
         {"seed": -1},
         {"schema_version": 2},         # forward schema not implemented
         {"mutation_rate": 0.1},        # unknown/deferred-feature key
+        # --- upper caps (F2): no unlimited escape hatch ---
+        {"lattice_size": R.MAX_LATTICE_SIZE + 1},
+        {"steps": R.MAX_STEPS + 1},
+        {"replicates": R.MAX_REPLICATES + 1},
+        {"thread_cap": 10_000},        # exceeds host CPU-count ceiling
+        {"checkpoint_every_steps": R.MAX_STEPS + 1},
+        # --- relational bounds (F2) ---
+        {"lattice_size": 8, "cube_size": 9},          # cube_size > lattice_size
+        {"steps": 2, "checkpoint_every_steps": 3},     # checkpoint interval > steps
     ],
 )
 def test_manifest_rejected(over):
@@ -164,11 +174,37 @@ def test_manifest_rejected(over):
         R.validate_manifest(_manifest(**over))
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../escape", "..", ".", "a/b", "a\\b", "C:evil", "with space", "", "-lead", "_lead",
+     "a" * 65],
+)
+def test_experiment_id_rejected(bad_id):
+    """experiment_id must be a conservative slug — no path traversal/separators (F1)."""
+    with pytest.raises(ValueError):
+        R.validate_manifest(_manifest(experiment_id=bad_id))
+
+
+@pytest.mark.parametrize("good_id", ["test", "exp-1", "Run_2", "a", "9", "a" * 64])
+def test_experiment_id_accepted(good_id):
+    assert R.validate_manifest(_manifest(experiment_id=good_id))["experiment_id"] == good_id
+
+
 def test_valid_manifest_accepted():
     m = R.validate_manifest(_manifest())
     assert m["backend"] == "cpu"
     assert m["mode"] == "replicate"
     assert m["replicates"] >= 2
+
+
+def test_cap_boundaries_accepted():
+    """The exact caps + relational equalities are allowed; only beyond them is rejected."""
+    m = R.validate_manifest(_manifest(
+        lattice_size=R.MAX_LATTICE_SIZE, cube_size=R.MAX_LATTICE_SIZE,
+        steps=5, checkpoint_every_steps=5, replicates=R.MAX_REPLICATES, thread_cap=1))
+    assert m["lattice_size"] == R.MAX_LATTICE_SIZE
+    assert m["cube_size"] == m["lattice_size"]          # cube_size == lattice_size is OK
+    assert m["checkpoint_every_steps"] == m["steps"]    # interval == steps is OK
 
 
 def test_resume_rejects_checkpoint_mismatch(tmp_path):
@@ -226,6 +262,198 @@ def test_seed_and_scientific_hash_are_deterministic():
             for gen in range(m["steps"]):
                 state, inactivity, memory, _ = ea.step_once(
                     ce, state, rule, rng, inactivity, memory, current_gen=gen)
-            return ea.scientific_hash(state, memory)
+            return ea.scientific_hash(state, memory, inactivity)
 
     assert one_run(3) == one_run(3)
+
+
+# --------------------------------------------------------------------------- #
+# F3 — inactivity_steps is part of the scientific hash
+# --------------------------------------------------------------------------- #
+def test_inactivity_changes_scientific_and_chain_hash():
+    """Changing ONLY inactivity_steps must change both hashes (else replication could be
+    falsely certified). The fixed array order is lattice, memory_grid, inactivity_steps."""
+    assert ea.SCIENTIFIC_ARRAY_ORDER == ("lattice", "memory_grid", "inactivity_steps")
+    lat = np.zeros((4, 4, 4), dtype=np.uint8)
+    mem = np.zeros((8, 4, 4, 4), dtype=np.float32)
+    inact0 = np.zeros((4, 4, 4), dtype=np.int16)
+    inact1 = inact0.copy()
+    inact1[0, 0, 0] = 7  # the only difference
+
+    assert ea.scientific_hash(lat, mem, inact0) != ea.scientific_hash(lat, mem, inact1)
+    assert ea.chain_hash("p", 1, lat, mem, inact0) != ea.chain_hash("p", 1, lat, mem, inact1)
+    # identical inputs -> identical hash (sanity)
+    assert ea.scientific_hash(lat, mem, inact0) == ea.scientific_hash(lat, mem, inact0.copy())
+
+
+# --------------------------------------------------------------------------- #
+# F4 — adapter restores process-global state; non-reentrant
+# --------------------------------------------------------------------------- #
+def test_adapter_restores_sys_path():
+    before = list(sys.path)
+    root = str(ea.PROJECT_ROOT)
+    try:
+        while root in sys.path:
+            sys.path.remove(root)
+        assert root not in sys.path
+        with ea.cpu_engine():
+            assert root in sys.path           # inserted on entry
+        assert root not in sys.path           # removed on exit
+    finally:
+        sys.path[:] = before
+
+
+def test_adapter_restores_modules_verbatim():
+    eng, gpu = "scripts.continuous_evolution_ca", "scripts.gpu_accelerator"
+    saved = {n: sys.modules.get(n) for n in (eng, gpu)}
+    sentinel_eng = types.ModuleType(eng)
+    sentinel_gpu = types.ModuleType(gpu)
+    try:
+        sys.modules[eng] = sentinel_eng
+        sys.modules[gpu] = sentinel_gpu
+        with ea.cpu_engine() as ce:
+            assert ce is not sentinel_eng     # a freshly forced-CPU import
+            assert ce._xp is np
+        # the pre-existing module objects are restored verbatim (same identity)
+        assert sys.modules.get(eng) is sentinel_eng
+        assert sys.modules.get(gpu) is sentinel_gpu
+    finally:
+        for n, v in saved.items():
+            if v is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = v
+
+
+def test_adapter_clean_state_and_package_attrs():
+    eng, gpu = "scripts.continuous_evolution_ca", "scripts.gpu_accelerator"
+    saved = {n: sys.modules.get(n) for n in (eng, gpu)}
+    pkg = sys.modules.get("scripts")
+    attr_saved = {a: getattr(pkg, a, None) for a in ("gpu_accelerator", "continuous_evolution_ca")} \
+        if pkg is not None else {}
+    try:
+        # nothing preloaded: drop the submodule entries + the package attrs
+        sys.modules.pop(eng, None)
+        sys.modules.pop(gpu, None)
+        if pkg is not None:
+            for a in ("gpu_accelerator", "continuous_evolution_ca"):
+                if hasattr(pkg, a):
+                    delattr(pkg, a)
+        with ea.cpu_engine():
+            pass
+        # restored to the (absent) prior state
+        assert eng not in sys.modules
+        assert gpu not in sys.modules
+        if pkg is not None:
+            assert not hasattr(pkg, "gpu_accelerator")
+            assert not hasattr(pkg, "continuous_evolution_ca")
+    finally:
+        for n, v in saved.items():
+            if v is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = v
+        if pkg is not None:
+            for a, v in attr_saved.items():
+                if v is not None:
+                    setattr(pkg, a, v)
+
+
+def test_adapter_is_non_reentrant():
+    with ea.cpu_engine() as ce1:
+        assert ce1._xp is np
+        with pytest.raises(RuntimeError):
+            with ea.cpu_engine():
+                pass
+        # the first context is uncorrupted by the rejected nested attempt
+        assert ce1._xp is np
+    # lock released after the outer context -> a fresh context works again
+    with ea.cpu_engine() as ce2:
+        assert ce2._xp is np
+
+
+# --------------------------------------------------------------------------- #
+# F5 — fresh run directories cannot collide
+# --------------------------------------------------------------------------- #
+def test_fresh_run_dirs_are_unique(tmp_path):
+    manifest = _write_manifest(tmp_path / "manifest.json", seed=1, steps=1, replicates=2)
+    a = _run_cli("--manifest", manifest, "--out", tmp_path / "out")
+    b = _run_cli("--manifest", manifest, "--out", tmp_path / "out")
+    assert a["run_dir"] != b["run_dir"]           # microsecond + nonce => distinct
+    assert a["all_replicates_identical"] is True
+    assert b["all_replicates_identical"] is True
+    # two distinct run dirs both present on disk
+    assert Path(a["run_dir"]).is_dir() and Path(b["run_dir"]).is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# F6 — resume provenance + run lifecycle
+# --------------------------------------------------------------------------- #
+def test_resume_preserves_start_and_records_resume_time(tmp_path):
+    manifest = _write_manifest(tmp_path / "manifest.json", seed=2, steps=2,
+                               replicates=2, checkpoint_every_steps=1)
+    out = _run_cli("--manifest", manifest, "--out", tmp_path / "run")
+    run_dir = Path(out["run_dir"])
+    rj0 = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert rj0["status"] == "completed"
+    assert rj0["resumed_utc"] == []
+    started0 = rj0["started_utc"]
+
+    # force a resume: drop one replicate's result+final, keep its checkpoints
+    r1 = run_dir / "replicate_001"
+    (r1 / "result.json").unlink()
+    (r1 / "final_state.npz").unlink()
+
+    _run_cli("--resume", run_dir, "--out", tmp_path / "run")
+    rj1 = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert rj1["status"] == "completed"
+    assert rj1["started_utc"] == started0            # original start preserved
+    assert len(rj1["resumed_utc"]) == 1              # resume recorded separately
+    assert rj1["resumed_utc"][0] != started0
+
+
+def test_completed_result_identity_mismatch_rejected(tmp_path):
+    """A completed replicate whose identity fields don't match the manifest is rejected
+    on reuse — exactly as a mismatched checkpoint is."""
+    manifest = _write_manifest(tmp_path / "manifest.json", seed=3, steps=1, replicates=2)
+    out = _run_cli("--manifest", manifest, "--out", tmp_path / "run")
+    run_dir = Path(out["run_dir"])
+
+    # corrupt replicate_000's completed result identity, and force a resume pass
+    r0 = run_dir / "replicate_000"
+    res = json.loads((r0 / "result.json").read_text(encoding="utf-8"))
+    res["manifest_sha256"] = "0" * 64
+    (r0 / "result.json").write_text(json.dumps(res), encoding="utf-8")
+    r1 = run_dir / "replicate_001"
+    (r1 / "result.json").unlink()
+    (r1 / "final_state.npz").unlink()
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "scripts.ca.replicate", "--resume", str(run_dir),
+         "--out", str(tmp_path / "run")],
+        cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=CLI_TIMEOUT,
+    )
+    assert proc.returncode != 0
+    assert "mismatch" in (proc.stdout + proc.stderr).lower()
+
+
+def test_interrupted_status_recorded(tmp_path, monkeypatch):
+    """A KeyboardInterrupt during a run is recorded as a durable 'interrupted' status
+    with a non-zero exit code, and the original start time is still present."""
+    manifest = _write_manifest(tmp_path / "manifest.json", seed=1, steps=2, replicates=2)
+
+    def _boom(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(R, "run_replicate", _boom)
+    rc = R.main(["--manifest", str(manifest), "--out", str(tmp_path / "out")])
+    assert rc == 130
+
+    runs = list((tmp_path / "out" / "test").glob("*"))
+    assert len(runs) == 1
+    rj = json.loads((runs[0] / "run.json").read_text(encoding="utf-8"))
+    assert rj["status"] == "interrupted"
+    assert rj["started_utc"]
+    assert rj["finished_utc"]            # interruption timestamp recorded
+    # the per-run lock must be released even on interrupt
+    assert not (runs[0] / "run.lock").exists()

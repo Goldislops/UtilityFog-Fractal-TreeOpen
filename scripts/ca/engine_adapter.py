@@ -8,9 +8,12 @@ engine path is GPU and is **not** reproducible run-to-run (audit 2B-5G-1).
 
 This adapter forces the CPU/NumPy path **without editing the engine**, by injecting a
 stand-in ``scripts.gpu_accelerator`` whose ``GPU_AVAILABLE`` is ``False`` *before* the
-engine is (re)imported, then restoring ``sys.modules`` afterwards. On the CPU path the
-engine's ``_xp_random`` consumes the explicit ``numpy.random.Generator`` we pass in, so
-the run is deterministic given (engine revision, NumPy, seed, rule, lattice, steps).
+engine is (re)imported, then fully restoring the process import state afterwards
+(``sys.modules`` entries, the leaf attributes bound on the ``scripts`` package, and any
+``sys.path`` entry it inserted). It is non-reentrant (a module-level lock fail-fasts on a
+second concurrent/nested context). On the CPU path the engine's ``_xp_random`` consumes
+the explicit ``numpy.random.Generator`` we pass in, so the run is deterministic given
+(engine revision, NumPy, seed, rule, lattice, steps).
 
 Nothing here mutates the engine source, the dormant ``src/uft_orch/ca/runner.py``, the
 ``ca/seeds/*.json`` loader, or any GPU/Medusa runtime. It NEVER imports CuPy.
@@ -24,6 +27,7 @@ import hashlib
 import importlib
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Tuple
@@ -92,6 +96,24 @@ DEFAULT_RULE_SPEC: Dict[str, Any] = {
 
 _ENGINE_NAME = "scripts.continuous_evolution_ca"
 _GPU_NAME = "scripts.gpu_accelerator"
+_PKG_NAME = "scripts"  # the (namespace) parent package
+# Leaf attribute names the import machinery binds onto the `scripts` package object.
+_PKG_ATTRS = ("gpu_accelerator", "continuous_evolution_ca")
+
+# Fixed, documented order of the scientific arrays that enter every hash (F3).
+SCIENTIFIC_ARRAY_ORDER = ("lattice", "memory_grid", "inactivity_steps")
+
+
+class _Missing:
+    """Sentinel: a watched name/attribute was absent before we entered the context."""
+
+
+_MISSING = _Missing()
+
+# A single forced-CPU import may be in flight at a time. cpu_engine() mutates
+# process-global import state (sys.modules / scripts package attrs / sys.path), so two
+# overlapping contexts would corrupt each other's snapshot. Non-reentrant by design.
+_CPU_ENGINE_LOCK = threading.Lock()
 
 
 def _fake_gpu_accelerator() -> types.ModuleType:
@@ -113,20 +135,38 @@ def _fake_gpu_accelerator() -> types.ModuleType:
 
 @contextlib.contextmanager
 def cpu_engine() -> Iterator[types.ModuleType]:
-    """Import the CA engine with the GPU backend forced OFF; restore sys.modules after.
+    """Import the CA engine with the GPU backend forced OFF; fully restore process state.
 
     Yields the imported ``continuous_evolution_ca`` module with ``_xp is numpy`` and
-    ``GPU_AVAILABLE is False``. Encapsulated, single-shot, and fully restored in a
-    ``finally`` block so no modified engine-global state leaks to the rest of the
-    process. Raises RuntimeError if the CPU backend cannot be verified.
-    """
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
+    ``GPU_AVAILABLE is False``. Single-shot and **non-reentrant**: a module-level lock
+    fail-fasts if a second (concurrent or nested) context is opened, so the two cannot
+    corrupt each other's snapshot.
 
-    # Snapshot anything we are about to displace so we can restore it verbatim.
-    watched = (_GPU_NAME, _ENGINE_NAME, "cupy")
-    saved = {name: sys.modules.get(name, _MISSING) for name in watched}
+    Everything it touches is snapshotted and restored in ``finally`` (including on
+    exceptional exit): the watched ``sys.modules`` entries, the leaf attributes the
+    import machinery binds onto the ``scripts`` package object, and the ``sys.path``
+    entry it may insert. Raises RuntimeError if the CPU backend cannot be verified.
+    Never edits the engine source.
+    """
+    if not _CPU_ENGINE_LOCK.acquire(blocking=False):
+        raise RuntimeError(
+            "cpu_engine() is already active in this process; it is single-shot and "
+            "non-reentrant (do not nest or run two concurrently)."
+        )
+
+    # Snapshot every piece of global state we may displace, BEFORE mutating anything.
+    watched = (_PKG_NAME, _GPU_NAME, _ENGINE_NAME, "cupy")
+    saved_modules = {name: sys.modules.get(name, _MISSING) for name in watched}
+    pre_pkg = sys.modules.get(_PKG_NAME, _MISSING)
+    saved_attrs = (
+        {a: getattr(pre_pkg, a, _MISSING) for a in _PKG_ATTRS}
+        if pre_pkg is not _MISSING else {}
+    )
+    inserted_path = str(PROJECT_ROOT) not in sys.path
+
     try:
+        if inserted_path:
+            sys.path.insert(0, str(PROJECT_ROOT))
         sys.modules[_GPU_NAME] = _fake_gpu_accelerator()
         # Drop any cached engine so it re-binds _xp/_gpu_rng against the fake.
         sys.modules.pop(_ENGINE_NAME, None)
@@ -140,18 +180,31 @@ def cpu_engine() -> Iterator[types.ModuleType]:
             raise RuntimeError("engine _gpu_rng is not None under forced-CPU import")
         yield ce
     finally:
-        for name, mod in saved.items():
-            if mod is _MISSING:
+        # Restore submodule entries first, then the package object, then sys.path.
+        for name in (_ENGINE_NAME, _GPU_NAME, "cupy"):
+            prev = saved_modules[name]
+            if prev is _MISSING:
                 sys.modules.pop(name, None)
             else:
-                sys.modules[name] = mod
-
-
-class _Missing:
-    pass
-
-
-_MISSING = _Missing()
+                sys.modules[name] = prev
+        if saved_modules[_PKG_NAME] is _MISSING:
+            # We (transitively) created the `scripts` package; remove it wholesale.
+            sys.modules.pop(_PKG_NAME, None)
+        else:
+            pkg = saved_modules[_PKG_NAME]
+            sys.modules[_PKG_NAME] = pkg
+            for attr, val in saved_attrs.items():
+                if val is _MISSING:
+                    if hasattr(pkg, attr):
+                        delattr(pkg, attr)
+                else:
+                    setattr(pkg, attr, val)
+        if inserted_path:
+            try:
+                sys.path.remove(str(PROJECT_ROOT))
+            except ValueError:
+                pass
+        _CPU_ENGINE_LOCK.release()
 
 
 # --------------------------------------------------------------------------- #
@@ -258,23 +311,31 @@ def _hash_array(h: "hashlib._Hash", arr: np.ndarray) -> None:
     h.update(a.tobytes())
 
 
-def scientific_hash(lattice: np.ndarray, memory: np.ndarray) -> str:
-    """sha256 over ONLY the ordered scientific arrays (lattice, then memory_grid).
+def scientific_hash(lattice: np.ndarray, memory: np.ndarray, inactivity: np.ndarray) -> str:
+    """sha256 over the THREE ordered scientific arrays the engine evolves.
 
-    Each array contributes its dtype tag, shape, and C-contiguous bytes — in that
-    fixed order. No timestamps, paths, run-ids, or metrics enter the hash.
+    Fixed order = ``SCIENTIFIC_ARRAY_ORDER`` = (lattice, memory_grid, inactivity_steps).
+    ``inactivity_steps`` drives future decay transitions and is checkpointed, so it MUST
+    enter the hash — otherwise two scientifically different states could collide and the
+    wrapper would falsely certify replication (Jack finding 3). Each array contributes
+    its dtype tag, shape, and C-contiguous bytes, in that order. No timestamps, paths,
+    run-ids, or (deterministically-derived) metrics enter the hash.
     """
     h = hashlib.sha256()
     _hash_array(h, lattice)
     _hash_array(h, memory)
+    _hash_array(h, inactivity)
     return h.hexdigest()
 
 
-def chain_hash(prev_hex: str, step_index: int, lattice: np.ndarray, memory: np.ndarray) -> str:
-    """Fold one step's scientific state into a running trajectory hash."""
+def chain_hash(prev_hex: str, step_index: int, lattice: np.ndarray, memory: np.ndarray,
+               inactivity: np.ndarray) -> str:
+    """Fold one step's scientific state (lattice, memory_grid, inactivity_steps) into a
+    running trajectory hash — same fixed array order as ``scientific_hash``."""
     h = hashlib.sha256()
     h.update(prev_hex.encode("ascii"))
     h.update(str(int(step_index)).encode("ascii"))
     _hash_array(h, lattice)
     _hash_array(h, memory)
+    _hash_array(h, inactivity)
     return h.hexdigest()
