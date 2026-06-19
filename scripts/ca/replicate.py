@@ -6,9 +6,10 @@ every replicate uses the identical seed and parameters, so they must produce byt
 scientific arrays and identical scientific hashes.
 
 Scientific claim (this milestone only):
-    Under the same repository revision, Python/NumPy environment, CPU backend, manifest,
-    initial state and RNG seed, separate bounded launches of this wrapper produce exactly
-    equal scientific arrays and identical scientific hashes.
+    Separate bounded launches produce exactly equal scientific arrays and identical
+    scientific hashes ONLY when the recorded executed-source hashes (engine + adapter +
+    wrapper), rule hash, NumPy version, CPU backend, manifest and initial state all match.
+    A git commit alone does NOT prove the executed code (a dirty tree can differ).
 NOT claimed: CPU/GPU identity, cross-machine identity, cross-version identity, faithful
 continuation of the full Medusa daemon, or determinism of the live GPU path.
 
@@ -19,7 +20,9 @@ Usage:
 Run dirs are uniquely named (microsecond timestamp + random nonce) and created
 exclusively, so two fresh launches never collide; a per-run lock prevents two processes
 from running/resuming the same run dir. ``run.json`` carries a durable status
-(running → completed, or interrupted on Ctrl-C).
+(running → completed, or interrupted on Ctrl-C, or failed on any other exception).
+Resume fails closed unless the prior run.json + checkpoints/results match the current
+executed-source/rule/NumPy/manifest identity.
 
 NOTE: numpy and the engine are imported lazily inside ``main`` *after* thread caps are
 set in the environment, so a fresh process honours the requested ``thread_cap``.
@@ -29,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -56,22 +60,36 @@ DEFAULTS = {"lattice_size": 8, "checkpoint_every_steps": 1, "thread_cap": 1, "ex
 _EXPERIMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 # Schema-v1 is a deliberately *bounded* CPU replication harness, not a simulation daemon.
-# These conservative upper caps (with the relational + memory guards below) stop a
-# manifest from accidentally commandeering the machine (Jack finding 2). There is NO
-# configurable "unlimited" escape hatch in schema v1 — widening is a future schema bump.
+# These conservative upper caps (with the relational, aggregate + memory guards below) stop
+# a manifest from accidentally commandeering the machine (Jack findings 2 + G1). There is
+# NO configurable "unlimited" escape hatch in schema v1 — widening is a future schema bump.
 #   lattice_size: 64 == the engine's own primordial cube edge; aux arrays at 64^3 are
 #     ~34 MB (see _estimate_peak_bytes). Bigger is real-Medusa territory, out of scope.
-#   steps/replicates: generous but finite ceilings on a sequential CPU loop.
-#   thread_cap: capped at the host CPU count (more is pointless and antisocial).
+#   steps/replicates: generous but finite per-field ceilings on a sequential CPU loop.
+#   thread_cap: <= min(8, host CPU count) — polite to co-tenants (BOINC/Folding@home).
+# Per-field caps alone do NOT bound the *combined* workload, so aggregate guards follow.
 MAX_LATTICE_SIZE = 64
 MAX_STEPS = 10_000
 MAX_REPLICATES = 100
-MAX_ESTIMATED_BYTES = 2 * 1024 ** 3        # 2 GiB peak per single replicate
+MAX_SEED = 2 ** 64 - 1                      # explicit reproducibility domain (G2)
+MAX_THREAD_CAP_ABS = 8                      # absolute polite ceiling; further capped to CPU count
+MAX_ESTIMATED_BYTES = 2 * 1024 ** 3        # 2 GiB peak per single replicate (in-memory)
 _BYTES_PER_CELL_ESTIMATE = 128             # memory(8ch*4B) + lattice(1B) + inactivity(2B) + engine temporaries, rounded up
 
+# Aggregate workload guards (G1): "each number is capped" != "the run is bounded".
+MAX_TOTAL_CELL_STEPS = 100_000_000         # lattice^3 * steps * replicates compute budget
+MAX_TOTAL_CHECKPOINTS = 1_000              # total checkpoint files across all replicates
+MAX_ESTIMATED_CHECKPOINT_BYTES = 2 * 1024 ** 3   # 2 GiB total estimated checkpoint storage
+# Conservative *uncompressed* per-cell checkpoint size (npz stores all three sci arrays):
+#   lattice uint8 (1) + memory_grid 8ch float32 (32) + inactivity int16 (2) = 35 B/cell.
+_CHECKPOINT_BYTES_PER_CELL = 35
+_CHECKPOINT_META_BYTES = 4096              # small per-file metadata allowance (meta_json + npz overhead)
+
 REPRO_CLAIM = (
-    "Bitwise R1/R2 on the CPU/NumPy backend within a fixed engine revision + NumPy "
-    "version, for this bounded step_ca_lattice loop, given identical seed/manifest."
+    "Bitwise R1/R2 on the CPU/NumPy backend holds ONLY when the recorded executed-source "
+    "hashes (engine + adapter + wrapper), the rule hash, the NumPy version, the backend, "
+    "the manifest and the initial state all match. A git commit alone does NOT prove the "
+    "executed code (a dirty working tree can run something else)."
 )
 REPRO_LIMITS = (
     "NOT bitwise across CPU vs GPU/CuPy, across machines, or across "
@@ -103,8 +121,28 @@ def _estimate_peak_bytes(lattice_size: int) -> int:
 
 
 def _thread_ceiling() -> int:
-    """Safe upper bound for thread_cap: the host CPU count (more is pointless)."""
-    return max(1, os.cpu_count() or 1)
+    """Safe upper bound for thread_cap: min(8, host CPU count) — polite to co-tenants."""
+    return max(1, min(MAX_THREAD_CAP_ABS, os.cpu_count() or 1))
+
+
+def _total_cell_steps(lattice_size: int, steps: int, replicates: int) -> int:
+    """Aggregate compute budget: total cell-updates across the whole run."""
+    return int(lattice_size) ** 3 * int(steps) * int(replicates)
+
+
+def _checkpoint_counts(steps: int, checkpoint_every_steps: int, replicates: int) -> tuple:
+    """(per_replicate, total) checkpoint counts. Per replicate = the step-0 (initial)
+    checkpoint + one per checkpoint interval, with the always-written final step folded in
+    via ceil (no double-count when steps is an exact multiple of the interval)."""
+    per = 1 + math.ceil(int(steps) / int(checkpoint_every_steps))
+    return per, per * int(replicates)
+
+
+def _estimated_checkpoint_bytes(lattice_size: int, total_checkpoints: int) -> int:
+    """Conservative UNCOMPRESSED estimate of total checkpoint storage (preflight must be
+    safe even though the on-disk npz is compressed and usually smaller)."""
+    per_file = int(lattice_size) ** 3 * _CHECKPOINT_BYTES_PER_CELL + _CHECKPOINT_META_BYTES
+    return per_file * int(total_checkpoints)
 
 
 def validate_manifest(m: Mapping[str, Any]) -> Dict[str, Any]:
@@ -143,8 +181,11 @@ def validate_manifest(m: Mapping[str, Any]) -> Dict[str, Any]:
             )
         return v
 
-    if not isinstance(out.get("seed"), int) or isinstance(out.get("seed"), bool) or out["seed"] < 0:
-        raise ValueError(f"seed must be an int >= 0, got {out.get('seed')!r}")
+    # seed: explicit reproducibility domain [0, 2**64 - 1] (G2) — also keeps run-dir
+    # names (which embed the seed) from becoming pathologically long.
+    if not isinstance(out.get("seed"), int) or isinstance(out.get("seed"), bool) \
+            or out["seed"] < 0 or out["seed"] > MAX_SEED:
+        raise ValueError(f"seed must be an int in [0, 2**64-1], got {out.get('seed')!r}")
     _bounded_int("lattice_size", 1, MAX_LATTICE_SIZE)
     _bounded_int("cube_size", 1, MAX_LATTICE_SIZE)
     _bounded_int("steps", 1, MAX_STEPS)
@@ -169,6 +210,28 @@ def validate_manifest(m: Mapping[str, Any]) -> Dict[str, Any]:
         raise ValueError(
             f"estimated peak memory {est} bytes for lattice_size={out['lattice_size']} "
             f"exceeds the schema-v1 cap {MAX_ESTIMATED_BYTES} bytes"
+        )
+
+    # Aggregate workload guards (G1): bound the COMBINED run, not just each field.
+    cell_steps = _total_cell_steps(out["lattice_size"], out["steps"], out["replicates"])
+    if cell_steps > MAX_TOTAL_CELL_STEPS:
+        raise ValueError(
+            f"aggregate compute lattice^3*steps*replicates={cell_steps} exceeds the "
+            f"schema-v1 cap {MAX_TOTAL_CELL_STEPS}"
+        )
+    _per_ck, total_ck = _checkpoint_counts(
+        out["steps"], out["checkpoint_every_steps"], out["replicates"])
+    if total_ck > MAX_TOTAL_CHECKPOINTS:
+        raise ValueError(
+            f"total checkpoint count {total_ck} exceeds the schema-v1 cap "
+            f"{MAX_TOTAL_CHECKPOINTS} (lower replicates or raise checkpoint_every_steps)"
+        )
+    ck_bytes = _estimated_checkpoint_bytes(out["lattice_size"], total_ck)
+    if ck_bytes > MAX_ESTIMATED_CHECKPOINT_BYTES:
+        raise ValueError(
+            f"estimated checkpoint storage {ck_bytes} bytes exceeds the schema-v1 cap "
+            f"{MAX_ESTIMATED_CHECKPOINT_BYTES} bytes (actual compressed size may be smaller, "
+            "but preflight is conservative)"
         )
     return out
 
@@ -234,6 +297,103 @@ def base_provenance(manifest_sha: str, rule_sha: str, thread_cap: int, priority:
         "reproducibility_claim": REPRO_CLAIM,
         "reproducibility_limitations": REPRO_LIMITS,
     }
+
+
+def build_provenance(m: Mapping[str, Any], priority: str = "unknown") -> tuple:
+    """Assemble (base_prov, rule_spec, manifest_sha) including executed-source identity.
+
+    base_prov pins the scientific implementation: engine/adapter/wrapper source SHA-256,
+    rule SHA-256, NumPy version, git SHA (+dirty), backend, engine module/boundary. This
+    is the single source of truth for both run.json and per-replicate identity checks (G3).
+    """
+    from scripts.ca import engine_adapter as ea
+    rule_spec = ea.default_rule_spec()
+    rule_sha = ea.rule_spec_hash(rule_spec)
+    manifest_sha = _sha256_text(json.dumps(m, sort_keys=True))
+    base_prov = base_provenance(manifest_sha, rule_sha, m["thread_cap"], priority)
+    base_prov.update(ea.source_identity())  # engine/adapter/wrapper source SHA-256
+    base_prov["rule_name"] = rule_spec["rule"]["name"]
+    base_prov["rule_source"] = str(DEFAULT_RULE.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    base_prov["rule_delivery"] = "in-code (DEFAULT_RULE_SPEC); source TOML not parsed at runtime"
+    base_prov["scientific_hash_arrays"] = list(ea.SCIENTIFIC_ARRAY_ORDER)
+    return base_prov, rule_spec, manifest_sha
+
+
+# Identity fields that pin the executed scientific implementation. A checkpoint or
+# completed result is reused on resume ONLY if every one of these matches the current
+# invocation — manifest hash alone is not enough (it can't see a code/env change). (G3)
+_IDENTITY_KEYS = (
+    "manifest_sha256", "backend", "rule_sha256", "numpy_version",
+    "engine_source_sha256", "adapter_source_sha256", "wrapper_source_sha256",
+)
+# Run-level required fields a prior run.json must carry to be trusted on resume (G4).
+_REQUIRED_RUNJSON_FIELDS = ("schema_version", "started_utc", "status") + _IDENTITY_KEYS
+
+
+def _expected_identity(base_prov: Mapping[str, Any], m: Mapping[str, Any], rep_index: int) -> Dict[str, Any]:
+    ident = {k: base_prov[k] for k in _IDENTITY_KEYS}
+    ident.update({
+        "seed": int(m["seed"]),
+        "lattice_size": int(m["lattice_size"]),
+        "cube_size": int(m["cube_size"]),
+        "replicate_index": int(rep_index),
+    })
+    return ident
+
+
+_INT_IDENTITY = {"seed", "lattice_size", "cube_size", "replicate_index"}
+
+
+def _assert_identity(record: Mapping[str, Any], expected: Mapping[str, Any], what: str) -> None:
+    for key, want in expected.items():
+        got = record.get(key)
+        ok = (got is not None and int(got) == want) if key in _INT_IDENTITY else (got == want)
+        if not ok:
+            raise ValueError(
+                f"{what} {key} mismatch (got {got!r}, expected {want!r}); refusing — "
+                "fail closed (a future code/env/rule change must not resume an old run)"
+            )
+
+
+def _load_validated_prior(run_dir: Path, base_prov: Mapping[str, Any]) -> Dict[str, Any]:
+    """Load + validate a prior run.json on resume; fail closed on missing/malformed/
+    incomplete provenance or an identity mismatch (G4). Never manufacture provenance."""
+    p = Path(run_dir) / "run.json"
+    if not p.exists():
+        raise ValueError(
+            f"cannot resume: {p} is missing — refusing to manufacture provenance (fail closed)"
+        )
+    try:
+        prior = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"cannot resume: {p} is malformed ({exc}); fail closed")
+    if not isinstance(prior, dict):
+        raise ValueError(f"cannot resume: {p} is not a JSON object; fail closed")
+    missing = [k for k in _REQUIRED_RUNJSON_FIELDS if k not in prior]
+    if missing:
+        raise ValueError(
+            f"cannot resume: {p} is missing required field(s) {missing}; fail closed"
+        )
+    # The recorded run must share the current executed-source/rule/env/manifest identity.
+    _assert_identity(prior, {k: base_prov[k] for k in _IDENTITY_KEYS}, "run.json")
+    return prior
+
+
+def _safe_failure_summary(exc: BaseException, limit: int = 200) -> str:
+    """Privacy-safe, bounded one-line failure summary — no home paths/usernames/traceback."""
+    msg = f"{type(exc).__name__}: {exc}"
+    try:
+        home = str(Path.home())
+        if home:
+            msg = msg.replace(home, "<home>")
+    except Exception:
+        pass
+    for var in ("USERNAME", "USER", "LOGNAME"):
+        val = os.environ.get(var)
+        if val:
+            msg = msg.replace(val, "<user>")
+    msg = msg.replace("\n", " ").replace("\r", " ")
+    return msg[:limit]
 
 
 def _atomic_json(path: Path, obj: Any) -> None:
@@ -306,31 +466,33 @@ def _release_run_lock(fd: int, run_dir: Path) -> None:
         pass
 
 
-def _validate_completed_result(res: Mapping[str, Any], manifest_sha: str,
-                               m: Mapping[str, Any]) -> None:
-    """Reject a reused completed replicate whose identity doesn't match the manifest —
-    exactly as checkpoints are rejected (F6). Never silently trust stale results."""
-    expected = {
-        "manifest_sha256": manifest_sha,
-        "backend": "cpu",
-        "seed": int(m["seed"]),
-        "lattice_size": int(m["lattice_size"]),
-        "cube_size": int(m["cube_size"]),
-    }
-    for key, want in expected.items():
-        got = res.get(key)
-        ok = (int(got) == want) if key in ("seed", "lattice_size", "cube_size") and got is not None \
-            else (got == want)
-        if not ok:
-            raise ValueError(
-                f"completed result {key} mismatch (got {got!r}, expected {want!r}); "
-                "refusing to reuse a stale/incompatible replicate"
-            )
+def _validate_completed_result(res: Mapping[str, Any], base_prov: Mapping[str, Any],
+                               m: Mapping[str, Any], rep_index: int) -> None:
+    """Reject a reused completed replicate unless its FULL identity (executed sources +
+    rule + NumPy + manifest + backend + seed/dims + replicate index) matches the current
+    invocation, and it is genuinely a finished result (G3). Never silently trust stale."""
+    _assert_identity(res, _expected_identity(base_prov, m, rep_index), "completed result")
+    target = int(m["steps"])
+    if res.get("status") != "completed":
+        raise ValueError(
+            f"completed result status is {res.get('status')!r}, not 'completed'; "
+            "refusing to reuse (fail closed)"
+        )
+    if int(res.get("target_steps", -1)) != target:
+        raise ValueError(
+            f"completed result target_steps mismatch (got {res.get('target_steps')!r}, "
+            f"expected {target}); fail closed"
+        )
+    if int(res.get("completed_steps", -1)) != target:
+        raise ValueError(
+            f"completed result completed_steps ({res.get('completed_steps')!r}) != "
+            f"target_steps ({target}); incomplete result, fail closed"
+        )
 
 
 def _build_run_record(status: str, base_prov: Dict[str, Any], m: Mapping[str, Any],
                       run_id: str, started: str, resumed: list, rep_hashes: list,
-                      all_identical, finished) -> Dict[str, Any]:
+                      all_identical, finished, extra: Dict[str, Any] = None) -> Dict[str, Any]:
     rec = {
         **base_prov,
         "schema_version": 1,
@@ -349,6 +511,8 @@ def _build_run_record(status: str, base_prov: Dict[str, Any], m: Mapping[str, An
         "replicate_trajectory_hashes": list(rep_hashes),
         "all_replicates_identical": all_identical,
     }
+    if extra:
+        rec.update(extra)
     return rec
 
 
@@ -356,18 +520,22 @@ def _build_run_record(status: str, base_prov: Dict[str, Any], m: Mapping[str, An
 # Replicate execution
 # --------------------------------------------------------------------------- #
 def _write_checkpoint(ea, ckdir: Path, step: int, state, inactivity, memory,
-                      rng, traj_hash: str, manifest_sha: str, m: Mapping[str, Any]) -> None:
+                      rng, traj_hash: str, base_prov: Mapping[str, Any],
+                      m: Mapping[str, Any], rep_index: int) -> None:
     meta = {
         "schema_version": 1,
         "step": int(step),
+        "target_steps": int(m["steps"]),
+        "replicate_index": int(rep_index),
         "seed": int(m["seed"]),
         "lattice_size": int(m["lattice_size"]),
         "cube_size": int(m["cube_size"]),
-        "backend": "cpu",
-        "manifest_sha256": manifest_sha,
         "traj_hash": traj_hash,
         "rng_state": ea.get_rng_state(rng),
     }
+    # Embed the full executed-source/rule/env identity so a resume can fail closed (G3).
+    for key in _IDENTITY_KEYS:
+        meta[key] = base_prov[key]
     import numpy as np
     _atomic_savez(
         ckdir / f"checkpoint_step_{step:09d}.npz",
@@ -385,9 +553,8 @@ def _latest_checkpoint(ckdir: Path):
     return cks[-1] if cks else None
 
 
-def run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m: Mapping[str, Any],
-                  rep_index: int, rep_dir: Path, base_prov: Dict[str, Any],
-                  resume: bool = False) -> Dict[str, Any]:
+def run_replicate(ce, ea, rule_spec, base_prov: Dict[str, Any], m: Mapping[str, Any],
+                  rep_index: int, rep_dir: Path, resume: bool = False) -> Dict[str, Any]:
     """Run (or resume) one replicate; write checkpoints + final_state + result.json."""
     import numpy as np
     rep_dir = Path(rep_dir)
@@ -406,15 +573,8 @@ def run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m: Mapping[str, Any
             memory = np.array(data["memory_grid"], dtype=np.float32)
             inactivity = np.array(data["inactivity_steps"], dtype=np.int16)
             meta = json.loads(data["meta_json"].item())
-        # Identity checks — never silently continue an incompatible checkpoint.
-        if meta.get("manifest_sha256") != manifest_sha:
-            raise ValueError("checkpoint manifest hash mismatch; refusing to resume")
-        if int(meta.get("seed", -1)) != seed:
-            raise ValueError("checkpoint seed mismatch; refusing to resume")
-        if int(meta.get("lattice_size", -1)) != int(m["lattice_size"]):
-            raise ValueError("checkpoint lattice_size mismatch; refusing to resume")
-        if meta.get("backend") != "cpu":
-            raise ValueError("checkpoint backend is not cpu; refusing to resume")
+        # Full identity check — never continue a checkpoint from different code/env/rule (G3).
+        _assert_identity(meta, _expected_identity(base_prov, m, rep_index), "checkpoint")
         step = int(meta["step"])
         traj = str(meta["traj_hash"])
         rng = ea.restore_rng(seed, meta["rng_state"])
@@ -427,7 +587,7 @@ def run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m: Mapping[str, Any
         step = 0
         # Fold the initial state (incl. inactivity) into the trajectory hash.
         traj = ea.chain_hash("INIT", 0, state, memory, inactivity)
-        _write_checkpoint(ea, ckdir, step, state, inactivity, memory, rng, traj, manifest_sha, m)
+        _write_checkpoint(ea, ckdir, step, state, inactivity, memory, rng, traj, base_prov, m, rep_index)
 
     while step < target_steps:
         state, inactivity, memory, _metrics = ea.step_once(
@@ -435,7 +595,7 @@ def run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m: Mapping[str, Any
         step += 1
         traj = ea.chain_hash(traj, step, state, memory, inactivity)
         if step % ck_every == 0 or step == target_steps:
-            _write_checkpoint(ea, ckdir, step, state, inactivity, memory, rng, traj, manifest_sha, m)
+            _write_checkpoint(ea, ckdir, step, state, inactivity, memory, rng, traj, base_prov, m, rep_index)
 
     final_hash = ea.scientific_hash(state, memory, inactivity)
     _atomic_savez(rep_dir / "final_state.npz", lattice=state, memory_grid=memory,
@@ -486,26 +646,14 @@ def main(argv=None) -> int:
         sys.path.insert(0, str(PROJECT_ROOT))
     from scripts.ca import engine_adapter as ea  # noqa: E402  (after thread caps)
 
-    rule_spec = ea.default_rule_spec()
-    rule_sha = ea.rule_spec_hash(rule_spec)
-    manifest_sha = _sha256_text(json.dumps(m, sort_keys=True))
-    base_prov = base_provenance(manifest_sha, rule_sha, m["thread_cap"], priority)
-    base_prov["rule_name"] = rule_spec["rule"]["name"]
-    base_prov["rule_source"] = str(DEFAULT_RULE.relative_to(PROJECT_ROOT)).replace("\\", "/")
-    base_prov["rule_delivery"] = "in-code (DEFAULT_RULE_SPEC); source TOML not parsed at runtime"
-    base_prov["scientific_hash_arrays"] = list(ea.SCIENTIFIC_ARRAY_ORDER)
+    base_prov, rule_spec, manifest_sha = build_provenance(m, priority)
 
     if resuming:
         run_id = run_dir.name
-        # Preserve the ORIGINAL run start; record each resume separately (F6).
-        prior = {}
-        prior_path = run_dir / "run.json"
-        if prior_path.exists():
-            try:
-                prior = json.loads(prior_path.read_text(encoding="utf-8"))
-            except Exception:
-                prior = {}
-        started = prior.get("started_utc") or _utc_now()
+        # Fail closed on missing/malformed/incomplete/foreign prior provenance (G4); only
+        # then preserve the ORIGINAL start and append this resume's timestamp (F6).
+        prior = _load_validated_prior(run_dir, base_prov)
+        started = prior["started_utc"]
         resumed = list(prior.get("resumed_utc", []))
         resumed.append(_utc_now())
     else:
@@ -532,13 +680,13 @@ def main(argv=None) -> int:
                 rep_dir = run_dir / f"replicate_{rep:03d}"
                 result_path = rep_dir / "result.json"
                 if result_path.exists():
-                    # Reuse a prior-launch completion — but verify its identity first (F6).
+                    # Reuse a prior-launch completion — but verify its FULL identity first (G3).
                     res = json.loads(result_path.read_text(encoding="utf-8"))
-                    _validate_completed_result(res, manifest_sha, m)
+                    _validate_completed_result(res, base_prov, m, rep)
                 else:
                     has_ck = _latest_checkpoint(rep_dir / "checkpoints") is not None
-                    res = run_replicate(ce, ea, rule_spec, rule_sha, manifest_sha, m, rep, rep_dir,
-                                        base_prov, resume=has_ck)
+                    res = run_replicate(ce, ea, rule_spec, base_prov, m, rep, rep_dir,
+                                        resume=has_ck)
                 rep_hashes.append(res["trajectory_hash"])
                 index_rows.append({
                     "run_id": run_id, "replicate_index": rep, "status": res["status"],
@@ -565,6 +713,13 @@ def main(argv=None) -> int:
             "interrupted", base_prov, m, run_id, started, resumed, rep_hashes, None, _utc_now()))
         print(json.dumps({"run_id": run_id, "run_dir": str(run_dir), "status": "interrupted"}))
         return 130
+    except Exception as exc:
+        # Record an ordinary failure (not just Ctrl-C) so run.json never sticks at
+        # "running"; bounded, privacy-safe summary; then re-raise so the CLI fails visibly (G5).
+        _atomic_json(run_dir / "run.json", _build_run_record(
+            "failed", base_prov, m, run_id, started, resumed, rep_hashes, None, _utc_now(),
+            extra={"error_type": type(exc).__name__, "error_summary": _safe_failure_summary(exc)}))
+        raise
     finally:
         _release_run_lock(lock_fd, run_dir)
 

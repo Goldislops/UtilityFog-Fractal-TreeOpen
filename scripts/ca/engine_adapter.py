@@ -44,6 +44,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RULE = PROJECT_ROOT / "ca" / "rules" / "example.toml"
 STRUCTURAL = 1  # STATE_NAME_TO_ID["STRUCTURAL"] in the engine
 
+# The actual executed sources, hashed for resume identity. A git SHA alone is NOT
+# sufficient (a dirty working tree can run code different from the commit), so we pin the
+# scientific implementation by hashing these three files + the in-code rule + NumPy.
+ENGINE_SOURCE = PROJECT_ROOT / "scripts" / "continuous_evolution_ca.py"
+ADAPTER_SOURCE = Path(__file__).resolve()
+WRAPPER_SOURCE = PROJECT_ROOT / "scripts" / "ca" / "replicate.py"
+
 # In-code transcription of ca/rules/example.toml (v0.7.5) — the four sections the
 # bounded stepper actually consumes. Stochastic/contagion/decay are kept ENABLED so
 # the engine genuinely draws from the explicit RNG (otherwise the RNG-state
@@ -251,6 +258,28 @@ def rule_spec_hash(spec: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    """sha256 of a file's raw bytes (for executed-source provenance)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def source_identity() -> Dict[str, str]:
+    """sha256 of the three executed source files (engine + adapter + wrapper).
+
+    These pin the actual code path so a later engine/adapter/wrapper change cannot be
+    silently resumed against an old checkpoint/result and called one continuous run.
+    """
+    return {
+        "engine_source_sha256": file_sha256(ENGINE_SOURCE),
+        "adapter_source_sha256": file_sha256(ADAPTER_SOURCE),
+        "wrapper_source_sha256": file_sha256(WRAPPER_SOURCE),
+    }
 
 
 # --------------------------------------------------------------------------- #

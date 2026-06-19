@@ -74,6 +74,14 @@ def _run_cli(*args):
     return json.loads(proc.stdout)
 
 
+def _run_cli_raw(*args):
+    """Run the CLI as a fresh OS process; return the CompletedProcess (no success assert)."""
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.ca.replicate", *map(str, args)],
+        cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=CLI_TIMEOUT,
+    )
+
+
 def _rep_hashes(run_dir):
     return {
         p.parent.name: json.loads(p.read_text(encoding="utf-8"))["trajectory_hash"]
@@ -198,13 +206,61 @@ def test_valid_manifest_accepted():
 
 
 def test_cap_boundaries_accepted():
-    """The exact caps + relational equalities are allowed; only beyond them is rejected."""
-    m = R.validate_manifest(_manifest(
-        lattice_size=R.MAX_LATTICE_SIZE, cube_size=R.MAX_LATTICE_SIZE,
-        steps=5, checkpoint_every_steps=5, replicates=R.MAX_REPLICATES, thread_cap=1))
-    assert m["lattice_size"] == R.MAX_LATTICE_SIZE
+    """Each per-field cap is acceptable on its own (with the other fields kept small so the
+    aggregate budgets are satisfied) — you cannot be at *all* caps at once, by design."""
+    # lattice at cap
+    R.validate_manifest(_manifest(lattice_size=R.MAX_LATTICE_SIZE, cube_size=R.MAX_LATTICE_SIZE,
+                                  steps=2, checkpoint_every_steps=2, replicates=2))
+    # steps at cap
+    R.validate_manifest(_manifest(lattice_size=8, cube_size=4, steps=R.MAX_STEPS,
+                                  checkpoint_every_steps=R.MAX_STEPS, replicates=2))
+    # replicates at cap
+    R.validate_manifest(_manifest(lattice_size=8, cube_size=4, steps=2,
+                                  checkpoint_every_steps=2, replicates=R.MAX_REPLICATES))
+    # thread_cap at the ceiling
+    R.validate_manifest(_manifest(thread_cap=R._thread_ceiling()))
+    # relational equalities allowed
+    m = R.validate_manifest(_manifest(lattice_size=8, cube_size=8, steps=4,
+                                      checkpoint_every_steps=4, replicates=2))
     assert m["cube_size"] == m["lattice_size"]          # cube_size == lattice_size is OK
     assert m["checkpoint_every_steps"] == m["steps"]    # interval == steps is OK
+
+
+@pytest.mark.parametrize(
+    "over,why",
+    [
+        # cell-step compute budget (others kept within checkpoint budgets)
+        ({"lattice_size": 8, "cube_size": 4, "steps": 2000,
+          "checkpoint_every_steps": 2000, "replicates": 100}, "cell_steps"),
+        # total checkpoint count budget
+        ({"lattice_size": 8, "cube_size": 4, "steps": 100,
+          "checkpoint_every_steps": 1, "replicates": 10}, "checkpoint_count"),
+        # total checkpoint storage budget
+        ({"lattice_size": 64, "cube_size": 4, "steps": 12,
+          "checkpoint_every_steps": 1, "replicates": 20}, "checkpoint_bytes"),
+    ],
+)
+def test_aggregate_budget_rejected(over, why):
+    """Per-field caps don't bound the combined workload; the aggregate guards do (G1)."""
+    with pytest.raises(ValueError):
+        R.validate_manifest(_manifest(**over))
+
+
+def test_aggregate_budget_just_under_accepted():
+    """A run just under every aggregate budget is accepted (boundary sanity)."""
+    # ~just under cell-steps: 8^3 * 1900 * 100 = 9.728e7 < 1e8; ckpts per=2,total=200; tiny bytes
+    R.validate_manifest(_manifest(lattice_size=8, cube_size=4, steps=1900,
+                                  checkpoint_every_steps=1900, replicates=100))
+
+
+def test_seed_domain():
+    """seed is bounded to [0, 2**64-1] (G2)."""
+    R.validate_manifest(_manifest(seed=0))
+    R.validate_manifest(_manifest(seed=R.MAX_SEED))           # 2**64 - 1 accepted
+    with pytest.raises(ValueError):
+        R.validate_manifest(_manifest(seed=-1))
+    with pytest.raises(ValueError):
+        R.validate_manifest(_manifest(seed=R.MAX_SEED + 1))   # 2**64 rejected
 
 
 def test_resume_rejects_checkpoint_mismatch(tmp_path):
@@ -456,4 +512,118 @@ def test_interrupted_status_recorded(tmp_path, monkeypatch):
     assert rj["started_utc"]
     assert rj["finished_utc"]            # interruption timestamp recorded
     # the per-run lock must be released even on interrupt
+    assert not (runs[0] / "run.lock").exists()
+
+
+# --------------------------------------------------------------------------- #
+# G3 — resume identity must match the executed sources/rule/env, not just manifest
+# --------------------------------------------------------------------------- #
+def _good_result(base_prov, m, rep_index):
+    r = {k: base_prov[k] for k in R._IDENTITY_KEYS}
+    r.update({
+        "replicate_index": rep_index, "status": "completed",
+        "seed": m["seed"], "lattice_size": m["lattice_size"], "cube_size": m["cube_size"],
+        "target_steps": m["steps"], "completed_steps": m["steps"],
+    })
+    return r
+
+
+def test_completed_result_full_identity_enforced():
+    m = R.validate_manifest(_manifest(seed=1, steps=2, replicates=2, lattice_size=8, cube_size=4))
+    base_prov, _rule, _msha = R.build_provenance(m)
+    # baseline matches -> accepted (no raise)
+    R._validate_completed_result(_good_result(base_prov, m, 0), base_prov, m, 0)
+    # each of these single-field changes must cause a fail-closed refusal
+    for field, badval in [
+        ("rule_sha256", "deadbeef"),
+        ("engine_source_sha256", "x"),
+        ("adapter_source_sha256", "x"),
+        ("wrapper_source_sha256", "x"),
+        ("numpy_version", "0.0.0"),
+        ("manifest_sha256", "x"),
+        ("backend", "gpu"),
+        ("status", "running"),
+        ("target_steps", 999),
+        ("completed_steps", 1),
+    ]:
+        bad = _good_result(base_prov, m, 0)
+        bad[field] = badval
+        with pytest.raises(ValueError):
+            R._validate_completed_result(bad, base_prov, m, 0)
+    # replicate_index mismatch (result says 0, current rep is 1)
+    with pytest.raises(ValueError):
+        R._validate_completed_result(_good_result(base_prov, m, 0), base_prov, m, 1)
+
+
+def test_checkpoint_identity_embedded():
+    """Checkpoints embed the full executed-source identity so resume can fail closed."""
+    m = R.validate_manifest(_manifest(seed=4, steps=1, replicates=2, lattice_size=8, cube_size=4))
+    base_prov, rule_spec, _msha = R.build_provenance(m)
+    import tempfile
+    with ea.cpu_engine() as ce:
+        with tempfile.TemporaryDirectory() as td:
+            R.run_replicate(ce, ea, rule_spec, base_prov, m, 0, Path(td), resume=False)
+            ckpath = R._latest_checkpoint(Path(td) / "checkpoints")
+            with np.load(ckpath, allow_pickle=False) as data:
+                meta = json.loads(data["meta_json"].item())
+    for k in R._IDENTITY_KEYS:
+        assert meta[k] == base_prov[k]
+    assert meta["replicate_index"] == 0
+    assert meta["target_steps"] == m["steps"]
+
+
+# --------------------------------------------------------------------------- #
+# G4 — corrupt/missing/incomplete run.json fails closed on resume
+# --------------------------------------------------------------------------- #
+def _fresh_run_for_resume(tmp_path, **over):
+    manifest = _write_manifest(tmp_path / "manifest.json", **over)
+    out = _run_cli("--manifest", manifest, "--out", tmp_path / "run")
+    return Path(out["run_dir"])
+
+
+def test_resume_missing_runjson_fails_closed(tmp_path):
+    run_dir = _fresh_run_for_resume(tmp_path, seed=1, steps=2, replicates=2)
+    (run_dir / "run.json").unlink()
+    proc = _run_cli_raw("--resume", run_dir, "--out", tmp_path / "run")
+    assert proc.returncode != 0
+    assert "run.json" in (proc.stdout + proc.stderr).lower()
+
+
+def test_resume_malformed_runjson_fails_closed(tmp_path):
+    run_dir = _fresh_run_for_resume(tmp_path, seed=1, steps=2, replicates=2)
+    (run_dir / "run.json").write_text("{not valid json", encoding="utf-8")
+    proc = _run_cli_raw("--resume", run_dir, "--out", tmp_path / "run")
+    assert proc.returncode != 0
+    out = (proc.stdout + proc.stderr).lower()
+    assert "malformed" in out or "run.json" in out
+
+
+def test_resume_incomplete_runjson_fails_closed(tmp_path):
+    run_dir = _fresh_run_for_resume(tmp_path, seed=1, steps=2, replicates=2)
+    (run_dir / "run.json").write_text("{}", encoding="utf-8")   # valid JSON, missing fields
+    proc = _run_cli_raw("--resume", run_dir, "--out", tmp_path / "run")
+    assert proc.returncode != 0
+    assert "missing required" in (proc.stdout + proc.stderr).lower()
+
+
+# --------------------------------------------------------------------------- #
+# G5 — ordinary exceptions are recorded as a durable 'failed' status
+# --------------------------------------------------------------------------- #
+def test_failed_status_recorded(tmp_path, monkeypatch):
+    manifest = _write_manifest(tmp_path / "manifest.json", seed=1, steps=2, replicates=2)
+
+    def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(R, "run_replicate", _boom)
+    with pytest.raises(RuntimeError):
+        R.main(["--manifest", str(manifest), "--out", str(tmp_path / "out")])
+
+    runs = list((tmp_path / "out" / "test").glob("*"))
+    assert len(runs) == 1
+    rj = json.loads((runs[0] / "run.json").read_text(encoding="utf-8"))
+    assert rj["status"] == "failed"
+    assert rj["error_type"] == "RuntimeError"
+    assert "error_summary" in rj and rj["finished_utc"]
+    # lock released even on ordinary failure
     assert not (runs[0] / "run.lock").exists()
