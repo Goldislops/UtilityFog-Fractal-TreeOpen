@@ -31,7 +31,7 @@ to re-run an experiment and *prove* you got byte-identical results, that is the 
 
 ### Scientific purpose
 
-Run an identical-seed experiment one or more times under a pinned CPU/NumPy environment
+Run an identical-seed experiment two or more times under a pinned CPU/NumPy environment
 and **verify it reproduces byte-for-byte**, with full provenance recorded. This is a
 calibration/trust tool (determinism levels R1–R2 on the CPU backend), not a new science
 run.
