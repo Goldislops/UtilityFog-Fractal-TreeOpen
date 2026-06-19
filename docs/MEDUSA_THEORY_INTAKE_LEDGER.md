@@ -161,6 +161,40 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 - **Guardrails/caveats**: Say **"passive state retention" / "no continuous holding input,"** NOT "zero-energy structure" — **switching states still requires work and has real material losses; this is not free energy.** Do **not** preserve the exact `T` / `θ` parameterisation until the original source is supplied and checked. Do **not** update continuous-fibre or any runtime architecture. Current cells have no geometry/rotation/latch state; adding one is a major, gated engine question.
 - **Linked**: entry 7 (physical export), entry 10 (MOST latent energy), entry 2 (Swarm Hunter applies the *brief* gradient, never holds it).
 
+### 14. AURA "Physics of the Utility Fog" — discrete hypothesis intake (Phase 2B-5H-0/1)
+- **Source/thread**: AURA "Physics of the Utility Fog" master handover (relayed via Kev, 2026-06-19), classified by the read-only **Phase 2B-5H-0** formalization audit (84) and reconciled by Jack.
+- **Status**: mixed — see per-concept classification. Treat as a **hypothesis ledger, not a feature backlog**. Inclusion ≠ endorsement ≠ implementation.
+
+**Architectural doctrine (durable principles):**
+- **local-first, bounded, sovereign compute** — *candidate design principle*.
+- **deterministic trigger before semantic interpretation** ("grep before vector") — never wake an LLM inside the CA step loop. *Candidate design principle; already embodied* in the bitwise scientific-hash-first comparison.
+- **bounded execution + consolidation/"sleep" cycles** — *implemented principle (CA-engine level)*: the parked replicate instrument checkpoints → exits → `--resume`; Calibration 003 proved lossless interrupt/resume.
+- **provenance before recursive search** — RSI is meaningless without proven deterministic replication. *Already enacted* by the calibrated instrument.
+- **GPU-for-explore / CPU-for-verified-replication** (Jack-ruled doctrine, 2026-06-19): GPU execution may be used for high-throughput exploratory searches where speed is primary and bitwise reproducibility is **not** claimed; any candidate golden seed/rule promoted as scientific evidence **must** be replayed through the calibrated CPU/NumPy instrument for recorded R1–R2 bitwise verification under matching implementation identity. This doctrine does **not** repair/authorize the live Medusa GPU RNG path, does **not** add GPU to any toy, and does **not** authorize a GPU experiment / R3 calibration / search mode / engine change — it is a governance boundary recorded for future work.
+- *Excluded from the durable record* (per Jack): unsourced vendor/model/IPO/cost-collapse anecdotes — supporting context only, never repo facts.
+
+**Candidate CA hypotheses** — each needs *discrete state · local rule · observable · falsifiable prediction* before any engine code:
+
+| Concept | Phase 2B-5H-0 classification |
+|---|---|
+| **Decaying scent trails** | *new hypothesis* (adjacent primitive exists: memory `signal_field` ch5 + `_mycelial_diffuse`, decay configs) — **APPROVED FOR DESIGN-INCEPTION ONLY — no engine implementation authorized** |
+| Scatter/funnel (chaos vs order) dynamics | *adjacent primitive* (`run_mini_lattice_mutation_trials`, transition tables); needs a deferred sweep mode |
+| Noise-robust attractors (AURA's "quantum locking / plastrons") | *adjacent primitive* (STRUCTURAL survival bands) — **avoid implying quantum mechanics; no superposition / flux-pinning** |
+| Passive geometric traps ("MOF") | *new hypothesis*; needs spatial rule heterogeneity (larger arc; deferred) |
+| Resonance / "grid spectroscopy" offline detection | *adjacent primitive* (`DensityPhaseDetector`, dormant Nextness Observer); observer-only |
+
+**Agent-layer concepts** (above the engine; not CA hypotheses):
+- typed **SkillOpt** actions — *deferred agent-layer idea*.
+- bounded **sleep / consolidation** cycles — *implemented principle* (engine level, above); agent-level deferred.
+- **consensus** ("Kalman") — *underspecified metaphor*: no "Kalman" label without explicit discrete update equations + uncertainty representation + stated assumptions.
+
+- **State note**: AURA's Part-4 "Immediate Actionable Directive — Phase 2B-5G-1" is **SUPERSEDED/COMPLETED** — the `continuous_evolution_ca.py` audit, the bounded CPU replication/provenance/resume instrument (`scripts/ca/`, merged `84c0f36`), the truthful CA docs (`05951e2`), and Calibrations 001–003 (same-seed stability / changed-seed discrimination / interrupt-resume equivalence) are all done; the calibrated CPU instrument is **PARKED** pending a deliberately named hypothesis.
+- **Current action**: Record + classify only. The single approved next step is the **Toy #3 scent-trail DESIGN-INCEPTION** (`experiments/theory_sandbox/TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md`) — *design document only, no script*. No engine / observer / Lane A / Swarm Hunter change.
+- **Guardrails/caveats**: hypothesis ledger, not marching orders; a metaphor compiles only after disclosing a discrete mechanism + falsifiable prediction; Lane A parked; the calibrated instrument stays parked; "scent trail" is a **falsifiable tracking metaphor, not radioactive physics**.
+- **Linked**: `experiments/theory_sandbox/README.md` · `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md` · external calibration dossier `UtilityFog_Calibrations/2B-5G-4A|B|C/` · entries 1–2 (emergence / Swarm Hunter), 9 (Janus gradients), 12 (event-driven change).
+
+---
+
 ## How an entry graduates out of this ledger
 
 1. Someone proposes promotion (e.g. "make entry 2 a canonical guardrail").

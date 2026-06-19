@@ -1,12 +1,12 @@
-# Theory Sandbox — Policy (no scripts yet)
+# Theory Sandbox — Policy + Inventory
 
-> **Status**: policy README only. **This directory contains no experiments yet.** The first toy script lands only after this policy is merged and a specific toy is approved as its own small PR.
+> **Status**: policy **and live inventory**. **Two toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing) — each **non-canonical**, each landed as its own reviewed PR. **Toy #3 (decaying scent-trail tracking) is DESIGN-INCEPTION only — no script yet.** Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
-> **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, MOST stored-strain, …).
+> **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
 > **What this is NOT**: engine code · observer semantics · Lane A · Swarm Hunter · CI-gated tests · evidence that any theory is true. A pretty plot in here proves nothing about Medusa.
 
-**Created**: 2026-06-10 (84/Fab5), per AURA's "proving ground" delta and Jack's policy-first sequencing. **Guardrails**: Lane A parked; quarantine rules below.
+**Created**: 2026-06-10 (84/Fab5), per AURA's "proving ground" delta and Jack's policy-first sequencing. **Inventory last corrected**: 2026-06-19 (84, Phase 2B-5H-1). **Guardrails**: Lane A parked; quarantine rules below.
 
 ---
 
@@ -53,16 +53,29 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 - Sandbox scripts must not be added to CI by default. If a specific check is ever wanted (e.g. "toy still runs"), it must be **opt-in, separate from the gate, and its own reviewed PR**.
 - A sandbox failure must never be able to redden the maintained floor.
 
-## 6. First candidate toys (listed only — NOT implemented here)
+## 6. Toy inventory & candidates
+
+### 6a. Implemented toys (non-canonical; each landed as its own PR)
+
+| Toy | File | Explores (ledger/preflight ref) | Status |
+|---|---|---|---|
+| **#1 Galton/Fourier diffusion** | `galton_fourier_diffusion_toy.py` | Preflight §12 | non-canonical toy (PR #200) — inspiration only, not Medusa validation |
+| **#2 Stochastic escape / annealing** | `stochastic_escape_annealing_toy.py` (+ `TOY_02_STOCHASTIC_ESCAPE_ANNEALING_INCEPTION.md`) | Preflight §13 | non-canonical toy (PR #204) — algorithmic language only, not quantum physics |
+
+### 6b. In design-inception (no script yet)
+
+| Toy | Inception doc | Explores | Status |
+|---|---|---|---|
+| **#3 Decaying scent-trail tracking** | `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md` | Ledger entry 14 (scent trails) | **INCEPTION/DESIGN ONLY; script not implemented.** Explores a *falsifiable tracking mechanism* (does a decaying integer trail improve target reacquisition vs a no-trail control?) — **not radioactive physics, not Medusa validation.** |
+
+### 6c. Other listed candidates (not yet inception)
 
 | Candidate | Explores (ledger/preflight ref) | Sketch |
 |---|---|---|
 | Janus gradient toy | Ledger entry 9 / preflight §5 | asymmetric agents on a 2D field; does local-gradient sensing yield ballistic-ish curves? |
-| Galton/Fourier diffusion toy | Preflight §12 | compare discrete random walks vs heat-equation smoothing on a small lattice |
-| Stochastic escape / annealing toy | Preflight §13 | escape probability vs barrier height for trapped configurations (algorithmic language only) |
 | MOST stored-strain metaphor toy | Ledger entry 10 / preflight §7 | latent "tension" accumulate-and-release dynamics on a toy state machine — metaphor mechanics only, no chemistry claims |
 
-Each becomes real only via its own PR, after this policy merges, with the §3 header discipline and §4 gate understood.
+Each candidate becomes real only via its own PR, with the §3 header discipline and §4 gate understood. A positive toy result still cannot touch the engine, observer vocabulary, Vanguard, Lane A or Swarm Hunter without a separate, explicitly-gated design + implementation phase.
 
 ---
 
