@@ -80,12 +80,12 @@ A deterministic expanding-ring sweep, identical for both arms (treatment uses it
 - construct an ordered list of all in-bounds cells by **increasing Chebyshev distance** from the last-seen cell. **Note: the first entry is the last-seen cell itself (distance 0), which is also the tracker's starting cell.**
 - **tie-break cells lexicographically by `(row, column)`**;
 - each arm maintains **its own** next-unvisited waypoint index into this shared ordering;
-- **Pre-advance before moving (erratum fix — Codex P2 r3441709727):** *before* each fallback movement, skip any already-reached waypoint — `while tracker_pos == waypoints[idx]: idx += 1`. This discards the distance-0 last-seen/start cell on the very first fallback tick, and any waypoint the tracker is already standing on when treatment resumes fallback after strict-ascent mode, so the fallback never stalls or emits a zero-length "move";
+- **Pre-advance before moving (erratum fix — Codex P2 r3441709727):** *before* each fallback movement, skip any already-reached waypoint — `while idx < len(waypoints) and tracker_pos == waypoints[idx]: idx += 1` (the `idx < len(waypoints)` bound prevents an out-of-range read once every waypoint has been reached; on a 1024-cell grid with a 192-move budget the list cannot actually exhaust, so the bound is defensive). This discards the distance-0 last-seen/start cell on the very first fallback tick, and any waypoint the tracker is already standing on when treatment resumes fallback after strict-ascent mode, so the fallback never stalls or emits a zero-length "move";
 - then move **one cardinal cell toward `waypoints[idx]`**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal). This yields **exactly one non-zero legal cardinal move per reacquisition tick**, unless reacquisition has already ended the run;
 - advance the waypoint index when the waypoint cell is reached (the pre-advance rule above also covers this on the following tick);
 - the treatment tracker **pauses** the fallback while following a strictly-ascending trail and **resumes deterministically** (same per-arm waypoint index + same pre-advance rule) when no ascent exists.
 
-Both arms apply the **identical** pre-advance rule and maintain their own waypoint index; **trail visibility remains the sole experimental variable.**
+Both arms apply the **identical** pre-advance rule and maintain their own waypoint index.
 
 The waypoint ordering and the target path are **generated once and shared identically** between arms. **Trail visibility remains the sole experimental variable.**
 
