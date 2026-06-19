@@ -81,7 +81,8 @@ A deterministic expanding-ring sweep, identical for both arms (treatment uses it
 - **tie-break cells lexicographically by `(row, column)`**;
 - each arm maintains **its own** next-unvisited waypoint index into this shared ordering;
 - **Pre-advance before moving (erratum fix — Codex P2 r3441709727):** *before* each fallback movement, skip any already-reached waypoint — `while idx < len(waypoints) and tracker_pos == waypoints[idx]: idx += 1` (the `idx < len(waypoints)` bound prevents an out-of-range read once every waypoint has been reached; on a 1024-cell grid with a 192-move budget the list cannot actually exhaust, so the bound is defensive). This discards the distance-0 last-seen/start cell on the very first fallback tick, and any waypoint the tracker is already standing on when treatment resumes fallback after strict-ascent mode, so the fallback never stalls or emits a zero-length "move";
-- then move **one cardinal cell toward `waypoints[idx]`**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal). This yields **exactly one non-zero legal cardinal move per reacquisition tick**, unless reacquisition has already ended the run;
+- then, **only when `idx < len(waypoints)`**, move **one cardinal cell toward `waypoints[idx]`**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal). This yields **exactly one non-zero legal cardinal move per reacquisition tick**, unless reacquisition has already ended the run;
+- **`idx == len(waypoints)` (waypoint list exhausted) is unreachable under pinned v0** — a 32×32 grid yields 1024 waypoints while the budget is only 192 moves — so if it is ever reached it is an **instrument-contract failure: fail closed (raise/abort)**, *not* a zero-length move and *not* a scientific outcome (Codex thread r3442612649);
 - advance the waypoint index when the waypoint cell is reached (the pre-advance rule above also covers this on the following tick);
 - the treatment tracker **pauses** the fallback while following a strictly-ascending trail and **resumes deterministically** (same per-arm waypoint index + same pre-advance rule) when no ascent exists.
 
@@ -119,6 +120,7 @@ The waypoint ordering and the target path are **generated once and shared identi
 - trial-count conservation (every seed runs both arms);
 - no illegal moves (tracker stays in-bounds; one **cardinal** step per move);
 - every reacquisition tick performs **exactly one non-zero** cardinal move (no zero-length "stall" move), unless reacquisition has already ended the run — i.e. the §3.6 pre-advance correctly skipped the distance-0 start cell and any already-reached waypoint;
+- a fallback move is only attempted with `idx < len(waypoints)`; reaching `idx == len(waypoints)` is a **fail-closed instrument-contract violation** (raise/abort), never a result — and is unreachable under pinned v0 (1024 waypoints ≫ 192-move budget);
 - reacquisition is checked **immediately after every tracker move**.
 
 **Do NOT hard-assert that treatment beats control.** That is the hypothesis and must be allowed to fail; treatment-vs-control outcomes are *reported*, never asserted.
