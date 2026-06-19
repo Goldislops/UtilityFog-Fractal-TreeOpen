@@ -2,78 +2,130 @@
 
 > **Status**: inception/design note only. **No script exists yet, and this note authorizes none.** The toy itself lands only in a later, separate PR after Jack/AURA/Kev review this note. Per `experiments/theory_sandbox/README.md`: one toy per PR; this is the *zeroth* brick of Toy #3 — the thinking before the toy.
 >
-> **NON-CANONICAL TOY (design):** a tracker finding a target faster on a toy grid proves nothing about Medusa. This explores a **falsifiable tracking mechanism**, **not radioactive physics** and **not** engine validation.
+> **NON-CANONICAL TOY (design):** a wayfinder reaching a faded endpoint faster on a toy grid proves nothing about Medusa. This is an **algorithmic trail-following toy** — *not radioactive physics, not a hunt, and not engine validation*. (Image: following one's own fading footprints back to a spot, not chasing prey.)
 
 ## 0. Current model seat
 
-Authored by **84** (`claude-opus-4-8`), desktop seat, 2026-06-19 (Sydney time), under Phase 2B-5H-1 (Jack-relayed, AURA-confirmed). *(Future seats editing this doc: state your seat here per model-seat hygiene.)*
+Authored by **84** (`claude-opus-4-8`), desktop seat, 2026-06-19 (Sydney time), under Phase 2B-5H-1 (Jack-relayed, AURA-confirmed; corrected after Jack's live review of PR #244 + three valid Gemini threads). *(Future seats editing this doc: state your seat here per model-seat hygiene.)*
 
 ## 1. Source and status
 
-- **Source**: AURA's "Physics of the Utility Fog" master handover (2026-06-19) → the read-only **Phase 2B-5H-0** formalization audit → `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` **entry 14** (decaying scent trails: *new hypothesis; adjacent primitive exists*), marked **APPROVED FOR DESIGN-INCEPTION ONLY — no engine implementation authorized**.
-- **Status**: speculative **discrete tracking metaphor** / sandbox candidate. The originating phrase was "radioactive decay scent trails"; the **preferred vocabulary here is algorithmic** — *decaying integer trail, deposit, decrement, gradient following, reacquisition*. There is no radioactivity, no half-life physics, and none is claimed.
+- **Source**: AURA's "Physics of the Utility Fog" master handover (2026-06-19) → the read-only **Phase 2B-5H-0** formalization audit → `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` **entry 14** (decaying trails: *new hypothesis; adjacent primitive exists*), marked **APPROVED FOR DESIGN-INCEPTION ONLY — no engine implementation authorized**.
+- **Status**: speculative **discrete wayfinding metaphor** / sandbox candidate. The originating phrase was "radioactive decay scent trails"; the **preferred vocabulary here is algorithmic** — *decaying integer trail, deposit, decrement, gradient ascent, reacquisition*. There is no radioactivity and no half-life physics, and none is claimed. The "tracker/target/reacquisition" terms below are the team's agreed technical vocabulary, not a hunting frame.
 - **Non-canonical. Not architecture evidence.** Adjacent engine primitives exist (memory `signal_field` channel 5 + `_mycelial_diffuse`, plus the decay configs in `continuous_evolution_ca.py`), but this toy deliberately does **not** import or touch them; if the toy ever validates, wiring the idea into those primitives is a **separate, later, gated** arc.
 
-## 2. Precise hypothesis
+## 2. Precise hypothesis (curator-corrected)
 
-> On an identical seeded target path, a tracker given access to a decaying integer trail will reacquire the hidden target in fewer steps, or with a higher success rate inside a fixed step budget, than an otherwise-identical tracker using the declared no-trail search policy.
+> Given an identical seeded hidden target path and endpoint, a tracker with access to the resulting decaying integer trail will reacquire the **stationary** hidden target in fewer steps, or more often inside the fixed budget, than the otherwise-identical tracker using only the declared no-trail search policy.
 
-The toy **must be permitted to falsify this** — the trail-reading tracker is allowed to tie, lose, or do worse, and that outcome must be reportable without any hard assertion to the contrary.
+The toy **must be permitted to falsify this** — the trail-reading tracker may tie, lose, or do worse, and that outcome must be reportable without any hard assertion to the contrary. This tests whether a *finite, decaying historical path* assists reacquisition of a **now-stationary** endpoint; it does **not** claim to test pursuit of a continuously moving target (an equal-speed chase can be structurally impossible for reasons unrelated to trail usefulness — Jack Correction 4).
 
-## 3. Mechanism requiring review before code (minimal v0 candidate)
+## 3. Mechanism (pinned v0 — review before any code)
 
-A single seeded scenario, run twice — **treatment** (reads trail) and **control** (cannot read trail) — differing by **exactly one variable: trail availability**.
+**Trail laying and reacquisition are deliberately separated** so the only thing under test is whether a *decayed historical trail* helps relocate a stationary endpoint.
 
-- **Grid**: small 2D integer grid, e.g. `N × N` with `N ≈ 24–32`. **Bounded (non-toroidal)** — *recommended* (see §9): a hard boundary keeps "hidden target", distance and reacquisition geometry interpretable and avoids wrap-around gradient artifacts.
-- **Phases**: a short **visible phase** (target in a declared start cell, no trail yet), then at a fixed declared step `T_jump` the target **jumps** to a seeded destination and follows a seeded **hidden path** for the remainder.
-- **Trail deposit**: deposition **begins only after the jump** (*recommended stale-trail handling*, §9): each hidden-phase step sets `trail[target_pos] = A` (deposit amplitude). Because there is no pre-jump trail, there is no stale trail pointing at the abandoned pre-jump location — both arms are identical pre-jump and the trail exists only where it is experimentally relevant.
-- **Decay (integer-only, exact rounding)**: every step, for all cells, `trail = max(0, trail - D)` (constant integer **decrement**, clamp at 0). *Recommended over multiplicative decay*: integer linear decrement has unambiguous rounding (no float floor/round), gives a clean finite lifetime `≈ A / D` steps, and makes byte-identical determinism trivial. Freshly-deposited cells hold higher values than older ones → an **along-trail freshness gradient pointing toward the current target**.
-- **Diffusion**: **none in v0**. The usable local gradient is the *along-trail* freshness gradient (newer deposits = higher value = toward target); a tracker standing on a trail cell can read its neighbourhood and step toward the higher (fresher) value. The known limitation — a tracker *off* the trail senses nothing locally — is examined directly in §9 (acquisition geometry) rather than papered over with diffusion. Diffusion is deferred to a possible v1 only if v0 shows the gradient is unusable.
-- **Tracker (deterministic)**: starts at the target's last-seen (pre-jump) cell.
-  - **Treatment**: if the current cell or a neighbour has `trail > 0`, step to the neighbour with the **highest** trail value (deterministic tie-break, e.g. lowest `(row, col)`); else fall back to the **declared control search policy**.
-  - **Control**: always uses the declared search policy; never inspects `trail`.
-- **Declared control search policy**: a deterministic **expanding-ring / spiral sweep** outward from the last-seen cell (fully specified, seed-independent). Both arms share it; only the treatment additionally reads the trail when on it.
-- **Reacquisition**: tracker occupies the target's **current** cell (Chebyshev radius `r = 0` *recommended*; `r = 1` noted as an alternative in §9).
-- **Step budget**: fixed, modest, e.g. `≈ 6 × N` steps after the jump. **Small fixed seed table** (e.g. 8–16 seeds), **not** an unbounded sweep.
+### 3.1 Geometry (Jack Correction 4 — pinned)
+- bounded **32 × 32** grid (non-toroidal);
+- tracker and target initially **share the declared last-seen cell**;
+- **jump destination**: a cell at Chebyshev distance **3–5** from the last-seen cell, chosen by the seed, and far enough from the boundary to permit the hidden path;
+- the target then follows a **seeded, precomputed, self-avoiding cardinal path of 12 moves**; if no unvisited legal cardinal move exists, the path ends early and **that realised path is used identically in both arms**;
+- the tracker is **stationary while the trail is laid**;
+- after laying, the target **remains stationary at its endpoint**;
+- treatment and control then begin reacquisition from the **same** last-seen tracker position;
+- **exact-cell reacquisition: `r = 0`**;
+- fixed post-laying **search budget: 192 tracker moves**;
+- fixed **seed table: 12 declared seeds**.
 
-## 4. Metrics
+### 3.2 Trail parameters (Jack Correction 2 — pinned)
+- deposit amplitude **`A = 64`**; per-step decrement **`D = 1`**;
+- trail dtype **signed `int16`** (lifetime ≈ `A/D` = 64 steps);
+- **no diffusion** in v0.
+
+### 3.3 Signed, saturating integer decay (Jack Correction 2)
+Every relevant tick, decay the whole trail with **saturating subtraction in signed arithmetic** (so no unsigned wraparound can occur):
+
+```
+trail[:] = maximum(trail - D, 0)        # int16; clamps at 0, never wraps
+```
+
+### 3.4 Treatment rule — strict ascent (Jack Correction 1; fixes the oscillation thread)
+At each reacquisition move the treatment tracker reads its **4 cardinal neighbours**:
+- **If at least one neighbour has a trail value strictly greater than the tracker's current-cell trail value**, move to the neighbour with the **highest** value, breaking ties by lowest `(row, col)`.
+- **Otherwise**, take exactly one step of the shared no-trail fallback policy (§3.6).
+
+A positive but **lower-or-equal**-valued neighbour must never pull the tracker backwards — this prevents oscillation between the newest and second-newest trail cells. The **control** tracker never inspects the trail; it always uses §3.6.
+
+### 3.5 Exact update order (Jack Correction 3 — identical across both arms)
+
+**Initial jump**
+1. Tracker remains at the last-seen cell.
+2. Target jumps to its precomputed seeded destination.
+3. Deposit `A` at the jump destination.
+
+**Each hidden trail-laying tick**
+1. Apply signed saturating decay to the whole trail.
+2. Move the target to the next precomputed legal path cell.
+3. Deposit/overwrite `A` at the target's new cell.
+4. The tracker remains stationary.
+
+**Each reacquisition tick**
+1. Check whether the tracker already occupies the stationary target endpoint (if so, end).
+2. Apply signed saturating decay.
+3. Target remains stationary and makes **no further deposit**.
+4. Treatment **or** control makes exactly **one** legal tracker move (§3.4 / §3.6).
+5. **Check reacquisition immediately after the move**; if the tracker now occupies the target cell, the run ends **before** any later fallback movement.
+
+### 3.6 Shared fallback search — fully specified (Jack Correction 5)
+A deterministic expanding-ring sweep, identical for both arms (treatment uses it only when no strict ascent exists):
+- construct an ordered list of all in-bounds cells by **increasing Chebyshev distance** from the last-seen cell;
+- **tie-break cells lexicographically by `(row, column)`**;
+- each arm maintains **its own** next-unvisited waypoint index into this shared ordering;
+- each fallback step moves **one cardinal cell toward the current waypoint**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal);
+- advance the waypoint index only when the waypoint cell is reached;
+- the treatment tracker **pauses** the fallback while following a strictly-ascending trail and **resumes deterministically** (same waypoint index) when no ascent exists.
+
+The waypoint ordering and the target path are **generated once and shared identically** between arms. **Trail visibility remains the sole experimental variable.**
+
+## 4. Metrics (Jack Correction 6)
 
 **Primary**
-- **steps-to-reacquisition** (after the jump) — per seed and mean across the seed table;
-- **success within the fixed budget** (fraction of seeds reacquired).
+- steps to reacquisition (per seed + mean across the 12-seed table);
+- success within the 192-move budget (fraction of seeds reacquired).
 
-**Secondary (diagnostic only)**
-- tracker path length;
-- stale-trail following (steps spent moving toward decayed/abandoned cells);
-- distance-to-target trajectory over time;
-- remaining trail mass over time.
+**Diagnostics only (no success claim asserted)**
+- whether and **when** the treatment tracker first acquired any trail cell (`trail > 0`);
+- number of strict-ascent (trail-following) moves;
+- number of fallback-search moves;
+- whether the trail had **fully decayed** before reacquisition;
+- realised hidden-path length (if it terminated early).
 
 ## 5. Determinism and fairness
 
-- Same seed → **byte-identical textual metrics** (the toy must be fully seeded; integer-only decay makes this trivial).
-- Treatment and control share the **exact** target start, jump destination, hidden path, tracker start, topology, movement rules, tie-breaking and step budget.
+- Same seed → **byte-identical textual metrics** (integer-only decay makes this trivial).
+- Treatment and control share the **exact** target start, jump destination, realised hidden path, endpoint, tracker start, topology, movement rules, tie-breaking, fallback waypoint ordering and step budget.
 - **Trail availability is the sole variable.**
-- Deterministic tie-breaking throughout; **no LLM and no semantic reasoning in the loop.**
+- Deterministic tie-breaking and a fixed fallback axis rule throughout; **no LLM and no semantic reasoning in the loop.**
 
 ## 6. Hard self-checks vs scientific outcome
 
-**Hard self-checks may enforce only instrument correctness** (a failure here means the toy is broken, not that the hypothesis failed):
-- trail values are integer dtype and **never negative**;
-- trail decays by exactly the stated rule (`max(0, trail - D)` each step);
-- a same-seed rerun is byte-identical;
-- treatment and control use **identical** target paths / jump / start (assert equality of the generated path arrays);
+**Hard self-checks may enforce only instrument correctness** (a failure means the toy is broken, not that the hypothesis failed):
+- trail dtype is **`int16`**; trail **min is never negative**; trail **max never exceeds `A`**;
+- on each decay tick, every **non-deposited** cell changes by exactly `-D` **or** reaches `0` (saturating);
+- a same-seed rerun is **byte-identical**;
+- treatment and control use **identical** target path / jump destination / endpoint / tracker start / fallback waypoint ordering (assert array equality);
 - trial-count conservation (every seed runs both arms);
-- no illegal moves (tracker stays in-bounds; steps to adjacent cells only).
+- no illegal moves (tracker stays in-bounds; one **cardinal** step per move);
+- reacquisition is checked **immediately after every tracker move**.
 
 **Do NOT hard-assert that treatment beats control.** That is the hypothesis and must be allowed to fail; treatment-vs-control outcomes are *reported*, never asserted.
 
 ## 7. Output and quarantine
 
-- **Text / table output first** (per the house text-first posture); compact tables of (seed, treatment steps, control steps, winner) + the aggregate means.
+- **Text / table output first**; compact tables of (seed, treatment steps, control steps, winner) + aggregate means + the §4 diagnostics.
 - Optional CSV **only** under the git-ignored `experiments/theory_sandbox/out/`.
 - **stdlib + NumPy only**; **no plots in v0**.
 - **No engine-runtime imports**; **no `uft_ca`**; **no production data**; **no `data/` writes**; **no CI collection** (`pytest.ini` `testpaths=tests` holds); **no GPU**.
-- Must print the non-canonical warning every run (*"NON-CANONICAL TOY: faster tracking on a toy grid proves nothing about Medusa; this is not radioactive physics."*).
+- Must print the non-canonical warning every run (*"NON-CANONICAL TOY: a wayfinder reaching a faded endpoint on a toy grid proves nothing about Medusa; not radioactive physics, not a hunt."*).
 - Header must follow README §3.6: cite ledger entry 14, status, can/cannot show, quarantine line.
 
 ## 8. Promotion boundary
@@ -82,23 +134,14 @@ The README §4 **six-step promotion gate** applies in full: (1) source verificat
 
 ## 9. Resolved decisions and remaining questions
 
-**Curator-confirmed (Jack + AURA, 2026-06-19) — binding for the future script PR:**
-1. **Primary scenario = reacquisition after a target jump.** Before the event, tracker and target begin in declared positions; at a fixed declared step the target jumps to a seeded destination and then follows an identical seeded hidden path in *both* arms; during the hidden interval the moving target deposits the decaying integer trail; treatment reads the trail gradient, control follows the declared no-trail policy; **trail availability is the sole variable**; primary outcomes are steps-to-reacquire and success-within-budget; treatment is allowed to lose.
-2. **Stale-trail fairness**: v0 **begins deposition only after the jump** (recommended), so no pre-jump trail can misdirect the tracker toward the abandoned location. (Alternative — clear the trail at the jump — is equivalent for v0; deposit-after-jump is simpler.)
+**Pinned by Jack (2026-06-19, binding for the future script PR):** grid 32×32 bounded · shared last-seen start · jump destination Chebyshev 3–5 (boundary-safe) · seeded self-avoiding cardinal hidden path of 12 moves (early-end allowed, realised path shared) · tracker stationary during laying · target stationary at endpoint · reacquire from same start · `r = 0` · budget 192 moves · 12 seeds · `A = 64`, `D = 1`, signed `int16`, no diffusion · **strict-ascent** treatment rule · explicit update order · signed saturating decay · fully-specified shared fallback · trail-laying separated from reacquisition · treatment may tie/lose.
 
-**84's reasoned recommendations (open to curator override):**
-- **Topology**: bounded (non-toroidal) `N×N`, `N ≈ 24–32`.
-- **Integer decay**: linear decrement `max(0, trail - D)` with `A ≫ D` (lifetime ≈ `A/D`); no multiplicative/float decay in v0.
-- **Control policy**: deterministic expanding-ring/spiral sweep from last-seen cell; treatment falls back to it when off-trail.
-- **Reacquisition radius**: `r = 0` (exact cell).
-- **Seeds / budget**: ~12 seeds; budget ≈ `6×N` post-jump steps.
-- **No diffusion in v0**: rely on the along-trail freshness gradient; treat "can the tracker acquire the trail at all without diffusion?" as a first-class *measured* question — if v0 shows acquisition fails, diffusion (or a wider deposit footprint) becomes an explicit v1 design question, not a silent v0 addition.
+**84's pinned implementation details (filling Jack's "document a fixed rule" requirements):** 4-cardinal-neighbour trail reading + movement; strict-ascent tie-break = lowest `(row, col)`; fallback axis rule = *`|Δrow| ≥ |Δcol|` → row, else column*; reacquisition checked at tick start and immediately after each move.
 
-**Genuinely-open (for Jack/Kev/AURA, if they wish to pin before the script PR):**
-- exact `N`, `A`, `D`, seed count and step budget (any reasonable small values are fine; these only set scale);
-- reacquisition radius `r = 0` vs `r = 1`;
-- whether the jump destination is constrained to within a bounded radius of the last-seen cell (affects how often the treatment tracker can reach the fresh trail) — the one choice that materially shapes the result, and the cleanest single knob to discuss.
+**Genuinely-open (implementer's choice, declared in the eventual script; not blocking):**
+- the literal 12 seed integers (any fixed declared set);
+- nothing else material remains — the geometry, trail mechanics, ordering and budget are all pinned above.
 
 ---
 
-*Glass box rules apply. The hound may follow the scent; the cathedral does not move.*
+*Glass box rules apply. A wayfinder may follow fading footprints home; the cathedral does not move.*
