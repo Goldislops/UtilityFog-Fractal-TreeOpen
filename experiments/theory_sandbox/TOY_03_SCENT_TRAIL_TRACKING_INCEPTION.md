@@ -77,12 +77,15 @@ A positive but **lower-or-equal**-valued neighbour must never pull the tracker b
 
 ### 3.6 Shared fallback search — fully specified (Jack Correction 5)
 A deterministic expanding-ring sweep, identical for both arms (treatment uses it only when no strict ascent exists):
-- construct an ordered list of all in-bounds cells by **increasing Chebyshev distance** from the last-seen cell;
+- construct an ordered list of all in-bounds cells by **increasing Chebyshev distance** from the last-seen cell. **Note: the first entry is the last-seen cell itself (distance 0), which is also the tracker's starting cell.**
 - **tie-break cells lexicographically by `(row, column)`**;
 - each arm maintains **its own** next-unvisited waypoint index into this shared ordering;
-- each fallback step moves **one cardinal cell toward the current waypoint**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal);
-- advance the waypoint index only when the waypoint cell is reached;
-- the treatment tracker **pauses** the fallback while following a strictly-ascending trail and **resumes deterministically** (same waypoint index) when no ascent exists.
+- **Pre-advance before moving (erratum fix — Codex P2 r3441709727):** *before* each fallback movement, skip any already-reached waypoint — `while tracker_pos == waypoints[idx]: idx += 1`. This discards the distance-0 last-seen/start cell on the very first fallback tick, and any waypoint the tracker is already standing on when treatment resumes fallback after strict-ascent mode, so the fallback never stalls or emits a zero-length "move";
+- then move **one cardinal cell toward `waypoints[idx]`**; when both row and column differ, resolve the axis by a **fixed rule**: *if `|Δrow| ≥ |Δcol|` step along the row, else step along the column* (never diagonal). This yields **exactly one non-zero legal cardinal move per reacquisition tick**, unless reacquisition has already ended the run;
+- advance the waypoint index when the waypoint cell is reached (the pre-advance rule above also covers this on the following tick);
+- the treatment tracker **pauses** the fallback while following a strictly-ascending trail and **resumes deterministically** (same per-arm waypoint index + same pre-advance rule) when no ascent exists.
+
+Both arms apply the **identical** pre-advance rule and maintain their own waypoint index; **trail visibility remains the sole experimental variable.**
 
 The waypoint ordering and the target path are **generated once and shared identically** between arms. **Trail visibility remains the sole experimental variable.**
 
@@ -115,6 +118,7 @@ The waypoint ordering and the target path are **generated once and shared identi
 - treatment and control use **identical** target path / jump destination / endpoint / tracker start / fallback waypoint ordering (assert array equality);
 - trial-count conservation (every seed runs both arms);
 - no illegal moves (tracker stays in-bounds; one **cardinal** step per move);
+- every reacquisition tick performs **exactly one non-zero** cardinal move (no zero-length "stall" move), unless reacquisition has already ended the run — i.e. the §3.6 pre-advance correctly skipped the distance-0 start cell and any already-reached waypoint;
 - reacquisition is checked **immediately after every tracker move**.
 
 **Do NOT hard-assert that treatment beats control.** That is the hypothesis and must be allowed to fail; treatment-vs-control outcomes are *reported*, never asserted.
@@ -136,7 +140,7 @@ The README §4 **six-step promotion gate** applies in full: (1) source verificat
 
 **Pinned by Jack (2026-06-19, binding for the future script PR):** grid 32×32 bounded · shared last-seen start · jump destination Chebyshev 3–5 (boundary-safe) · seeded self-avoiding cardinal hidden path of 12 moves (early-end allowed, realised path shared) · tracker stationary during laying · target stationary at endpoint · reacquire from same start · `r = 0` · budget 192 moves · 12 seeds · `A = 64`, `D = 1`, signed `int16`, no diffusion · **strict-ascent** treatment rule · explicit update order · signed saturating decay · fully-specified shared fallback · trail-laying separated from reacquisition · treatment may tie/lose.
 
-**84's pinned implementation details (filling Jack's "document a fixed rule" requirements):** 4-cardinal-neighbour trail reading + movement; strict-ascent tie-break = lowest `(row, col)`; fallback axis rule = *`|Δrow| ≥ |Δcol|` → row, else column*; reacquisition checked at tick start and immediately after each move.
+**84's pinned implementation details (filling Jack's "document a fixed rule" requirements):** 4-cardinal-neighbour trail reading + movement; strict-ascent tie-break = lowest `(row, col)`; fallback axis rule = *`|Δrow| ≥ |Δcol|` → row, else column*; fallback **pre-advances past already-reached waypoints before moving** (§3.6 erratum fix, Codex P2 r3441709727) so the distance-0 start cell never stalls the first fallback tick; reacquisition checked at tick start and immediately after each move.
 
 **Genuinely-open (implementer's choice, declared in the eventual script; not blocking):**
 - the literal 12 seed integers (any fixed declared set);
