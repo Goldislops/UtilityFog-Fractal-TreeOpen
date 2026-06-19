@@ -172,7 +172,7 @@ adjacency lists (trees, meshes, random graphs), enabling fractal branching struc
 ### Synchronous
 
 All cells update simultaneously based on the previous state: read all cell states and
-neighbour counts, apply the transition rule, then update all cells atomically.
+neighbor counts, apply the transition rule, then update all cells atomically.
 
 ### Asynchronous (future)
 
