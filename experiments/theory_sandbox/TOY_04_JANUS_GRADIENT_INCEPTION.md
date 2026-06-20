@@ -4,6 +4,9 @@
 >
 > **NON-CANONICAL TOY (design):** a discrete asymmetric sampling rule that drifts across a toy lattice proves nothing about Medusa. This is an **algorithmic lattice-displacement toy** — *not real Janus particles, not phoresis, not propulsion, not active-matter physics, and not engine validation.* The word "Janus" is retained as a **label only**; throughout this note it means **discrete asymmetric gradient sampling**, never a colloidal particle. The poetry is allowed to ride along; it is not allowed to drive the bus.
 
+**Explores:** `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` entry 9 (Janus Gradient Kinetics / active asymmetric propulsion) / `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` §5 (Janus gradient kinetics / active matter).
+**Status of that entry:** *speculative inspiration / candidate design principle — not current engine design* (the colloidal science is real; the Medusa mapping is the speculative part).
+
 ## 0. Current model seat
 
 Authored by **84** (`claude-opus-4-8`), desktop seat, 2026-06-20, under the Toy #4 docs-only inception authorization (AURA blessed → Jack accepts → Kev relayed). *(Future seats editing this doc: state your seat here per the model-seat hygiene protocol in `AGENT_HANDOFF.md`.)*
