@@ -281,11 +281,14 @@ def main(argv=None):
     t_succ_n = c_succ_n = 0
     for r in results:
         t, c = r["treatment"], r["control"]
-        t_succ += int(t["reacquired"]); c_succ += int(c["reacquired"])
+        t_succ += int(t["reacquired"])
+        c_succ += int(c["reacquired"])
         if t["reacquired"]:
-            t_steps_sum += t["steps"]; t_succ_n += 1
+            t_steps_sum += t["steps"]
+            t_succ_n += 1
         if c["reacquired"]:
-            c_steps_sum += c["steps"]; c_succ_n += 1
+            c_steps_sum += c["steps"]
+            c_succ_n += 1
         print(f"{r['seed']:>5} | {_steps_str(t):>7} | {_steps_str(c):>7} | {_winner(r):>9} | "
               f"{str(r['jump_dest']):>9} | {str(r['endpoint']):>9} | {r['path_len_moves']:>6}")
 
