@@ -44,17 +44,25 @@ The toy **must be permitted to falsify this.** The asymmetric rule may tie, fail
 ### 3.3 Static field (no dynamics)
 The scalar field is **static** — it is generated once per geometry and never updated during a run. There is no field diffusion, no deposition, no feedback from the walker onto the field. This keeps the toy minimal and the variable clean.
 
-### 3.4 Why this is not the tautology
-"Bias your steps toward the gradient and you will, trivially, move up the gradient" is not interesting. The **non-trivial, falsifiable** quantity is the **MSD scaling exponent α** (§4): does asymmetric local sampling produce **superdiffusive** translation (α meaningfully > 1, toward ballistic α ≈ 2) that the symmetric/blind control does **not** (α ≈ 1, ordinary diffusion)? An exponent is an *emergent* statistic of the trajectory ensemble, not a property you can write directly into one step. A treatment that merely drifts but stays diffusive (α ≈ 1) is a genuine — and useful — negative result (§5).
+### 3.4 Two distinct effects — drift vs spreading (metric erratum; post-seal Codex P2 on #249)
+"Bias your steps toward the gradient and you will, trivially, move up the gradient" is not interesting — and **raw mean-squared displacement measured from the start cell does not separate the interesting part from the trivial part.** A biased walk grows its raw MSD as `⟨r²⟩ ≈ v²·t² + D·t`: the `v²·t²` term is pure **directed drift**, so a *raw*-MSD exponent can read "ballistic" (toward 2) even when the only effect is ordinary drift and the genuine *spreading* is plainly diffusive. Net displacement already measures the drift (§4), so raw MSD must **not** double as the diffusion/superdiffusion evidence.
+
+The toy therefore measures **two separated quantities**:
+- **directed drift** — the net displacement vector / distance (§4);
+- **spreading** — a **centered-MSD / ensemble-variance** exponent `α_var`: subtract each arm's **per-time ensemble-mean trajectory** before fitting, so the `v²·t²` drift term is removed and the exponent reflects genuine dispersion *around the mean path*.
+
+The **non-trivial, falsifiable** question is whether asymmetric local sampling produces directed drift **and/or** genuine superdiffusive *spreading* (`α_var` meaningfully > 1) that the symmetric/blind control does not — **not** whether a drift-contaminated raw exponent looks ballistic. A centered exponent is an *emergent* dispersion statistic of the ensemble, not something you can write into one step. A treatment that merely drifts while its centered spreading stays diffusive (`α_var ≈ 1`) is a genuine — and useful — negative result for the *superdiffusion* claim (§5), **even if its net displacement is large**.
 
 ## 4. Observables / metrics (Jack-pinned)
 
 **Primary**
-- **MSD scaling exponent α** — fit the mean-squared displacement vs step count across the fixed seed ensemble (ballistic α ≈ 2, diffusive α ≈ 1, sub-diffusive α < 1);
-- **net displacement** — vector and scalar distance from start at `T_max`;
-- **treatment − control deltas** on both of the above, over the identical shared inputs.
+- **net displacement (directed-drift observable)** — vector and scalar distance from start at `T_max`, per arm, across the fixed seed ensemble;
+- **centered-MSD / ensemble-variance spreading exponent `α_var`** — subtract each arm's **per-time ensemble-mean trajectory**, then fit the centered mean-squared displacement vs step count (superdiffusive spreading `α_var > 1`, diffusive `α_var ≈ 1`, sub-diffusive `α_var < 1`). **This — not raw MSD — is the diffusion/superdiffusion evidence** (the `v²·t²` drift term is removed, §3.4);
+- **treatment − control deltas** on the **net displacement** *and* the **centered-MSD spreading exponent**, reported **separately** (treatment success must not rest on one combined exponent), over the identical shared inputs;
+- **shared, pre-registered fit** — the same fitting window, fit form, and ensemble-centering method are applied **identically to treatment and control** and declared **before any script** (alongside the seeds/geometries).
 
 **Reported (no success asserted)**
+- **raw / uncentered displacement-growth exponent `α_raw`** *(optional)* — if reported at all, label it explicitly as a **"raw displacement-growth exponent," NOT proof of superdiffusion around drift** (it contains the `v²·t²` drift term, §3.4); treatment success must **never** rest on `α_raw` alone;
 - per-geometry breakdown (the three geometries in §4.1 need not behave alike, and that is informative, not a failure);
 - trajectory stability indicators (did the asymmetric arm stall, oscillate, or wander off-field?).
 
@@ -72,7 +80,7 @@ This is the direct lesson banked from Toy #3, whose single-geometry / 12-seed ru
 
 ## 5. Useful negative results (must be reportable)
 A negative result here is **valuable**, not a failure of the toy — it is an early, cheap caution against entry-9's central design principle (node motion from local gradient + internal asymmetry) **before** anyone proposes building it. Two honest negatives the toy must be able to report:
-- **No separation**: treatment α ≈ control α ≈ 1 — asymmetric local sampling does **not** buy superdiffusive translation over the symmetric/blind baseline on the fixed set; **or**
+- **No separation**: treatment's **net-displacement delta ≈ 0** *and* its **centered-MSD spreading exponent `α_var` ≈ control's `α_var` ≈ 1** — asymmetric local sampling buys neither directed drift nor genuine superdiffusive *spreading* over the symmetric/blind baseline on the fixed set. (A large net displacement with `α_var ≈ 1` is **drift without superdiffusion** — still a negative for the superdiffusion claim, per §3.4.) **or**
 - **Instability**: the asymmetric rule **fails stability** / the trajectory structure "shatters" (stalls, traps, or degenerates) under the specified rule subset.
 
 Either outcome is recorded plainly. No hard assertion that treatment wins (§6).
@@ -82,7 +90,7 @@ Either outcome is recorded plainly. No hard assertion that treatment wins (§6).
 - **determinism** — same seed → byte-identical textual metrics; same-seed rerun is byte-identical;
 - **identical shared inputs across arms** — assert equality of field, seed, start, budget, tie-breaks, topology, and the measurement pipeline inputs between treatment and control;
 - **legal moves** — the walker stays in-bounds; exactly one legal lattice move per tick (cardinal, per the pinned topology);
-- **correct MSD calculation** — the α-fit and displacement computations are verified against a known closed-form case (e.g. a constructed pure-ballistic and a pure-diffusive synthetic trajectory recover α ≈ 2 and α ≈ 1 within tolerance).
+- **correct MSD calculation (centered vs raw, shared fit)** — the displacement, centering, and exponent fits are verified against constructed synthetic trajectories: (a) a **pure-drift** trajectory (identical constant velocity across the ensemble, no noise) makes the **centered MSD identically zero at every step** — the self-check asserts **centered MSD ≈ 0 within machine precision and *bypasses* the log–log `α_var` fit for this degenerate zero-variance case** (a log–log slope on zero variance is undefined — `log 0 → NaN/−∞` — and must be guarded, never forced through), while **`α_raw ≈ 2`** confirms the drift is still present (so centering demonstrably removes drift, §3.4); (b) a **pure-diffusion** trajectory (zero mean drift) must yield **`α_var ≈ 1`**; (c) a **drift + diffusion** trajectory must recover **`α_var ≈ 1`** despite a near-ballistic `α_raw`. The `α_var` fit **excludes the degenerate `t = 0` point** and uses the pre-registered fit window; the same fitting window/method is applied to both arms (assert identical fit configuration).
 
 **Do NOT hard-assert that treatment beats control.** That is the hypothesis and must be allowed to fail; treatment-vs-control outcomes are *reported*, never asserted.
 
@@ -111,7 +119,7 @@ The README §4 **six-step promotion gate** applies in full: (1) source verificat
 - hypothesis as stated in §2 (pre-registered seeds/geometries; static scalar field; superdiffusive lattice displacement vs symmetric/blind baseline; statistically distinct on the same field);
 - sole variable = symmetry of the rule's local gradient sampling (treatment asymmetric / control symmetric-or-blind);
 - shared field/seed/start/budget/tie-breaks/topology/measurement pipeline;
-- observables = MSD exponent α, net displacement (vector + scalar) at `T_max`, treatment−control deltas;
+- observables = **net displacement** (vector + scalar, directed-drift) at `T_max` **and** a **centered-MSD / ensemble-variance spreading exponent `α_var`** (drift removed, §3.4), reported as **separate** treatment−control deltas; raw/uncentered `α_raw` is optional and explicitly **not** superdiffusion proof; the same fitting window/method is pre-registered and identical across arms;
 - power floor = **exactly 100 pre-registered seeds × exactly 3 static geometries** (Linear Slope, Radial Well, Noisy Step-Function); pre-registration for power, **not** a sweep;
 - negatives are reportable (no-separation **or** instability);
 - language quarantine (§7);
@@ -123,7 +131,7 @@ The README §4 **six-step promotion gate** applies in full: (1) source verificat
 - lattice size and `T_max` step budget (declared constants; chosen so the three geometries are boundary-safe and α is fittable);
 - the exact form of the asymmetric integer-gradient-bias rule and the symmetric/blind control rule (must satisfy §3.1–§3.2 and the §6 self-checks);
 - the declared statistical test used for "statistically distinct," and its tolerance;
-- the α-fit method (e.g. log–log slope of MSD vs step) and its self-check synthetic cases.
+- the centered-MSD `α_var` fit method (e.g. log–log slope of **centered** MSD vs step), the chosen fit window, and the §6 synthetic self-check cases (pure-drift, pure-diffusion, drift+diffusion) — all declared/pre-registered before any run. The fit must **exclude `t = 0`** and **guard the degenerate zero-variance / `log 0` case** (assert ≈ 0 and bypass the slope, per §6) rather than force a log–log slope through it.
 
 **Nothing else material remains open** — the variable, the shared inputs, the observables, the power floor, the negatives, the language, and the quarantine are all pinned above.
 
