@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Three toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Three toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking) — each **non-canonical**, each landed as its own reviewed PR. **Toy #4 (Janus gradient) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -67,14 +67,15 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| *(none currently — Toy #3 has graduated to an implemented script; see §6a)* | | | |
+| **#4 Janus gradient** | `TOY_04_JANUS_GRADIENT_INCEPTION.md` | Ledger entry 9 / preflight §5 | **DESIGN / INCEPTION ONLY — no script implemented or authorized.** Algorithmic *discrete asymmetric gradient sampling* toy: does an asymmetric local-sampling rule yield superdiffusive lattice displacement vs a symmetric/gradient-blind baseline on the same static field? Pre-registered power (100 seeds × 3 geometries), treatment may tie/lose. **Not real Janus particles, not phoresis, not propulsion, not Medusa validation.** |
 
 ### 6c. Other listed candidates (not yet inception)
 
 | Candidate | Explores (ledger/preflight ref) | Sketch |
 |---|---|---|
-| Janus gradient toy | Ledger entry 9 / preflight §5 | asymmetric agents on a 2D field; does local-gradient sensing yield ballistic-ish curves? |
 | MOST stored-strain metaphor toy | Ledger entry 10 / preflight §7 | latent "tension" accumulate-and-release dynamics on a toy state machine — metaphor mechanics only, no chemistry claims |
+
+*(Janus gradient graduated from this list to design-inception — see §6b, `TOY_04_JANUS_GRADIENT_INCEPTION.md`.)*
 
 Each candidate becomes real only via its own PR, with the §3 header discipline and §4 gate understood. A positive toy result still cannot touch the engine, observer vocabulary, Vanguard, Lane A or Swarm Hunter without a separate, explicitly-gated design + implementation phase.
 
