@@ -315,11 +315,21 @@ def main(argv=None):
               f"{str(r['jump_dest']):>9} | {str(r['endpoint']):>9} | {r['path_len_moves']:>6}")
 
     n = len(results)
+    censored = BUDGET + 1                           # unreacquired arms counted as BUDGET+1
+    t_cens = sum((r["treatment"]["steps"] if r["treatment"]["reacquired"] else censored)
+                 for r in results) / n
+    c_cens = sum((r["control"]["steps"] if r["control"]["reacquired"] else censored)
+                 for r in results) / n
     t_mean = f"{t_steps_sum / t_succ_n:.1f}" if t_succ_n else "n/a"
     c_mean = f"{c_steps_sum / c_succ_n:.1f}" if c_succ_n else "n/a"
-    print("\nsummary (descriptive only -- not a success claim):")
-    print(f"  treatment success-in-budget: {t_succ}/{n}; mean steps (successes): {t_mean}")
-    print(f"  control   success-in-budget: {c_succ}/{n}; mean steps (successes): {c_mean}")
+    print("\nsummary (descriptive only -- NOT a success claim; a lower mean is not 'better' "
+          "unless the success rates are equal):")
+    print(f"  PRIMARY (sealed v0 section 4) -- all-{n}-seed mean steps-to-reacquisition, "
+          f"budget-censored (unreacquired counted as BUDGET+1={censored}):")
+    print(f"      treatment: {t_cens:.1f}    control: {c_cens:.1f}")
+    print(f"  success-in-budget: treatment {t_succ}/{n}, control {c_succ}/{n}")
+    print(f"  secondary -- mean steps over successful seeds only: "
+          f"treatment {t_mean}, control {c_mean}")
     wins = {"treatment": 0, "control": 0, "tie": 0}
     for r in results:
         wins[_winner(r)] += 1
