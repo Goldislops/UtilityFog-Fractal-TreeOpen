@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Two toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing) — each **non-canonical**, each landed as its own reviewed PR. **Toy #3 (decaying scent-trail tracking) is DESIGN-INCEPTION only — no script yet.** Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Three toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -61,12 +61,13 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 |---|---|---|---|
 | **#1 Galton/Fourier diffusion** | `galton_fourier_diffusion_toy.py` | Preflight §12 | non-canonical toy (PR #200) — inspiration only, not Medusa validation |
 | **#2 Stochastic escape / annealing** | `stochastic_escape_annealing_toy.py` (+ `TOY_02_STOCHASTIC_ESCAPE_ANNEALING_INCEPTION.md`) | Preflight §13 | non-canonical toy (PR #204) — algorithmic language only, not quantum physics |
+| **#3 Decaying scent-trail tracking** | `scent_trail_tracking_toy.py` (+ `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md`) | Ledger entry 14 (scent trails) | non-canonical toy (Phase 2B-5H-2) — implements the sealed inception contract; a *falsifiable* trail-vs-no-trail reacquisition test (treatment may tie/lose; no success asserted) — **not radioactive physics, not a hunt, not Medusa validation** |
 
 ### 6b. In design-inception (no script yet)
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| **#3 Decaying scent-trail tracking** | `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md` | Ledger entry 14 (scent trails) | **INCEPTION/DESIGN ONLY; script not implemented.** Explores a *falsifiable tracking mechanism* (does a decaying integer trail improve target reacquisition vs a no-trail control?) — **not radioactive physics, not Medusa validation.** |
+| *(none currently — Toy #3 has graduated to an implemented script; see §6a)* | | | |
 
 ### 6c. Other listed candidates (not yet inception)
 
