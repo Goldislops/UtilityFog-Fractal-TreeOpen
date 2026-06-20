@@ -151,11 +151,18 @@ def _strict_ascent_step(pos, trail):
     return (best[1], best[2])
 
 
-def _fallback_step(pos, idx, waypoints):
+def _fallback_step(pos, idx, waypoints, reached):
     """Shared deterministic expanding-ring sweep (sealed §3.6). Pre-advances past any
-    already-reached waypoint before moving; bounded; fail-closed if exhausted."""
+    waypoint this arm has **already reached** (not merely the current cell) before moving;
+    bounded; fail-closed if exhausted.
+
+    A single cardinal step toward a (possibly diagonal) waypoint can *transit* a later
+    waypoint cell before it becomes the current target, so skipping only `pos == waypoints[idx]`
+    would let the sweep walk back to an already-visited cell. Skipping any `waypoints[idx] in
+    reached` keeps it a true next-**unvisited** sweep (Codex thread r3441... / #247 r…aad).
+    """
     n = len(waypoints)
-    while idx < n and pos == waypoints[idx]:
+    while idx < n and waypoints[idx] in reached:
         idx += 1
     if idx >= n:
         raise RuntimeError(
@@ -163,6 +170,7 @@ def _fallback_step(pos, idx, waypoints):
             "failure; unreachable under pinned v0 (1024 waypoints vs 192-move budget)"
         )
     target = waypoints[idx]
+    assert target not in reached, "fallback must never target an already-reached waypoint"
     dr = target[0] - pos[0]
     dc = target[1] - pos[1]
     if abs(dr) >= abs(dc):                         # fixed axis rule: row first on ties
@@ -181,6 +189,7 @@ def run_arm(laid_trail, endpoint, waypoints, *, read_trail):
     trail = laid_trail.copy()
     pos = START
     idx = 0
+    reached = {START}                               # all cells this arm has stood on (incl. ascent)
     moves = 0
     ascent_moves = 0
     fallback_moves = 0
@@ -207,13 +216,14 @@ def run_arm(laid_trail, endpoint, waypoints, *, read_trail):
         if nxt is not None:
             ascent_moves += 1
         else:
-            nxt, idx = _fallback_step(pos, idx, waypoints)
+            nxt, idx = _fallback_step(pos, idx, waypoints, reached)
             fallback_moves += 1
         # instrument checks: exactly one non-zero, legal cardinal move
         assert nxt != pos, "tracker made a zero-length (stall) move"
         assert _in_bounds(nxt), "tracker left the grid"
         assert abs(nxt[0] - pos[0]) + abs(nxt[1] - pos[1]) == 1, "move was not one cardinal step"
         pos = nxt
+        reached.add(pos)                            # record every visited cell (ascent + fallback)
         moves += 1
         if read_trail and first_trail_acq is None and int(trail[pos]) > 0:
             first_trail_acq = moves
