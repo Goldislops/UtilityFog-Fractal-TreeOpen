@@ -96,7 +96,7 @@ def lay_trail(jump_dest, path):
     trail = np.zeros((GRID, GRID), dtype=np.int16)
     trail[jump_dest] = A                          # initial-jump deposit
     for cell in path[1:]:
-        trail[:] = np.maximum(trail - D, 0)       # signed saturating decay
+        _apply_decay(trail)                        # signed saturating decay + exact §6 check
         trail[cell] = A                           # deposit/overwrite at target's new cell
         _assert_trail_invariants(trail)
     return trail
@@ -109,6 +109,29 @@ def _assert_trail_invariants(trail):
     assert trail.dtype == np.int16, "trail dtype must be int16"
     assert int(trail.min()) >= 0, "trail must never be negative"
     assert int(trail.max()) <= int(A), "trail must never exceed A"
+
+
+def _apply_decay(trail):
+    """Apply signed saturating decay IN PLACE and hard-verify the exact per-cell §6
+    contract: every cell becomes ``max(prev - D, 0)`` — i.e. it drops by exactly ``D``,
+    or saturates to 0 only if it was already ``<= D``. Verified via (prev, post)
+    relations rather than by re-running the formula, so a wrong future decay rule (e.g.
+    a different step, multiplicative decay, or a missing clamp) is caught.
+
+    Called on the pure decayed array **before** any deposit, so every cell is
+    "non-deposited" at check time; the deposit overwrite during trail-laying is a
+    separate, later step and is therefore never mistaken for a decay result.
+    """
+    prev = trail.copy()
+    trail[:] = np.maximum(prev - D, 0)
+    delta = prev - trail
+    assert np.all((delta == D) | (trail == 0)), \
+        "decay: each cell must drop by exactly D or saturate to 0"
+    assert np.all((trail != 0) | (prev <= D)), \
+        "decay: a cell reached 0 only if it was already <= D"
+    assert np.all(trail >= 0) and np.all(trail <= prev), \
+        "decay must be non-negative and non-increasing"
+    _assert_trail_invariants(trail)
 
 
 # ----------------------------------------------------------------------------- #
@@ -175,9 +198,8 @@ def run_arm(laid_trail, endpoint, waypoints, *, read_trail):
             reacquired = True
             steps = moves
             break
-        # (2) decay
-        trail[:] = np.maximum(trail - D, 0)
-        _assert_trail_invariants(trail)
+        # (2) decay (no deposit during reacquisition -> exact §6 check applies to all cells)
+        _apply_decay(trail)
         if fully_decayed_tick is None and int(trail.max()) == 0:
             fully_decayed_tick = moves
         # (4) one tracker move (treatment: strict ascent else fallback; control: fallback)
