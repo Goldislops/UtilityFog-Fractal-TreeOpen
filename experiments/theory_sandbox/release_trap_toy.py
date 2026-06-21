@@ -79,12 +79,14 @@ def transform(o, cells):
 
 
 # --- Conway Life B3/S23, bounded dead-border ---------------------------------
+_PAD = np.zeros((L + 2, L + 2), dtype=np.int16)   # reused scratch buffer (border stays 0)
+
+
 def neighbor_count(g):
-    p = np.zeros((L + 2, L + 2), dtype=np.int16)
-    p[1:-1, 1:-1] = g
-    return (p[0:-2, 0:-2] + p[0:-2, 1:-1] + p[0:-2, 2:] +
-            p[1:-1, 0:-2] + p[1:-1, 2:] +
-            p[2:, 0:-2] + p[2:, 1:-1] + p[2:, 2:])
+    _PAD[1:-1, 1:-1] = g
+    return (_PAD[0:-2, 0:-2] + _PAD[0:-2, 1:-1] + _PAD[0:-2, 2:] +
+            _PAD[1:-1, 0:-2] + _PAD[1:-1, 2:] +
+            _PAD[2:, 0:-2] + _PAD[2:, 1:-1] + _PAD[2:, 2:])
 
 
 def b3s23(g):
@@ -93,15 +95,13 @@ def b3s23(g):
 
 
 def step_freeze(g):                       # inside sector frozen (identity); outside B3/S23
-    base = b3s23(g)
-    nxt = base.copy()
-    nxt[SECTOR_MASK] = g[SECTOR_MASK]
-    return nxt, base
+    nxt = b3s23(g)                        # fresh array -> safe to modify in place
+    nxt[SECTOR_MASK] = g[SECTOR_MASK]     # freeze: inside-sector cells keep their value
+    return nxt
 
 
 def step_latch(g):                        # v0 permanent latch: B3/S012345678 inside
-    base = b3s23(g)
-    nxt = base.copy()
+    nxt = b3s23(g)                        # fresh array -> modify in place
     nxt[SECTOR_MASK & (g == 1)] = 1
     return nxt
 
@@ -144,19 +144,12 @@ def sim_latch(g0):
     return hist
 
 
-def sim_freeze(g0, t_rel, check=False):
+def sim_freeze(g0, t_rel):
     hist = np.empty((T_MAX + 1, L, L), dtype=np.uint8)
     hist[0] = g0
     g = g0
     for t in range(1, T_MAX + 1):
-        if t <= t_rel:                    # hold: freeze inside sector
-            nxt, base = step_freeze(g)
-            if check:
-                assert not ((nxt != base) & ~SECTOR_MASK).any(), "mask wrote outside sector"
-                assert np.array_equal(nxt[SECTOR_MASK], g[SECTOR_MASK]), "inside not frozen"
-            g = nxt
-        else:                             # released: pure B3/S23 everywhere
-            g = b3s23(g)
+        g = step_freeze(g) if t <= t_rel else b3s23(g)   # hold inside-sector freeze, then release
         hist[t] = g
     return hist
 
@@ -218,7 +211,7 @@ def earliest_translating(hist, lo, hi, vr, vc, cache):
         return cache[t]
     for t in range(lo, hi + 1):
         for (r0, c0) in gl(t):
-            if all(any(o == (r0 + vr * k, c0 + vc * k) for o in gl(t + 4 * k))
+            if all((r0 + vr * k, c0 + vc * k) in gl(t + 4 * k)
                    for k in range(1, N_PERIODS + 1)):
                 return t
     return None
@@ -229,12 +222,11 @@ def classify(hist, dr, dc, t_entry, t_rel):
     cache = {}
     hi = min(max(t_rel, t_entry) + SCAN_AHEAD, T_MAX - 4 * N_PERIODS)
     e_o = earliest_translating(hist, t_entry, hi, dr, dc, cache)        # original orientation
-    pops = [int(hist[t].sum()) for t in range(T_MAX - W, T_MAX + 1)]
     # 1. pass-through: original-orientation glider already translating at/before release
     if e_o is not None and e_o <= t_rel:
         return "pass-through", e_o
-    # 2. clean-annihilation
-    if all(p == 0 for p in pops):
+    # 2. clean-annihilation (no live cell anywhere in the final W ticks)
+    if not hist[T_MAX - W:T_MAX + 1].any():
         return "clean-annihilation", None
     # 3. choke
     if int(hist[T_MAX].sum()) > CHOKE:
@@ -253,7 +245,7 @@ def classify(hist, dr, dc, t_entry, t_rel):
 
 def first_entry(hist):
     for t in range(T_MAX + 1):
-        if (hist[t] & SECTOR_MASK).any():
+        if hist[t][SECTOR_MASK].any():
             return t
     return None
 
@@ -302,6 +294,16 @@ def main():
     out.append("-- self-checks --")
     check_free_glider()
     out.append("free_glider_translation: PASS")
+    # meaningful freeze/release validation on one representative produced history
+    _g = place_glider("SE", 1, 1, -1, 0)
+    _te = first_entry(sim_free(_g))
+    _tr = _te + 40
+    _h = sim_freeze(_g, _tr)
+    assert all(np.array_equal(_h[t][SECTOR_MASK], _h[t - 1][SECTOR_MASK])
+               for t in range(_te + 1, _tr + 1)), "sector not static during hold"
+    assert np.array_equal(_h[_tr + 2], b3s23(_h[_tr + 1])), "release is not pure B3/S23"
+    out.append("inside_sector_static_during_hold: PASS")
+    out.append("release_pure_b3s23_after_t_rel: PASS")
 
     cats = ["pass-through", "clean-annihilation", "choke",
             "release-success", "wrong-orientation", "identity-loss"]
@@ -331,7 +333,7 @@ def main():
                 # treatment: strict-passive freeze, one run per hold_duration
                 for hd in HOLD_DURATIONS:
                     t_rel = t_entry + hd
-                    treat = sim_freeze(g0, t_rel, check=True)
+                    treat = sim_freeze(g0, t_rel)
                     assert np.array_equal(treat[0], g0)
                     t_lab, e_t = classify(treat, dr, dc, t_entry, t_rel)
                     counts["treatment"][t_lab] += 1
@@ -342,8 +344,6 @@ def main():
     assert counts["control"]["pass-through"] == 128, \
         "positive-control failed: control should be 128 pass-through, got %d" % counts["control"]["pass-through"]
     out.append("determinism: PASS (no RNG)")
-    out.append("mask_write_containment: PASS")
-    out.append("inside_sector_frozen_during_hold: PASS")
     out.append("arms_initial_equal: PASS")
     out.append("canonical_glider_matcher: PASS (free-glider translation verified)")
     out.append("trial_count: PASS (384 treatment runs)")
