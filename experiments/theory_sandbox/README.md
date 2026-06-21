@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Four toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient) — each **non-canonical**, each landed as its own reviewed PR. **Toy #5 (passive "MOF" trap) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Five toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient; Toy #5 passive "MOF" trap) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -63,12 +63,13 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 | **#2 Stochastic escape / annealing** | `stochastic_escape_annealing_toy.py` (+ `TOY_02_STOCHASTIC_ESCAPE_ANNEALING_INCEPTION.md`) | Preflight §13 | non-canonical toy (PR #204) — algorithmic language only, not quantum physics |
 | **#3 Decaying scent-trail tracking** | `scent_trail_tracking_toy.py` (+ `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md`) | Ledger entry 14 (scent trails) | non-canonical toy (Phase 2B-5H-2) — implements the sealed inception contract; a *falsifiable* trail-vs-no-trail reacquisition test (treatment may tie/lose; no success asserted) — **not radioactive physics, not a hunt, not Medusa validation** |
 | **#4 Janus gradient** | `janus_gradient_toy.py` (+ `TOY_04_JANUS_GRADIENT_INCEPTION.md`) | Ledger entry 9 / preflight §5 | non-canonical toy (inception #249 + metric erratum #250 sealed; script = this PR) — implements the **ratified pre-registration lock + Addendum 2** verbatim: a **memoryless** discrete asymmetric gradient-sampling rule vs a symmetric/gradient-blind control on 3 static fields (100 seeds × 3 geometries), separating **net displacement (drift)** from a **centered-MSD `α_var` (spreading)** exponent so raw MSD cannot masquerade as superdiffusion; treatment may tie/lose/confine, **no success asserted** — **not real Janus particles, not phoresis, not propulsion, not Medusa validation** |
+| **#5 Passive "MOF" trap** | `passive_mof_trap_toy.py` (+ `TOY_05_PASSIVE_MOF_TRAP_INCEPTION.md`) | Ledger entry 14 (passive geometric traps / "MOF") | non-canonical toy (inception #252 + stats erratum #253 sealed; script = this PR) — implements the **ratified v0 lock + Addendum 1** verbatim: does a **static localized latch rule-mask** (`B3/S012345678` inside sector / `B3/S23` outside) arrest a **canonical Conway glider** vs a homogeneous baseline, keeping it recognizable? **128 deterministic conditions** (4 orientations × 4 phases × 8 offsets); v0 is **noise-free → exact category counts, no p-values/CIs/tests** (noise/inferential → v1); **capture NEVER asserted**. **Target is an externally-canonical glider, NOT native Medusa evidence; not chemistry, not a real Metal-Organic Framework, not Medusa validation.** |
 
 ### 6b. In design-inception (no script yet)
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| **#5 Passive "MOF" trap** | `TOY_05_PASSIVE_MOF_TRAP_INCEPTION.md` | Ledger entry 14 (passive geometric traps / "MOF") | **DESIGN / INCEPTION ONLY — no script implemented or authorized.** Does a **static localized rule-mask** (spatial heterogeneity) arrest a canonical glider's translation vs a homogeneous baseline, while keeping it recognizable? **Target is an externally-canonical Conway glider (B3/S23), NOT a native Medusa discovery** — an isolated sandbox proof-of-concept for trap mechanics only (AURA Option-B ruling after the repo-native glider search came up empty). MOF-alone; **no Janus coupling**. **Not chemistry, not a real Metal-Organic Framework, not Medusa validation.** |
+| *(none currently — Toy #5 has graduated to an implemented script; see §6a)* | | | |
 
 ### 6c. Other listed candidates (not yet inception)
 
