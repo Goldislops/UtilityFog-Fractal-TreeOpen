@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Four toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Four toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient) — each **non-canonical**, each landed as its own reviewed PR. **Toy #5 (passive "MOF" trap) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -68,7 +68,7 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| *(none currently — Toy #4 has graduated to an implemented script; see §6a)* | | | |
+| **#5 Passive "MOF" trap** | `TOY_05_PASSIVE_MOF_TRAP_INCEPTION.md` | Ledger entry 14 (passive geometric traps / "MOF") | **DESIGN / INCEPTION ONLY — no script implemented or authorized.** Does a **static localized rule-mask** (spatial heterogeneity) arrest a canonical glider's translation vs a homogeneous baseline, while keeping it recognizable? **Target is an externally-canonical Conway glider (B3/S23), NOT a native Medusa discovery** — an isolated sandbox proof-of-concept for trap mechanics only (AURA Option-B ruling after the repo-native glider search came up empty). MOF-alone; **no Janus coupling**. **Not chemistry, not a real Metal-Organic Framework, not Medusa validation.** |
 
 ### 6c. Other listed candidates (not yet inception)
 
