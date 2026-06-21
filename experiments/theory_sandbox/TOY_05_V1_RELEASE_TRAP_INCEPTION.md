@@ -46,7 +46,7 @@ v0-style discipline: v1 is **deterministic and noise-free**, so outcomes are rep
 - **pass-through** — the glider was never actually held (escaped before/around `t_rel`);
 - **clean-annihilation** — nothing survives post-release;
 - **choke** — the hold rule filled the sector with junk (carried from v0, if the hold candidate can grow).
-Plus, for release-success, a **hold-duration** record (`t_rel`) and the re-emergent glider's recorded phase/orientation vs the reference.
+Plus, for release-success, a **hold-duration** record (= `t_rel − t_entry`, the ticks the glider is *actually* held after it first enters the sector — not `t_rel` alone) and the re-emergent glider's recorded phase/orientation vs the derived expectation (§7 U3).
 
 ## 6. Useful negative results (must be reportable)
 
@@ -61,7 +61,7 @@ Any outcome is recorded plainly; **release-success is NEVER asserted.**
 Marked clearly as the open, load-bearing choices (none silently chosen):
 - **(U1) Exact release mask / hold rule** — the *load-bearing scientific choice*. Candidates to evaluate: a **"freeze" hold** (inside-sector cells do not update during the hold — preserve the snapshot — then release); a **bounded-lifetime latch**; or another passive local rule. Each must be *reversible* and passive; the freeze candidate's **boundary-tearing** failure mode (§3) must be confronted.
 - **(U2) Release tick / hold duration(s)** — `t_rel` (single value, a small pre-registered set, or phase-locked to the glider's entry). The hold duration is itself a variable of interest.
-- **(U3) Identity / re-emergence predicate** — exact post-release detector: a 5-cell glider of the original orientation translating `(dr,dc)`/4 for ≥ N periods, with the **known/derivable** phase/orientation defined relative to the free-glider reference (the reference's phase at `t_rel` gives the expected resume phase).
+- **(U3) Identity / re-emergence predicate** — exact post-release detector: a 5-cell glider of the original orientation translating `(dr,dc)`/4 for ≥ N periods, with a **known/derivable** expected phase/orientation. **The expected resume phase is derivable from the ratified hold rule (U1) + `t_entry`, NOT simply the free reference's phase at `t_rel`:** a freeze-style hold does **not** advance the glider's phase during the hold, so it would resume at (approximately) its frozen phase from `t_entry` — phase-offset from the never-held free reference (which kept evolving). The exact derivation must be pinned alongside U1/U2.
 - **(U4) Reference / control arm** — options: homogeneous **free glider** (gold-standard canonical translation, for the re-emergence comparison); the **v0 permanent latch** (held-and-destroyed baseline); or **hold-without-release**. The sole-variable framing must keep the *only* difference the release protocol.
 - **(U5) Deterministic condition set** — orientations × phases × offsets × **release ticks** (the new dimension), enumerated and frozen before any run (pre-registration for power, **not** a sweep — same bright line as v0).
 
