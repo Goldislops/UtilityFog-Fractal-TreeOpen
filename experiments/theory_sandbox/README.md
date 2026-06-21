@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Three toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking) — each **non-canonical**, each landed as its own reviewed PR. **Toy #4 (Janus gradient) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Four toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -62,12 +62,13 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 | **#1 Galton/Fourier diffusion** | `galton_fourier_diffusion_toy.py` | Preflight §12 | non-canonical toy (PR #200) — inspiration only, not Medusa validation |
 | **#2 Stochastic escape / annealing** | `stochastic_escape_annealing_toy.py` (+ `TOY_02_STOCHASTIC_ESCAPE_ANNEALING_INCEPTION.md`) | Preflight §13 | non-canonical toy (PR #204) — algorithmic language only, not quantum physics |
 | **#3 Decaying scent-trail tracking** | `scent_trail_tracking_toy.py` (+ `TOY_03_SCENT_TRAIL_TRACKING_INCEPTION.md`) | Ledger entry 14 (scent trails) | non-canonical toy (Phase 2B-5H-2) — implements the sealed inception contract; a *falsifiable* trail-vs-no-trail reacquisition test (treatment may tie/lose; no success asserted) — **not radioactive physics, not a hunt, not Medusa validation** |
+| **#4 Janus gradient** | `janus_gradient_toy.py` (+ `TOY_04_JANUS_GRADIENT_INCEPTION.md`) | Ledger entry 9 / preflight §5 | non-canonical toy (inception #249 + metric erratum #250 sealed; script = this PR) — implements the **ratified pre-registration lock + Addendum 2** verbatim: a **memoryless** discrete asymmetric gradient-sampling rule vs a symmetric/gradient-blind control on 3 static fields (100 seeds × 3 geometries), separating **net displacement (drift)** from a **centered-MSD `α_var` (spreading)** exponent so raw MSD cannot masquerade as superdiffusion; treatment may tie/lose/confine, **no success asserted** — **not real Janus particles, not phoresis, not propulsion, not Medusa validation** |
 
 ### 6b. In design-inception (no script yet)
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| **#4 Janus gradient** | `TOY_04_JANUS_GRADIENT_INCEPTION.md` | Ledger entry 9 / preflight §5 | **DESIGN / INCEPTION ONLY — no script implemented or authorized.** Algorithmic *discrete asymmetric gradient sampling* toy: does an asymmetric local-sampling rule yield superdiffusive lattice displacement vs a symmetric/gradient-blind baseline on the same static field? Pre-registered power (100 seeds × 3 geometries), treatment may tie/lose. **Not real Janus particles, not phoresis, not propulsion, not Medusa validation.** |
+| *(none currently — Toy #4 has graduated to an implemented script; see §6a)* | | | |
 
 ### 6c. Other listed candidates (not yet inception)
 
