@@ -161,6 +161,8 @@ def alpha_from_msd(msd: np.ndarray):
     if seg.max() <= EPS:
         return None                               # zero-variance: bypass fit
     keep = seg > EPS
+    if np.count_nonzero(keep) < 2:
+        return None                               # under-determined fit -> degenerate (unreachable on locked spec)
     return float(np.polyfit(np.log(ts[keep].astype(np.float64)),
                             np.log(seg[keep]), 1)[0])  # slope = coeff[0], natural log
 
@@ -210,6 +212,11 @@ def bootstrap_alpha(P_t: np.ndarray, P_c: np.ndarray, a_full_t, a_full_c) -> dic
         deltas.append(a_t - a_c)
     deltas = np.array(deltas, dtype=np.float64)
     n = len(deltas)
+    if n == 0:                                     # every resample degenerate (unreachable on locked spec)
+        return {
+            "degenerate": True, "dalpha": delta_obs, "p_alpha": "NA",
+            "ci": ("NA", "NA"), "excluded": excluded, "distinct": "N",
+        }
     count_le = int((deltas <= 0).sum())
     count_ge = int((deltas >= 0).sum())
     p_alpha = min(1.0, 2.0 * min((1 + count_le) / (n + 1), (1 + count_ge) / (n + 1)))
