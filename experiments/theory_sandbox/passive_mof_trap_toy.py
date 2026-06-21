@@ -153,15 +153,6 @@ def region_frame(g):
     return frozenset(zip(rs.tolist(), cs.tolist()))
 
 
-def smallest_period(hist, lo, hi):
-    # smallest q in [1,P] with region_frame(t)==region_frame(t+q) for all t in [lo, hi-q]
-    frames = {t: region_frame(hist[t]) for t in range(lo, hi + 1)}
-    for q in range(1, P + 1):
-        if all(frames[t] == frames[t + q] for t in range(lo, hi - q + 1)):
-            return q
-    return None
-
-
 # --- outcome classification (precedence: pass->annih->choke->capture->shatter)
 def classify(hist, dr, dc, t_entry):
     fwd = forward_mask(dr, dc)
@@ -173,34 +164,32 @@ def classify(hist, dr, dc, t_entry):
             f2 = live_set(hist[t + 4] & fwd)
             if len(f2) == 5 and f2 == want:
                 return "pass-through", 0, None
+    # precompute per-tick population once (lookups below avoid O(T_MAX^2) rescans)
+    pops = [int(hist[t].sum()) for t in range(T_MAX + 1)]
     # 2. clean-annihilation
-    if all(int(hist[t].sum()) == 0 for t in range(T_MAX - W, T_MAX + 1)):
+    if all(pops[t] == 0 for t in range(T_MAX - W, T_MAX + 1)):
         return "clean-annihilation", 0, None
     # 3. choke
     if int((hist[T_MAX] & SECTOR_MASK).sum()) > CHOKE:
         return "choke", 0, None
     # 4. capture
     lo = T_MAX - W
-    contained = all((not (hist[t] & ~REGION_MASK).any()) and
-                    int(hist[t].sum()) <= CHOKE
-                    for t in range(lo, T_MAX + 1))
-    pop_end = int(hist[T_MAX].sum())
-    if pop_end > 0 and contained:
-        q = smallest_period(hist, lo, T_MAX)
+    contained = [(pops[t] <= CHOKE) and (not (hist[t] & ~REGION_MASK).any())
+                 for t in range(T_MAX + 1)]
+    if pops[T_MAX] > 0 and all(contained[t] for t in range(lo, T_MAX + 1)):
+        frames = [region_frame(hist[t]) for t in range(T_MAX + 1)]   # precomputed once
+        q = None
+        for cand_q in range(1, P + 1):
+            if all(frames[t] == frames[t + cand_q] for t in range(lo, T_MAX - cand_q + 1)):
+                q = cand_q
+                break
         if q is not None:
-            # retention: earliest t_cap with containment+periodicity(q) continuous to T_MAX
+            # retention: earliest t_cap with containment + periodicity(q) continuous to T_MAX.
+            # The chain [t_cap, T_MAX] already holds; extending downward needs only the new tick.
             t_cap = lo
-            while t_cap > 0:
-                cand = t_cap - 1
-                ok_contain = all((not (hist[t] & ~REGION_MASK).any()) and
-                                 int(hist[t].sum()) <= CHOKE and int(hist[t].sum()) > 0
-                                 for t in range(cand, T_MAX + 1))
-                ok_period = all(region_frame(hist[t]) == region_frame(hist[t + q])
-                                for t in range(cand, T_MAX - q + 1))
-                if ok_contain and ok_period:
-                    t_cap = cand
-                else:
-                    break
+            while (t_cap > 0 and contained[t_cap - 1] and pops[t_cap - 1] > 0
+                   and frames[t_cap - 1] == frames[t_cap - 1 + q]):
+                t_cap -= 1
             return "capture", T_MAX - t_cap, q
     # 5. shatter (residual)
     return "shatter", 0, None
