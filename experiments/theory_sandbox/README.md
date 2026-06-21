@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Five toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient; Toy #5 passive "MOF" trap) — each **non-canonical**, each landed as its own reviewed PR. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Five toy scripts now exist** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient; Toy #5 passive "MOF" trap) — each **non-canonical**, each landed as its own reviewed PR. **Toy #5 v1 (release-style / identity-preserving trap) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -69,7 +69,7 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| *(none currently — Toy #5 has graduated to an implemented script; see §6a)* | | | |
+| **#5 v1 Release-style / identity-preserving trap** | `TOY_05_V1_RELEASE_TRAP_INCEPTION.md` | Ledger entry 14 (passive geometric traps / "MOF") | **DESIGN / INCEPTION ONLY — no script implemented or authorized.** Deepens Toy #5 v0 (which proved latch-*capture-with-transformation*): can a **static localized passive rule-mask** *hold* a canonical Conway glider and, after a pre-registered **release**, let the original glider **re-emerge** and resume canonical T=4 translation with known phase/orientation? Two-phase (hold → release) protocol; deterministic exact-count framing; release-success **NEVER asserted**; likely-negative = passive local trapping may be inseparable from identity destruction. MOF-alone; **no Janus coupling**. **External canonical glider, NOT native Medusa evidence; not chemistry, not a real Metal-Organic Framework.** |
 
 ### 6c. Other listed candidates (not yet inception)
 
