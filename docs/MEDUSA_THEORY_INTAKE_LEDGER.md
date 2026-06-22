@@ -195,6 +195,18 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 
 ---
 
+### 15. Flexible polyhedra / discrete compliant trap geometry
+- **Source/thread**: Kev/AURA/Jack intake from a Steve Mould video on Jessen's icosahedron / flexible polyhedra, corrected by Jack's source-hygiene pass (2026-06-22) after Toy #5 v0/v1 characterized the passive-trap boundary.
+- **Claim (corrected)**: Keep three geometry objects separate: **Jessen's orthogonal icosahedron** is rigid but not infinitesimally rigid ("shaky"), not a genuinely flexible polyhedron; **Connelly's flexible polyhedra / Connelly sphere** refers to Robert Connelly's 1977 first non-self-intersecting embedded flexible polyhedron in 3D (commonly described as **18 vertices / 32 triangular faces**) and to later flexible-sphere descriptions whose exact vertex/face counts should be checked against primary sources before promotion; **Steffen's polyhedron** is a later simpler embedded flexible polyhedron with **14 triangular faces**. The Bellows theorem applies to true flexible polyhedra (volume invariant under flexing), not casually to Jessen's shaky object.
+- **Status**: **speculative inspiration** / candidate future primitive vocabulary. Not canonical.
+- **Repo relevance**: Possible future **Discrete Compliant Trap / Quasi-Mechanism Trap** vocabulary: a localized discrete rule that yields under entry, preserves a structure's identity signature, and then locks without an explicit temporal shutter. This is a different primitive from Toy #5 v0 latch, Toy #5 v1 strict-passive freeze, and Janus+MOF coupling.
+- **Current action**: Record only. No toy inception, no script, no engine work.
+- **Revisit when**: before any compliant/yielding trap design · before any future "shutter" revival · before Janus+MOF coupling uses a trap that claims identity preservation · before any physical-geometry / quasi-mechanism analogy becomes a sandbox toy.
+- **Guardrails/caveats**: Do **not** model continuous Hooke's law, tensile strain, material elasticity, floating-point mechanics, or real material response. Do **not** claim Bellows invariance for Jessen's icosahedron. Do **not** treat this as proof that a CA trap can preserve identity. If promoted, define discrete invariants explicitly (candidate examples: live-cell count, bounding box, phase/orientation, period signature, re-emergence, local identity signature) and keep the result falsifiable.
+- **Linked**: `docs/FLEXIBLE_POLYHEDRA_COMPLIANT_TRAP_INTAKE.md`; entry 14 (passive geometric traps / Toy #5); entry 13 (bistable auxetic metamaterials).
+
+---
+
 ## How an entry graduates out of this ledger
 
 1. Someone proposes promotion (e.g. "make entry 2 a canonical guardrail").
