@@ -32,7 +32,7 @@ For always-on passive local rule-masks, **capture and identity-preservation are 
 - Also untested: **collateral-freezing under noise** (deferred v1-noise variant), other sector geometries/sizes, other CA targets.
 
 ## 5. Forward queue (clearly separated; each gated; none authorized)
-Recorded so the distinctions stay crisp — see `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` **entry 15** and the theory-sandbox README §6c.
+Recorded so the distinctions stay crisp — see [`docs/MEDUSA_THEORY_INTAKE_LEDGER.md`](../../docs/MEDUSA_THEORY_INTAKE_LEDGER.md) **entry 15** and the theory-sandbox README §6c.
 
 - **Discrete Compliant / Quasi-Mechanism Trap ("yield-then-lock")** — *the genuine unexplored third mechanism.* A localized discrete rule that **yields under entry, preserves an identity signature** (candidate invariants: live-cell count, bounding box, phase/orientation, period signature, re-emergence), **then locks** — *without* an explicit temporal shutter. Inspired by the corrected flexible-polyhedra intake (entry 15): a flexible polyhedron deforms while preserving structure (Bellows ⇒ volume invariant) then holds. **Caution (Jessen's "shaky"):** distinguish *true* yield-then-lock from a first-order "shaky" near-miss that yields then jams. **Distinct from** v0 latch, v1 freeze, the temporal shutter, and Janus+MOF coupling. Would need its own inception → lock → script.
 - **Active shutter / temporal-gating trap** — a *timed* transparent→hold→release primitive. **A distinct ACTIVE primitive**, not strict-passive (it introduces a global timing/control signal). It would likely succeed *near-tautologically* (timed pause/resume of a fully-contained glider), with the only real payoff a timing-window map. Lower priority; muddies the "passive" story.
@@ -46,7 +46,7 @@ Recorded so the distinctions stay crisp — see `docs/MEDUSA_THEORY_INTAKE_LEDGE
 ## 7. Sealed-artifact references
 - Toy #5 v0 inception + stats erratum: PRs #252 (`bf51f87`), #253 (`4e0cc61`); **v0 script** PR #254 (`207f4a9`).
 - Toy #5 v1 inception: PR #255 (`0cd5d1e`); U1–U5 lock + Addendum 1 (chat-ratified, Option A Strict Passive); **v1 script** PR #256 (`b0f7022`).
-- Flexible-polyhedra / compliant-trap intake: PR #257 (`255d294`) → `docs/FLEXIBLE_POLYHEDRA_COMPLIANT_TRAP_INTAKE.md` + ledger entry 15.
+- Flexible-polyhedra / compliant-trap intake: PR #257 (`255d294`) → [`docs/FLEXIBLE_POLYHEDRA_COMPLIANT_TRAP_INTAKE.md`](../../docs/FLEXIBLE_POLYHEDRA_COMPLIANT_TRAP_INTAKE.md) + ledger entry 15.
 
 ---
 
