@@ -34,10 +34,10 @@ example of true continuous flex.
 
 Robert Connelly's 1977 counterexample is the first non-self-intersecting
 embedded flexible polyhedron in three-dimensional Euclidean space. Keep that
-first example distinct from Connelly's later, smaller flexible-sphere
-description: the 1977 counterexample is commonly described as having **18
-vertices / 32 triangular faces**, while the later simplified example discussed
-in this intake has **11 vertices / 18 triangular faces**.
+first example distinct from Connelly's later flexible-sphere descriptions: the
+1977 counterexample is commonly described as having **18 vertices / 32
+triangular faces**, while later simplified Connelly examples should be checked
+against the primary paper before any vertex/face count is treated as settled.
 
 This is the true flexible-polyhedron object in the story, distinct from the
 Jessen "shaky" object.
