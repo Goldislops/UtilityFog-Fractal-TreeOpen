@@ -30,12 +30,14 @@ motion, but it is not a genuinely flexible polyhedron.
 Use it as inspiration for **near-mechanism / first-order yielding**, not as an
 example of true continuous flex.
 
-### Connelly Sphere / Connelly's Flexible Polyhedron
+### Connelly Sphere / Connelly's Flexible Polyhedra
 
-Robert Connelly's 1977 example is the first non-self-intersecting embedded
-flexible polyhedron in three-dimensional Euclidean space. It is commonly
-referred to as the Connelly sphere or Connelly's flexible polyhedron, and the
-example discussed in the intake has **18 triangular faces**.
+Robert Connelly's 1977 counterexample is the first non-self-intersecting
+embedded flexible polyhedron in three-dimensional Euclidean space. Keep that
+first example distinct from Connelly's later, smaller flexible-sphere
+description: the 1977 counterexample is commonly described as having **18
+vertices / 32 triangular faces**, while the later simplified example discussed
+in this intake has **11 vertices / 18 triangular faces**.
 
 This is the true flexible-polyhedron object in the story, distinct from the
 Jessen "shaky" object.
