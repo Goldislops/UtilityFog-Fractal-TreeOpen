@@ -77,6 +77,7 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 | Candidate | Explores (ledger/preflight ref) | Sketch |
 |---|---|---|
 | MOST stored-strain metaphor toy | Ledger entry 10 / preflight §7 | latent "tension" accumulate-and-release dynamics on a toy state machine — metaphor mechanics only, no chemistry claims |
+| Discrete compliant / quasi-mechanism trap | Ledger entry 15 | yielding-then-locking local rule metaphor inspired by corrected flexible-polyhedra intake; would require explicit invariants and a fresh design-inception before any script |
 
 *(Janus gradient graduated from this list to design-inception — see §6b, `TOY_04_JANUS_GRADIENT_INCEPTION.md`.)*
 
