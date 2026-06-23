@@ -47,12 +47,12 @@ A Medusa pause should not even be scheduled until **all** of the following hold:
 *Design intent only — exact commands to be confirmed against `scripts/medusa_start.py` / `watchdog.py` before use.*
 
 1. **Quiesce:** stop accepting new tuning commits; let the current generation step finish (no mid-step kill).
-2. **Snapshot:** write a full state snapshot (`data/v070_gen<N>.npz` style: CA state + channel-first memory grid `(channels, X, Y, Z)` + generation counter) at a known generation `N`. Record `N`, the file path, and a checksum.
+2. **Snapshot:** write a **full** state snapshot at a known generation `N`. The snapshot must include **all** trajectory-bearing arrays — confirmed against the snapshot format (`ca/docs/README.md`): `lattice` (CA state) + channel-first `memory_grid` `(channels, X, Y, Z)` + **`inactivity_steps`** (per-cell decay counters) + the generation counter. **Omitting `inactivity_steps` would reset decay counters to zero and alter the post-restart trajectory** — it is not optional. Record `N`, the file path, and a checksum.
 3. **Verify snapshot integrity:** confirm the snapshot loads back into a **throwaway** process and reproduces gen `N` state (shape, channel order, live-cell count) — **never test-restore over the live instance.**
 4. **Record provenance:** log the pre-pause `main` SHA, the snapshot gen/checksum, and the exact param state (from `data/tuning_ledger.jsonl`) so the "before" picture is unambiguous.
 
 ### 5b. Rollback plan (design level)
-- **Trigger conditions (abort → rollback):** post-restart state fails an integrity check (wrong shape / channel order / implausible live-cell delta); a Track A race produces **non-bitwise-identical** output vs. baseline; the tuning consumer applies a value outside schema bounds; or any unexpected crash/loop within the first M generations after restart.
+- **Trigger conditions (abort → rollback):** post-restart state fails an integrity check (wrong shape / channel order / implausible live-cell delta); the tuning consumer applies a value outside schema bounds; or any unexpected crash/loop within the first M generations after restart. *(The Track A **bitwise-identity** check is a **pre-restart, throwaway-instance** gate (§7), not a live trigger — a stream race cannot be detected on the live instance without a parallel baseline; if it fails off-line, Track A simply does not ship.)*
 - **Rollback action:** shut the new process down, **restore the verified pre-pause snapshot** (gen `N`), relaunch on the **pre-Task-A** engine code (the prior `main`), and confirm the organism resumes from gen `N`.
 - **Param rollback:** if only a tuning was bad (engine code fine), use the existing `POST /api/tuning/rollback` path to revert params, rather than a full snapshot restore.
 - **Non-negotiable:** the verified snapshot + the prior engine SHA are the two-key safety net; **never start the pause without both in hand.**
@@ -61,14 +61,14 @@ A Medusa pause should not even be scheduled until **all** of the following hold:
 *Design-level contract only; no implementation here. Aligns with `PHASE_18.md` §Safety non-negotiables.*
 
 - **Source of truth:** the tuning API remains the **only** writer of pending tunings; the engine consumer is a **reader/applier**, never a second proposer.
-- **Read cadence:** the consumer checks for a pending tuning at a **safe step boundary** (between generations, never mid-step), at a bounded interval — it must not add per-cell or per-step hot-loop cost.
+- **Read cadence:** the consumer checks for a pending tuning at a **safe step boundary** (between generations, never mid-step), at a bounded interval — **offloaded to a helper thread (updating an in-memory flag) or throttled to a large generation interval** (e.g. matching the 1000-generation rate limit). Synchronous disk I/O on the stepping thread is forbidden; the check must add no per-cell or per-step hot-loop cost.
 - **Apply discipline:**
   - re-validate every pending value against `/api/params/schema` bounds **at apply time** (defense in depth — reject out-of-bounds even if the API already checked);
   - **refuse to touch `locked=true` invariants** (`structural_to_void_decay_prob = 0.005`, memory-grid channel semantics) — these are unreachable by any tuning path;
   - honor the rate limit (≤ one change per parameter per 1000 generations) so a stuck file can't oscillate a tunable;
   - apply atomically at a step boundary; on any malformed/partial file, **no-op and log** (fail-safe, not fail-fast).
-- **Acknowledgement:** after a successful apply, record `applied_at_gen` + old/new values to `data/tuning_ledger.jsonl` and emit `tuning.committed`; mark the pending entry consumed so it is not re-applied.
-- **Idempotence:** re-reading the same consumed pending entry must be a no-op.
+- **Acknowledgement:** after a successful apply, record `applied_at_gen` + old/new values to `data/tuning_ledger.jsonl`. The **Layer 2 API / event-bus daemon** watches the ledger (or param state) and emits `tuning.committed` — the **Layer-1 engine must stay substrate-independent and free of ZMQ/network deps** (PHASE_18 Four-Layer Model). The engine does **not** emit the event itself.
+- **Idempotence (engine stays a pure reader — one-way I/O):** the engine **never writes or deletes `tuning_pending.json`** — that avoids write-write races and the OneDrive sync quirk. Instead it tracks the **last-applied `proposal_id`** (in memory + the ledger) and **ignores** a pending entry whose id is already applied, so re-reading the same entry is a no-op. The API is the **only** writer of the pending file; the engine is the **only** reader/applier.
 - **Failure modes to design for:** missing file (normal — no-op); malformed JSON (no-op + log); value out of bounds (reject + log); locked param present (reject + log); clock/timing must play **no** role (state-boundary triggered, not wall-clock).
 
 ## 7. Track A CuPy benchmark plan (design level)
