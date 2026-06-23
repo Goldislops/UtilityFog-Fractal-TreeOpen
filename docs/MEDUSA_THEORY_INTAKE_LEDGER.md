@@ -205,6 +205,16 @@ Per-entry fields: **Source/thread · Claim · Status · Repo relevance · Curren
 - **Guardrails/caveats**: Do **not** model continuous Hooke's law, tensile strain, material elasticity, floating-point mechanics, or real material response. Do **not** claim Bellows invariance for Jessen's icosahedron. Do **not** treat this as proof that a CA trap can preserve identity. If promoted, define discrete invariants explicitly (candidate examples: live-cell count, bounding box, phase/orientation, period signature, re-emergence, local identity signature) and keep the result falsifiable.
 - **Linked**: `docs/FLEXIBLE_POLYHEDRA_COMPLIANT_TRAP_INTAKE.md`; entry 14 (passive geometric traps / Toy #5); entry 13 (bistable auxetic metamaterials).
 
+### 16. Pre-pivot vision archive (salvaged from stale PR #17)
+- **Source/thread**: Salvage of the 4 unique concept `.md` files from stale open PR #17 (`docs/research-and-design @ 33449a7`, 2025-09-20), surfaced by the Brick-#4 stale-PR triage and the `REPOSITORY_HEALTH_AUDIT_2026-06.md` (which flagged #17 as the one *potentially salvageable* stale PR). AURA ratified "Option A" (salvage-then-archive).
+- **Claim**: pre-pivot (Sept-2025) conceptual material — BEAM + mindful-replication design philosophy, a 5-phase "mindfulness protocol", a "replication rules engine", and Blackmore-style "meme propagation" (flood/selective/epidemic). Describes the **abandoned `fractal_tree` vision**, predating the Feb-2026 Medusa CA pivot.
+- **Status**: **speculative inspiration** (archival). Not canonical, not validated, not current architecture.
+- **Repo relevance**: Archived verbatim (banner-only edits) under [`docs/vision/`](vision/README.md) so the ideas survive PR #17's eventual closure. No current engine relevance; possible distant muse only.
+- **Current action**: Record + archive only. Dropped (not salvaged): 6 binary PDFs, `PROJECT_LOG.md`, `RESEARCH_INDEX.md`, and anything tied to the `src/fractal_tree/` implementation (#52–#58). PR #17 itself remains **open and untouched** (closure is a separate, separately-authorized action).
+- **Revisit when**: only if a specific concept here is ever proposed for promotion — then it follows the normal gate below.
+- **Guardrails/caveats**: inspiration only; nothing here is endorsed, validated, or implementation authority. Do not treat archived presence as currency.
+- **Linked**: [`docs/vision/README.md`](vision/README.md); `docs/REPOSITORY_HEALTH_AUDIT_2026-06.md` (stale-PR triage); entry 1 (emergence / local-rule intelligence).
+
 ---
 
 ## How an entry graduates out of this ledger
