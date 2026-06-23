@@ -1,6 +1,6 @@
 # Theory Sandbox — Policy + Inventory
 
-> **Status**: policy **and live inventory**. **Six toy scripts now exist across five toys** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient; Toy #5 passive "MOF" trap — **v0 latch-capture + v1 Strict-Passive release-trap**) — each **non-canonical**, each landed as its own reviewed PR. **Toy #6 (Discrete Compliant "yield-then-lock" trap) is in design-inception** — a design note only, no script (see §6b). Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
+> **Status**: policy **and live inventory**. **Six toy scripts now exist across five toys** (Toy #1 Galton/Fourier diffusion; Toy #2 stochastic-escape/annealing; Toy #3 decaying scent-trail tracking; Toy #4 Janus gradient; Toy #5 passive "MOF" trap — **v0 latch-capture + v1 Strict-Passive release-trap**) — each **non-canonical**, each landed as its own reviewed PR. **Toy #6 (Discrete Compliant "yield-then-lock" trap): lock framing analytically closed** — no script (see §6b + `TOY_06_COMPLIANT_TRAP_ADDENDUM_2.md`); confine-not-lock + encode-and-release parked as §6c candidates. Each new toy still lands only as its own small PR after its inception note is reviewed (one toy per PR; see §4 + §6).
 >
 > **What this is**: a **non-canonical proving ground** for toy explorations of ideas already recorded in `docs/MEDUSA_THEORY_INTAKE_LEDGER.md` or `docs/MATURIN_ARC_THEORY_PREFLIGHT.md` (Janus gradients, Galton/Fourier diffusion, stochastic escape, scent-trail tracking, MOST stored-strain, …).
 >
@@ -68,17 +68,19 @@ This mirrors the graduation path in the Theory Intake Ledger and the promotion g
 
 *Toy #5 trap-arc **synthesis / capstone**: [`TOY_05_SYNTHESIS.md`](TOY_05_SYNTHESIS.md) — what v0 (capture-with-transformation) and v1 (inert-wall shear) established, the capture↔identity tension, the explicit non-claims, and the gated forward queue (compliant "yield-then-lock" trap / shutter / Janus+MOF coupling).*
 
-### 6b. In design-inception (no script yet)
+### 6b. In design-inception / analytically closed (no script)
 
 | Toy | Inception doc | Explores | Status |
 |---|---|---|---|
-| **#6 Discrete Compliant / Quasi-Mechanism Trap ("yield-then-lock")** | `TOY_06_COMPLIANT_TRAP_INCEPTION.md` | Ledger entry 15 (flexible polyhedra / compliant trap) | **DESIGN / INCEPTION ONLY — no script implemented or authorized** (AURA explicitly lifted the prior "no Toy #6" guardrail for this one bounded docs-only inception). The **third trap mechanism** after Toy #5 v0 latch (over-bind/transform) and v1 freeze (under-admit/shear): can a **localized discrete rule yield under entry, then lock while preserving the target's identity signature, without a temporal shutter**? Analogy only (true-flexible Connelly/Steffen + Bellows vs "shaky" Jessen — **not** physical elasticity). Distinct from active shutter and Janus+MOF coupling. Must allow the honest negative (no passive-local compliant rule exists without collapsing into latch/freeze/shaky/shutter). **External canonical Conway glider, NOT native Medusa evidence; not real MOFs.** |
+| **#6 Discrete Compliant / Quasi-Mechanism Trap ("yield-then-lock")** | [`TOY_06_COMPLIANT_TRAP_INCEPTION.md`](TOY_06_COMPLIANT_TRAP_INCEPTION.md) + [`TOY_06_COMPLIANT_TRAP_ADDENDUM_2.md`](TOY_06_COMPLIANT_TRAP_ADDENDUM_2.md) | Ledger entry 15 (flexible polyhedra / compliant trap) | **LOCK FRAMING ANALYTICALLY CLOSED — not script-ready** (Addendum 2, AURA Option A). The "third mechanism" after v0 latch (over-bind/transform) and v1 freeze (under-admit/shear): a passive-local *yield-then-lock* rule is **not ratifiable for a Conway glider** because **glider identity *is* its motion** (no held-rest state) — every candidate U1 (age-gated / density / hysteresis) collapses into pass-through / latch / freeze-shear / shaky / active-shutter-leakage. **Bounded reasoned conclusion, NOT a universal CA impossibility theorem.** Authorizes no script. Alternatives parked in §6c. **External canonical Conway glider, NOT native Medusa evidence; not real MOFs; not physical elasticity.** |
 
 ### 6c. Other listed candidates (not yet inception)
 
 | Candidate | Explores (ledger/preflight ref) | Sketch |
 |---|---|---|
 | MOST stored-strain metaphor toy | Ledger entry 10 / preflight §7 | latent "tension" accumulate-and-release dynamics on a toy state machine — metaphor mechanics only, no chemistry claims |
+| Confine-not-lock trap | Ledger entry 15 (Toy #6 Addendum 2) | preserve a glider's identity by **bounding** its motion (reflect/contain in a "soft box") rather than stopping it — separate hypothesis; open question whether a passive rule-mask can reflect at all |
+| Encode-and-release / state-transduction trap ("stopped-light") | Ledger entry 15 (Toy #6 Addendum 2) | **transduce** an incoming glider into a stored/encoded state, then **re-emit** the original on release — distinct from "lock"; open whether a passive-local rule can encode+faithfully-decode without a clock |
 
 *(Discrete compliant / quasi-mechanism trap graduated from this list to design-inception — see §6b, `TOY_06_COMPLIANT_TRAP_INCEPTION.md`.)*
 
