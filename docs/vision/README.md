@@ -6,7 +6,7 @@
 
 ## Provenance
 - **Source PR**: #17 — *"docs: add research index, design philosophy, and algorithms seeds"* — branch `docs/research-and-design`, head `33449a7`, opened 2025-09-20 by Goldislops.
-- **Status of PR #17**: still **OPEN and untouched** by this salvage. This PR does **not** close, comment on, label, or merge #17 (or any stale PR). Closure of #17/#25/#52–#58 is a separate, separately-authorized action (see the stale-PR triage in [`REPOSITORY_HEALTH_AUDIT_2026-06.md`](REPOSITORY_HEALTH_AUDIT_2026-06.md)).
+- **Status of PR #17**: still **OPEN and untouched** by this salvage. This PR does **not** close, comment on, label, or merge #17 (or any stale PR). Closure of #17/#25/#52–#58 is a separate, separately-authorized action (see the stale-PR triage in [`REPOSITORY_HEALTH_AUDIT_2026-06.md`](../REPOSITORY_HEALTH_AUDIT_2026-06.md)).
 - **Faithfulness**: each file below is the **verbatim** PR-#17 content with **only** a provenance banner prepended (no edits to the original text).
 
 ## Salvaged files (the 4 unique concept specs)
