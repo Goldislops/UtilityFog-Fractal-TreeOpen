@@ -1,11 +1,13 @@
 # Trap Arc Capstone — The Passive Local Rule-Mask Trap Paradigm Is Exhausted (docs-only)
 
-> **Status**: durable **synthesis / capstone** of the theory-sandbox **trap arc** (Toy #5 v0, Toy #5 v1, Toy #6, and the confine-not-lock feasibility memo). **Docs-only.** Authorizes **no script, no simulation, no implementation, no engine / `uft_ca` / GPU / R3 / observer / Vanguard / Lane A work.** This is a **reasoned, bounded conclusion**, not a formal theorem.
+> **Status**: durable **synthesis / capstone** of the theory-sandbox **trap arc** (Toy #5 v0, Toy #5 v1, Toy #6, and the confine-not-lock **and** encode-and-release feasibility memos). **Docs-only.** Authorizes **no script, no simulation, no implementation, no reversible-CA work, no engine / `uft_ca` / GPU / R3 / observer / Vanguard / Lane A work.** This is a **reasoned, bounded conclusion**, not a formal theorem.
 >
 > **NON-CANONICAL.** Every result in the arc targets the **externally-canonical Conway Game-of-Life glider (B3/S23)** — **NOT** a native Medusa structure. This says **nothing** about Medusa-native gliders, Medusa dynamics, real Metal-Organic Frameworks, flexible polyhedra physics, or material elasticity. A trap that works (or fails) in here proves nothing about Medusa.
 
 ## 0. Current model seat
 Authored by **84** (`claude-opus-4-8`), desktop seat, 2026-06-23, under AURA's explicit authorization (relayed by Jack) for a **docs-only Trap Arc Capstone** following the read-only confine-not-lock feasibility memo (ratified by AURA/Jack as the final rule-mask exhaustion finding). *(Future seats: state your seat per the model-seat hygiene protocol in `AGENT_HANDOFF.md`.)*
+
+> **Addendum (2026-06-23, AURA-authorized, relayed by Jack):** §2b records the read-only **encode-and-release / state-transduction** closeout, completing the trap arc's full conceptual perimeter. Authored by **84** (`claude-opus-4-8`), desktop seat. Docs-only; authorizes nothing further.
 
 ## 1. The capstone finding
 For the externally-canonical **Conway glider (B3/S23)**, the **passive local rule-mask trap paradigm is exhausted** for **identity-preserving trapping**.
@@ -16,7 +18,9 @@ Across four independent framings — *over-bind*, *block*, *lock*, and *confine*
 
 This is the **capture↔identity tension**, now confirmed from three angles: **freeze** (Toy #5 v1), **compliance** (Toy #6), and **confinement** (feasibility memo). It is a strong convergent result, not a single data point.
 
-## 2. The four closed paths
+A fifth, **trap-adjacent** door — **encode-and-release** (don't trap the glider *as* a glider: convert it to a *stored, different* state, then reconstruct and re-emit it) — is likewise closed under the same passive-local, no-clock, rule-mask constraints (§2b). It fails on **more** independent grounds than the others, and its closure completes the arc's **full conceptual perimeter**: every passive-local way of doing anything identity-preserving to a moving glider *via bulk rule changes* — latch / freeze / lock / confine / encode-release — is now reasoned-closed.
+
+## 2. The closed paths
 
 | Path | Framing | Artifact | Outcome |
 |---|---|---|---|
@@ -24,6 +28,7 @@ This is the **capture↔identity tension**, now confirmed from three angles: **f
 | **Block / freeze** | refuse entry (inert wall) | Toy #5 v1 (`release_trap_toy.py`, sealed) | **Inert wall / shear** — 0/384 release-success; the already-closed passive door shears the glider on entry (372 identity-loss, 12 clean-annihilation; control 128/128 pass-through). |
 | **Lock / compliance** | yield-then-lock | Toy #6 (`TOY_06_COMPLIANT_TRAP_ADDENDUM_2.md`, sealed) | **Analytically collapses** — a glider's identity *is* its motion, so there is no rest state to lock-and-preserve; every candidate U1 (age-gated / density / hysteresis) collapses into pass-through / latch / freeze-shear / shaky / active-shutter-leakage. |
 | **Confine / reflection** | bound the motion (soft box) | Confine-not-lock feasibility memo (read-only; recorded durably here, §2a) | **Collapses or leaks** — a uniform local rule-mask cannot reflect/bound a glider while preserving identity; every candidate reduces to shear / annihilation / transformation / pass-through, **or** leaks into an out-of-class primitive (placed-object reflector / topology-wrap / active shutter). |
+| **Encode-and-release / transduction** | store as a *different* state, then reconstruct | Encode-and-release feasibility memo (read-only; recorded durably here, §2b) | **Collapses or leaks (on more grounds)** — a passive-local no-clock rule-mask cannot encode a glider and faithfully re-emit it; fails via decode-timing/shutter-leakage, Conway non-reversibility/information-loss, and placed-object/catalyst leakage. Degenerate no-decode case = Toy #5 v0 latch relabeled. |
 
 ### 2a. Confine-not-lock feasibility — durable record of the read-only finding
 The confine-not-lock idea was assessed **read-only** (chat-only feasibility memo, no script, no repo work) and is recorded here so the finding survives in the repo.
@@ -33,12 +38,23 @@ The confine-not-lock idea was assessed **read-only** (chat-only feasibility memo
 - **Decisive reason:** known Life glider reflectors are **placed patterns** (engineered still-lifes/oscillators acting as catalysts), **not rule masks**. A uniform per-cell rule change supplies no catalyst → no clean reflection → "needs placed object" leakage.
 - **Verdict:** collapses analytically (like lock-as-framed), or reduces to an out-of-class primitive. A reasoned assessment from known Life behavior, **not a proof**; some exotic rule-mask cannot be categorically excluded, but the weight of Life knowledge points firmly to collapse.
 
+### 2b. Encode-and-release / state-transduction feasibility — durable record of the read-only finding
+The encode-and-release ("stopped-light") idea was assessed **read-only** (chat-only feasibility memo, no script, no repo work) and is recorded here so the finding survives in the repo.
+
+- **Idea:** don't trap the glider *as* a glider. **Transduce** the incoming glider into a stored/encoded **different** state, **hold** it, then **decode** — faithfully re-emitting the original glider (same chirality, same heading) on a **locally-triggered** release, *without a clock*. The analogy is "stopped light" (store a photon's state in a medium, re-emit it) — **vocabulary only**, no optics, no physics.
+- **Verdict: collapses / leaks out of class — on MORE grounds than confine.** Three independent failure vectors, any one of which is fatal:
+  1. **Decode timing → active-shutter leakage.** "Re-emit on release" needs a trigger. Every *local* trigger is either a counter/age/threshold (a **clock in disguise** → the forbidden active shutter), or a spontaneous decay (the dynamics' **own** timeline, not on-demand). A genuinely *stable* store never triggers at all → never releases. Sharp dilemma, no passive on-demand middle.
+  2. **Non-reversibility / information loss in Conway Life.** B3/S23 is **strongly non-injective** — information is destroyed every tick (many predecessors → one successor). A rule that *loses* information generically **cannot reconstruct** the input it "stored"; faithful store-and-reconstruct is *reversible computation*, which needs a **reversible CA** (second-order / Margolus-neighborhood rules, Critters, …) — a **different rule class**, not a rule-mask over Conway, and adopting it **abandons the canonical-Conway-glider target**.
+  3. **Placed-object engineering / catalyst leakage.** Encoding a glider into a *specific* engineered carrier is a precise catalyzed reaction; a *uniform* rule-mask supplies no catalyst (same root cause as confine/reflection). Life store-then-re-emit constructions **do** exist — but only as **placed-object engineering** triggered by **other gliders / injected signals** (an external control = clock-like): the out-of-class door, never a passive-local rule-mask.
+- **Degenerate case:** if a candidate captures but **never faithfully re-emits**, "encode-and-release" has collapsed into **Toy #5 v0 latch** (capture-with-transformation) **relabeled** — the "release" never honestly happens.
+- **Note (honest):** A reasoned assessment from known CA behavior, **not a proof**. It does **not** refute reversible-CA store-and-reconstruct, placed-object memory cells, or active-shutter gating — those are *different primitive classes*, out of scope here, not disproven.
+
 ## 3. Boundary (what this capstone does and does NOT claim)
 - **Bounded to** the **canonical Conway glider (B3/S23)** target **and** the **bulk / passive-local rule-mask** framing. That is the whole scope.
 - **NOT a universal CA impossibility theorem** — it makes no claim over all cellular automata, all targets, or all rules. A different target (one with a genuine metastable rest state) or a different rule class is not covered.
 - **NOT a claim about engineered placed-object reflectors** — placed catalysts are a *different primitive*; Life reflectors built from placed patterns are well known to exist and are **out of scope** here, not refuted.
 - **NOT a claim about topology / wrap primitives** — toroidal/periodic confinement is non-local connectivity, a *different primitive*, out of scope, not refuted.
-- **NOT a claim about active-shutter or encode-and-release primitives** — timed gating and store-then-re-emit (state transduction / "stopped-light") are *different primitives*, out of scope, not refuted.
+- **The encode-and-release closeout (§2b) is bounded the same way** — it closes only the *passive-local, no-clock, rule-mask* framing of store-then-re-emit. It is **NOT a claim about** reversible-CA store-and-reconstruct, placed-object memory cells, or active-shutter / timed gating — those are *different primitive classes*, out of scope, not refuted.
 - **NOT a statement about Medusa** — external canonical glider only; non-canonical throughout.
 
 ## 4. Future queue (all parked, all UNAUTHORIZED)
@@ -47,8 +63,8 @@ Each is a **different primitive class** or a **separate hypothesis**. None is op
 - **Placed-object reflector / catalyst arc** — identity-preserving glider control via engineered placed Life patterns (the paradigm the rule-mask arc is *not*). Parked, unauthorized.
 - **Topology / wrap arc** — bounding a glider via non-local connectivity (toroidal/periodic regions). Parked, unauthorized.
 - **Active shutter / temporal-gating trap** — a timed transparent→hold→release primitive (a clock/control signal). Parked, unauthorized.
-- **Encode-and-release / state-transduction trap ("stopped-light")** — transduce the incoming glider into a stored/encoded state, then re-emit the original on release (from Kev's stopped-light / glider-potential intuition). Parked, unauthorized.
-- **Janus + MOF coupling** — a mover + a trap; premature until an identity-preserving trap exists at all. Parked, unauthorized.
+- **Encode-and-release / state-transduction ("stopped-light")** — the *passive-local rule-mask* framing is now **closed** (§2b). Only its *out-of-class* variants survive — **reversible-CA** store-and-reconstruct (a different rule class) and **placed-object** memory cells + a control signal — and those fold into the reversible-CA / placed-object / active-shutter doors rather than standing alone. Parked, unauthorized.
+- **Janus + MOF coupling** — a mover + a trap; premature until an identity-preserving trap exists at all (none does — every framing above is closed). Parked, unauthorized.
 
 ## 5. Guardrails (this capstone authorizes nothing further)
 README §4 **six-step promotion gate** applies in full. This capstone is **documentation only** and authorizes:
@@ -58,6 +74,7 @@ README §4 **six-step promotion gate** applies in full. This capstone is **docum
 - **no topology / wrap arc;**
 - **no active shutter;**
 - **no encode-and-release implementation;**
+- **no reversible-CA work;**
 - **no Janus + MOF coupling;**
 - **no engine / `uft_ca` / GPU / R3 / observer / Vanguard / Lane A / Swarm Hunter work.**
 
@@ -70,8 +87,10 @@ Any parked alternative (§4) requires its own separate inception and explicit AU
 - **Toy #6 inception** — #259 (sealed `52b1d74`): yield-then-lock framing posed.
 - **Toy #6 Addendum 2** — #260 (sealed `4c55462`): lock framing analytically closed.
 - **Confine-not-lock feasibility** — read-only memo (ratified by AURA/Jack); recorded durably in §2a above.
-- **This capstone** — closes the rule-mask trap paradigm and queues the four out-of-class arcs.
+- **This capstone** — closes the rule-mask trap paradigm and queues the out-of-class arcs.
+- **Encode-and-release feasibility** — read-only memo (ratified by AURA/Jack); recorded durably in §2b above.
+- **This addendum** (2026-06-23) — folds the encode-and-release closeout into the capstone, completing the trap arc's full conceptual perimeter (latch / freeze / lock / confine / encode-release).
 
 ---
 
-*Glass box rules apply. The latch over-binds, the wall shatters, the compliant lock asks a moving thing to be still without ceasing to move, and the soft box cannot bend a rule into a mirror. Four doors, four honest closes: a region of changed law can wall a glider out, gum it up, or let it pass — but it cannot catch and keep a thing whose identity is motion. That needs a built object, not a different rule. We close the rule-mask paradigm and leave the other doors sketched but unopened. The glider was never Medusa's to begin with.*
+*Glass box rules apply. The latch over-binds, the wall shatters, the compliant lock asks a moving thing to be still without ceasing to move, the soft box cannot bend a rule into a mirror, and the stopped-light store cannot reconstruct what a one-way rule has already forgotten. Five doors, five honest closes: a region of changed law can wall a glider out, gum it up, or let it pass — but it cannot catch and keep a thing whose identity is motion, nor remember it once the rule has thrown the memory away. That needs a built object, or a different law, not a mask over this one. We close the rule-mask paradigm and leave the other doors sketched but unopened. The glider was never Medusa's to begin with.*
