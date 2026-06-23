@@ -67,7 +67,7 @@ Any parked alternative (§4) requires its own separate inception and explicit AU
 - **Toy #5 v0 latch** — inception #252 + stats erratum #253 + script #254 (sealed `207f4a9`): over-bind / capture-with-transformation.
 - **Toy #5 v1 Strict-Passive freeze** — inception #255 + script #256 (sealed `b0f7022`): inert wall / shear, 0/384 release-success.
 - **Toy #5 synthesis** — #258 (sealed `45a410d`): capture↔identity tension named.
-- **Toy #6 inception** — #259 (sealed `0cd5d1e`): yield-then-lock framing posed.
+- **Toy #6 inception** — #259 (sealed `52b1d74`): yield-then-lock framing posed.
 - **Toy #6 Addendum 2** — #260 (sealed `4c55462`): lock framing analytically closed.
 - **Confine-not-lock feasibility** — read-only memo (ratified by AURA/Jack); recorded durably in §2a above.
 - **This capstone** — closes the rule-mask trap paradigm and queues the four out-of-class arcs.
