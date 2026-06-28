@@ -2,21 +2,31 @@
 
 > **For**: Any AI (Claude, Gemini/AURA, GPT/Jack, future Nemo Claw, etc.) joining this project mid-stream. Read this first; it'll save Kevin from having to re-explain everything every time.
 >
-> **Last revised**: 2026-06-23 (`main = b2883f5`). State is point-in-time — `git log --oneline -20` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
+> **Last revised**: 2026-06-28 (`main = d342c14`). State is point-in-time — `git log --oneline -20` is authoritative for repo state; snapshot state requires a numeric/date-aware listing (plain `ls … | tail` mis-sorts lexically, e.g. `gen9…` after `gen1…`) and may differ between local `data/` and the backup.
 
-## ⭐ Latest State (2026-06-23, `main = b2883f5`) — read this first
+## ⭐ Latest State (2026-06-28, `main = d342c14`) — read this first
 
-**Current-state snapshot. The Phase 19 block below remains accurate as the active work-phase narrative; this block supersedes any older "next work" / theory-sandbox pointers further down.** Authoritative state = `git log --oneline -20`.
+**Current-state snapshot. The Phase 19 block below remains the active work-phase narrative; this block supersedes older "next work" pointers. Authoritative state = `git log --oneline -20`.**
 
-- **Repo:** `main = b2883f5` (PR #263; trap-arc work sealed through PR #262). Tracked tree clean (only untracked `__pycache__` / `data/*.json` telemetry, never staged).
-- **Theory Sandbox — trap arc COMPLETE.** Toys **#1–#5** landed as scripts (six scripts: Toy #5 has v0 + v1), and **#6** was **analytically closed (no script)**; the **passive-local rule-mask trap paradigm is durably closed** across its full conceptual perimeter — over-bind/latch (#5 v0, capture-with-transformation), block/freeze (#5 v1, inert-wall shear), lock/compliance (#6, analytically collapses), confine/reflection, and encode-release — recorded in `experiments/theory_sandbox/TRAP_ARC_CAPSTONE.md` (capstone #261 + encode-release addendum #262). Bounded to the canonical Conway glider + rule-mask framing; **not** a universal CA theorem. The sandbox is **resting at a clean checkpoint**; all future doors (placed-object reflector, topology/wrap, active shutter, reversible-CA, Janus+MOF coupling) are **parked + unauthorized**. See `experiments/theory_sandbox/README.md`.
-- **Lane A / Swarm Hunter — PARKED** (standing guardrail, unchanged). No engine consumer acts on observer signals; Swarm Hunter is unimplemented (candidate guardrails only — intake-ledger entries 2 & 4, Maturin preflight §2).
-- **Task A = "PR 2b + Track A engine-restart bundle"** — the engine-side **consumer of `tuning_pending.json`** (would land in `continuous_evolution_ca.py`) **+ Track A 5-stream CuPy parallelism**, bundled into **one coordinated Medusa pause/restart**. This is **engine surgery — HIGH RISK, NOT started, UNAUTHORIZED.** No rush while Medusa bakes; a **Lane A Readiness Review (docs-only)** should precede it — see `docs/LANE_A_READINESS_REVIEW.md` (preconditions / snapshot+rollback / consumer spec / benchmark plan; authorizes nothing).
-- **Lane B / Nextness Observer — distinct from Lane A; already BUILT & CALIBRATED.** Passive, read-only (`scripts/nextness_observer.py` + `scripts/nextness_calibration.py`); second-pass calibration merged (#159→#164). Do **not** conflate Lane B (touches no engine, low risk) with Lane A (engine surgery, parked).
-- **Vanguard:** code present (`crates/vanguard-mcp/`, Phase 13/16c); **live-cluster provisioning UNVERIFIED** (cluster nodes lack Python/Ray/SSH per Phase 17b). Coordinate before assuming it is production-live.
-- **AURORA / Granite (clarification, to stop label drift):** **"Aurora" = a local Alienware Aurora desktop (RTX 4090)** used as an **Ollama host — it is NOT a model.** **"Granite" = IBM Granite 4** models run locally via Ollama. The orchestrator↔Ollama **smoke test (`LOCAL_OLLAMA_SMOKE_TEST.md`) is a documented PLAN; its execution/success is UNVERIFIED** in-repo. Make **no AURORA/Granite assumptions without evidence**.
-- **Board hygiene:** the **9 open PRs dated Sept 2025** (#17, #25, #52–#58) are **stale board noise**, not active work — pending a triage/close decision, not part of any current arc.
-- **Engine:** Medusa bakes at **256³, Phase 17a (Magnon Amplification)**, gen **~1.5M+** *(last recorded in a 2026-04-20 doc; not live-verified here)*. **Do not pause/restart for routine work.**
+- **Repo:** `main = d342c14` (PR #265). Since the prior handoff (`b2883f5`): **#263** AGENT_HANDOFF state-reconciliation refresh, **#264** Lane A Readiness Review (docs-only, planning), **#265** PR-#17 vision salvage (4 pre-pivot concept specs, Option A). Tracked tree clean. *84-reported (2026-06-28; grows over time):* ~52,000 untracked **non-ignored** files (`crates/*/target` Rust builds, `data/` snapshots + telemetry, `__pycache__`) — a `.gitignore`-coverage question, **not actioned** (mass-deletion is risky — `data/` is precious; treat as a separate gated decision).
+
+- **Ignition/Cascade investigation (NEW, June 2026) — read-only, OPS-DIR, PROVISIONAL, NOT in the repo.** A multi-day **read-only** analysis of git-ignored `data/` snapshots (no engine, no repo mutation, all outputs under `C:\Users\kevin\medusa_backup\`) reached a **Jack-reviewed provisional** characterization of the late COMPUTE ignition as **emergent lattice-scale phase behavior** — everywhere-at-once, *not* a resolved center-out wave, **within snapshot resolution**. The non-void front predates the sampled window; an anisotropy caveat (mild radial gradient: center-bias vs cube-boundary depletion) is **parked**. **Nothing is canonical**; artifacts + full caveats live **outside the repo**. *(Governance ≠ evidence; do not promote into repo docs as established. Lock-in→expansion = correlation/hypothesis only. External media = analogy only, never evidence.)*
+
+- **Warm backup (NEW).** `data/` snapshots are mirrored off-OneDrive to a warm backup (UNC `\\192.168.86.50\data\medusa_data_backup\data` + `K:`), with a nightly task. *84-reported:* ~13,627 npz / ~577 GB, newest ≈ gen 1,896,023 (2026-06-26). `data/` is **not** the only copy.
+
+- **Governance — M'WE Constitution v1 (NEW, external).** Project process follows the **M'WE Constitution** (ratified 2026-06-27), an **external** charter at `C:\Users\kevin\medusa_backup\mwe_constitution_v1.md` (kept out of the repo by design). Authorization lanes: *small / sizable-no-code / existing-output read / helper-script / read-only snapshot pass / engine·replay·intervention / repo-mutation·PR / canonical-claim* — each more gated than the last. **Glass Wall:** Medusa-generated artifacts are the only Medusa evidence lane; external media may shape vocabulary/questions/analogies, **never** Medusa evidentiary weight *(unless separately cited as external scholarship — see Constitution Law 8)*.
+
+- **Theory Sandbox — trap arc COMPLETE** (unchanged). Toys #1–#5 as scripts, #6 analytically closed; passive-local rule-mask trap paradigm durably closed. `experiments/theory_sandbox/TRAP_ARC_CAPSTONE.md`. Resting at a clean checkpoint; all future doors parked + unauthorized.
+
+- **Lane A / Swarm Hunter — PARKED** (standing guardrail). No engine consumer acts on observer signals; Swarm Hunter unimplemented. **Task A** (engine consumer of `tuning_pending.json` + Track A CuPy parallelism) = engine surgery, HIGH RISK, **NOT started, UNAUTHORIZED**; `docs/LANE_A_READINESS_REVIEW.md` precedes it (authorizes nothing).
+
+- **Lane B / Nextness Observer — BUILT & CALIBRATED** (unchanged). Passive, read-only; do not conflate with Lane A.
+
+- **Vanguard / AURORA / Granite** (unchanged): code present, live-cluster provisioning **UNVERIFIED**; "Aurora" = an Alienware desktop Ollama host (not a model); "Granite" = IBM Granite 4 via Ollama; smoke test is a documented PLAN, execution UNVERIFIED. Make no assumptions without evidence.
+
+- **Board hygiene:** PR **#17** content salvaged via #265. Remaining Sept-2025 stale PRs (#25, #52–#58) — *84-reported as still open/triage-pending; re-check `gh pr list` before acting.*
+
+- **Engine:** Medusa bakes at **256³**. *84-reported (not live-verified):* newest backup snapshot = gen **~1,896,023** (2026-06-26). **Do not pause/restart for routine work.**
 
 ## ⭐ Current Phase — Phase 19 (Nextness Observer + Second-Pass Calibration)
 
