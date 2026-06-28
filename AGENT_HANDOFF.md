@@ -2,7 +2,7 @@
 
 > **For**: Any AI (Claude, Gemini/AURA, GPT/Jack, future Nemo Claw, etc.) joining this project mid-stream. Read this first; it'll save Kevin from having to re-explain everything every time.
 >
-> **Last revised**: 2026-06-28 (`main = d342c14`). State is point-in-time — `git log --oneline -20` and `ls data/v070_gen*.npz | tail` are authoritative for current state.
+> **Last revised**: 2026-06-28 (`main = d342c14`). State is point-in-time — `git log --oneline -20` is authoritative for repo state; snapshot state requires a numeric/date-aware listing (plain `ls … | tail` mis-sorts lexically, e.g. `gen9…` after `gen1…`) and may differ between local `data/` and the backup.
 
 ## ⭐ Latest State (2026-06-28, `main = d342c14`) — read this first
 
