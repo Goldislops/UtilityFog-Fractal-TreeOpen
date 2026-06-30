@@ -65,3 +65,9 @@ tmp/
 temp/
 # Theory sandbox outputs (experiments are non-canonical; outputs never committed)
 experiments/theory_sandbox/out/
+
+# --- Rust build artifacts ---
+crates/*/target/
+# --- Python bytecode caches ---
+__pycache__/
+*.pyc
