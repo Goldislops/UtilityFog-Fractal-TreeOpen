@@ -84,3 +84,8 @@ data/observatory_*.html
 data/observatory_*.png
 data/geometry/
 data/voxel_slices/
+
+# --- regenerable epigenetic-snapshot genome export (derived from an npz; preserved in warm backup) ---
+# ~11.5 MB base64-encoded lattice+memory state; reconstructable via scripts/portable_genome.py.
+# Targeted (*_epi.genome.json) so the curated base genome organism_*.genome.json stays tracked/visible.
+data/*_epi.genome.json
