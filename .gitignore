@@ -71,3 +71,16 @@ crates/*/target/
 # --- Python bytecode caches ---
 __pycache__/
 *.pyc
+
+# --- data/ runtime-generated output (snapshots, telemetry, exports, renders) ---
+# kept on disk + warm backup, never committed. Deliberately granular to preserve the
+# curated files tracked/visible in data/ (viewers, QR, genomes) — see Packet B notes.
+data/*.npz
+data/telemetry_*.json
+data/*.stl
+data/*.csv
+data/*.glb
+data/observatory_*.html
+data/observatory_*.png
+data/geometry/
+data/voxel_slices/
