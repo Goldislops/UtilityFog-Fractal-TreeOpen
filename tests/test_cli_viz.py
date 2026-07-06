@@ -214,7 +214,7 @@ class TestExporters:
         assert success
         assert output_file.exists()
         
-        content = output_file.read_text()
+        content = output_file.read_text(encoding='utf-8')
         assert "<!DOCTYPE html>" in content
         assert "UtilityFog Fractal Tree Visualization" in content
         assert "Test Node" in content
@@ -229,7 +229,7 @@ class TestExporters:
         assert success
         assert output_file.exists()
         
-        content = output_file.read_text()
+        content = output_file.read_text(encoding='utf-8')
         assert "<svg" in content
         assert "width=\"400\"" in content
         assert "height=\"300\"" in content
@@ -244,7 +244,7 @@ class TestExporters:
         assert success
         assert output_file.exists()
         
-        content = output_file.read_text()
+        content = output_file.read_text(encoding='utf-8')
         assert "UTILITYFOG FRACTAL TREE VISUALIZATION REPORT" in content
         assert "TREE STRUCTURE" in content
         assert "MESSAGE FLOWS" in content
@@ -259,7 +259,7 @@ class TestExporters:
         assert success
         assert output_file.exists()
         
-        with open(output_file) as f:
+        with open(output_file, encoding='utf-8') as f:
             data = json.load(f)
         
         assert "timestamp" in data
