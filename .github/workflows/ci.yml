@@ -70,12 +70,12 @@ jobs:
   # auto-passing without running anything. This job runs the maintained
   # Python suites so a real regression fails the build visibly.
   #
-  # Scope note: targets the two maintained nextness suites explicitly rather
-  # than bare `pytest`, because several pre-existing modules fail at
-  # collection (uft_ca / utilityfog_frontend.cli_viz imports, root-level
-  # *_test.py scripts) — tracked separately. These two files are exactly the
-  # suite verified locally for PRs #160–#164 (275 tests). Broadening coverage
-  # (fixing or excluding the broken collectors) is a follow-up under #165.
+  # Scope note: gates the full tests/ suite (pytest.ini scopes collection to
+  # tests/ and keeps the root-level legacy *_test.py scripts out). The uft_ca
+  # pyo3 extension is built below so its suites run instead of self-skipping
+  # (#165 skip-conversion + #180). Historical: this job originally targeted
+  # only the two maintained nextness suites (the set verified for
+  # PRs #160–#164) while the broken collectors were being fixed under #165.
   verify-python:
     runs-on: ubuntu-latest
     steps:
