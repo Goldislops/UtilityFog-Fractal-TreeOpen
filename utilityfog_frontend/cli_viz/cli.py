@@ -115,7 +115,7 @@ Examples:
     def load_data(self, input_file: str) -> bool:
         """Load visualization data from JSON file."""
         try:
-            with open(input_file, 'r') as f:
+            with open(input_file, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
             
             # Load nodes
@@ -304,7 +304,7 @@ Examples:
         demo_data = self._generate_demo_data(args.nodes, args.messages, args.transitions)
         
         try:
-            with open(args.output, 'w') as f:
+            with open(args.output, 'w', encoding='utf-8') as f:
                 json.dump(demo_data, f, indent=2)
             
             print(f"Generated demo data with {args.nodes} nodes, {args.messages} messages, {args.transitions} transitions")

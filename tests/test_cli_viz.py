@@ -331,7 +331,7 @@ class TestCLI:
         }
         
         json_file = tmp_path / "sample.json"
-        with open(json_file, 'w') as f:
+        with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(data, f)
         
         return str(json_file)
@@ -412,7 +412,7 @@ class TestCLI:
         assert output_file.exists()
         
         # Verify generated data
-        with open(output_file) as f:
+        with open(output_file, encoding='utf-8') as f:
             data = json.load(f)
         
         assert len(data['nodes']) == 5
