@@ -201,9 +201,14 @@ class ParallelTempering:
 
     def exchange_step(self, step: int, even: bool) -> int:
         accepted = 0
+        # Pair ladder neighbors by CURRENT beta, not list position:
+        # accepted swaps migrate betas between replicas, so list order
+        # stops matching the temperature ladder after the first swap.
+        order = sorted(range(len(self.replicas)),
+                       key=lambda idx: self.replicas[idx].beta)
         start = 0 if even else 1
-        for k in range(start, len(self.replicas) - 1, 2):
-            if self.attempt_swap(k, k + 1):
+        for k in range(start, len(order) - 1, 2):
+            if self.attempt_swap(order[k], order[k + 1]):
                 accepted += 1
         return accepted
 
