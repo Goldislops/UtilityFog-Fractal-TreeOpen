@@ -68,7 +68,7 @@ class PrometheusAdapter(MetricsExporter):
             prometheus_text = self._generate_prometheus_text(exported_metrics)
 
             if self.output_file:
-                with open(self.output_file, "w") as f:
+                with open(self.output_file, "w", encoding="utf-8") as f:
                     f.write(prometheus_text)
             else:
                 # Log the metrics (in production, this would be served via HTTP)
@@ -169,7 +169,7 @@ class JSONExporter(MetricsExporter):
             snapshot = collector.get_snapshot()
 
             if self.output_file:
-                with open(self.output_file, "w") as f:
+                with open(self.output_file, "w", encoding="utf-8") as f:
                     if self.pretty:
                         json.dump(snapshot, f, indent=2)
                     else:
