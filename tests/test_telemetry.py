@@ -255,7 +255,7 @@ class TestExporters:
 
         # Check that file was created and contains expected content
         assert output_file.exists()
-        content = output_file.read_text()
+        content = output_file.read_text(encoding="utf-8")
 
         assert "# HELP test_counter Test counter" in content
         assert "# TYPE test_counter counter" in content
@@ -280,7 +280,7 @@ class TestExporters:
         # Parse and validate JSON content
         import json
 
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             data = json.load(f)
 
         assert "timestamp" in data
