@@ -142,6 +142,10 @@ async def get_simulation_results(run_id: str):
             "timestamp": time.time()
         }
         
+    except HTTPException:
+        # Let the intended 404 (and any other HTTPException) through instead
+        # of remapping it to a 500 below.
+        raise
     except Exception as e:
         logger.error(f"Failed to get results for {run_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get results: {str(e)}")
