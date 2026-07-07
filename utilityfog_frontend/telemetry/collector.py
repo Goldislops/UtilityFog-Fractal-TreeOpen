@@ -306,7 +306,9 @@ def setup_coordination_hooks(collector: TelemetryCollector) -> None:
     )
 
     def on_coordination_message(message_data):
-        collector.record_event("coordination_message", message_data)
+        # Hooks REACT to an already-recorded event; re-recording the same
+        # event name here re-triggers this hook and recurses until
+        # RecursionError (silently swallowed by _trigger_hooks).
         if "coordination_messages_total" in collector._metrics:
             collector._metrics["coordination_messages_total"].increment()
 
@@ -325,12 +327,10 @@ def setup_messaging_hooks(collector: TelemetryCollector) -> None:
     )
 
     def on_message_sent(message_data):
-        collector.record_event("message_sent", message_data)
         if "messages_sent_total" in collector._metrics:
             collector._metrics["messages_sent_total"].increment()
 
     def on_message_received(message_data):
-        collector.record_event("message_received", message_data)
         if "messages_received_total" in collector._metrics:
             collector._metrics["messages_received_total"].increment()
 
@@ -352,13 +352,16 @@ def setup_health_hooks(collector: TelemetryCollector) -> None:
     )
 
     def on_health_check(health_data):
-        collector.record_event("health_check", health_data)
         if "health_checks_total" in collector._metrics:
             collector._metrics["health_checks_total"].increment()
 
+        # Hooks receive the TelemetryEvent; the status dict is its value.
+        payload = getattr(health_data, "value", health_data)
+        if not isinstance(payload, dict):
+            payload = {}
         # Map health status to numeric value
         status_map = {"UNKNOWN": 0, "HEALTHY": 1, "DEGRADED": 2, "UNHEALTHY": 3}
-        status_value = status_map.get(health_data.get("status", "UNKNOWN"), 0)
+        status_value = status_map.get(payload.get("status", "UNKNOWN"), 0)
         if "health_status" in collector._metrics:
             collector._metrics["health_status"].set(status_value)
 
