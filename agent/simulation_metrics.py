@@ -216,7 +216,9 @@ class SimulationMetrics:
         total_collected = 0
         
         try:
-            for collector, source_name in zip(self.collectors, self.collector_source_names):
+            for collector, source_name in zip(
+                self.collectors, self.collector_source_names, strict=True
+            ):
                 entities = self.entity_sources.get(source_name, [])
                 
                 collected_metrics = collector.collect_metrics(entities, timestamp)
