@@ -19,7 +19,6 @@ import csv
 from collections import defaultdict, deque
 from abc import ABC, abstractmethod
 import numpy as np
-import pandas as pd
 
 from .meme_structure import Meme, MemeType
 from .foglet_agent import FogletAgent, AgentState
