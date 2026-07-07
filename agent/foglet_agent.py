@@ -262,14 +262,16 @@ class FogletAgent:
             return False
         
         # Check for conflicts with existing memes
-        for existing_meme in self.active_memes.values():
+        for existing_key, existing_meme in list(self.active_memes.items()):
             if existing_meme.meme_type == meme.meme_type:
                 # Competition between memes of same type
                 if existing_meme.genes.dominance > meme.genes.dominance:
                     return False
                 else:
-                    # Replace weaker meme
-                    del self.active_memes[existing_meme.meme_id]
+                    # Replace weaker meme. Delete by dict key: stored copies
+                    # carry a regenerated meme_id (Meme.copy() assigns a new
+                    # uuid), so existing_meme.meme_id is never the key.
+                    del self.active_memes[existing_key]
                     break
         
         # Successful infection
