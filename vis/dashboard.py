@@ -24,7 +24,9 @@ def dashboard(history, coords=None, states=None, title="Utility Fog Dashboard",
               save_path=None, figsize=(16, 10), dpi=150, slice_axis="z",
               slice_level=None):
     arr = to_numpy(history)
-    has_spatial = coords is not None and states is not None
+    has_spatial = (
+        coords is not None and states is not None and len(coords) > 0
+    )
 
     if has_spatial:
         fig = plt.figure(figsize=figsize)

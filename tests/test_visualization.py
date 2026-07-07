@@ -392,3 +392,33 @@ class TestStateNames:
 
     def test_state_names_count(self):
         assert len(STATE_NAMES) == 5
+
+class TestVisEdgeCases:
+    """Edge-case guards surfaced by the defect hunt (parent-seat confirmed)."""
+
+    def test_to_numpy_none_returns_empty(self):
+        # Regression-of-the-regression: the ndarray fix replaced truthiness
+        # with len(), which broke the old None-returns-empty contract.
+        arr = to_numpy(None)
+        assert arr.shape == (0, 5)
+
+    def test_to_numpy_accepts_ndarray_input(self):
+        # Regression: `if not history:` raised ValueError (ambiguous truth)
+        # for multi-row ndarray input.
+        arr = to_numpy(np.asarray(SAMPLE_FLAT))
+        assert arr.shape == (5, 5)
+
+    def test_dashboard_handles_empty_spatial_lists(self):
+        # Regression: has_spatial checked None-ness only, so coords=[] hit
+        # `coords_arr[:, ax_idx]` on a 1-D empty array -> IndexError.
+        fig = dashboard(SAMPLE_FLAT, coords=[], states=[])
+        plt.close("all")
+
+    def test_spatial_slice_fallback_title_reports_plotted_level(self):
+        # Regression: the no-match fallback plotted nodes around closest_val
+        # but titled the figure with the originally requested level.
+        coords = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+        states = [1, 2]
+        fig, ax = plot_spatial_slice(coords, states, axis="z", level=5.0)
+        assert "Z=1.000" in ax.get_title()
+        plt.close("all")
