@@ -7,6 +7,7 @@ Provides ObservatorySnapshot (frozen dataclass) consumed by all rendering module
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -142,6 +143,24 @@ def load_snapshot(path: str | Path) -> ObservatorySnapshot:
         raise ValueError(f"Unknown file format: {path.suffix}. Expected .npz or .json")
 
 
+_DIGIT_RUNS = re.compile(r"(\d+)")
+
+
+def _natural_key(path: Path):
+    """Numeric-aware filename key: gen9 sorts before gen10.
+
+    Plain lexicographic sorting breaks chronological order across digit-width
+    boundaries (the AGENT_HANDOFF snapshot-listing caveat, applied here).
+    """
+    return (
+        [
+            (0, int(token)) if token.isdigit() else (1, token)
+            for token in _DIGIT_RUNS.split(path.name)
+        ],
+        path.name,
+    )
+
+
 def load_snapshot_series(
     directory: str | Path,
     pattern: str = "v070_*.npz",
@@ -153,7 +172,7 @@ def load_snapshot_series(
     chronological order.
     """
     directory = Path(directory)
-    files = sorted(directory.glob(pattern))
+    files = sorted(directory.glob(pattern), key=_natural_key)
     if max_count is not None:
         files = files[:max_count]
     if not files:
