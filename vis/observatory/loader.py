@@ -152,10 +152,13 @@ def _natural_key(path: Path):
     Plain lexicographic sorting breaks chronological order across digit-width
     boundaries (the AGENT_HANDOFF snapshot-listing caveat, applied here).
     """
-    return [
-        (0, int(token)) if token.isdigit() else (1, token)
-        for token in _DIGIT_RUNS.split(Path(path).name)
-    ]
+    return (
+        [
+            (0, int(token)) if token.isdigit() else (1, token)
+            for token in _DIGIT_RUNS.split(path.name)
+        ],
+        path.name,
+    )
 
 
 def load_snapshot_series(
