@@ -510,6 +510,10 @@ class TestExporterEscaping:
         # benign 'A<B' corrupted the document.
         data = VisualizationData()
         data.add_node(TreeNode("node1", "<script>alert(1)</script>", NodeState.ACTIVE))
+        data.add_transition(StateTransition(
+            "node1", NodeState.ACTIVE, NodeState.ERROR,
+            trigger="<img src=x onerror=alert(2)>",
+        ))
         output_file = tmp_path / "report.html"
 
         assert HTMLExporter().export(data, str(output_file))
@@ -517,6 +521,8 @@ class TestExporterEscaping:
         content = output_file.read_text(encoding="utf-8")
         assert "<script>alert(1)</script>" not in content
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
+        assert "<img src=x onerror=alert(2)>" not in content
+        assert "&lt;img src=x onerror=alert(2)&gt;" in content
 
     def test_svg_export_is_well_formed_with_special_chars(self, tmp_path):
         # Regression: unescaped '&'/'<' in node names produced SVG that no

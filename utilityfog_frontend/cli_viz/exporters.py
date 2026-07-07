@@ -221,7 +221,7 @@ class HTMLExporter(BaseExporter):
             html.append(f"    <span class='state {to_class}'>{trans.to_state.value}</span>")
             html.append("  </div>")
             if trans.trigger != "unknown":
-                html.append(f"  <div class='trigger'>Trigger: {trans.trigger}</div>")
+                html.append(f"  <div class='trigger'>Trigger: {_escape(str(trans.trigger))}</div>")
             html.append("</div>")
         
         html.append("</div>")
