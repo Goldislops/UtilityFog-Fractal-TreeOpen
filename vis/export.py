@@ -18,7 +18,7 @@ def to_numpy(history):
 
 def to_csv(history, path, header=True):
     arr = to_numpy(history)
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if header:
             writer.writerow(["step"] + STATE_NAMES)
