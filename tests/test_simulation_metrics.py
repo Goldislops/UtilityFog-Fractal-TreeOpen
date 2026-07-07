@@ -2,7 +2,15 @@
 
 import sys
 from pathlib import Path
+
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# simulation_metrics imports the agent package family (network_topology needs
+# networkx), which is not part of CI's dependency set. Self-skip like the
+# other optional-dep suites (#165 Tier 1 pattern).
+pytest.importorskip("networkx")
 
 from agent.simulation_metrics import MetricCollector, SimulationMetrics
 
