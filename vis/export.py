@@ -6,7 +6,7 @@ STATE_NAMES = ["void", "structural", "compute", "energy", "sensor"]
 
 
 def to_numpy(history):
-    if not history:
+    if len(history) == 0:
         return np.empty((0, 5), dtype=np.uint64)
     if isinstance(history[0], dict):
         rows = []

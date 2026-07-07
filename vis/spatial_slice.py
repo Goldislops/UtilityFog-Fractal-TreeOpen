@@ -54,6 +54,8 @@ def plot_spatial_slice(coords, states, axis="z", level=None, tolerance=None,
     if not np.any(mask):
         closest_idx = np.argmin(np.abs(slice_vals - level))
         closest_val = slice_vals[closest_idx]
+        # Keep the reported level honest: we plot around closest_val.
+        level = closest_val
         mask = np.abs(slice_vals - closest_val) <= tolerance
 
     slice_coords = coords[mask]
