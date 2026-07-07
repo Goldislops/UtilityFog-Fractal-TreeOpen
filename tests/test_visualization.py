@@ -105,7 +105,7 @@ class TestExportCSV:
             path = f.name
         try:
             to_csv(SAMPLE_FLAT, path)
-            with open(path, encoding="utf-8") as f:
+            with open(path, newline="", encoding="utf-8") as f:
                 reader = csv.reader(f)
                 header = next(reader)
             assert header == ["step", "void", "structural", "compute", "energy", "sensor"]
@@ -139,7 +139,7 @@ class TestExportCSV:
             path = f.name
         try:
             to_csv(SAMPLE_FLAT, path)
-            with open(path, encoding="utf-8") as f:
+            with open(path, newline="", encoding="utf-8") as f:
                 reader = csv.reader(f)
                 next(reader)
                 first_row = next(reader)
