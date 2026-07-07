@@ -120,7 +120,10 @@ def observatory_dashboard(
     sig_vol = snapshot.channel(SIGNAL_FIELD_CHANNEL).copy().astype(float)
     sig_vol[snapshot.lattice == VOID] = np.nan
     sig_z = sig_vol[:, :, mid_z]
-    vmax_sig = max(abs(np.nanmin(sig_z)), abs(np.nanmax(sig_z)), 0.01)
+    if np.all(np.isnan(sig_z)):
+        vmax_sig = 0.01
+    else:
+        vmax_sig = max(abs(np.nanmin(sig_z)), abs(np.nanmax(sig_z)), 0.01)
     norm_sig = TwoSlopeNorm(vmin=-vmax_sig, vcenter=0, vmax=vmax_sig)
     # Base: lattice states
     ax_sig.imshow(lattice_z.T, origin="lower", cmap=cmap, vmin=0, vmax=4,
