@@ -309,7 +309,11 @@ def format_remote_polaroid(result: GrokkingRunResult) -> str:
 
     n_hist = len(result.energy_history)
     sample_points = [0, n_hist // 4, n_hist // 2, 3 * n_hist // 4, n_hist - 1]
-    sample_points = sorted(set(max(0, min(p, n_hist - 1)) for p in sample_points))
+    if n_hist:
+        sample_points = sorted(set(max(0, min(p, n_hist - 1)) for p in sample_points))
+    else:
+        # Empty history: the clamp would yield index 0 into an empty list.
+        sample_points = []
     lines.append("  --- Convergence Trace ---")
     lines.append(f"    {'Step':>6s}  {'MinE':>10s}  {'MeanE':>10s}  {'MaxE':>10s}  {'SwapRate':>10s}")
     for idx in sample_points:
