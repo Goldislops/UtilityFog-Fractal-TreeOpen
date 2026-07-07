@@ -185,3 +185,18 @@ class TestWatchdogAlignment:
         """Verify each replica targets gpu-0 on its node (matching GPU router slot IDs)."""
         for node in ParallelTempering.NODE_MAP:
             assert node["gpu"] == "gpu-0"
+
+class TestFormatRemotePolaroidEmptyHistory:
+
+    def test_empty_energy_history_does_not_raise(self):
+        # Regression: with total_exchanges=0 the energy history is empty and
+        # the Convergence Trace sample-point clamp yielded index 0 into an
+        # empty list (IndexError at agent/ising_tempering.py:316).
+        config = IsingConfig(lattice_size=8, num_replicas=4, total_exchanges=0,
+                             sweeps_per_exchange=1, seed=0)
+        pt = ParallelTempering(config)
+        result = pt.run()
+        assert result.energy_history == []
+
+        report = format_remote_polaroid(result)
+        assert "Convergence Trace" in report
