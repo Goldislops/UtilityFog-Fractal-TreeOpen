@@ -5,6 +5,7 @@ Export functionality for visualization artifacts.
 
 import json
 import time
+from html import escape as _escape
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple
 
@@ -117,18 +118,18 @@ class HTMLExporter(BaseExporter):
         state_class = f"node-{node.state.value}"
         indent = "  " * depth
         
-        html.append(f'{indent}<div class="node {state_class}" data-node-id="{node.id}">')
+        html.append(f'{indent}<div class="node {state_class}" data-node-id="{_escape(str(node.id))}">')
         html.append(f'{indent}  <div class="node-header">')
         html.append(f'{indent}    <span class="node-state"></span>')
-        html.append(f'{indent}    <span class="node-name">{node.name}</span>')
-        html.append(f'{indent}    <span class="node-id">({node.id})</span>')
+        html.append(f'{indent}    <span class="node-name">{_escape(str(node.name))}</span>')
+        html.append(f'{indent}    <span class="node-id">({_escape(str(node.id))})</span>')
         html.append(f'{indent}  </div>')
         
         # Add metadata
         if node.metadata:
             html.append(f'{indent}  <div class="node-metadata">')
             for key, value in node.metadata.items():
-                html.append(f'{indent}    <span class="metadata-item">{key}: {value}</span>')
+                html.append(f'{indent}    <span class="metadata-item">{_escape(str(key))}: {_escape(str(value))}</span>')
             html.append(f'{indent}  </div>')
         
         # Add children
@@ -167,20 +168,20 @@ class HTMLExporter(BaseExporter):
             
             for msg in sorted(messages, key=lambda m: m.timestamp, reverse=True):
                 age = time.time() - msg.timestamp
-                status_class = f"status-{msg.status}"
+                status_class = f"status-{_escape(str(msg.status))}"
                 
                 source_name = self._get_node_name(msg.source_id, data.nodes)
                 target_name = self._get_node_name(msg.target_id, data.nodes)
                 
                 html.append(f"<div class='message-item {status_class}'>")
                 html.append("  <div class='message-flow'>")
-                html.append(f"    <span class='source'>{source_name}</span>")
+                html.append(f"    <span class='source'>{_escape(str(source_name))}</span>")
                 html.append("    <span class='arrow'>→</span>")
-                html.append(f"    <span class='target'>{target_name}</span>")
+                html.append(f"    <span class='target'>{_escape(str(target_name))}</span>")
                 html.append("  </div>")
                 html.append("  <div class='message-meta'>")
                 html.append(f"    <span class='age'>{age:.1f}s ago</span>")
-                html.append(f"    <span class='status'>{msg.status}</span>")
+                html.append(f"    <span class='status'>{_escape(str(msg.status))}</span>")
                 html.append("  </div>")
                 html.append("</div>")
             
@@ -211,7 +212,7 @@ class HTMLExporter(BaseExporter):
             
             html.append("<div class='transition-item'>")
             html.append("  <div class='transition-header'>")
-            html.append(f"    <span class='node-name'>{node_name}</span>")
+            html.append(f"    <span class='node-name'>{_escape(str(node_name))}</span>")
             html.append(f"    <span class='age'>{age:.1f}s ago</span>")
             html.append("  </div>")
             html.append("  <div class='transition-flow'>")
@@ -683,7 +684,7 @@ class SVGExporter(BaseExporter):
         
         elements = []
         elements.append(f'<circle cx="{x}" cy="{y}" r="20" fill="{color}" class="node" />')
-        elements.append(f'<text x="{x}" y="{y + 35}" text-anchor="middle" class="node-label">{node.name}</text>')
+        elements.append(f'<text x="{x}" y="{y + 35}" text-anchor="middle" class="node-label">{_escape(str(node.name))}</text>')
         
         return '\n'.join(elements)
     
