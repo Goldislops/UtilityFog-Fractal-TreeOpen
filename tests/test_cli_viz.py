@@ -500,3 +500,39 @@ class TestIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestExporterEscaping:
+    """User-supplied strings must be escaped in HTML/SVG output."""
+
+    def test_html_export_escapes_untrusted_strings(self, tmp_path):
+        # Regression: node names/ids from the input JSON were interpolated
+        # into markup verbatim, so a hostile name became live script and a
+        # benign 'A<B' corrupted the document.
+        data = VisualizationData()
+        data.add_node(TreeNode("node1", "<script>alert(1)</script>", NodeState.ACTIVE))
+        data.add_transition(StateTransition(
+            "node1", NodeState.ACTIVE, NodeState.ERROR,
+            trigger="<img src=x onerror=alert(2)>",
+        ))
+        output_file = tmp_path / "report.html"
+
+        assert HTMLExporter().export(data, str(output_file))
+
+        content = output_file.read_text(encoding="utf-8")
+        assert "<script>alert(1)</script>" not in content
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
+        assert "<img src=x onerror=alert(2)>" not in content
+        assert "&lt;img src=x onerror=alert(2)&gt;" in content
+
+    def test_svg_export_is_well_formed_with_special_chars(self, tmp_path):
+        # Regression: unescaped '&'/'<' in node names produced SVG that no
+        # XML parser or viewer would accept.
+        import xml.etree.ElementTree as ET
+
+        data = VisualizationData()
+        data.add_node(TreeNode("n1", "R&D <core>", NodeState.ACTIVE))
+        output_file = tmp_path / "graph.svg"
+
+        assert SVGExporter().export(data, str(output_file))
+
+        ET.fromstring(output_file.read_text(encoding="utf-8"))  # must parse
