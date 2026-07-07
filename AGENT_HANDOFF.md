@@ -28,7 +28,7 @@
 
 - **Vanguard / AURORA / Granite** (unchanged): code present, live-cluster provisioning **UNVERIFIED**; "Aurora" = an Alienware desktop Ollama host (not a model); "Granite" = IBM Granite 4 via Ollama; smoke test is a documented PLAN, execution UNVERIFIED. Make no assumptions without evidence.
 
-- **Board hygiene:** PR **#17** content salvaged via #265. Remaining Sept-2025 stale PRs (#25, #52–#58) — *84-reported as still open/triage-pending; re-check `gh pr list` before acting.* **Dependency surface (2026-07-07):** Dependabot version-update PRs **#272–#274** open (uft_ca `toml`/`criterion` + actions group) — observe-only, merge = Kev's gate; **Dependabot alert #10** open (LOW, `rand` via `crates/vanguard-mcp/Cargo.lock` — visible since Packet C tracked the lockfile; unremediated — vanguard-mcp has no test/CI gate to verify a bump against).
+- **Board hygiene:** PR **#17** content salvaged via #265. Remaining Sept-2025 stale PRs (#25, #52–#58) — *84-reported as still open/triage-pending; re-check `gh pr list` before acting.* **Dependency surface (2026-07-07):** Dependabot version-update PRs **#272/#273/#278** open (uft_ca `toml`/`criterion` + the actions group — #278 superseded #274 on 2026-07-07 after the #276 ci.yml merge) — observe-only, merge = Kev's gate; **Dependabot alert #10** open (LOW, `rand` via `crates/vanguard-mcp/Cargo.lock` — visible since Packet C tracked the lockfile; unremediated — vanguard-mcp has no test/CI gate to verify a bump against).
 
 - **Engine:** Medusa bakes at **256³**. *84-reported (not live-verified):* newest backup snapshot = gen **~1,896,023** (2026-06-26). **Do not pause/restart for routine work.**
 
