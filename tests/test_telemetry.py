@@ -331,3 +331,31 @@ class TestIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+class TestSystemHookRegressions:
+    """Hooks react to recorded events; they must not re-record them."""
+
+    def test_one_event_records_once_and_counts_once(self):
+        # Regression: each system hook re-recorded the event that triggered
+        # it, recursing until RecursionError (swallowed) — one real event
+        # left ~331 stored events and a ~330x-inflated counter.
+        collector = TelemetryCollector()
+        setup_messaging_hooks(collector)
+
+        collector.record_event("message_sent", {"to": "node1"})
+
+        assert len(collector.get_events()) == 1
+        sent = collector.get_metric("messages_sent_total").get_value()
+        assert sent.value == 1
+
+    def test_health_status_gauge_tracks_event_payload(self):
+        # Regression: on_health_check called .get on the TelemetryEvent
+        # object (hooks receive the event, not the raw dict); the
+        # AttributeError was swallowed and the gauge never left 0.
+        collector = TelemetryCollector()
+        setup_health_hooks(collector)
+
+        collector.record_event("health_check", {"status": "UNHEALTHY"})
+
+        gauge = collector.get_metric("health_status").get_value()
+        assert gauge.value == 3
