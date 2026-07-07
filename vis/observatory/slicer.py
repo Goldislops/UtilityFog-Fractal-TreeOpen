@@ -161,7 +161,10 @@ def slice_channel(
     # Bipolar normalization for signal_field
     cmap_name = CHANNEL_COLORMAPS.get(channel, "viridis")
     if channel == SIGNAL_FIELD_CHANNEL:
-        vmax = max(abs(np.nanmin(sl)), abs(np.nanmax(sl)), 0.01)
+        if np.all(np.isnan(sl)):
+            vmax = 0.01
+        else:
+            vmax = max(abs(np.nanmin(sl)), abs(np.nanmax(sl)), 0.01)
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
     else:
         vmin_val = np.nanmin(sl) if not np.all(np.isnan(sl)) else 0
@@ -229,7 +232,10 @@ def slice_composite(
     # Overlay: channel heatmap
     cmap_name = CHANNEL_COLORMAPS.get(overlay_channel, "viridis")
     if overlay_channel == SIGNAL_FIELD_CHANNEL:
-        vmax = max(abs(np.nanmin(ch_sl)), abs(np.nanmax(ch_sl)), 0.01)
+        if np.all(np.isnan(ch_sl)):
+            vmax = 0.01
+        else:
+            vmax = max(abs(np.nanmin(ch_sl)), abs(np.nanmax(ch_sl)), 0.01)
         norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
     else:
         vmin_val = np.nanmin(ch_sl) if not np.all(np.isnan(ch_sl)) else 0
@@ -299,7 +305,10 @@ def tri_slice(
             cmap_name = CHANNEL_COLORMAPS.get(channel, "viridis")
 
             if channel == SIGNAL_FIELD_CHANNEL:
-                vmax = max(abs(np.nanmin(sl)), abs(np.nanmax(sl)), 0.01)
+                if np.all(np.isnan(sl)):
+                    vmax = 0.01
+                else:
+                    vmax = max(abs(np.nanmin(sl)), abs(np.nanmax(sl)), 0.01)
                 norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
             else:
                 vmin_val = np.nanmin(sl) if not np.all(np.isnan(sl)) else 0

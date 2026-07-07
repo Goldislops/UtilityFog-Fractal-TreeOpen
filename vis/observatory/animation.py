@@ -113,7 +113,10 @@ def animate_slices(
 
             # Update normalization
             if overlay_channel == SIGNAL_FIELD_CHANNEL:
-                vmax = max(abs(np.nanmin(ch_sl)), abs(np.nanmax(ch_sl)), 0.01)
+                if np.all(np.isnan(ch_sl)):
+                    vmax = 0.01
+                else:
+                    vmax = max(abs(np.nanmin(ch_sl)), abs(np.nanmax(ch_sl)), 0.01)
                 im_overlay.set_norm(TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax))
             else:
                 vmin_val = np.nanmin(ch_sl) if not np.all(np.isnan(ch_sl)) else 0
