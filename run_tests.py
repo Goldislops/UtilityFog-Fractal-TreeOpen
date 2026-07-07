@@ -159,6 +159,10 @@ Examples:
             test_runner.reporter.export_results_to_csv(results, csv_filename)
         
         print(f"\n📁 Detailed results saved in: {args.output_dir}")
+        failed = [r for r in results if not r.success]
+        if failed:
+            print(f"💥 {len(failed)}/{len(results)} tests FAILED")
+            return 1
         print("🎯 Testing completed successfully!")
         
         return 0
