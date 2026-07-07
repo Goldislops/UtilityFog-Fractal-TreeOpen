@@ -359,3 +359,43 @@ class TestSystemHookRegressions:
 
         gauge = collector.get_metric("health_status").get_value()
         assert gauge.value == 3
+
+class TestPrometheusHistogramExposition:
+    """Histogram samples must follow the text exposition format."""
+
+    @pytest.mark.asyncio
+    async def test_histogram_uses_spec_sample_names(self, tmp_path):
+        # Regression: histograms were emitted as name{le=...}/{type="sum"}
+        # with no _bucket/_sum/_count suffixes and no +Inf bucket -- a
+        # format scrapers reject and histogram_quantile() cannot use.
+        collector = TelemetryCollector()
+        hist = collector.register_histogram("req_seconds", "Request duration")
+        hist.observe(0.003)
+        hist.observe(0.2)
+
+        output_file = tmp_path / "metrics.prom"
+        exporter = PrometheusAdapter(str(output_file))
+        assert await exporter.export_metrics(collector)
+
+        content = output_file.read_text(encoding="utf-8")
+        assert 'req_seconds_bucket{le="0.005"} 1' in content
+        assert 'req_seconds_bucket{le="+Inf"} 2' in content
+        assert "req_seconds_sum 0.203" in content
+        assert "req_seconds_count 2" in content
+        assert "req_seconds{le=" not in content
+        assert '{type="sum"}' not in content
+
+    @pytest.mark.asyncio
+    async def test_label_values_are_escaped(self, tmp_path):
+        collector = TelemetryCollector()
+        counter = collector.register_counter(
+            "evil_total", "c", labels={"path": 'a"b\\c'}
+        )
+        counter.increment()
+
+        output_file = tmp_path / "metrics.prom"
+        exporter = PrometheusAdapter(str(output_file))
+        assert await exporter.export_metrics(collector)
+
+        content = output_file.read_text(encoding="utf-8")
+        assert 'path="a\\"b\\\\c"' in content

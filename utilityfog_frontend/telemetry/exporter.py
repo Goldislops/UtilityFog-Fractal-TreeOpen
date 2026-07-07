@@ -123,6 +123,60 @@ class PrometheusAdapter(MetricsExporter):
             logger.error(f"Error formatting metric {name}: {e}")
             return None
 
+    @staticmethod
+    def _escape_label_value(value):
+        """Escape a label value per the Prometheus text exposition format."""
+        return (
+            str(value)
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+        )
+
+    def _format_labels(self, labels):
+        if not labels:
+            return ""
+        pairs = [
+            f'{k}="{self._escape_label_value(v)}"' for k, v in labels.items()
+        ]
+        return "{" + ",".join(pairs) + "}"
+
+    def _histogram_sample_lines(self, metric):
+        """Emit spec-compliant histogram samples: _bucket/_sum/_count + +Inf.
+
+        Histogram.observe already keeps cumulative bucket counts, and the
+        +Inf bucket equals the total observation count by definition.
+        """
+        buckets = []
+        sum_value = 0.0
+        count_value = 0
+        base_labels = {}
+        for value_data in metric.values:
+            labels = dict(value_data["labels"])
+            if "le" in labels:
+                le = labels.pop("le")
+                buckets.append((float(le), le, value_data["value"], labels))
+                base_labels = labels
+            elif labels.get("type") == "sum":
+                labels.pop("type")
+                sum_value = value_data["value"]
+                base_labels = labels
+            elif labels.get("type") == "count":
+                labels.pop("type")
+                count_value = value_data["value"]
+                base_labels = labels
+
+        lines = []
+        for _, le, bucket_count, labels in sorted(buckets, key=lambda b: b[0]):
+            labels_str = self._format_labels({**labels, "le": le})
+            lines.append(f"{metric.name}_bucket{labels_str} {bucket_count}")
+        inf_str = self._format_labels({**base_labels, "le": "+Inf"})
+        lines.append(f"{metric.name}_bucket{inf_str} {count_value}")
+        base_str = self._format_labels(base_labels)
+        lines.append(f"{metric.name}_sum{base_str} {sum_value}")
+        lines.append(f"{metric.name}_count{base_str} {count_value}")
+        return lines
+
     def _generate_prometheus_text(self, metrics: List[ExportedMetric]) -> str:
         """Generate Prometheus text format from exported metrics."""
         lines = []
@@ -135,16 +189,14 @@ class PrometheusAdapter(MetricsExporter):
             # Add TYPE line
             lines.append(f"# TYPE {metric.name} {metric.metric_type}")
 
-            # Add metric values
-            for value_data in metric.values:
-                labels_str = ""
-                if value_data["labels"]:
-                    label_pairs = [
-                        f'{k}="{v}"' for k, v in value_data["labels"].items()
-                    ]
-                    labels_str = "{" + ",".join(label_pairs) + "}"
-
-                lines.append(f"{metric.name}{labels_str} {value_data['value']}")
+            if metric.metric_type == "histogram":
+                lines.extend(self._histogram_sample_lines(metric))
+            else:
+                for value_data in metric.values:
+                    labels_str = self._format_labels(value_data["labels"])
+                    lines.append(
+                        f"{metric.name}{labels_str} {value_data['value']}"
+                    )
 
             lines.append("")  # Empty line between metrics
 
