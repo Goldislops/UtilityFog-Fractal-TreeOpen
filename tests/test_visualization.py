@@ -396,6 +396,12 @@ class TestStateNames:
 class TestVisEdgeCases:
     """Edge-case guards surfaced by the defect hunt (parent-seat confirmed)."""
 
+    def test_to_numpy_none_returns_empty(self):
+        # Regression-of-the-regression: the ndarray fix replaced truthiness
+        # with len(), which broke the old None-returns-empty contract.
+        arr = to_numpy(None)
+        assert arr.shape == (0, 5)
+
     def test_to_numpy_accepts_ndarray_input(self):
         # Regression: `if not history:` raised ValueError (ambiguous truth)
         # for multi-row ndarray input.
