@@ -9,7 +9,7 @@ import logging
 import time
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Union
 from contextlib import contextmanager
 from functools import wraps
@@ -65,7 +65,7 @@ class StructuredLogger:
         class JSONFormatter(logging.Formatter):
             def format(self, record):
                 log_entry = {
-                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                     'level': record.levelname,
                     'logger': record.name,
                     'message': record.getMessage(),
