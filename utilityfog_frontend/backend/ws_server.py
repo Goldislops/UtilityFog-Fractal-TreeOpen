@@ -105,9 +105,7 @@ ws_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mounted under "/ws" by run_server.py; the route must be "/" or the
-# effective endpoint becomes /ws/ws (mounting strips the prefix).
-@ws_app.websocket("/")
+@ws_app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, run_id: str = Query(...)):
     """WebSocket endpoint for real-time simulation data."""
     
