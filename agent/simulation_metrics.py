@@ -19,7 +19,6 @@ import csv
 from collections import defaultdict, deque
 from abc import ABC, abstractmethod
 import numpy as np
-import pandas as pd
 
 from .meme_structure import Meme, MemeType
 from .foglet_agent import FogletAgent, AgentState
@@ -179,6 +178,7 @@ class SimulationMetrics:
         self.metric_data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_data_points))
         
         self.collectors: List[MetricCollector] = []
+        self.collector_source_names: List[str] = []
         self.entity_sources: Dict[str, List[Any]] = {}
         
         self.last_collection_time: float = 0.0
@@ -200,6 +200,7 @@ class SimulationMetrics:
     def add_collector(self, collector: MetricCollector, entity_source_name: str) -> None:
         """Add a metric collector with its associated entity source."""
         self.collectors.append(collector)
+        self.collector_source_names.append(entity_source_name)
         if entity_source_name not in self.entity_sources:
             self.entity_sources[entity_source_name] = []
     
@@ -215,16 +216,16 @@ class SimulationMetrics:
         total_collected = 0
         
         try:
-            for i, collector in enumerate(self.collectors):
-                source_names = list(self.entity_sources.keys())
-                if i < len(source_names):
-                    entities = self.entity_sources[source_names[i]]
-                    
-                    collected_metrics = collector.collect_metrics(entities, timestamp)
-                    
-                    for metric_name, data_point in collected_metrics:
-                        self._store_metric_data(metric_name, data_point)
-                        total_collected += 1
+            for collector, source_name in zip(
+                self.collectors, self.collector_source_names, strict=True
+            ):
+                entities = self.entity_sources.get(source_name, [])
+                
+                collected_metrics = collector.collect_metrics(entities, timestamp)
+                
+                for metric_name, data_point in collected_metrics:
+                    self._store_metric_data(metric_name, data_point)
+                    total_collected += 1
             
             self.last_collection_time = timestamp
             self.collection_count += 1
