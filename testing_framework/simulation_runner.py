@@ -605,6 +605,11 @@ class SimulationRunner:
                         simple_a = SimpleAgent(agent_a)
                         simple_b = SimpleAgent(agent_b)
                         
+                        # Capture pre-entanglement values: the writeback below
+                        # mutates energy_level before the log dict is built.
+                        energy_a_before = agent_a.energy_level
+                        energy_b_before = agent_b.energy_level
+                        
                         # Apply quantum myelin entanglement
                         entanglement_strength = random.uniform(0.1, 0.8)
                         myelin_layer(simple_a, simple_b, entanglement_strength)
@@ -619,10 +624,10 @@ class SimulationRunner:
                             agent_b.agent_id,
                             entanglement_strength,
                             {
-                                "agent_a_state_before": agent_a.energy_level,
-                                "agent_b_state_before": agent_b.energy_level,
-                                "agent_a_state_after": simple_a.state,
-                                "agent_b_state_after": simple_b.state
+                                "agent_a_state_before": energy_a_before,
+                                "agent_b_state_before": energy_b_before,
+                                "agent_a_state_after": agent_a.energy_level,
+                                "agent_b_state_after": agent_b.energy_level
                             }
                         )
                         
