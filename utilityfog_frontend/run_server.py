@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Import our API and WebSocket apps
 from backend.api import app as api_app
-from backend.ws_server import ws_app
+from backend.ws_server import websocket_endpoint
 
 def create_combined_app():
     """Create combined FastAPI app with both API and WebSocket endpoints."""
@@ -22,8 +22,12 @@ def create_combined_app():
     # Use the API app as the main app
     main_app = api_app
     
-    # Mount the WebSocket app
-    main_app.mount("/ws", ws_app)
+    # Register the WebSocket endpoint on the parent app at the exact
+    # advertised path. A mounted sub-app cannot serve bare /ws:
+    # Mount("/ws") matches only slash-delimited children, and
+    # Starlette's trailing-slash redirect applies to HTTP, not
+    # WebSocket handshakes.
+    main_app.add_api_websocket_route("/ws", websocket_endpoint)
     
     # Add CORS middleware to main app
     main_app.add_middleware(
