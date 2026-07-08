@@ -658,6 +658,7 @@ def init_memory_grid(shape: Tuple[int, int, int]):
 def _migrate_memory_grid(memory_grid, shape: Tuple[int, int, int]):
     """Auto-migrate older memory grids to 8-channel format."""
     xp = _xp
+    memory_grid = xp.asarray(memory_grid)
     if memory_grid.shape[0] == MEMORY_CHANNELS:
         return memory_grid
     if memory_grid.shape[0] == 5:
