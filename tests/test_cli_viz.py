@@ -347,6 +347,63 @@ class TestCLI:
         assert len(cli.data.messages) == 1
         assert len(cli.data.transitions) == 1
     
+    def test_load_data_replaces_previous_state(self, cli, sample_json_file):
+        """Reloading must not accumulate messages/transitions (regression)."""
+        assert cli.load_data(sample_json_file)
+        assert cli.load_data(sample_json_file)
+
+        assert len(cli.data.nodes) == 2
+        assert len(cli.data.messages) == 1
+        assert len(cli.data.transitions) == 1
+
+    def test_load_data_failure_preserves_existing_data(self, cli, sample_json_file, tmp_path):
+        """A failed (re)load leaves previously loaded data untouched."""
+        assert cli.load_data(sample_json_file)
+        assert not cli.load_data(str(tmp_path / "missing.json"))
+
+        assert len(cli.data.nodes) == 2
+        assert len(cli.data.messages) == 1
+        assert len(cli.data.transitions) == 1
+
+    def test_demo_zero_nodes_exits_cleanly(self, cli, tmp_path, capsys):
+        """demo with --nodes 0 must fail with a message, not a traceback (regression)."""
+        args = type('Args', (), {
+            'nodes': 0,
+            'messages': 20,
+            'transitions': 15,
+            'output': str(tmp_path / "demo.json")
+        })()
+
+        assert cli.cmd_demo(args) == 1
+        assert "at least 1" in capsys.readouterr().out
+
+    def test_demo_single_node_with_messages_exits_cleanly(self, cli, tmp_path, capsys):
+        """demo with --nodes 1 and messages requested must fail cleanly, not IndexError (regression)."""
+        out_file = tmp_path / "demo.json"
+        args = type('Args', (), {
+            'nodes': 1,
+            'messages': 5,
+            'transitions': 0,
+            'output': str(out_file)
+        })()
+
+        assert cli.cmd_demo(args) == 1
+        assert "at least 2 nodes" in capsys.readouterr().out
+        assert not out_file.exists()
+
+    def test_demo_single_node_without_messages_succeeds(self, cli, tmp_path):
+        """demo with --nodes 1 and --messages 0 is valid (transitions only need one node)."""
+        out_file = tmp_path / "demo.json"
+        args = type('Args', (), {
+            'nodes': 1,
+            'messages': 0,
+            'transitions': 3,
+            'output': str(out_file)
+        })()
+
+        assert cli.cmd_demo(args) == 0
+        assert out_file.exists()
+
     def test_tree_command(self, cli, sample_json_file, capsys):
         """Test tree command."""
         args = type('Args', (), {
