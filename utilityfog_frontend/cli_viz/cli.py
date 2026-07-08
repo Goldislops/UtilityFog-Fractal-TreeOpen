@@ -113,10 +113,17 @@ Examples:
         return parser
     
     def load_data(self, input_file: str) -> bool:
-        """Load visualization data from JSON file."""
+        """Load visualization data from JSON file, replacing previously loaded data.
+
+        Built into a fresh container and swapped in only on success, so a
+        failed (re)load — e.g. the interactive 'r' key, which ignores the
+        return value — leaves existing data untouched.
+        """
         try:
             with open(input_file, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
+
+            data = VisualizationData()
             
             # Load nodes
             for node_id, node_data in json_data.get('nodes', {}).items():
@@ -130,7 +137,7 @@ Examples:
                     metadata=node_data.get('metadata', {}),
                     last_updated=node_data.get('last_updated', time.time())
                 )
-                self.data.add_node(node)
+                data.add_node(node)
             
             # Load messages
             for msg_data in json_data.get('messages', []):
@@ -144,7 +151,7 @@ Examples:
                     status=msg_data['status'],
                     metadata=msg_data.get('metadata', {})
                 )
-                self.data.add_message(message)
+                data.add_message(message)
             
             # Load transitions
             for trans_data in json_data.get('transitions', []):
@@ -156,10 +163,11 @@ Examples:
                     trigger=trans_data.get('trigger', 'unknown'),
                     metadata=trans_data.get('metadata', {})
                 )
-                self.data.add_transition(transition)
+                data.add_transition(transition)
             
             # Load metadata
-            self.data.metadata = json_data.get('metadata', {})
+            data.metadata = json_data.get('metadata', {})
+            self.data = data
             
             return True
         except Exception as e:
@@ -299,6 +307,12 @@ Examples:
     
     def cmd_demo(self, args) -> int:
         """Handle demo command."""
+        if args.nodes < 1:
+            print("Error: demo requires at least 1 node (--nodes)")
+            return 1
+        if args.nodes < 2 and args.messages > 0:
+            print("Error: generating messages requires at least 2 nodes (source and target must differ)")
+            return 1
         
         # Generate demo data
         demo_data = self._generate_demo_data(args.nodes, args.messages, args.transitions)
