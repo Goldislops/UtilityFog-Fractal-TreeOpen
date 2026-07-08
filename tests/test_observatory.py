@@ -209,6 +209,34 @@ class TestLoader:
         assert loaded.generation == snapshot.generation
         assert loaded.ca_step == snapshot.ca_step
 
+    def test_load_npz_legacy_grid_stays_numpy(self):
+        """Legacy 3-channel NPZ: the migrated grid must be NumPy even when the
+        engine helper runs on a GPU backend (ObservatorySnapshot contract)."""
+        lattice = np.zeros((16, 16, 16), dtype=np.uint8)
+        legacy = np.random.rand(3, 16, 16, 16).astype(np.float32)
+        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+            np.savez(
+                f.name,
+                lattice=lattice,
+                memory_grid=legacy,
+                generation=1,
+                ca_step=2,
+                best_fitness=0.5,
+            )
+            loaded = load_npz(f.name)
+        os.unlink(f.name)
+
+        assert isinstance(loaded.memory_grid, np.ndarray)
+        assert loaded.memory_grid.shape == (8, 16, 16, 16)
+        assert loaded.memory_grid.dtype == np.float32
+        # 3->8 channel mapping per _migrate_memory_grid: 0->0, 1->2, 2->4
+        assert np.allclose(loaded.memory_grid[0], legacy[0])
+        assert np.allclose(loaded.memory_grid[2], legacy[1])
+        assert np.allclose(loaded.memory_grid[4], legacy[2])
+        # downstream NumPy plotting path works on the migrated grid
+        masked = loaded.channel_masked(0, 0)
+        assert isinstance(masked, np.ndarray)
+
     def test_load_snapshot_autodetect_npz(self, snapshot):
         """load_snapshot() auto-detects .npz format."""
         with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
