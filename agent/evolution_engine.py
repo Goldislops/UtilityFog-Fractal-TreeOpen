@@ -197,6 +197,7 @@ class EvolutionEngine:
         self.agent_population: List[FogletAgent] = []
         self.current_generation: int = 0
         self.generation_history: List[GenerationStats] = []
+        self._run_start_index: int = 0
         self.best_individuals: List[Union[Meme, FogletAgent]] = []
         self.evolution_start_time: float = 0.0
         self.total_evaluations: int = 0
@@ -232,6 +233,7 @@ class EvolutionEngine:
         env_context = environment_context or {}
         
         self.evolution_start_time = time.time()
+        self._run_start_index = len(self.generation_history)
         generation_stats = []
         
         for generation in range(max_gens):
@@ -318,11 +320,12 @@ class EvolutionEngine:
         )
     
     def _check_convergence(self, stats: GenerationStats) -> bool:
-        """Check if the population has converged."""
-        if len(self.generation_history) < 10:
+        """Check if the population has converged (within the current evolve run)."""
+        run_history = self.generation_history[self._run_start_index:]
+        if len(run_history) < 10:
             return False
-        
-        recent_best = [s.best_fitness for s in self.generation_history[-10:]]
+
+        recent_best = [s.best_fitness for s in run_history[-10:]]
         improvement = max(recent_best) - min(recent_best)
         
         return improvement < self.parameters.convergence_threshold
