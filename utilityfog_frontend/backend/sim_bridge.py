@@ -45,8 +45,14 @@ class SimBridge:
         logger.info("🌉 SimBridge initialized")
     
     def is_running(self) -> bool:
-        """Check if simulation is currently running."""
-        return self.status == "running"
+        """Check if simulation is currently running.
+
+        True while the worker thread is alive even after a "stop": stop lets
+        the thread drain, so new starts must wait or both runs would write the
+        same shared fields (current_step/status/current_simulation).
+        """
+        thread_alive = self.simulation_thread is not None and self.simulation_thread.is_alive()
+        return thread_alive or self.status == "running"
     
     def get_status(self) -> Dict[str, Any]:
         """Get current simulation status."""
