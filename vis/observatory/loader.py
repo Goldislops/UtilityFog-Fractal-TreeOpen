@@ -81,6 +81,9 @@ def load_npz(path: str | Path) -> ObservatorySnapshot:
         try:
             from scripts.continuous_evolution_ca import _migrate_memory_grid
             memory_grid = _migrate_memory_grid(memory_grid, lattice.shape)
+            if not isinstance(memory_grid, np.ndarray):
+                # engine helper may return a GPU device array; the snapshot contract is NumPy
+                memory_grid = memory_grid.get()
         except ImportError:
             # Fallback: zero-pad to 8 channels
             old_ch = memory_grid.shape[0]
