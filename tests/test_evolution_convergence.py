@@ -12,10 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.evolution_engine import EvolutionEngine, EvolutionParameters
+from agent.evolution_engine import EvolutionEngine, EvolutionParameters, FitnessEvaluator
 
 
-class _ScriptedFitness:
+class _ScriptedFitness(FitnessEvaluator):
     """Test-driven evaluator: a flat plateau, then a steady per-generation climb."""
 
     def __init__(self):
@@ -26,6 +26,10 @@ class _ScriptedFitness:
         if not self.climbing:
             return 0.5
         return min(1.0, 0.5 + 0.05 * self.engine.current_generation)
+
+    def evaluate_agent(self, agent, environment_context):
+        # Interface contract only — this test never evolves agents.
+        return 0.0
 
 
 def test_second_run_does_not_inherit_previous_convergence_window():
