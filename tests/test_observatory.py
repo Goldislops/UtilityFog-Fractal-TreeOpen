@@ -417,8 +417,8 @@ class TestScatter3D:
 # ---------------------------------------------------------------------------
 
 class TestCLI:
-    def test_info_command(self, snapshot):
-        """Test the info CLI command."""
+    def test_info_command(self, snapshot, capsys):
+        """Test the info CLI command actually reports the snapshot's metadata."""
         with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
             np.savez(
                 f.name,
@@ -431,6 +431,12 @@ class TestCLI:
             from vis.observatory.cli import main
             main(["info", f.name])
         os.unlink(f.name)
+
+        out = capsys.readouterr().out
+        assert f"Generation: {snapshot.generation:,}" in out
+        assert f"CA Step:    {snapshot.ca_step:,}" in out
+        assert f"Fitness:    {snapshot.best_fitness:.4f}" in out
+        assert f"Non-void:   {snapshot.non_void_count:,}" in out
 
     def test_slice_command(self, snapshot):
         import matplotlib.pyplot as plt
