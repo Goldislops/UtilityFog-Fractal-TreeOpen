@@ -9,7 +9,7 @@ import asyncio
 import time
 import uuid
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import logging
 
@@ -49,10 +49,10 @@ class SimulationStatus(BaseModel):
     connected_clients: int
 
 @app.post("/api/sim/start")
-async def start_simulation(request: SimulationStartRequest, background_tasks: BackgroundTasks):
+async def start_simulation(request: SimulationStartRequest):
     """Start a new simulation run."""
     
-    if sim_bridge.is_running():
+    if not sim_bridge.can_start():
         raise HTTPException(status_code=400, detail="Simulation already running")
     
     try:
@@ -75,7 +75,10 @@ async def start_simulation(request: SimulationStartRequest, background_tasks: Ba
         }
         
         # Start simulation in background
-        background_tasks.add_task(sim_bridge.start_simulation, run_id, config)
+        # Start at request time (no await between the guard above and here),
+        # so a second rapid POST gets its 400 instead of dying later in a
+        # background task; the actual work still runs on the bridge's thread.
+        await sim_bridge.start_simulation(run_id, config)
         
         logger.info(f"🚀 Starting simulation {run_id} with {request.num_agents} agents")
         

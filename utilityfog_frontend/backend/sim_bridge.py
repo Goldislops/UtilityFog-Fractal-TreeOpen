@@ -44,9 +44,29 @@ class SimBridge:
         
         logger.info("🌉 SimBridge initialized")
     
+    def _worker_alive(self) -> bool:
+        """True while a background worker thread exists and is executing."""
+        return self.simulation_thread is not None and self.simulation_thread.is_alive()
+
+    def can_start(self) -> bool:
+        """A new run may start only when no worker thread is executing.
+
+        A draining worker (stopped/completed but still cleaning up) blocks new
+        starts so two threads never share current_step/status/
+        current_simulation; a dead thread never blocks, even if a crash left
+        status stale at "running".
+        """
+        return not self._worker_alive()
+
     def is_running(self) -> bool:
-        """Check if simulation is currently running."""
-        return self.status == "running"
+        """Currently in a live, STOPPABLE run: running status AND a live worker.
+
+        Deliberately distinct from (not can_start()): a worker that already
+        wrote a terminal status (completed/error) but is still broadcasting or
+        cleaning up must not be treated as stoppable, or stop would overwrite
+        the terminal status with "stopped".
+        """
+        return self.status == "running" and self._worker_alive()
     
     def get_status(self) -> Dict[str, Any]:
         """Get current simulation status."""
@@ -71,7 +91,7 @@ class SimBridge:
     async def start_simulation(self, run_id: str, config: Dict[str, Any]):
         """Start a new simulation run."""
         
-        if self.is_running():
+        if not self.can_start():
             raise RuntimeError("Simulation already running")
         
         logger.info(f"🚀 Starting simulation {run_id}")
