@@ -15,8 +15,8 @@ The root-level `agent/` package does NOT contain these three modules — this pa
 their only source. Plain removal of this directory breaks the pytest gate.
 
 ## CORRUPTED STUBS — DO NOT USE, DO NOT "FIX" IN PLACE
-`evolution_engine.py` · `foglet_agent.py` · `meme_structure.py` · `network_topology.py` ·
-`simulation_metrics.py` — padding files of repeated `class X: pass` lines. **The real
+`agent/evolution_engine.py` · `agent/foglet_agent.py` · `agent/meme_structure.py` ·
+`agent/network_topology.py` · `agent/simulation_metrics.py` — padding files of repeated `class X: pass` lines. **The real
 implementations live in the ROOT `agent/` package** (e.g. PR #300 fixed
 `agent/evolution_engine.py` at the root; PRs #285/#290 likewise landed at the root).
 Tests that import these names resolve to the root package, so the stubs are
