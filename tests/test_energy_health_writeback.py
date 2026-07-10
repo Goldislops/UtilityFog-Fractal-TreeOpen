@@ -41,4 +41,5 @@ def test_entanglement_writeback_preserves_energy_for_unhealthy_agents(monkeypatc
     assert a.energy_level == 0.8  # pre-fix: 0.8 * 0.5 = 0.4 silently drained
     assert b.energy_level == 0.6  # pre-fix: 0.6 * 0.25 = 0.15
     # health is untouched either way
-    assert a.health == 0.5 and b.health == 0.25
+    assert a.health == 0.5
+    assert b.health == 0.25

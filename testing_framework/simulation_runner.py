@@ -600,9 +600,9 @@ class SimulationRunner:
                         # Create simple state objects for quantum_myelin
                         class SimpleAgent:
                             def __init__(self, agent):
-                                self.state = agent.energy_level  # the writeback below targets
-                                # energy_level alone, so the proxy must BE energy
-                                # (D6 Option B: health no longer silently taxes it)
+                                # D6 Option B: The writeback below targets energy_level alone,
+                                # so the proxy must be energy (health no longer silently taxes it).
+                                self.state = agent.energy_level
                         
                         simple_a = SimpleAgent(agent_a)
                         simple_b = SimpleAgent(agent_b)
