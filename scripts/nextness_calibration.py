@@ -483,9 +483,10 @@ def check_determinism(
                 run_metadata={
                     "content_fingerprint_sha256_16": fp[:16],
                     "snapshot_byte_identical_across_repeats": snapshot_byte_identical,
-                    "elapsed_seconds": entry.get("budget", {}).get(
-                        "elapsed_seconds"
-                    ),
+                    # patches_processed is deterministic; elapsed_seconds
+                    # is wallclock-derived and would break byte-identical
+                    # re-run. Timing is available in process_snapshot's
+                    # own log entry, joinable on snapshot_file.
                     "patches_processed": entry.get("budget", {}).get(
                         "patches_processed"
                     ),
@@ -815,9 +816,10 @@ def shuffle_test(
                         "cci": cci_value,
                     },
                     run_metadata={
-                        "elapsed_seconds": entry.get("budget", {}).get(
-                            "elapsed_seconds"
-                        ),
+                        # patches_processed is deterministic; elapsed_seconds
+                        # is wallclock-derived and would break byte-identical
+                        # re-run. Timing is available in process_snapshot's
+                        # own log entry, joinable on snapshot_file.
                         "patches_processed": entry.get("budget", {}).get(
                             "patches_processed"
                         ),
