@@ -78,7 +78,7 @@ jobs:
           if [ $? -ne 0 ]; then
             echo "comment query failed; exiting silently (no post)"; exit 0
           fi
-          if printf '%s' "$own" | grep -q 'theory-tripwire-marker'; then
+          if printf '%s' "$own" | grep -Fq '<!-- theory-tripwire-marker -->'; then
             echo "marker already present; suppressed"; exit 0
           fi
 
