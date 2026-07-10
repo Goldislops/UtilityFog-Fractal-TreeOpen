@@ -597,6 +597,24 @@ def test_check_determinism_emits_no_generated_at_field(tmp_path):
     assert "generated_at" not in content
 
 
+def test_check_determinism_byte_identical_on_rerun(tmp_path):
+    """Determinism — re-running on the same input produces byte-identical output.
+
+    Issue #151: per-row run_metadata.elapsed_seconds was wallclock-derived
+    and broke byte-identical re-run (the Chapter 4 pattern from PR #148).
+    """
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snaps = [
+        _make_snapshot(snaps_dir / f"v070_gen{i}_step{i}_test.npz", generation=i)
+        for i in (1, 2)
+    ]
+    out_a = log_path.parent / "calibration_determinism_a.jsonl"
+    out_b = log_path.parent / "calibration_determinism_b.jsonl"
+    check_determinism(snaps, out_a, log_path, "short", config, repeats=2)
+    check_determinism(snaps, out_b, log_path, "short", config, repeats=2)
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
 def test_check_determinism_calibration_set_field_propagates(tmp_path):
     """Every row (per-snapshot AND aggregate) carries the calibration_set tag."""
     snaps_dir, log_path, config = _calibration_setup(tmp_path)
@@ -1011,6 +1029,23 @@ def test_shuffle_test_no_generated_at_field(tmp_path):
     shuffle_test([snap], out, log_path, "short", config)
     content = out.read_text()
     assert "generated_at" not in content
+
+
+def test_shuffle_test_byte_identical_on_rerun(tmp_path):
+    """Determinism — re-running on the same input produces byte-identical output.
+
+    Issue #151: per-row run_metadata.elapsed_seconds was wallclock-derived
+    and broke byte-identical re-run (the Chapter 4 pattern from PR #148).
+    Shuffle permutations are seed-derived, so identical default seeds
+    produce identical rows.
+    """
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen1_step1_test.npz", generation=1)
+    out_a = log_path.parent / "calibration_shuffle_a.jsonl"
+    out_b = log_path.parent / "calibration_shuffle_b.jsonl"
+    shuffle_test([snap], out_a, log_path, "short", config)
+    shuffle_test([snap], out_b, log_path, "short", config)
+    assert out_a.read_bytes() == out_b.read_bytes()
 
 
 def test_shuffle_test_subset_of_modes_marks_aggregate_incomplete(tmp_path):
