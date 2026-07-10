@@ -1,0 +1,96 @@
+# Theory Tripwire v1 — a comment-only signpost at theory→architecture boundaries.
+#
+# Design: docs/THEORY_TRIPWIRE_ACTION_DESIGN.md (v0), as amended by the
+# 2026-07-10 Jack-audited decision lock: label-only triggering (four trigger
+# labels + the tripwire-reviewed acknowledgement label), at most one comment
+# per PR, never a blocking check.
+#
+# Failure contract: all anticipated shell/API failures are trapped and return
+# success. Platform, runner, or workflow-parsing failures may still fail or
+# cancel this optional check; because it is not required, it cannot block the
+# merge gate.
+#
+# Fork PRs: on fork PRs the pull_request GITHUB_TOKEN is read-only, so the
+# comment post fails and is swallowed — the tripwire is fail-silent by design.
+#
+# SECURITY: do NOT convert this workflow to pull_request_target without a
+# Jack-audited design revision. It deliberately has no checkout step, uses no
+# marketplace actions, reads no secrets, and never executes PR code.
+name: Theory Tripwire
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Serialize runs per PR so overlapping opened/labeled events cannot both pass
+# the marker check and double-post (cancel-in-progress must stay false: the
+# first run has to finish posting before the next run re-checks).
+concurrency:
+  group: theory-tripwire-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  tripwire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Comment once if a gate label is present
+        run: |
+          # This optional job never reddens the gate on anticipated failures.
+          set +e
+
+          # Live PR labels (the event payload can be stale under rapid edits).
+          labels=$(gh api "repos/$REPO/issues/$PR/labels" --paginate --jq '.[].name' 2>/dev/null)
+          if [ $? -ne 0 ]; then
+            echo "label query failed; exiting silently"; exit 0
+          fi
+
+          # Acknowledgement precedence: tripwire-reviewed suppresses everything.
+          if printf '%s\n' "$labels" | grep -qx 'tripwire-reviewed'; then
+            echo "tripwire-reviewed present; suppressed"; exit 0
+          fi
+
+          # Matched trigger labels, in the fixed locked order.
+          matched=""
+          for l in lane-a-activation swarm-hunter observer-semantics theory-to-architecture; do
+            if printf '%s\n' "$labels" | grep -qx "$l"; then
+              matched="${matched:+$matched, }\`$l\`"
+            fi
+          done
+          if [ -z "$matched" ]; then
+            echo "no trigger label; nothing to do"; exit 0
+          fi
+
+          # Idempotency: trust only our own marker — a comment must carry the
+          # marker AND be authored by github-actions[bot]. Full pagination so
+          # long threads cannot hide it. If the query fails, exit without
+          # posting (prefer a missed reminder over a possible duplicate).
+          own=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                --jq '.[] | select(.user.login == "github-actions[bot]") | .body' 2>/dev/null)
+          if [ $? -ne 0 ]; then
+            echo "comment query failed; exiting silently (no post)"; exit 0
+          fi
+          if printf '%s' "$own" | grep -Fq '<!-- theory-tripwire-marker -->'; then
+            echo "marker already present; suppressed"; exit 0
+          fi
+
+          # Post the single reminder. A failure here (fork read-only token,
+          # transient API error) is swallowed — fail-silent by contract.
+          body='⚠️ **Theory-to-architecture boundary detected** (labels: '"$matched"').
+          This PR appears to touch a gated scope. Before promotion, please confirm the five-step gate:
+          **1.** source verification · **2.** explicit design doc · **3.** tests or falsification criteria · **4.** Jack/AURA/Kev review · **5.** no Lane A activation unless separately gated.
+          Relevant caveats: [MEDUSA_THEORY_INTAKE_LEDGER.md](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/blob/main/docs/MEDUSA_THEORY_INTAKE_LEDGER.md) · [MATURIN_ARC_THEORY_PREFLIGHT.md](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/blob/main/docs/MATURIN_ARC_THEORY_PREFLIGHT.md) · [AGENT_HANDOFF.md](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/blob/main/AGENT_HANDOFF.md)
+          *(Comment-only; not a blocking check. Apply `tripwire-reviewed` to acknowledge.)*
+
+          <!-- theory-tripwire-marker -->'
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null 2>&1 \
+            || echo "comment post failed (fork PR or transient); exiting silently"
+          exit 0
