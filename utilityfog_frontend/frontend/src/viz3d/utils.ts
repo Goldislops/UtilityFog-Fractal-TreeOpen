@@ -1,5 +1,3 @@
-import { Vector3 } from 'three'
-
 export function calculateDistance(pos1: [number, number, number], pos2: [number, number, number]): number {
   const [x1, y1, z1] = pos1
   const [x2, y2, z2] = pos2
