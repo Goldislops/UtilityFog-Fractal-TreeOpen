@@ -16,9 +16,20 @@ For now, the pending file is an authoritative promise waiting to be picked up.
 
 Safety contract enforced here:
   - LOCKED params always rejected at `propose` (via params_schema.validate_proposal).
+  - The autonomous ``policy:auto`` commit approver is rejected at the commit
+    boundary (``AUTO_COMMIT_APPROVER`` / ``auto_commit_disabled``). This closes
+    the legacy orchestrator's only write identity: it commits with
+    ``approver="policy:auto"`` (see ``scripts/orchestrator.py`` ToolRouter),
+    so with this path shut, no LLM-facing tool call can mutate a parameter —
+    the protection lives at the server boundary, not in a prompt or tool list.
+    A deliberate human commit (``approver="human:<name>"``) is unaffected.
   - HUMAN_APPROVAL params require `approver` starting with `human:` at commit.
   - Per-parameter rate limit (MIN_GEN_BETWEEN_COMMITS_PER_PARAM generations).
   - Invalid proposals cannot be committed even if approver is otherwise sufficient.
+
+Scope note: this module does NOT authenticate callers or make the tuning API
+generally secure. It closes exactly the proven ``policy:auto`` auto-commit path;
+propose/dry-run, reads, and human-approved commits are intentionally unchanged.
 """
 
 from __future__ import annotations
@@ -46,6 +57,14 @@ MIN_GEN_BETWEEN_COMMITS_PER_PARAM = 1000
 Prevents an LLM in a tight loop from oscillating a tunable."""
 
 VALID_MODES = ("dry-run", "commit-pending")
+
+AUTO_COMMIT_APPROVER = "policy:auto"
+"""The autonomous approver identity the legacy orchestrator commits with.
+
+Commits presenting this exact approver are rejected at the boundary
+(``auto_commit_disabled``). Re-enabling autonomous commits must be a reviewed
+code change here — there is deliberately no env flag, query param, header, or
+alternate route that turns it back on."""
 
 
 # -- helpers ----------------------------------------------------------------
@@ -215,6 +234,20 @@ class TuningState:
                     "Proposal failed validation; cannot commit.",
                 )
             params: dict[str, Any] = proposal["params"]
+
+            # Auto-commit quarantine: the autonomous policy:auto approver is
+            # refused at the write boundary regardless of parameter category.
+            # This is the legacy orchestrator's only commit identity, so with
+            # it shut, no LLM-facing tool call can mutate a parameter. Checked
+            # before the human-approval branch so policy:auto yields one stable
+            # reason. A human commit (approver="human:<name>") is unaffected.
+            if approver == AUTO_COMMIT_APPROVER:
+                raise TuningError(
+                    403, "auto_commit_disabled",
+                    "Autonomous commits (approver='policy:auto') are disabled at "
+                    "the server boundary. A deliberate human approver "
+                    "(approver='human:<name>') is required to commit.",
+                )
 
             # Approver policy.
             if _contains_human_approval_param(params) and not approver.startswith("human:"):
@@ -462,6 +495,7 @@ def create_blueprint(state: TuningState) -> Blueprint:
 __all__ = [
     "MIN_GEN_BETWEEN_COMMITS_PER_PARAM",
     "VALID_MODES",
+    "AUTO_COMMIT_APPROVER",
     "TuningError",
     "TuningState",
     "create_blueprint",
