@@ -186,6 +186,68 @@ test('malformed positions never crash: null, string, wrong lengths, non-numbers'
   expect(errors).toHaveLength(0);
 });
 
+test('partial status-only update preserves position AND connections (merge semantics)', async ({ page }) => {
+  await storeUpdate(page, { id: 'n-merge', position: [1, 2, 3], connections: ['a', 'b'], status: 'active' });
+  await storeUpdate(page, { id: 'n-merge', status: 'error' }); // partial, no position/connections
+  const node = (await storeNodes(page)).find(n => n.id === 'n-merge') as any;
+  expect(node.position).toEqual([1, 2, 3]);
+  expect(node.connections).toEqual(['a', 'b']); // omitted field survives
+  expect(node.status).toBe('error');
+});
+
+test('valid-position partial update preserves omitted fields', async ({ page }) => {
+  await storeUpdate(page, { id: 'n-move', position: [1, 1, 1], connections: ['x'], status: 'active' });
+  await storeUpdate(page, { id: 'n-move', position: [9, 9, 9] }); // no connections/status
+  const node = (await storeNodes(page)).find(n => n.id === 'n-move') as any;
+  expect(node.position).toEqual([9, 9, 9]);
+  expect(node.connections).toEqual(['x']);
+  expect(node.status).toBe('active');
+});
+
+test('unknown node with valid position but missing connections is admitted (renderer-required fields only)', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await storeUpdate(page, { id: 'n-min', position: [2, 2, 2] }); // no connections/status
+  await page.waitForTimeout(300); // let the 3D effect render it
+  const node = (await storeNodes(page)).find(n => n.id === 'n-min') as any;
+  expect(node.position).toEqual([2, 2, 2]);
+  expect(errors).toHaveLength(0); // renderers tolerate missing optional fields
+  await appMounted(page);
+});
+
+test('bulk network_update: null/undefined/primitive payloads never throw', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  for (const payload of [null, undefined, 42, 'garbage', { nodes: null, edges: null }]) {
+    await inject(page, 'network_update', payload);
+    await storeSetNetwork(page, (payload as any)?.nodes, (payload as any)?.edges);
+  }
+  await page.waitForTimeout(200);
+  await appMounted(page);
+  expect(errors).toHaveLength(0);
+});
+
+test('bulk per-side tolerance: malformed side never discards the valid side; empty arrays clear', async ({ page }) => {
+  await storeSetNetwork(page, [VALID('bulk-1', [1, 1, 1])], [{ id: 'e1', source: 'bulk-1', target: 'bulk-1', strength: 1 }]);
+  let nodes = await storeNodes(page);
+  expect(nodes.map(n => n.id)).toContain('bulk-1');
+
+  // Malformed nodes side + (implicitly valid) edges side: nodes preserved.
+  await storeSetNetwork(page, 'not-an-array', []);
+  nodes = await storeNodes(page);
+  expect(nodes.map(n => n.id)).toContain('bulk-1'); // valid side kept, edges cleared
+
+  // Valid nodes side + malformed edges side.
+  await storeSetNetwork(page, [VALID('bulk-2', [2, 2, 2])], { bogus: true });
+  nodes = await storeNodes(page);
+  expect(nodes.map(n => n.id)).toContain('bulk-2');
+
+  // Explicit empty arrays clear both collections.
+  await storeSetNetwork(page, [], []);
+  nodes = await storeNodes(page);
+  expect(nodes).toHaveLength(0);
+});
+
 test('a later valid update recovers an excluded node', async ({ page }) => {
   await storeUpdate(page, { id: 'n-late', position: [1, 2] }); // invalid → excluded
   expect((await storeNodes(page)).map(n => n.id)).not.toContain('n-late');

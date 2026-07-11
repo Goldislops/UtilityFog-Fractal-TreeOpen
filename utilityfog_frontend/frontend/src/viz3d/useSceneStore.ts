@@ -37,7 +37,12 @@ export const useSceneStore = create<SceneStore>((set) => ({
     }),
 
   setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) =>
-    set((state) => ({ nodes: sanitizeNodeList(nodes, state.nodes), edges })),
+    set((state) => ({
+      // Per-side tolerance: a malformed side never discards the valid
+      // other side; explicit empty arrays remain meaningful and clear.
+      nodes: Array.isArray(nodes) ? sanitizeNodeList(nodes, state.nodes) : state.nodes,
+      edges: Array.isArray(edges) ? edges : state.edges,
+    })),
 
   clearNetwork: () =>
     set({ nodes: [], edges: [] }),

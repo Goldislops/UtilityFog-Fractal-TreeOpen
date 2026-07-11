@@ -18,8 +18,11 @@ export default function NetworkView2D({ simClient }: NetworkView2DProps) {
     // view keeps its own subscription, so malformed positions must be
     // reconciled here too before the draw effect indexes node.position.
     const handleNetworkUpdate = (data: any) => {
-      if (data.nodes) setNodes(prev => sanitizeNodeList(data.nodes, prev))
-      if (data.edges) setEdges(data.edges)
+      if (!data || typeof data !== 'object') return
+      // Per-side tolerance mirrors the store: malformed one side never
+      // discards the other; explicit [] clears its collection.
+      if (Array.isArray(data.nodes)) setNodes(prev => sanitizeNodeList(data.nodes, prev))
+      if (Array.isArray(data.edges)) setEdges(data.edges)
     }
 
     const handleNodeUpdate = (node: NetworkNode) => {

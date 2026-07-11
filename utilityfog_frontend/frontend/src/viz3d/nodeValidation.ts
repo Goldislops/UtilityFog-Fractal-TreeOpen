@@ -20,22 +20,30 @@ export function isValidPosition(p: unknown): p is [number, number, number] {
 }
 
 /// Reconcile an incoming node-shaped payload against the previously known
-/// node with the same id. Returns the node to store, or null when it must
-/// not reach any renderer:
-///  - valid incoming position → the incoming node as-is;
+/// node with the same id. Partial updates MERGE with the existing record
+/// ({ ...existing, ...incoming }) so omitted fields such as `connections`
+/// survive. Returns the node to store, or null when it must not reach any
+/// renderer:
+///  - valid incoming position → merged record with the incoming position;
 ///  - invalid/missing position on a node whose previous state holds a valid
-///    position → other fields update, the LAST VALID position is preserved;
+///    position → merged record with the LAST VALID position preserved;
 ///  - previously unknown node without a valid position → null. No [0,0,0]
 ///    is ever invented; a later valid update recovers the node normally.
+/// Required-field evidence (source-verified): the renderers read `id`
+/// (matching), `position` (InstancedNodes matrix + 2D draw) and `status`
+/// (color switches with safe defaults); `connections` is read by no
+/// renderer. A previously unknown node with a valid position is therefore
+/// admitted as supplied — no missing fields are invented.
 export function reconcileNode(
   incoming: NetworkNode,
   existing: NetworkNode | undefined,
 ): NetworkNode | null {
+  const merged = existing ? { ...existing, ...incoming } : incoming
   if (isValidPosition((incoming as { position?: unknown }).position)) {
-    return incoming
+    return merged
   }
   if (existing && isValidPosition(existing.position)) {
-    return { ...incoming, position: existing.position }
+    return { ...merged, position: existing.position }
   }
   return null
 }
