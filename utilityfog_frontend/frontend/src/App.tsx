@@ -42,17 +42,24 @@ function App() {
   return (
     <div className="app-container">
       <div className="controls">
-        <button onClick={() => setView('2d')}>2D View</button>
-        <button onClick={() => setView('3d')}>3D View</button>
+        <button aria-pressed={view === '2d'} onClick={() => setView('2d')}>2D View</button>
+        <button aria-pressed={view === '3d'} onClick={() => setView('3d')}>3D View</button>
       </div>
 
       <EventFeed simClient={simClient} />
       <ConnectionBadge isConnected={isConnected} />
 
+      {/* display:contents keeps these accessibility wrappers out of the
+          .app-container flex layout — the view roots stay direct flex
+          children, so rendering/styling is unchanged. */}
       {view === '3d' ? (
-        <NetworkView3D simClient={simClient} />
+        <section role="region" aria-label="3D network view" style={{ display: 'contents' }}>
+          <NetworkView3D simClient={simClient} />
+        </section>
       ) : (
-        <NetworkView2D simClient={simClient} />
+        <section role="region" aria-label="2D network view" style={{ display: 'contents' }}>
+          <NetworkView2D simClient={simClient} />
+        </section>
       )}
     </div>
   )
