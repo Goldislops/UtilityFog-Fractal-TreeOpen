@@ -29,15 +29,18 @@ interface FeedEntry {
 const MAX_EVENTS = 50
 const PREVIEW_CHARS = 100
 
-// Bounded preview: pretty-printed JSON truncated to PREVIEW_CHARS with a
-// trailing ellipsis (length measured on the same string that is sliced — a
-// narrow consistency improvement over the previous compact-length check).
-// Every payload enters through JSON.parse in SimBridgeClient, so circular
-// structures cannot occur; the catch is a bounded last resort and never
-// hides ordinary valid payloads.
+// Bounded, serialize-once preview: COMPACT JSON. The rendering div collapses
+// whitespace, so pretty-printing spent part of the 100-character budget on
+// formatting the user never saw — the cap now applies to the exact string
+// rendered, with the ellipsis appended only when truncated. String payloads
+// stay JSON-quoted (deliberate, test-locked): the preview shows the JSON
+// value, so "5" and 5 stay distinguishable and behavior matches the feed's
+// historical stringify-everything contract. Every payload enters through
+// JSON.parse in SimBridgeClient, so circular structures cannot occur; the
+// catch is a bounded last resort and never hides ordinary valid payloads.
 function formatPreview(data: unknown): string {
   try {
-    const full = JSON.stringify(data, null, 1)
+    const full = JSON.stringify(data)
     if (full === undefined) return String(data)
     return full.length > PREVIEW_CHARS ? `${full.slice(0, PREVIEW_CHARS)}...` : full
   } catch {

@@ -130,7 +130,36 @@ test('payload preview is bounded with an ellipsis', async ({ page }) => {
   const preview = entries(page).first().locator('div').last();
   const text = (await preview.textContent()) ?? '';
   expect(text.endsWith('...')).toBe(true);
-  expect(text.length).toBeLessThanOrEqual(103); // 100 chars + '...'
+  expect(text.length).toBe(103); // exactly 100 rendered chars + '...'
+});
+
+test('nested objects serialize compactly — no whitespace spent on formatting', async ({ page }) => {
+  await inject(page, 'simulation_event', { a: { b: [1, 2] } });
+  const text = (await entries(page).first().locator('div').last().textContent()) ?? '';
+  expect(text).toBe('{"a":{"b":[1,2]}}');
+});
+
+test('a compact serialization of exactly 100 characters is shown whole, no ellipsis', async ({ page }) => {
+  // {"s":"…"} wrapper is 8 chars; 92 x's → exactly 100.
+  await inject(page, 'simulation_event', { s: 'x'.repeat(92) });
+  const text = (await entries(page).first().locator('div').last().textContent()) ?? '';
+  expect(text.length).toBe(100);
+  expect(text.endsWith('...')).toBe(false);
+  expect(text).toBe(`{"s":"${'x'.repeat(92)}"}`);
+});
+
+test('101 characters truncates to 100 plus exactly one ellipsis', async ({ page }) => {
+  await inject(page, 'simulation_event', { s: 'x'.repeat(93) }); // 101 compact chars
+  const text = (await entries(page).first().locator('div').last().textContent()) ?? '';
+  expect(text.length).toBe(103);
+  expect(text.endsWith('...')).toBe(true);
+  expect(text.endsWith('....')).toBe(false);
+});
+
+test('string payloads remain JSON-quoted (locked contract)', async ({ page }) => {
+  await inject(page, 'node_update', 'plain-string');
+  const text = (await entries(page).first().locator('div').last().textContent()) ?? '';
+  expect(text).toBe('"plain-string"');
 });
 
 test('script-like payload text renders as text, never as markup', async ({ page }) => {
