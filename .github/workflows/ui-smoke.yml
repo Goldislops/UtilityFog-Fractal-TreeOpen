@@ -5,7 +5,9 @@ on:
     branches: [ main, develop ]
     paths: [ 'utilityfog_frontend/frontend/**' ]
   pull_request:
-    branches: [ main ]
+    # No base-branch filter: stacked PRs (frontend children based on other
+    # frontend branches) must exercise this gate too, not only PRs to main.
+    # The path filter below still scopes the workflow to frontend changes.
     paths: [ 'utilityfog_frontend/frontend/**' ]
 
 permissions:
