@@ -84,19 +84,32 @@ const injectFour = async (page: Page) => {
 const armExportCapture = (page: Page) =>
   page.evaluate(() => {
     const w = window as any;
-    w.__exportCapture = { revoked: [] as string[], download: '', href: '', text: '' };
+    // Ordered event sequence proves the download click happens BEFORE the
+    // (deferred) revocation — no fixed sleeps; tests poll for 'revoke'.
+    w.__exportCapture = { revoked: [] as string[], sequence: [] as string[], download: '', href: '', text: '' };
     URL.createObjectURL = ((blob: Blob) => {
       w.__exportCapture.blob = blob;
+      w.__exportCapture.sequence.push('create');
       return 'blob:capture-1';
     }) as typeof URL.createObjectURL;
     URL.revokeObjectURL = ((u: string) => {
       w.__exportCapture.revoked.push(u);
+      w.__exportCapture.sequence.push('revoke');
     }) as typeof URL.revokeObjectURL;
     HTMLAnchorElement.prototype.click = function () {
       w.__exportCapture.download = (this as HTMLAnchorElement).download;
       w.__exportCapture.href = (this as HTMLAnchorElement).href;
+      w.__exportCapture.sequence.push('click');
     };
   });
+const awaitRevocation = async (page: Page) => {
+  await expect
+    .poll(async () => page.evaluate(() => (window as any).__exportCapture.revoked.length))
+    .toBe(1);
+  const seq: string[] = await page.evaluate(() => (window as any).__exportCapture.sequence);
+  expect(seq.indexOf('click')).toBeGreaterThanOrEqual(0);
+  expect(seq.indexOf('click')).toBeLessThan(seq.indexOf('revoke'));
+};
 const readExport = (page: Page) =>
   page.evaluate(async () => {
     const c = (window as any).__exportCapture;
@@ -248,7 +261,8 @@ test('export: visible-only, newest-first, schema/version, full payloads, revoked
 
   expect(result.download).toBe('event-feed-export.json');
   expect(result.href).toBe('blob:capture-1');
-  expect(result.revoked).toContain('blob:capture-1');
+  await awaitRevocation(page);
+  expect(await page.evaluate(() => (window as any).__exportCapture.revoked)).toContain('blob:capture-1');
   expect(result.doc.schema).toBe('utilityfog.event-feed-export');
   expect(result.doc.version).toBe(1);
   // Visible-only (edge_update excluded), newest first.
@@ -276,6 +290,36 @@ test('export composes with search + filter and is disabled at zero visible', asy
   const result = await readExport(page);
   expect(result.doc.events).toHaveLength(1);
   expect(result.doc.events[0].channel).toBe('edge_update');
+  await awaitRevocation(page); // exactly one revocation here too
+});
+
+test('export normalizes absent payloads to null and preserves falsy payloads distinctly', async ({ page }) => {
+  // Injection order (oldest→newest): absent, null, false, 0, ''.
+  await page.evaluate(() => {
+    const w = window as any;
+    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const s = socks[socks.length - 1];
+    s._message({ type: 'simulation_event' }); // payload property absent
+    s._message({ type: 'simulation_event', payload: null });
+    s._message({ type: 'simulation_event', payload: false });
+    s._message({ type: 'simulation_event', payload: 0 });
+    s._message({ type: 'simulation_event', payload: '' });
+  });
+  await expect(entries(page)).toHaveCount(5);
+  await armExportCapture(page);
+  await exportBtn(page).click();
+  const result = await readExport(page);
+  expect(result.doc.events).toHaveLength(5);
+  // Every record carries channel, timestamp AND payload — even when the
+  // original payload was absent (normalized to explicit null).
+  for (const rec of result.doc.events) {
+    expect(Object.prototype.hasOwnProperty.call(rec, 'payload')).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(rec, 'channel')).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(rec, 'timestamp')).toBe(true);
+  }
+  // Newest first: '', 0, false, null (explicit), null (normalized absent).
+  expect(result.doc.events.map((r: { payload: unknown }) => r.payload)).toEqual(['', 0, false, null, null]);
+  await awaitRevocation(page);
 });
 
 test('StrictMode single delivery holds with operations present; no page errors across a mixed sequence', async ({ page }) => {

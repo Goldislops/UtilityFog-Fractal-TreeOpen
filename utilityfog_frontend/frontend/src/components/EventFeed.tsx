@@ -131,11 +131,14 @@ export default function EventFeed({ simClient }: EventFeedProps) {
         schema: EXPORT_SCHEMA,
         version: EXPORT_VERSION,
         // Visible (filtered + searched) results only, newest first, carrying
-        // the original parsed payloads — never the truncated previews.
+        // the original parsed payloads — never the truncated previews. An
+        // omitted payload normalizes to explicit null so JSON.stringify
+        // cannot drop the property: every exported record carries channel,
+        // timestamp AND payload. (Preview contract separate and unchanged.)
         events: visible.map(e => ({
           channel: e.channel,
           timestamp: e.timestamp,
-          payload: e.payload,
+          payload: e.payload === undefined ? null : e.payload,
         })),
       }
       const json = JSON.stringify(doc, null, 2)
@@ -144,8 +147,13 @@ export default function EventFeed({ simClient }: EventFeedProps) {
       const anchor = document.createElement('a')
       anchor.href = url
       anchor.download = EXPORT_FILENAME
+      document.body.appendChild(anchor)
       anchor.click()
-      URL.revokeObjectURL(url)
+      anchor.remove()
+      // Deferred revocation: a synchronous revoke can race the browser's
+      // resolution of the download. Exactly one revocation per successful
+      // export; on serialization failure no URL exists, so nothing leaks.
+      setTimeout(() => URL.revokeObjectURL(url), 0)
       setExportError(null)
     } catch {
       // Unreachable through the message path (payloads arrive via
