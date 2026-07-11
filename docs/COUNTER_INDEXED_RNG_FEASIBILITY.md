@@ -28,7 +28,7 @@ to whether or when a vector is generated re-times all later draws.
 | `rng_vals3` | `:123` | Phase 6 `apply_stochastic` (`:211+`) | `config.stochastic.enabled` (**default `true`**, `params.rs:26`) | Per-state stochastic transitions (e.g. STRUCTURAL→ENERGY/SENSOR probs, `params.rs:14–15`) | Block-scoped |
 | `rng_vals4` | `:129` | Phase 7 `apply_forward_contagion` (`:246+`) | `config.contagion.enabled` (**default `true`**, `params.rs:55`) | Contagion-eligible non-VOID cells (`:250`) | Block-scoped |
 | `rng_vals5` | `:135` | Phase 8 `apply_reverse_contagion` (`:282–290`) | **Unconditional** | STRUCTURAL with COMPUTE neighbors (reclaim, `:290`) | Block-scoped |
-| `rng_vals6` | `:149` | Phase 11 `apply_energy_conversion` (`:333–345`) | **Unconditional** | ENERGY/COMPUTE (biofilm leech `:340`, 5% branch `:345`) | Block-scoped |
+| `rng_vals6` | `:149` | Phase 11 `apply_energy_conversion` (`:333–345`) | **Unconditional** | **ENERGY cells only** — `rng_vals[i]` is consulted solely inside the `states[i] == ENERGY` branch (`:337–345`: biofilm leech `:340`, super-pod 5% branch `:345`). COMPUTE cells are counted as *neighbors* for the biofilm condition but never consume this phase's draw. Vector generation remains dense and unconditional; this distinction concerns sparse consumption only | Block-scoped |
 | `rng_vals7` | `:161` | Phase 13 `apply_decay_resistance` (`:426–472`) | **Unconditional** | Non-VOID decay candidates (`decay_prob` draw, `:472`) | Block-scoped |
 | `rng_vals8` | `:174` | Phase 15 `apply_analogue_mutation` (`:483–493`) | **Unconditional** | Non-VOID cells (`pre_mut[i] != VOID`, `:490`); the same value is reused for the replacement-state pick (`:493`) | Block-scoped |
 
@@ -65,6 +65,22 @@ Rust, `bool` is guaranteed 1 byte and `Vec<T>` stores contiguous `T`; unlike C++
 `std::vector<bool>`, **Rust's `Vec<bool>` is not bit-packed**. Arithmetic above uses
 1 B/element accordingly.
 
+**`Vec<bool>` allocations, distinguished:**
+
+- `half_step_flags` — a **persistent, lattice-resident field** of `VoxelLattice`
+  (`voxel_lattice.rs:23–24`), allocated at n³ for the lattice's lifetime. (An automated
+  review suggestion claimed this field does not exist; that claim is **contradicted by
+  the live source** at `voxel_lattice.rs:23–24` — the review thread is left untouched
+  for the auditor.)
+- `equanimity_mask` — a **separate per-step transient** `Vec<bool>` returned by
+  `compute_equanimity_mask` (`stepper.rs:92`, `phase4.rs`), dropped within `step()`.
+- `sensor_mask` / `energy_mask` — **additional per-signal-generation transients**
+  (`phase6c.rs:52`, `:56`), allocated only when the nervous system runs.
+
+The table above is **payload arithmetic** (logical bytes of the named arrays), not a
+complete peak-resident-memory measurement; allocator capacity, metadata, and exact peak
+residency remain **unmeasured**.
+
 **Other principal per-step transients** (from `step()` source): `out` state clone
 (u8, `:39`) and `pre_mut` clone (`:173`) — 16 MiB each at 256³; `neighbor_counts`
 (`[i16; 5]`/cell, `:35`) — **160 MiB at 256³, the largest single transient**;
@@ -85,10 +101,21 @@ transient-copy effects are **unmeasured** and excluded from the totals above.
    are queried. *This is the property the laboratory demonstrates.*
 4. **Statistical similarity.** Counter output distribution ≈ Xoshiro output distribution
    by statistical tests. **Not established by (3)** and not claimed by the laboratory.
-5. **Existing-trajectory identity.** Counter-indexed draws produce a **different random
-   stream** from sequential Xoshiro and therefore **different trajectories** — even with
-   the same seed. **(3) does not establish (4) or (5); nothing in this contract or the
-   laboratory claims the new stream preserves existing Medusa trajectories.**
+5. **Existing-trajectory identity.** LAB-CRNG-v1 deliberately defines a **new
+   deterministic stream**: its draws differ from sequential Xoshiro and therefore
+   produce **different trajectories** — even with the same seed. **(3) does not
+   establish (4) or (5); nothing in this contract or the laboratory claims the new
+   stream preserves existing trajectories.**
+
+6. **Scope of the incompatibility statement.** Point 5 is a property of *this proposed
+   mixer*, not a universal impossibility: a random-access **jump-ahead/offset mapping**
+   from `(generation, phase, index)` to the current Xoshiro serial offset is
+   theoretically possible in principle (Xoshiro supports jump functions; a full mapping
+   would additionally have to reproduce the **conditional whole-vector generation**
+   predicates of §A — enabled/interval flags decide whether a vector exists at all).
+   Such a design may be complex or uneconomic, **was not proven impossible, and is not
+   proposed, designed, or benchmarked here**. Dense pre-draw (point 2) remains the
+   direct way to preserve today's stream.
 
 ## D. Counter-key proposal (proposed, not canonized)
 
@@ -114,9 +141,25 @@ Requirements any implementation must meet:
   tests make drift visible).
 - **No cryptographic-security claim** — the mixer is a statistical utility, never a
   security primitive.
-- **No collision-freedom claim:** with a 64-bit output space, output coincidences across
-  large key populations are expected (birthday behavior) and acceptable for f32 use;
-  key→output determinism is what matters, and nothing more is claimed.
+- **No collision-freedom claim:** the key space is larger than the 64-bit output space,
+  so the mapping cannot be injective; fixed-width field boundaries prevent
+  *structural concatenation ambiguity* between tuples, but they do not prevent two
+  distinct tuples from mixing to the same output. By birthday reasoning, u64 output
+  coincidences become plausible around ~2³² samples, and the 24-bit f32 projection
+  necessarily repeats far sooner (birthday scale ~2¹² ≈ 4,096 samples). **Neither kind
+  of repeat is, by itself, evidence of a defect**, and no cryptographic or
+  statistical-suitability claim follows. Key→output determinism is what matters.
+
+**Generation width and overflow (source truth, `[SRC]`):** `VoxelLattice.generation`
+is `u32` (`voxel_lattice.rs:22`) and stepping performs `lattice.generation += 1`
+(`stepper.rs:192`). Ordinary Rust **debug** builds panic on overflow while **release**
+builds wrap (unless overflow checks are configured otherwise), so cross-profile
+production behavior at 2³²−1 is **not presently a locked deterministic contract**. For
+the isolated laboratory: `CounterKey.generation` accepts the full u32 domain **as
+data**; max-u32 golden vectors are valid *algorithm fixtures* and do **not** prove the
+current stepper reaches or wraps through that generation identically across build
+profiles. A future production integration must explicitly choose checked, saturating,
+or wrapping semantics — that engine decision is not made here.
 
 ## E. Sparse / quiescence analysis (per-phase inventory)
 
@@ -228,3 +271,103 @@ equivalence is made or implied anywhere in this contract); any GPU speedup; phys
 stability under a different stream; or that production integration is safe. Production
 integration is out of scope until Jack audits both PRs and AURA reviews the corrected
 semantics, and would in any case be a separate engine/kernel gate.
+
+---
+
+## Appendix — LAB-CRNG-v1 normative specification and golden vectors
+
+This appendix is **self-sufficient**: a third party can reproduce every golden vector
+from this text alone, without access to any scratch script.
+
+### A.1 Algorithm (proposed laboratory specification, normative)
+
+```text
+All operations are unsigned 64-bit (u64) modulo 2^64 (wrapping).
+">>" is a logical (zero-filling) right shift. "xor" is bitwise exclusive-or.
+Narrower input fields are zero-extended to u64 before use.
+Byte order is not applicable: the algorithm consumes integers, never serialized bytes.
+
+Constants:
+    DOMAIN  = 0x243F6A8885A308D3      (first 64 fractional bits of pi)
+    VERSION = 0x0000000000000001      (LAB_STREAM_VERSION = 1)
+    M1      = 0xBF58476D1CE4E5B9      (Stafford variant-13 multiplier 1)
+    M2      = 0x94D049BB133111EB      (Stafford variant-13 multiplier 2)
+
+mix64(z):
+    z = (z xor (z >> 30)) * M1        (wrapping multiply)
+    z = (z xor (z >> 27)) * M2        (wrapping multiply)
+    return z xor (z >> 31)
+
+counter_u64(seed: u64, generation: u32, phase_id: u16, voxel_index: u64, draw_lane: u16):
+    g   = zero_extend_u64(generation)                     (high 32 bits zero)
+    pl  = (zero_extend_u64(phase_id) << 16)
+          or zero_extend_u64(draw_lane)                   (disjoint u16 fields packed)
+    acc = mix64(DOMAIN xor VERSION)                       (initial accumulator)
+    acc = mix64(acc xor seed)                             (fold 1: seed)
+    acc = mix64(acc xor g)                                (fold 2: generation)
+    acc = mix64(acc xor pl)                               (fold 3: phase/lane pack)
+    acc = mix64(acc xor voxel_index)                      (fold 4: voxel index)
+    return acc                                            (final output point)
+
+counter_f32(...) :
+    top24 = counter_u64(...) >> 40                        (top 24 bits, integer)
+    return f32(top24) * 2^-24                             (exactly representable;
+                                                           result in [0, 1), never 1.0)
+```
+
+`voxel_index` is the row-major flat index `z·N² + y·N + x` (`voxel_lattice.rs:56–62`).
+Phase registry (append-only): 0 pre-step block · 1 nervous system · 2 stochastic ·
+3 forward contagion · 4 reverse contagion · 5 energy conversion · 6 decay resistance ·
+7 analogue mutation · 8+ reserved. Fixed-width field boundaries prevent structural
+concatenation ambiguity between tuples, but they do **not** make the larger key space
+injective into 64 output bits (see §D collision discussion).
+
+**Portability boundaries:** these integer operations are *expressible* on common GPU
+programming models; 64-bit multiplication cost and exact backend behavior remain
+**unmeasured**, Philox-style 32-bit arithmetic remains a future comparison candidate,
+and **no GPU compilation, execution, portability, or speedup was tested**. The PR 2
+laboratory is CPU-only.
+
+### A.2 Golden vectors (independently calculated, dual-formulation verified)
+
+Inputs are (seed, generation, phase_id, voxel_index, draw_lane). `top24 = u64 >> 40`.
+The f32 value `top24 × 2⁻²⁴` is exactly representable; laboratories must compare the
+**u64 outputs first**, then f32 by **exact/bit equality** (IEEE-754 bits given below) —
+never by floating tolerance. Decimal is supplementary display only.
+
+| ID | seed | gen | phase | index | lane | u64 output | top24 | f32 bits | f32 (display) |
+|---|---|---|---|---|---|---|---|---|---|
+| T1 zero | 0 | 0 | 0 | 0 | 0 | `0x966C920FE8E9DA97` | 9,858,194 | `0x3F166C92` | 0.58759415 |
+| T2 max seed | 2⁶⁴−1 | 0 | 0 | 0 | 0 | `0x9BBCF84A6EBF14FD` | 10,206,456 | `0x3F1BBCF8` | 0.60835218 |
+| T3 all max | 2⁶⁴−1 | 2³²−1 | 2¹⁶−1 | 2⁶⁴−1 | 2¹⁶−1 | `0x88D72CB6D8EE6248` | 8,967,980 | `0x3F08D72C` | 0.53453326 |
+| T4 gen boundary | 42 | 2³²−1 | 6 | 137 | 0 | `0x9E747B6304BBFFF3` | 10,384,507 | `0x3F1E747B` | 0.61896485 |
+| T5 base | 42 | 1000 | 6 | 137 | 0 | `0xAF3800A697FA60B3` | 11,483,136 | `0x3F2F3800` | 0.68444824 |
+| T6 adjacent index | 42 | 1000 | 6 | 138 | 0 | `0x5371121AAAE80CA2` | 5,468,434 | `0x3EA6E224` | 0.32594407 |
+| T7 adjacent phase | 42 | 1000 | 7 | 137 | 0 | `0x38BD0EC22AA02C6C` | 3,718,414 | `0x3E62F438` | 0.22163475 |
+| T8 adjacent lane | 42 | 1000 | 6 | 137 | 1 | `0x98A8A9BCD1C826C9` | 10,004,649 | `0x3F18A8A9` | 0.59632355 |
+| T9 realistic | 424,242 | 1,000,000 | 6 | 8,421,376 | 0 | `0xA76D5375031595F3` | 10,972,499 | `0x3F276D53` | 0.65401191 |
+| T10 wrap boundary | 2⁶³ | 2³¹ | 2¹⁵ | 2⁶³ | 2¹⁵ | `0x43AFED7293593EAF` | 4,435,949 | `0x3E875FDA` | 0.26440316 |
+
+T9 is a realistic tuple from the live phase map: registry phase 6 (decay resistance,
+the unconditional per-cell stochastic phase), a Medusa-scale generation, and a
+mid-lattice 256³ row-major index. T4/T10 are **algorithm fixtures** for the u32
+boundary — they do not prove stepper overflow behavior (§D generation note).
+
+### A.3 Provenance
+
+- **Formulation 1:** Node v22.19.0, `BigInt` with `BigInt.asUintN(64, ·)` wrapping.
+- **Formulation 2:** Windows PowerShell 5.1 / .NET `System.Numerics.BigInteger` with
+  explicit mod-2⁶⁴ masking — a genuinely separate engine, parser, and operator set.
+- **Defect caught by independence:** the first PowerShell run diverged on the three
+  tuples whose `generation` had bit 31 set, because PowerShell parses hex literals such
+  as `0xFFFFFFFF` as *signed* int32 (−1) and BigInteger sign-extends. The specification
+  was unambiguous; that formulation's *expression* was wrong. It was corrected by
+  enforcing the spec's explicit field-width masks (zero-extension) inside the function,
+  after which **all ten tuples agree exactly across both formulations**. This episode
+  is retained as evidence for the dual-oracle requirement in §F.
+- f32 bit patterns were derived mechanically (IEEE-754 encoding of exactly-representable
+  values) in the Node formulation; the PowerShell formulation cross-confirms the decimal
+  values.
+- Scratch scripts were **not committed** anywhere; this appendix supersedes them.
+- These vectors prove **conformity to the proposed laboratory specification only** —
+  no statistical or cryptographic property is claimed from them.
