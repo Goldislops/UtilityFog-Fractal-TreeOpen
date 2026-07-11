@@ -430,7 +430,8 @@ def test_anthropic_and_openai_compat_produce_equivalent_ledger_entries(tmp_path:
     assert a_lines[0]["params"] == o_lines[0]["params"] == PROPOSAL_PARAMS
     assert a_lines[0]["source"] == o_lines[0]["source"] == SOURCE
     assert a_lines[0]["justification"] == o_lines[0]["justification"] == JUSTIFICATION
-    assert a_lines[1]["approver"] == o_lines[1]["approver"] == "policy:auto"
+    # No commit ledger entry exists on either side — the policy:auto commit was
+    # refused at the server boundary (Package R), so both ledgers stop at propose.
 
 
 def test_parity_at_response_translation_layer():
