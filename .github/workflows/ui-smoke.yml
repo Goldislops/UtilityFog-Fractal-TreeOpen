@@ -5,7 +5,9 @@ on:
     branches: [ main, develop ]
     paths: [ 'utilityfog_frontend/frontend/**' ]
   pull_request:
-    branches: [ main ]
+    # No base-branch filter: stacked PRs (frontend children based on other
+    # frontend branches) must exercise this gate too, not only PRs to main.
+    # The path filter below still scopes the workflow to frontend changes.
     paths: [ 'utilityfog_frontend/frontend/**' ]
 
 permissions:
@@ -31,10 +33,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Bundle budget unit tests
+        run: npm run test:budget
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Bundle budget check
+        run: npm run check:budget
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # No build step when using Vite dev server
+      # Playwright smoke tests still run against the Vite dev server (see
+      # playwright.config.ts); the production build above exists to feed the
+      # bundle-budget gate.
 
       - name: Run smoke tests
         run: npm run test:ui

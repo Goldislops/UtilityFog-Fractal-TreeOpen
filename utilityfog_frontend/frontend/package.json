@@ -10,7 +10,9 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test:ui": "playwright test",
     "test:ui:headed": "playwright test --headed",
-    "test:ui:report": "npx playwright show-report"
+    "test:ui:report": "npx playwright show-report",
+    "test:budget": "node --test scripts/check-bundle-budget.test.mjs",
+    "check:budget": "node scripts/check-bundle-budget.mjs"
   },
   "dependencies": {
     "react": "^18.2.0",
