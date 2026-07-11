@@ -31,10 +31,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Bundle budget unit tests
+        run: npm run test:budget
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Bundle budget check
+        run: npm run check:budget
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # No build step when using Vite dev server
+      # Playwright smoke tests still run against the Vite dev server (see
+      # playwright.config.ts); the production build above exists to feed the
+      # bundle-budget gate.
 
       - name: Run smoke tests
         run: npm run test:ui
