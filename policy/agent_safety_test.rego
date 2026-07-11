@@ -98,11 +98,22 @@ test_encoded_payload_json if {
 	not safety.encoded_payload_detected with input as {"payload": "{\"key\": \"value\"}"} with data.agent_limits.enforce_encoded_payload as true
 }
 
-# Embedded base64 substring inside natural text — currently NOT detected by
-# the anchored regex. Whether this should be detected is a real design
-# question (false-positive risk vs catching obfuscation) tracked in
-# issue #157. Removed from the regression suite until that's decided.
-# Was: test_encoded_payload_mixed_content with input "Hello SGVsbG8gV29ybGQ= World"
+# Whole-payload contract (issue #157 — contract locked in code; the issue's
+# disposition remains a separate decision): base64 detection is INTENTIONALLY
+# whole-payload. The anchored regex means a base64-form token embedded in
+# ordinary prose is NOT treated as an encoded payload — embedded
+# arbitrary-text substring scanning is out of scope, because the
+# false-positive surface of scanning ordinary prose is not justified by
+# current evidence. No decoder, entropy heuristic, tokenizer, or broader
+# payload scanner. URL-encoding detection remains deliberately unanchored
+# (see test_encoded_payload_url_in_text); data-URI detection remains
+# prefix-based.
+
+# Regression: mixed natural text containing a harmless base64-form token is
+# NOT detected as an encoded payload, even with enforcement enabled.
+test_encoded_payload_mixed_text_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "Hello SGVsbG8gV29ybGQ= World"} with data.agent_limits.enforce_encoded_payload as true
+}
 
 # ---------------------------------------------------------------------------
 # encoded_payload_detected isolated tests — flag disabled
@@ -296,4 +307,22 @@ test_allow_base64_when_flag_disabled if {
 		"payload": "SGVsbG8gV29ybGQ=",
 		"action": "read",
 	} with data.agent_limits.enforce_encoded_payload as false
+}
+
+# Allow-level regression for the whole-payload contract (issue #157): an
+# otherwise fully valid request whose payload is ordinary prose containing a
+# base64-form token stays ALLOWED while encoded-payload enforcement is
+# enabled.
+test_allow_mixed_text_payload_with_enforcement if {
+	safety.allow with input as {
+		"pause_before_propagate": true,
+		"intent": "creative",
+		"domain": "github.com",
+		"ttl": 3,
+		"children": 5,
+		"concurrency": 2,
+		"rate": 30,
+		"payload": "Hello SGVsbG8gV29ybGQ= World",
+		"action": "read",
+	} with data.agent_limits.enforce_encoded_payload as true
 }
