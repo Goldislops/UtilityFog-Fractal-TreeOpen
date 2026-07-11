@@ -57,8 +57,19 @@ async function setupPage(page: Page) {
 const activeSocket = (page: Page, action: '_open' | '_close') =>
   page.evaluate((act) => {
     const w = window as any;
-    const appSockets = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
-    appSockets[appSockets.length - 1][act]();
+    // Defensive diagnostics: tolerate a missing registry, then fail with a
+    // descriptive error rather than an opaque undefined-property throw.
+    const registry = Array.isArray(w.__fakeSockets) ? w.__fakeSockets : [];
+    const appSockets = registry.filter((s: any) => String(s.url).includes('/ws'));
+    const active = appSockets[appSockets.length - 1];
+    if (!active) {
+      throw new Error(
+        `No active application fake socket (registry size ${registry.length}, ` +
+        `app-URL sockets ${appSockets.length}) — did the init script install ` +
+        `FakeWebSocket before the app loaded?`
+      );
+    }
+    active[act]();
   }, action);
 
 const status = (page: Page) => page.getByRole('status');
