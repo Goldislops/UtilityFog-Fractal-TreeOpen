@@ -147,6 +147,9 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Unit tests (Vitest, jsdom — Playwright E2E stays in ui-smoke)
+        run: npm run test:unit
+
       - name: Budget-script unit tests
         run: npm run test:budget
 
