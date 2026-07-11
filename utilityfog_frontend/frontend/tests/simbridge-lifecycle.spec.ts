@@ -32,6 +32,12 @@ async function setupHarness(page: Page) {
       onclose: ((ev: unknown) => void) | null = null;
       onerror: ((ev: unknown) => void) | null = null;
       constructor(url: string) {
+        // Synchronous construction-failure injection (one-shot): throws
+        // BEFORE registration, so no instance exists for a failed attempt.
+        if (w.__throwNextConstruction) {
+          w.__throwNextConstruction = false;
+          throw new Error('synthetic construction failure');
+        }
         this.url = url;
         w.__fakeSockets.push(this);
       }
@@ -59,6 +65,9 @@ async function setupHarness(page: Page) {
       _message(obj: unknown) {
         if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) });
       }
+      _messageRaw(raw: string) {
+        if (this.onmessage) this.onmessage({ data: raw });
+      }
     }
     w.WebSocket = FakeWebSocket;
   });
@@ -74,6 +83,7 @@ async function setupHarness(page: Page) {
     };
     w.__h.client.on('connected', () => w.__h.events.push('connected'));
     w.__h.client.on('disconnected', () => w.__h.events.push('disconnected'));
+    w.__h.client.on('error', () => w.__h.events.push('error'));
   }, { url: TEST_URL, delay: RECONNECT_MS });
 }
 
@@ -218,6 +228,67 @@ test('message routing and listener removal remain behaviorally compatible', asyn
   });
   const after = await page.evaluate(() => (window as any).__h.payloads);
   expect(after.filter((p: any) => p.channel === 'removable')).toHaveLength(0);
+});
+
+test('malformed JSON logs a parse error and is never routed; no page error', async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.on('node_update', (p: unknown) => h.payloads.push({ channel: 'node_update', payload: p }));
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.sockets()[0]._messageRaw('{this is not json');
+  });
+  await page.waitForTimeout(50);
+  expect(consoleErrors.some((t) => t.includes('Error parsing message'))).toBe(true);
+  expect(await page.evaluate(() => (window as any).__h.payloads.length)).toBe(0);
+  expect(pageErrors).toHaveLength(0);
+});
+
+test('a throwing listener surfaces as a page error and is not mislabelled as a parse error', async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+  page.on('pageerror', (e) => pageErrors.push(e.message));
+
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.on('node_update', () => { throw new Error('SENTINEL_LISTENER_FAILURE'); });
+    h.client.connect();
+    h.sockets()[0]._open();
+    // Deliver from a timer so the throw leaves the test's own call stack
+    // and reaches the page's uncaught-error channel, as it would from a
+    // real socket event.
+    setTimeout(() => h.sockets()[0]._message({ type: 'node_update', payload: { id: 'n1' } }), 0);
+  });
+  await page.waitForTimeout(80);
+  expect(pageErrors.some((t) => t.includes('SENTINEL_LISTENER_FAILURE'))).toBe(true);
+  expect(consoleErrors.filter((t) => t.includes('Error parsing message'))).toHaveLength(0);
+});
+
+test('synchronous constructor failure emits one error, retries once, then connects normally', async ({ page }) => {
+  await page.evaluate(() => {
+    const w = window as any;
+    w.__throwNextConstruction = true;
+    w.__h.client.connect();
+  });
+  // The throwing construction registered no instance.
+  expect(await socketCount(page)).toBe(0);
+  expect(await events(page)).toEqual(['error']);
+
+  // Exactly one scheduled replacement attempt.
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(1);
+  await page.evaluate(() => (window as any).__h.sockets()[0]._open());
+  expect(await events(page)).toEqual(['error', 'connected']);
+
+  // No duplicate timers or sockets after another full delay.
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(1);
 });
 
 test('send serializes only while OPEN and is a no-op otherwise', async ({ page }) => {

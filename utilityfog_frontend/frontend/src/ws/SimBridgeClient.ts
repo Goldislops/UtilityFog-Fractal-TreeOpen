@@ -90,47 +90,60 @@ export class SimBridgeClient {
   }
 
   private openSocket(): void {
+    let socket: WebSocket
     try {
-      const socket = new WebSocket(this.url)
-      this.ws = socket
-
-      socket.onopen = () => {
-        if (this.ws !== socket) return
-        console.log('Connected to SimBridge')
-        this.clearReconnectTimer()
-        this.emit('connected')
-      }
-
-      socket.onmessage = (event) => {
-        if (this.ws !== socket) return
-        try {
-          const data = JSON.parse(event.data)
-          this.handleMessage(data)
-        } catch (error) {
-          console.error('Error parsing message:', error)
-        }
-      }
-
-      socket.onclose = () => {
-        if (this.ws !== socket) return
-        this.ws = null
-        console.log('Disconnected from SimBridge')
-        this.emit('disconnected')
-        if (this.shouldReconnect) {
-          this.scheduleReconnect()
-        }
-      }
-
-      socket.onerror = (error) => {
-        if (this.ws !== socket) return
-        console.error('WebSocket error:', error)
-        this.emit('error', error)
-      }
+      socket = new WebSocket(this.url)
     } catch (error) {
+      // Synchronous construction failure (bad scheme, CSP, …): no socket
+      // exists, so the client must not keep pointing at a stale one.
+      // Surface the failure and retry on the normal schedule while
+      // reconnect intent holds — at most one timer, no duplicate sockets.
+      this.ws = null
       console.error('Failed to connect:', error)
+      this.emit('error', error)
       if (this.shouldReconnect) {
         this.scheduleReconnect()
       }
+      return
+    }
+    this.ws = socket
+
+    socket.onopen = () => {
+      if (this.ws !== socket) return
+      console.log('Connected to SimBridge')
+      this.clearReconnectTimer()
+      this.emit('connected')
+    }
+
+    socket.onmessage = (event) => {
+      if (this.ws !== socket) return
+      // Parse inside the catch boundary; dispatch outside it. A listener
+      // exception must surface through the page error channel, not be
+      // swallowed and mislabelled as a JSON parsing failure.
+      let data: any
+      try {
+        data = JSON.parse(event.data)
+      } catch (error) {
+        console.error('Error parsing message:', error)
+        return
+      }
+      this.handleMessage(data)
+    }
+
+    socket.onclose = () => {
+      if (this.ws !== socket) return
+      this.ws = null
+      console.log('Disconnected from SimBridge')
+      this.emit('disconnected')
+      if (this.shouldReconnect) {
+        this.scheduleReconnect()
+      }
+    }
+
+    socket.onerror = (error) => {
+      if (this.ws !== socket) return
+      console.error('WebSocket error:', error)
+      this.emit('error', error)
     }
   }
 
