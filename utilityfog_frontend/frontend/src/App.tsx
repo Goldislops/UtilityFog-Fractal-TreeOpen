@@ -49,15 +49,25 @@ function App() {
       <EventFeed simClient={simClient} />
       <ConnectionBadge isConnected={isConnected} />
 
-      {/* display:contents keeps these accessibility wrappers out of the
-          .app-container flex layout — the view roots stay direct flex
-          children, so rendering/styling is unchanged. */}
+      {/* Each rendered view sits in a labelled region landmark. The wrapper
+          mirrors the flex slot the view roots already expect (a flex:1 child
+          of the column-flex .app-container) and is itself a flex container,
+          so the view root's own flex:1 fills it and child canvas sizing is
+          unchanged. minHeight/minWidth 0 keep flex overflow semantics. */}
       {view === '3d' ? (
-        <section role="region" aria-label="3D network view" style={{ display: 'contents' }}>
+        <section
+          role="region"
+          aria-label="3D network view"
+          style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
+        >
           <NetworkView3D simClient={simClient} />
         </section>
       ) : (
-        <section role="region" aria-label="2D network view" style={{ display: 'contents' }}>
+        <section
+          role="region"
+          aria-label="2D network view"
+          style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
+        >
           <NetworkView2D simClient={simClient} />
         </section>
       )}
