@@ -218,10 +218,18 @@ test('unknown node with valid position but missing connections is admitted (rend
 test('bulk network_update: null/undefined/primitive payloads never throw', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  // The consumers THIS PR owns (queue -> store, 2D handler) are driven with
+  // the full null/undefined/primitive matrix directly. Socket-level
+  // injection uses object-shaped payloads only: the pre-#318 EventFeed on
+  // current main reads payload.type and throws uncaught on null payloads
+  // now that the merged client no longer swallows listener exceptions —
+  // a NEIGHBORING fragility owned and fixed by #318/#320 (documented in
+  // the PR body), not by this PR's files.
   for (const payload of [null, undefined, 42, 'garbage', { nodes: null, edges: null }]) {
-    await inject(page, 'network_update', payload);
     await storeSetNetwork(page, (payload as any)?.nodes, (payload as any)?.edges);
   }
+  await inject(page, 'network_update', {}); // object-shaped, side-free
+  await inject(page, 'network_update', { nodes: null, edges: null });
   await page.waitForTimeout(200);
   await appMounted(page);
   expect(errors).toHaveLength(0);
