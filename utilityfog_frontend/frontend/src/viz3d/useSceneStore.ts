@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
+import { applyNodeUpdate, sanitizeNodeList } from './nodeValidation'
 
 interface SceneStore {
   nodes: NetworkNode[]
@@ -16,15 +17,10 @@ export const useSceneStore = create<SceneStore>((set) => ({
 
   updateNode: (node: NetworkNode) =>
     set((state) => {
-      const existingIndex = state.nodes.findIndex(n => n.id === node.id)
-      
-      if (existingIndex >= 0) {
-        const newNodes = [...state.nodes]
-        newNodes[existingIndex] = node
-        return { nodes: newNodes }
-      } else {
-        return { nodes: [...state.nodes, node] }
-      }
+      // Ingestion boundary: malformed positions never reach the renderers
+      // (see nodeValidation.ts for the reconcile contract).
+      const nodes = applyNodeUpdate(state.nodes, node)
+      return nodes === state.nodes ? {} : { nodes }
     }),
 
   updateEdge: (edge: NetworkEdge) =>
@@ -41,7 +37,7 @@ export const useSceneStore = create<SceneStore>((set) => ({
     }),
 
   setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) =>
-    set({ nodes, edges }),
+    set((state) => ({ nodes: sanitizeNodeList(nodes, state.nodes), edges })),
 
   clearNetwork: () =>
     set({ nodes: [], edges: [] }),
