@@ -1,0 +1,248 @@
+import { test, expect, Page } from '@playwright/test';
+
+// SimBridgeClient lifecycle contract tests.
+//
+// A deterministic in-page FakeWebSocket replaces window.WebSocket before the
+// app loads (so nothing ever dials a real backend), and the client module is
+// imported through the Vite dev server inside the browser. The fake fires
+// its close callback asynchronously, exactly like real browsers — that async
+// gap is what produced the original zombie-reconnect defect, so the fake
+// must reproduce it. Reconnect delay is injected (25ms) for determinism; no
+// long sleeps.
+
+const TEST_URL = 'ws://lifecycle-test';
+const RECONNECT_MS = 25;
+// Comfortably past one reconnect delay, far below two app-default delays.
+const AFTER_RECONNECT_MS = 4 * RECONNECT_MS;
+
+async function setupHarness(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as any;
+    w.__fakeSockets = [];
+    class FakeWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      url: string;
+      readyState = 0;
+      sent: string[] = [];
+      onopen: ((ev: unknown) => void) | null = null;
+      onmessage: ((ev: { data: string }) => void) | null = null;
+      onclose: ((ev: unknown) => void) | null = null;
+      onerror: ((ev: unknown) => void) | null = null;
+      constructor(url: string) {
+        this.url = url;
+        w.__fakeSockets.push(this);
+      }
+      send(data: string) {
+        this.sent.push(data);
+      }
+      close() {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        // Real browsers deliver onclose asynchronously after close().
+        setTimeout(() => {
+          if (this.onclose) this.onclose({});
+        }, 0);
+      }
+      // Test-side helpers (server-driven transitions are synchronous).
+      _open() {
+        this.readyState = 1;
+        if (this.onopen) this.onopen({});
+      }
+      _close() {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        if (this.onclose) this.onclose({});
+      }
+      _message(obj: unknown) {
+        if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) });
+      }
+    }
+    w.WebSocket = FakeWebSocket;
+  });
+  await page.goto('/');
+  await page.evaluate(async ({ url, delay }) => {
+    const w = window as any;
+    const mod = await import('/src/ws/SimBridgeClient.ts');
+    w.__h = {
+      events: [] as string[],
+      payloads: [] as Array<{ channel: string; payload: unknown }>,
+      client: new mod.SimBridgeClient(url, delay),
+      sockets: () => w.__fakeSockets.filter((s: any) => s.url === url),
+    };
+    w.__h.client.on('connected', () => w.__h.events.push('connected'));
+    w.__h.client.on('disconnected', () => w.__h.events.push('disconnected'));
+  }, { url: TEST_URL, delay: RECONNECT_MS });
+}
+
+const socketCount = (page: Page) =>
+  page.evaluate(() => (window as any).__h.sockets().length);
+const events = (page: Page) =>
+  page.evaluate(() => (window as any).__h.events as string[]);
+
+test.beforeEach(async ({ page }) => {
+  await setupHarness(page);
+});
+
+test('first connect creates exactly one socket; repeats while CONNECTING/OPEN are idempotent', async ({ page }) => {
+  await page.evaluate(() => (window as any).__h.client.connect());
+  expect(await socketCount(page)).toBe(1);
+
+  // Repeat while CONNECTING — no second socket.
+  await page.evaluate(() => (window as any).__h.client.connect());
+  expect(await socketCount(page)).toBe(1);
+
+  // Open, then repeat while OPEN — still no second socket.
+  await page.evaluate(() => (window as any).__h.sockets()[0]._open());
+  await page.evaluate(() => (window as any).__h.client.connect());
+  expect(await socketCount(page)).toBe(1);
+
+  // Open emitted 'connected' exactly once.
+  expect(await events(page)).toEqual(['connected']);
+});
+
+test('unexpected close emits disconnected and schedules exactly one reconnect', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.sockets()[0]._close(); // server-side drop
+  });
+  expect(await events(page)).toEqual(['connected', 'disconnected']);
+
+  // Exactly one replacement socket after the injected delay — and still
+  // exactly one after another full delay (at most one reconnect per close).
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(2);
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(2);
+
+  // Successful reopen clears pending reconnect state (no third socket).
+  await page.evaluate(() => (window as any).__h.sockets()[1]._open());
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(2);
+});
+
+test('intentional disconnect never yields a replacement socket', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.client.disconnect(); // fake delivers its close callback async
+  });
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(1);
+  expect(await events(page)).toEqual(['connected', 'disconnected']);
+});
+
+test('disconnect clears an already-scheduled reconnect', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.sockets()[0]._close(); // schedules a reconnect...
+    h.client.disconnect();   // ...which this must cancel
+  });
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await socketCount(page)).toBe(1);
+});
+
+test('explicit connect after disconnect creates a fresh working socket', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.client.disconnect();
+  });
+  await page.evaluate(() => (window as any).__h.client.connect());
+  expect(await socketCount(page)).toBe(2);
+  await page.evaluate(() => (window as any).__h.sockets()[1]._open());
+  expect(await events(page)).toEqual(['connected', 'disconnected', 'connected']);
+  expect(await page.evaluate(() => (window as any).__h.client.isConnected)).toBe(true);
+});
+
+test('late callbacks from an obsolete socket cannot affect the current connection', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.sockets()[0]._open();
+    h.sockets()[0]._close(); // drop → reconnect scheduled
+  });
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  await page.evaluate(() => (window as any).__h.sockets()[1]._open());
+  const before = await events(page);
+
+  // Fire every callback on the OBSOLETE socket: all must be inert.
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    const stale = h.sockets()[0];
+    if (stale.onopen) stale.onopen({});
+    if (stale.onmessage) stale.onmessage({ data: JSON.stringify({ type: 'node_update', payload: { id: 'stale' } }) });
+    if (stale.onclose) stale.onclose({});
+  });
+  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  expect(await events(page)).toEqual(before); // no new connected/disconnected
+  expect(await socketCount(page)).toBe(2);    // no extra reconnect socket
+  expect(await page.evaluate(() => (window as any).__h.client.isConnected)).toBe(true);
+});
+
+test('message routing and listener removal remain behaviorally compatible', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    for (const ch of ['simulation_event', 'network_update', 'node_update', 'edge_update']) {
+      h.client.on(ch, (p: unknown) => h.payloads.push({ channel: ch, payload: p }));
+    }
+    h.client.connect();
+    h.sockets()[0]._open();
+    const s = h.sockets()[0];
+    s._message({ type: 'simulation_event', payload: { kind: 'tick' } });
+    s._message({ type: 'network_update', payload: { nodes: [] } });
+    s._message({ type: 'node_update', payload: { id: 'n1' } });
+    s._message({ type: 'edge_update', payload: { id: 'e1' } });
+  });
+  const payloads = await page.evaluate(() => (window as any).__h.payloads);
+  expect(payloads.map((p: any) => p.channel)).toEqual([
+    'simulation_event', 'network_update', 'node_update', 'edge_update',
+  ]);
+  expect(payloads[2].payload).toEqual({ id: 'n1' });
+
+  // off() prevents later delivery.
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.removable = (p: unknown) => h.payloads.push({ channel: 'removable', payload: p });
+    h.client.on('node_update', h.removable);
+    h.client.off('node_update', h.removable);
+    h.sockets()[0]._message({ type: 'node_update', payload: { id: 'n2' } });
+  });
+  const after = await page.evaluate(() => (window as any).__h.payloads);
+  expect(after.filter((p: any) => p.channel === 'removable')).toHaveLength(0);
+});
+
+test('send serializes only while OPEN and is a no-op otherwise', async ({ page }) => {
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.connect();
+    h.client.send({ early: true }); // CONNECTING — must be a no-op
+  });
+  expect(await page.evaluate(() => (window as any).__h.sockets()[0].sent)).toEqual([]);
+
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.sockets()[0]._open();
+    h.client.send({ hello: 'world' });
+  });
+  expect(await page.evaluate(() => (window as any).__h.sockets()[0].sent)).toEqual([
+    JSON.stringify({ hello: 'world' }),
+  ]);
+
+  await page.evaluate(() => {
+    const h = (window as any).__h;
+    h.client.disconnect();
+    h.client.send({ late: true }); // released socket — no-op
+  });
+  expect(await page.evaluate(() => (window as any).__h.sockets()[0].sent)).toEqual([
+    JSON.stringify({ hello: 'world' }),
+  ]);
+});
