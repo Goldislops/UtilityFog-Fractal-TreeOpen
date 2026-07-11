@@ -12,11 +12,14 @@ import { NetworkNode } from '../ws/SimBridgeClient'
 /// numbers. (NaN/Infinity are rejected — they draw nothing meaningful and
 /// poison instanced-matrix math.)
 export function isValidPosition(p: unknown): p is [number, number, number] {
-  return (
-    Array.isArray(p) &&
-    p.length === 3 &&
-    p.every(v => typeof v === 'number' && Number.isFinite(v))
-  )
+  if (!Array.isArray(p) || p.length !== 3) return false
+  // Indexed access, not every(): every() SKIPS holes in sparse arrays, so
+  // Array(3) — length 3, zero coordinates — would validate vacuously.
+  for (let i = 0; i < 3; i++) {
+    const v: unknown = p[i]
+    if (typeof v !== 'number' || !Number.isFinite(v)) return false
+  }
+  return true
 }
 
 /// Reconcile an incoming node-shaped payload against the previously known
@@ -42,15 +45,23 @@ export function reconcileNode(
   // The candidate is only trusted after the runtime position validation
   // below (id is checked by callers); status/connections stay tolerated
   // per the source-verified renderer-requirements evidence.
-  const candidate = incoming as Partial<NetworkNode> & { position?: unknown }
-  const merged = (existing ? { ...existing, ...candidate } : candidate) as NetworkNode
-  if (isValidPosition(candidate.position)) {
-    return merged
+  try {
+    const candidate = incoming as Partial<NetworkNode> & { position?: unknown }
+    const merged = (existing ? { ...existing, ...candidate } : candidate) as NetworkNode
+    if (isValidPosition(candidate.position)) {
+      return merged
+    }
+    if (existing && isValidPosition(existing.position)) {
+      return { ...merged, position: existing.position }
+    }
+    return null
+  } catch {
+    // Hostile payload shapes (throwing getters, poisoned proxies) are
+    // contained at the boundary exactly like any other malformed input —
+    // property access and the merge spread both evaluate getters, and an
+    // exception here must not cross into store/render code.
+    return null
   }
-  if (existing && isValidPosition(existing.position)) {
-    return { ...merged, position: existing.position }
-  }
-  return null
 }
 
 /// Apply one incoming node to a node list (update-or-append by id),
@@ -62,7 +73,13 @@ export function applyNodeUpdate(
   previous: NetworkNode[],
   incoming: unknown,
 ): NetworkNode[] {
-  const id = (incoming as { id?: unknown } | null | undefined)?.id
+  let id: unknown
+  try {
+    id = (incoming as { id?: unknown } | null | undefined)?.id
+  } catch {
+    // A throwing id getter identifies nothing — same outcome as no id.
+    return previous
+  }
   if (typeof id !== 'string') return previous
   const index = previous.findIndex(n => n.id === id)
   const next = reconcileNode(incoming, index >= 0 ? previous[index] : undefined)
@@ -87,7 +104,13 @@ export function sanitizeNodeList(
   const result: NetworkNode[] = []
   const seen = new Set<string>()
   for (const candidate of incoming) {
-    const id = (candidate as { id?: unknown } | null | undefined)?.id
+    let id: unknown
+    try {
+      id = (candidate as { id?: unknown } | null | undefined)?.id
+    } catch {
+      // A hostile entry is skipped without losing the rest of the batch.
+      continue
+    }
     if (typeof id !== 'string' || seen.has(id)) continue
     const next = reconcileNode(candidate, byId.get(id))
     if (next !== null) {
