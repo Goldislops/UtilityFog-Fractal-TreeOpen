@@ -15,8 +15,13 @@
 mod counter_rng;
 
 use counter_rng::{
-    counter_f32, counter_u64, materialize_dense, mix64, CounterKey, LAB_STREAM_VERSION,
+    counter_f32, counter_u64, materialize_dense, mix64, CounterKey, INITIAL_ACC, LAB_STREAM_VERSION,
 };
+
+// Compile-time const-evaluation lock (audit M-T2): `mix64` must be usable
+// in const context. The expected value is from the INDEPENDENT Python
+// big-int oracle (mod-2^64 masking), not from the Rust implementation.
+const MIX64_OF_42_CONST: u64 = mix64(42);
 
 /// (id, seed, generation, phase_id, voxel_index, draw_lane, u64, top24, f32_bits)
 const GOLDENS: [(&str, u64, u32, u16, u64, u16, u64, u64, u32); 10] = [
@@ -182,6 +187,21 @@ fn same_key_repeats_identically() {
 #[test]
 fn version_constant_is_locked() {
     assert_eq!(LAB_STREAM_VERSION, 1);
+}
+
+#[test]
+fn initial_acc_matches_independent_oracle() {
+    // mix64(DOMAIN xor VERSION) computed independently (Python big-int with
+    // explicit mod-2^64 masking) — NOT generated from this implementation.
+    assert_eq!(INITIAL_ACC, 0x8204_7734_2D9C_40C0);
+}
+
+#[test]
+fn mix64_const_evaluation_matches_independent_oracle() {
+    // Value computed by the same independent oracle; the constant itself
+    // proves const-context evaluation compiled.
+    assert_eq!(MIX64_OF_42_CONST, 0xA759_EA27_D472_7622);
+    assert_eq!(mix64(42), MIX64_OF_42_CONST);
 }
 
 #[test]

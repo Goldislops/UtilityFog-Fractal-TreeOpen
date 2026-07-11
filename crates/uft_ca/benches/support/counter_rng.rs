@@ -37,13 +37,20 @@ pub struct CounterKey {
 }
 
 /// Spec A.1 `mix64` — all arithmetic u64 mod 2^64, explicit wrapping
-/// multiplication, logical right shifts.
+/// multiplication, logical right shifts. `const fn`: evaluable at compile
+/// time (audit M-T2); output for any input is locked by the golden vectors.
 #[inline]
-pub fn mix64(mut z: u64) -> u64 {
+pub const fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(M1);
     z = (z ^ (z >> 27)).wrapping_mul(M2);
     z ^ (z >> 31)
 }
+
+/// The spec's fixed initial accumulator `mix64(DOMAIN xor VERSION)`,
+/// hoisted to a compile-time constant (audit M-T3). Its exact value is
+/// locked by an independently calculated test fixture — this fold is pure
+/// algebraic hoisting and changes no output.
+pub const INITIAL_ACC: u64 = mix64(DOMAIN ^ LAB_STREAM_VERSION);
 
 /// Spec A.1 `counter_u64` — fixed fold order: version-domain, seed,
 /// generation, phase/lane pack, voxel index. Narrow fields zero-extend.
@@ -51,8 +58,7 @@ pub fn mix64(mut z: u64) -> u64 {
 pub fn counter_u64(key: CounterKey) -> u64 {
     let g = u64::from(key.generation);
     let pl = (u64::from(key.phase_id) << 16) | u64::from(key.draw_lane);
-    let mut acc = mix64(DOMAIN ^ LAB_STREAM_VERSION);
-    acc = mix64(acc ^ key.seed);
+    let mut acc = mix64(INITIAL_ACC ^ key.seed);
     acc = mix64(acc ^ g);
     acc = mix64(acc ^ pl);
     acc = mix64(acc ^ key.voxel_index);
@@ -60,10 +66,14 @@ pub fn counter_u64(key: CounterKey) -> u64 {
 }
 
 /// Spec A.1 `counter_f32` — top 24 bits scaled by exactly 2^-24; the result
-/// lies in [0, 1) and can never equal 1.0.
+/// lies in [0, 1) and can never equal 1.0. The intermediate narrows to u32
+/// before the float conversion (audit M-T4): top24 always fits in 24 bits,
+/// so the narrowing is lossless and is DESIGNED TO PERMIT a narrower
+/// integer-to-float conversion — no instruction-selection claim is made
+/// without inspecting generated assembly.
 #[inline]
 pub fn counter_f32(key: CounterKey) -> f32 {
-    let top24 = counter_u64(key) >> 40;
+    let top24 = (counter_u64(key) >> 40) as u32;
     (top24 as f32) * F32_SCALE
 }
 

@@ -3,13 +3,27 @@
 //!
 //! Groups are reported SEPARATELY and are not like-for-like proofs of a
 //! production speedup:
-//!   1. xoshiro_dense    — seeded Xoshiro256** (the engine's CaRng algorithm)
-//!                         materializing Vec<f32> via Rng::gen::<f32>().
-//!   2. counter_dense    — counter generator materializing Vec<f32>
+//!   1. xoshiro_persistent — Xoshiro256** (the engine's CaRng algorithm)
+//!                         seeded ONCE outside the timed region, then
+//!                         consumed across iterations, materializing
+//!                         Vec<f32> via Rng::gen::<f32>(). This is the
+//!                         production-representative comparison: the
+//!                         stepper keeps a persistent RNG and does not
+//!                         reseed per vector. A persistent generator means
+//!                         each Criterion iteration consumes a DIFFERENT
+//!                         stretch of the random sequence — that is
+//!                         correct for measuring generation/
+//!                         materialization throughput, which does not
+//!                         depend on which stretch is drawn.
+//!   2. xoshiro_reseed   — the previous shape (seed inside the timed
+//!                         region) retained ONLY as a measurement of
+//!                         seeding overhead. NEVER the production
+//!                         comparison.
+//!   3. counter_dense    — counter generator materializing Vec<f32>
 //!                         (generator cost + allocation cost together).
-//!   3. counter_direct   — counter generator consumed directly (checksum),
+//!   4. counter_direct   — counter generator consumed directly (checksum),
 //!                         no intermediate vector (generator cost alone).
-//!   4. counter_sparse   — counter lookups on deterministic 1%/10%/50%
+//!   5. counter_sparse   — counter lookups on deterministic 1%/10%/50%
 //!                         index sets (skipped-work shape). Index-set
 //!                         construction happens OUTSIDE the timed region.
 //!
@@ -50,8 +64,29 @@ fn checksum(values: impl IntoIterator<Item = f32>) -> f64 {
     values.into_iter().map(f64::from).sum()
 }
 
-fn bench_xoshiro_dense(c: &mut Criterion) {
-    let mut group = c.benchmark_group("xoshiro_dense_vec_f32");
+fn bench_xoshiro_persistent_dense(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xoshiro_persistent_dense_vec_f32");
+    group.sample_size(20);
+    group.warm_up_time(std::time::Duration::from_secs(1));
+    group.measurement_time(std::time::Duration::from_secs(2));
+    for (label, n) in SIZES {
+        group.bench_function(label, |b| {
+            // Production-representative: seeded ONCE outside the timed
+            // region; the persistent generator is consumed across
+            // iterations (throughput is sequence-position independent).
+            let mut rng = Xoshiro256StarStar::seed_from_u64(SEED);
+            b.iter(|| {
+                let v: Vec<f32> = (0..n).map(|_| rng.gen::<f32>()).collect();
+                black_box(checksum(v))
+            })
+        });
+    }
+    group.finish();
+}
+
+fn bench_xoshiro_reseed_dense(c: &mut Criterion) {
+    // Seeding-overhead measurement ONLY — never the production comparison.
+    let mut group = c.benchmark_group("xoshiro_reseed_and_dense_vec_f32");
     group.sample_size(20);
     group.warm_up_time(std::time::Duration::from_secs(1));
     group.measurement_time(std::time::Duration::from_secs(2));
@@ -136,7 +171,8 @@ fn bench_counter_sparse(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_xoshiro_dense,
+    bench_xoshiro_persistent_dense,
+    bench_xoshiro_reseed_dense,
     bench_counter_dense,
     bench_counter_direct,
     bench_counter_sparse
