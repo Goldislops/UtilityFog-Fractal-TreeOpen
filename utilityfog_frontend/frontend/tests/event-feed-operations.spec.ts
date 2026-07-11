@@ -39,7 +39,18 @@ async function setupPage(page: Page) {
       _open() { this.readyState = 1; if (this.onopen) this.onopen({}); }
       _message(obj: unknown) { if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) }); }
     }
-    w.WebSocket = FakeWebSocket;
+    // Only the app's SimBridge socket (/ws path) is faked; everything else
+    // (notably Vite's HMR client socket) keeps the real WebSocket, so the
+    // dev-server connection stays healthy and never triggers the client's
+    // lost-connection page reload mid-test.
+    const RealWebSocket = w.WebSocket;
+    w.WebSocket = new Proxy(FakeWebSocket, {
+      construct(target, args) {
+        const url = String(args[0] ?? '');
+        if (url.includes('/ws')) return new target(url);
+        return new (RealWebSocket as any)(...args);
+      },
+    });
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
@@ -64,7 +75,7 @@ const exportBtn = (page: Page) => feed(page).getByRole('button', { name: 'Export
 const injectFour = async (page: Page) => {
   await inject(page, 'simulation_event', { kind: 'tick' });
   await inject(page, 'network_update', { nodes: [] });
-  await inject(page, 'node_update', { id: 'n1' });
+  await inject(page, 'node_update', { id: 'n1', position: [0, 0, 0], connections: [], status: 'active' });
   await inject(page, 'edge_update', { id: 'e1' });
   await expect(entries(page)).toHaveCount(4);
 };
@@ -219,9 +230,9 @@ test('the 50-event retained cap holds regardless of filters', async ({ page }) =
 test('export: visible-only, newest-first, schema/version, full payloads, revoked URL, deterministic filename', async ({ page }) => {
   test.slow(); // stub installation + blob readback under contention
   const longText = 'y'.repeat(300);
-  await inject(page, 'node_update', { seq: 1, blob: longText });
+  await inject(page, 'node_update', { seq: 1, id: 'x1', position: [0, 0, 0], connections: [], status: 'active', blob: longText });
   await inject(page, 'edge_update', { seq: 2 });
-  await inject(page, 'node_update', { seq: 3 });
+  await inject(page, 'node_update', { seq: 3, id: 'x3', position: [0, 0, 0], connections: [], status: 'active' });
   await expect(entries(page)).toHaveCount(3);
 
   // Filter to node_update + search that matches both node entries.
@@ -271,12 +282,12 @@ test('StrictMode single delivery holds with operations present; no page errors a
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
 
-  await inject(page, 'node_update', { once: true });
+  await inject(page, 'node_update', { id: 'once-1', position: [0, 0, 0], connections: [], status: 'active' });
   await expect(entries(page)).toHaveCount(1); // one delivery per message
 
   await chan(page, 'node_update').click();
   await chan(page, 'node_update').click();
-  await searchBox(page).fill('once');
+  await searchBox(page).fill('once-1');
   await expect(entries(page)).toHaveCount(1);
   await searchBox(page).fill('');
   await clearBtn(page).click();
