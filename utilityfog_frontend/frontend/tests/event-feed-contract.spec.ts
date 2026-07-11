@@ -1,5 +1,58 @@
 import { test, expect, Page } from '@playwright/test';
 
+// ---------------------------------------------------------------------------
+// Typed test-harness surface (no `any`): the in-page fake socket and the
+// harness slots this spec pins onto window. Types are erased at runtime, so
+// page.evaluate closures may reference them freely.
+interface FakeSocketHarness {
+  url: string;
+  readyState: number;
+  sent: string[];
+  onopen: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: string }) => void) | null;
+  onclose: ((ev: unknown) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  _open: () => void;
+  _close: () => void;
+  _message: (obj: unknown) => void;
+  _messageRaw: (raw: string) => void;
+}
+interface SimClientLike {
+  connect: () => void;
+  disconnect: () => void;
+  on: (event: string, cb: (data?: unknown) => void) => void;
+  off: (event: string, cb: (data?: unknown) => void) => void;
+  send: (data: unknown) => void;
+  readonly isConnected: boolean;
+}
+interface ExportCapture {
+  revoked: string[];
+  sequence: string[];
+  download: string;
+  href: string;
+  text: string;
+  blob?: Blob;
+}
+interface LifecycleHarness {
+  events: string[];
+  payloads: Array<{ channel: string; payload: unknown }>;
+  client: SimClientLike;
+  sockets: () => FakeSocketHarness[];
+  removable?: (p?: unknown) => void;
+}
+type HarnessWindow = Window &
+  typeof globalThis & {
+    __fakeSockets: FakeSocketHarness[];
+    __throwNextConstruction?: boolean;
+    __h: LifecycleHarness;
+    __exportCapture: ExportCapture;
+    __cap: ExportCapture;
+    __pwned?: boolean;
+    __pwned2?: boolean;
+  };
+// ---------------------------------------------------------------------------
+
+
 // EventFeed contract tests.
 //
 // A deterministic in-page FakeWebSocket replaces window.WebSocket before the
@@ -11,7 +64,7 @@ import { test, expect, Page } from '@playwright/test';
 
 async function setupPage(page: Page) {
   await page.addInitScript(() => {
-    const w = window as any;
+    const w = window as HarnessWindow;
     w.__fakeSockets = [];
     class FakeWebSocket {
       static CONNECTING = 0;
@@ -47,7 +100,7 @@ async function setupPage(page: Page) {
         if (this.onmessage) this.onmessage({ data: JSON.stringify(obj) });
       }
     }
-    w.WebSocket = FakeWebSocket;
+    w.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
   });
   await page.goto('/');
   // The app's client(s) exist once the root renders; the active one is last.
@@ -57,8 +110,8 @@ async function setupPage(page: Page) {
 // Inject one already-parsed-shape message on the app's active socket.
 const inject = (page: Page, type: string, payload: unknown) =>
   page.evaluate(({ type, payload }) => {
-    const w = window as any;
-    const appSockets = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const appSockets = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     const active = appSockets[appSockets.length - 1];
     active._message({ type, payload });
   }, { type, payload });
@@ -108,8 +161,8 @@ test('newest event appears first', async ({ page }) => {
 
 test('exactly fifty events are retained; after fifty-five the oldest five are gone', async ({ page }) => {
   await page.evaluate(() => {
-    const w = window as any;
-    const appSockets = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const appSockets = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     const active = appSockets[appSockets.length - 1];
     for (let n = 1; n <= 55; n++) {
       active._message({ type: 'node_update', payload: { seq: `marker-${n}` } });
@@ -169,7 +222,7 @@ test('script-like payload text renders as text, never as markup', async ({ page 
   await expect(entries(page).first()).toContainText('<script>');
   // …and no element was actually created from the payload.
   expect(await feed(page).locator('script, img').count()).toBe(0);
-  expect(await page.evaluate(() => (window as any).__pwned ?? (window as any).__pwned2 ?? null)).toBeNull();
+  expect(await page.evaluate(() => (window as HarnessWindow).__pwned ?? (window as HarnessWindow).__pwned2 ?? null)).toBeNull();
 });
 
 test('StrictMode double-mount does not duplicate entries (cleanup removes listeners)', async ({ page }) => {

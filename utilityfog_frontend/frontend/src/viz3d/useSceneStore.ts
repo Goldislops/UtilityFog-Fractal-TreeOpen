@@ -5,9 +5,9 @@ import { applyNodeUpdate, sanitizeNodeList } from './nodeValidation'
 interface SceneStore {
   nodes: NetworkNode[]
   edges: NetworkEdge[]
-  updateNode: (node: NetworkNode) => void
+  updateNode: (node: unknown) => void
   updateEdge: (edge: NetworkEdge) => void
-  setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) => void
+  setNetwork: (nodes: unknown, edges: unknown) => void
   clearNetwork: () => void
 }
 
@@ -15,7 +15,7 @@ export const useSceneStore = create<SceneStore>((set) => ({
   nodes: [],
   edges: [],
 
-  updateNode: (node: NetworkNode) =>
+  updateNode: (node: unknown) =>
     set((state) => {
       // Ingestion boundary: malformed positions never reach the renderers
       // (see nodeValidation.ts for the reconcile contract).
@@ -36,12 +36,14 @@ export const useSceneStore = create<SceneStore>((set) => ({
       }
     }),
 
-  setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) =>
+  setNetwork: (nodes: unknown, edges: unknown) =>
     set((state) => ({
       // Per-side tolerance: a malformed side never discards the valid
       // other side; explicit empty arrays remain meaningful and clear.
+      // Edge ELEMENT shape stays tolerated (renderers skip dangling
+      // references) — the array check is the documented boundary.
       nodes: Array.isArray(nodes) ? sanitizeNodeList(nodes, state.nodes) : state.nodes,
-      edges: Array.isArray(edges) ? edges : state.edges,
+      edges: Array.isArray(edges) ? (edges as NetworkEdge[]) : state.edges,
     })),
 
   clearNetwork: () =>

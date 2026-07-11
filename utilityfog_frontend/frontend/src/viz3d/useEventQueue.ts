@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react'
-import { SimBridgeClient, NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
+import { useCallback, useEffect, useRef } from 'react'
+import { SimBridgeClient } from '../ws/SimBridgeClient'
 
 interface EventQueueHandlers {
-  updateNode: (node: NetworkNode) => void
-  setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) => void
+  updateNode: (node: unknown) => void
+  setNetwork: (nodes: unknown, edges: unknown) => void
 }
 
 export function useEventQueue(
@@ -13,7 +13,7 @@ export function useEventQueue(
   const queueRef = useRef<Array<() => void>>([])
   const processingRef = useRef(false)
 
-  const processQueue = async () => {
+  const processQueue = useCallback(async () => {
     if (processingRef.current) return
     processingRef.current = true
 
@@ -26,34 +26,38 @@ export function useEventQueue(
     }
 
     processingRef.current = false
-  }
+  }, [])
 
-  const enqueueUpdate = (updateFn: () => void) => {
-    queueRef.current.push(updateFn)
-    if (!processingRef.current) {
-      requestAnimationFrame(processQueue)
-    }
-  }
+  const enqueueUpdate = useCallback(
+    (updateFn: () => void) => {
+      queueRef.current.push(updateFn)
+      if (!processingRef.current) {
+        requestAnimationFrame(processQueue)
+      }
+    },
+    [processQueue],
+  )
 
   useEffect(() => {
     if (!simClient) return
 
-    const handleNetworkUpdate = (data: { nodes?: NetworkNode[], edges?: NetworkEdge[] } | null | undefined) => {
+    const handleNetworkUpdate = (data?: unknown) => {
       // Null/primitive payloads must not throw, and one malformed side
       // must not discard the other: forward whatever is present and let
       // the store's per-side validation decide (empty arrays stay
       // meaningful and clear their collection).
       if (!data || typeof data !== 'object') return
-      if (data.nodes !== undefined || data.edges !== undefined) {
-        enqueueUpdate(() => handlers.setNetwork(data.nodes as NetworkNode[], data.edges as NetworkEdge[]))
+      const d = data as { nodes?: unknown; edges?: unknown }
+      if (d.nodes !== undefined || d.edges !== undefined) {
+        enqueueUpdate(() => handlers.setNetwork(d.nodes, d.edges))
       }
     }
 
-    const handleNodeUpdate = (node: NetworkNode) => {
+    const handleNodeUpdate = (node?: unknown) => {
       enqueueUpdate(() => handlers.updateNode(node))
     }
 
-    const handleEdgeUpdate = (edge: NetworkEdge) => {
+    const handleEdgeUpdate = (edge?: unknown) => {
       // Handle edge updates if needed
       console.log('Edge update:', edge)
     }
@@ -67,7 +71,7 @@ export function useEventQueue(
       simClient.off('node_update', handleNodeUpdate)
       simClient.off('edge_update', handleEdgeUpdate)
     }
-  }, [simClient, handlers])
+  }, [simClient, handlers, enqueueUpdate])
 
   return {
     queueLength: queueRef.current.length,

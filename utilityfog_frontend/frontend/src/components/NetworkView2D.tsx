@@ -17,15 +17,18 @@ export default function NetworkView2D({ simClient }: NetworkView2DProps) {
     // Same ingestion boundary as the scene store (nodeValidation.ts): this
     // view keeps its own subscription, so malformed positions must be
     // reconciled here too before the draw effect indexes node.position.
-    const handleNetworkUpdate = (data: any) => {
+    const handleNetworkUpdate = (data?: unknown) => {
       if (!data || typeof data !== 'object') return
+      const d = data as { nodes?: unknown; edges?: unknown }
       // Per-side tolerance mirrors the store: malformed one side never
-      // discards the other; explicit [] clears its collection.
-      if (Array.isArray(data.nodes)) setNodes(prev => sanitizeNodeList(data.nodes, prev))
-      if (Array.isArray(data.edges)) setEdges(data.edges)
+      // discards the other; explicit [] clears its collection. Edge
+      // ELEMENT shape stays tolerated (the draw effect skips dangling
+      // references) — the array check is the documented boundary.
+      if (Array.isArray(d.nodes)) setNodes(prev => sanitizeNodeList(d.nodes, prev))
+      if (Array.isArray(d.edges)) setEdges(d.edges as NetworkEdge[])
     }
 
-    const handleNodeUpdate = (node: NetworkNode) => {
+    const handleNodeUpdate = (node?: unknown) => {
       setNodes(prev => applyNodeUpdate(prev, node))
     }
 
