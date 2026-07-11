@@ -61,6 +61,16 @@ is_encoded_payload(payload) {
 # 8 is the smallest meaningful base64 output length (encodes 4-6 raw bytes
 # with padding), so this floor preserves detection of genuine short base64
 # while eliminating the false-positive class of plain words and identifiers.
+#
+# CONTRACT (issue #157): base64 detection is intentionally WHOLE-PAYLOAD —
+# the regex is anchored (^…$) on purpose. A base64-form token embedded
+# inside ordinary prose is NOT an encoded payload for this policy; embedded
+# arbitrary-text substring scanning is out of scope (the false-positive
+# surface of scanning ordinary prose — plain words, identifiers, hashes
+# quoted in text — is not justified by current evidence). Do not add a
+# decoder, entropy heuristic, tokenizer, or broader payload scanner here
+# without a new recorded decision. URL-encoding detection below remains
+# deliberately unanchored; data-URI detection remains prefix-based.
 is_base64_like(payload) {
   regex.match(`^[A-Za-z0-9+/]{4,}={0,2}$`, payload)
   count(payload) >= 8
