@@ -37,11 +37,15 @@ from scripts.agent_backends import (
 )
 from scripts.orchestrator import (
     IterationResult,
+    MODE_OBSERVE,
+    MODE_PROPOSE,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
     observation_tools,
-    tuning_tools,
+    proposal_tools,
+    resolve_mode,
+    tools_for_mode,
 )
 from scripts.orchestrator_config import (
     DEFAULT_BASE_URL,
@@ -166,7 +170,7 @@ def test_router_routes_get_census_through_client():
 
 def test_router_propose_requires_nonempty_justification():
     client, _ = _client_with_fake()
-    router = ToolRouter(client)
+    router = ToolRouter(client, mode=MODE_PROPOSE)
     payload, is_error = router.execute(
         "propose_tuning",
         {"params": {"signal_interval": 12}, "justification": "   "},
@@ -179,25 +183,29 @@ def test_router_propose_requires_nonempty_justification():
 def test_router_propose_calls_client_with_orchestrator_source():
     client, http = _client_with_fake()
     http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-x"})
-    router = ToolRouter(client, orchestrator_source="agent:swarm-hunter")
+    router = ToolRouter(client, mode=MODE_PROPOSE, orchestrator_source="agent:legacy-tuner")
     router.execute(
         "propose_tuning",
         {"params": {"signal_interval": 14}, "justification": "reason"},
     )
     sent = http.calls[0]["json"]
-    assert sent["source"] == "agent:swarm-hunter"
+    assert sent["source"] == "agent:legacy-tuner"
+    # Package S: the router forces dry-run at the boundary.
+    assert sent["mode"] == "dry-run"
 
 
-def test_router_commit_always_uses_configured_approver_never_human():
-    """Safety: the orchestrator's router hard-codes the approver. No
-    mechanism exists for the LLM to spoof a human approver."""
-    client, http = _client_with_fake()
-    http.set("POST", "/api/tuning/commit", 200, {"status": "committed"})
-    router = ToolRouter(client, commit_approver="policy:auto")
-    router.execute("commit_tuning", {"proposal_id": "prop-x", "approver": "human:evil"})
-    sent = http.calls[0]["json"]
-    # The human:evil from LLM input is IGNORED — router uses its configured value.
-    assert sent["approver"] == "policy:auto"
+def test_router_never_registers_commit_tool_in_any_mode():
+    """Package S: commit_tuning is not an LLM-facing tool in observe OR propose
+    mode. A call to it returns unknown_tool and makes no HTTP request — the LLM
+    has no path to the commit endpoint through the router."""
+    for mode in (MODE_OBSERVE, MODE_PROPOSE):
+        client, http = _client_with_fake()
+        router = ToolRouter(client, mode=mode)
+        payload, is_error = router.execute(
+            "commit_tuning", {"proposal_id": "prop-x", "approver": "human:evil"})
+        assert is_error is True
+        assert payload["error"] == "unknown_tool"
+        assert http.calls == []  # no POST attempted
 
 
 def test_router_commit_empty_proposal_id_rejected_client_side():
@@ -262,13 +270,14 @@ def _tool_use_response(
     )
 
 
-def _make_orchestrator(backend: MockBackend) -> tuple[Orchestrator, FakeHttp]:
+def _make_orchestrator(backend: MockBackend, *, mode: str = MODE_OBSERVE) -> tuple[Orchestrator, FakeHttp]:
     http = FakeHttp()
     client = OrchestratorClient("http://test:8080", http_do=http)
     orch = Orchestrator(
         backend=backend,
         client=client,
         system_prompt="test system",
+        mode=mode,
         max_tool_depth=4,
     )
     return orch, http
@@ -295,7 +304,7 @@ def test_iteration_propose_then_end():
         }, text="I'll propose reducing signal_interval."),
         _text_response("proposal submitted"),
     ])
-    orch, http = _make_orchestrator(backend)
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
     http.set("POST", "/api/tuning/propose", 200,
              {"proposal_id": "prop-newid", "status": "accepted"})
     result = orch.run_one_iteration("observe")
@@ -309,23 +318,39 @@ def test_iteration_propose_then_end():
     assert result.usage_total["output_tokens"] == 25 + 20
 
 
-def test_iteration_propose_then_commit_then_end():
+def test_iteration_commit_tool_call_is_unknown_and_uncommitted():
+    """Package S: even if a model emits a commit_tuning tool call, there is no
+    such tool — it resolves to unknown_tool, no POST is made, and nothing is
+    committed. (No LLM-facing commit path exists in any mode.)"""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "commit_tuning", {"proposal_id": "prop-xyz"}),
+        _text_response("nothing to commit with"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    result = orch.run_one_iteration("observe")
+    assert result.stopped_because == "end_turn"
+    assert result.commits_applied == []
+    # The commit tool call was executed as unknown_tool; no commit POST made.
+    assert all(c["path"] != "/api/tuning/commit" for c in http.calls)
+
+
+def test_iteration_commit_pending_proposal_is_rejected():
+    """propose mode forces dry-run: a commit-pending request is refused with a
+    deterministic error, not silently downgraded."""
     backend = MockBackend(responses=[
         _tool_use_response("tu_1", "propose_tuning", {
             "params": {"signal_interval": 12},
             "justification": "reduce overhead",
             "mode": "commit-pending",
         }),
-        _tool_use_response("tu_2", "commit_tuning", {"proposal_id": "prop-xyz"}),
-        _text_response("committed"),
+        _text_response("ok, dry-run only"),
     ])
-    orch, http = _make_orchestrator(backend)
-    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-xyz", "status": "accepted"})
-    http.set("POST", "/api/tuning/commit", 200, {"proposal_id": "prop-xyz", "status": "committed"})
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
     result = orch.run_one_iteration("observe")
     assert result.stopped_because == "end_turn"
-    assert result.proposals_created == ["prop-xyz"]
-    assert result.commits_applied == ["prop-xyz"]
+    # No proposal was created (the router refused commit-pending before POSTing).
+    assert result.proposals_created == []
+    assert http.calls == []  # no POST — rejected at the router boundary
 
 
 def test_iteration_hits_max_depth():
@@ -393,33 +418,42 @@ def test_iteration_system_prompt_is_forwarded():
     assert backend.calls[0].system == "custom system"
 
 
-def test_iteration_tools_default_to_observation_plus_tuning():
+def test_iteration_tools_default_to_observation_only():
+    """Package S: a default (observe) orchestrator advertises observation tools
+    only — no propose, no commit."""
     backend = MockBackend(responses=[_text_response("ok")])
-    orch, _ = _make_orchestrator(backend)
+    orch, _ = _make_orchestrator(backend)  # default mode = observe
     orch.run_one_iteration("go")
     tool_names = [t.name for t in backend.calls[0].tools]
     for expected in (
         "get_medusa_census", "get_medusa_equanimity", "get_acoustic_map",
         "get_params", "get_params_schema",
-        "propose_tuning", "commit_tuning",
     ):
         assert expected in tool_names
+    assert "propose_tuning" not in tool_names
+    assert "commit_tuning" not in tool_names
+
+
+def test_iteration_propose_mode_adds_proposal_tool_only():
+    backend = MockBackend(responses=[_text_response("ok")])
+    orch, _ = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    orch.run_one_iteration("go")
+    tool_names = [t.name for t in backend.calls[0].tools]
+    assert "propose_tuning" in tool_names
+    assert "commit_tuning" not in tool_names
 
 
 # -- tool spec shape ---------------------------------------------------------
 
 
-def test_propose_tuning_tool_requires_justification():
-    specs = {t.name: t for t in tuning_tools()}
+def test_proposal_tool_requires_justification_and_has_no_commit_mode():
+    specs = {t.name: t for t in proposal_tools()}
+    assert "commit_tuning" not in specs  # no commit tool exists
     propose = specs["propose_tuning"]
     assert "justification" in propose.input_schema["required"]
     assert "params" in propose.input_schema["required"]
-
-
-def test_commit_tuning_tool_requires_proposal_id():
-    specs = {t.name: t for t in tuning_tools()}
-    commit = specs["commit_tuning"]
-    assert commit.input_schema["required"] == ["proposal_id"]
+    # The dry-run-only surface no longer advertises a mode enum toggle.
+    assert "mode" not in propose.input_schema["properties"]
 
 
 # -- orchestrator_config ----------------------------------------------------
@@ -534,3 +568,76 @@ def test_create_orchestrator_smoke():
     assert orch.backend is backend
     assert orch.system_prompt == DEFAULT_SYSTEM_PROMPT
     assert orch.max_tool_depth == 8
+
+
+# -- Package S: observe-by-default capability model -------------------------
+
+
+def test_config_default_mode_is_observe():
+    assert OrchestratorConfig().mode == MODE_OBSERVE
+
+
+def test_resolve_mode_fail_closed_is_exhaustive():
+    """Absent, malformed, and unknown values all fail closed to observe; only
+    the exact tokens observe/propose (trimmed, case-insensitive) are honored;
+    only propose is a non-observe result."""
+    for raw in (None, "", "   ", "garbage", "commit", "COMMIT", "obserform",
+                "propose!", "0", "true", "observe ; propose"):
+        assert resolve_mode(raw) == MODE_OBSERVE
+    for raw in ("observe", "OBSERVE", " observe ", "Observe"):
+        assert resolve_mode(raw) == MODE_OBSERVE
+    for raw in ("propose", "PROPOSE", " propose ", "Propose"):
+        assert resolve_mode(raw) == MODE_PROPOSE
+
+
+def test_config_from_env_mode(monkeypatch):
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "propose")
+    assert OrchestratorConfig.from_env().mode == MODE_PROPOSE
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "observe")
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE
+    # Malformed → fail closed to observe.
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "commit-everything")
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE
+    monkeypatch.delenv("MEDUSA_ORCHESTRATOR_MODE", raising=False)
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE  # absent → observe
+
+
+def test_tools_for_mode_inventories():
+    observe_names = {t.name for t in tools_for_mode(MODE_OBSERVE)}
+    propose_names = {t.name for t in tools_for_mode(MODE_PROPOSE)}
+    assert "propose_tuning" not in observe_names
+    assert "commit_tuning" not in observe_names
+    assert "propose_tuning" in propose_names
+    assert "commit_tuning" not in propose_names
+    # propose is a strict superset of observe by exactly the proposal tool.
+    assert propose_names - observe_names == {"propose_tuning"}
+
+
+def test_observe_mode_makes_zero_posts_even_if_model_tries_to_write():
+    """In observe mode, a model that emits propose/commit tool calls gets
+    unknown_tool for both and the client makes zero POST requests."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "propose_tuning",
+                           {"params": {"signal_interval": 12}, "justification": "x"}),
+        _tool_use_response("tu_2", "commit_tuning", {"proposal_id": "prop-x"}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_OBSERVE)
+    result = orch.run_one_iteration("observe")
+    assert result.proposals_created == []
+    assert result.commits_applied == []
+    post_calls = [c for c in http.calls if c["method"] == "POST"]
+    assert post_calls == []
+
+
+def test_create_orchestrator_propose_mode_wires_router_and_tools():
+    backend = MockBackend(responses=[_text_response("ok")])
+    orch = create_orchestrator(
+        config=OrchestratorConfig(mode=MODE_PROPOSE),
+        backend=backend,
+    )
+    assert orch.mode == MODE_PROPOSE
+    assert orch.router.mode == MODE_PROPOSE
+    tool_names = {t.name for t in orch.tools}
+    assert "propose_tuning" in tool_names
+    assert "commit_tuning" not in tool_names
