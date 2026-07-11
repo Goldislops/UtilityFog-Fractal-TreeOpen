@@ -1,3 +1,6 @@
+/// <reference types="vite/client" />
+// Vite's client type declarations (shipped with the installed vite package)
+// type import.meta.env — no compiler flags or casts needed.
 import { Suspense } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Grid, Stats } from '@react-three/drei'
