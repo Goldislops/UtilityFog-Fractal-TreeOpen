@@ -38,9 +38,14 @@ export function useEventQueue(
   useEffect(() => {
     if (!simClient) return
 
-    const handleNetworkUpdate = (data: { nodes?: NetworkNode[], edges?: NetworkEdge[] }) => {
-      if (data.nodes && data.edges) {
-        enqueueUpdate(() => handlers.setNetwork(data.nodes!, data.edges!))
+    const handleNetworkUpdate = (data: { nodes?: NetworkNode[], edges?: NetworkEdge[] } | null | undefined) => {
+      // Null/primitive payloads must not throw, and one malformed side
+      // must not discard the other: forward whatever is present and let
+      // the store's per-side validation decide (empty arrays stay
+      // meaningful and clear their collection).
+      if (!data || typeof data !== 'object') return
+      if (data.nodes !== undefined || data.edges !== undefined) {
+        enqueueUpdate(() => handlers.setNetwork(data.nodes as NetworkNode[], data.edges as NetworkEdge[]))
       }
     }
 
