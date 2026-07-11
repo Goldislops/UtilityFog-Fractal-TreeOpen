@@ -3,7 +3,7 @@
 // directly; no console-text grepping.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { gzipSync } from 'node:zlib'
@@ -14,13 +14,31 @@ import {
   machineLine,
 } from './check-bundle-budget.mjs'
 
+// Populate a freshly created temp dir; on ANY setup failure the created
+// directory is removed before the ORIGINAL error is rethrown (cleanup
+// failures never mask it). The io seam exists solely so the failure path
+// is testable without OS-specific permission tricks.
+export function populateAssets(dir, files, io = { mkdirSync, writeFileSync }) {
+  try {
+    const assets = join(dir, 'assets')
+    io.mkdirSync(assets)
+    for (const [name, content] of Object.entries(files)) {
+      io.writeFileSync(join(assets, name), content)
+    }
+    return assets
+  } catch (error) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // never mask the original setup error with a cleanup failure
+    }
+    throw error
+  }
+}
+
 function makeAssets(files) {
   const dir = mkdtempSync(join(tmpdir(), 'budget-test-'))
-  const assets = join(dir, 'assets')
-  mkdirSync(assets)
-  for (const [name, content] of Object.entries(files)) {
-    writeFileSync(join(assets, name), content)
-  }
+  const assets = populateAssets(dir, files)
   return { dir, assets }
 }
 
@@ -136,6 +154,22 @@ test('asset names containing spaces are handled', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('setup failure removes the created temp directory and rethrows the original error', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'budget-test-'))
+  const boom = new Error('synthetic writer failure')
+  assert.throws(
+    () =>
+      populateAssets(dir, { 'app.js': 'x' }, {
+        mkdirSync,
+        writeFileSync: () => {
+          throw boom
+        },
+      }),
+    (e) => e === boom, // the ORIGINAL error, not a cleanup error
+  )
+  assert.equal(existsSync(dir), false) // leaked directory removed
 })
 
 test('machine-readable line has the stable shape', () => {
