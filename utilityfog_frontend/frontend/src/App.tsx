@@ -37,10 +37,23 @@ function App() {
   const [view, setView] = useState<'2d' | '3d'>('3d')
   const [isConnected, setIsConnected] = useState(false)
   const [simClient, setSimClient] = useState<SimBridgeClient | null>(null)
-  // Lazy components live in STATE so Retry can mint a fresh instance (a
+  // Lazy components live in STATE so a fresh instance can be minted (a
   // rejected lazy caches its rejection; a new lazy re-runs the import).
   const [Lazy3D, setLazy3D] = useState(() => lazy(load3D))
   const [Lazy2D, setLazy2D] = useState(() => lazy(load2D))
+
+  // Explicit view selection (audit amendment): switching TO a view mints a
+  // fresh lazy for the TARGET, so a chunk import that failed earlier is
+  // retried on entry — without an unconditional effect (no first-load
+  // churn: the slot remounts on switch anyway, and a successfully loaded
+  // module resolves instantly from the module cache). Clicking the
+  // already-active view is a NO-OP: no remount, no reload.
+  const selectView = (target: '2d' | '3d') => {
+    if (target === view) return
+    if (target === '3d') setLazy3D(() => lazy(load3D))
+    else setLazy2D(() => lazy(load2D))
+    setView(target)
+  }
 
   useEffect(() => {
     const client = new SimBridgeClient(WS_URL)
@@ -59,8 +72,8 @@ function App() {
   return (
     <div className="app-container">
       <div className="controls">
-        <button aria-pressed={view === '2d'} onClick={() => setView('2d')}>2D View</button>
-        <button aria-pressed={view === '3d'} onClick={() => setView('3d')}>3D View</button>
+        <button aria-pressed={view === '2d'} onClick={() => selectView('2d')}>2D View</button>
+        <button aria-pressed={view === '3d'} onClick={() => selectView('3d')}>3D View</button>
       </div>
 
       <EventFeed simClient={simClient} />

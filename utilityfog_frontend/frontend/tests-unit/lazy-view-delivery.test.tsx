@@ -148,3 +148,129 @@ describe('lazy rejection reaches the boundary (direct harness)', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
+
+describe('switch-away/back retries a failed chunk import (audit amendment)', () => {
+  // Two-view direct harness replicating App's selection semantics with
+  // CONTROLLABLE import factories (vi.mock factories cannot reject
+  // cleanly): switching TO a view mints a fresh lazy for the target;
+  // clicking the active view is a no-op.
+  function TwoViewHarness({ factories }: { factories: { a: () => Promise<{ default: () => JSX.Element }>; b: () => Promise<{ default: () => JSX.Element }> } }) {
+    const [view, setView] = useState<'a' | 'b'>('a')
+    const [LazyA, setLazyA] = useState(() => lazy(factories.a))
+    const [LazyB, setLazyB] = useState(() => lazy(factories.b))
+    const selectView = (target: 'a' | 'b') => {
+      if (target === view) return
+      if (target === 'a') setLazyA(() => lazy(factories.a))
+      else setLazyB(() => lazy(factories.b))
+      setView(target)
+    }
+    const Active = view === 'a' ? LazyA : LazyB
+    return (
+      <div>
+        <button type="button" onClick={() => selectView('a')}>go a</button>
+        <button type="button" onClick={() => selectView('b')}>go b</button>
+        {/* key mirrors App's load-bearing per-view boundary remount */}
+        <ViewErrorBoundary key={view} viewLabel={`${view} view`}>
+          <Suspense fallback={<div role="status">loading…</div>}>
+            <Active />
+          </Suspense>
+        </ViewErrorBoundary>
+      </div>
+    )
+  }
+
+  it('reject A -> switch B -> return A -> the import RETRIES and recovers', async () => {
+    let aAttempts = 0
+    const factories = {
+      a: () => {
+        aAttempts++
+        return aAttempts === 1
+          ? Promise.reject(new Error('chunk A failed'))
+          : Promise.resolve({ default: () => <div data-testid="view-a" /> })
+      },
+      b: () => Promise.resolve({ default: () => <div data-testid="view-b" /> }),
+    }
+    render(<TwoViewHarness factories={factories} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('failed to render')
+    expect(aAttempts).toBe(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'go b' }))
+    expect(await screen.findByTestId('view-b')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'go a' }))
+    expect(await screen.findByTestId('view-a')).toBeInTheDocument() // recovered
+    expect(aAttempts).toBe(2) // switch-back minted a fresh lazy: import re-ran
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('the same recovery works for the second view', async () => {
+    let bAttempts = 0
+    const factories = {
+      a: () => Promise.resolve({ default: () => <div data-testid="view-a" /> }),
+      b: () => {
+        bAttempts++
+        return bAttempts === 1
+          ? Promise.reject(new Error('chunk B failed'))
+          : Promise.resolve({ default: () => <div data-testid="view-b" /> })
+      },
+    }
+    render(<TwoViewHarness factories={factories} />)
+    await screen.findByTestId('view-a')
+    fireEvent.click(screen.getByRole('button', { name: 'go b' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'go a' }))
+    await screen.findByTestId('view-a')
+    fireEvent.click(screen.getByRole('button', { name: 'go b' }))
+    expect(await screen.findByTestId('view-b')).toBeInTheDocument()
+    expect(bAttempts).toBe(2)
+  })
+
+  it('App mints a FRESH lazy on switch-back (fallback reappears) and keeps one connection', async () => {
+    render(<App />)
+    await screen.findByTestId('view-3d')
+    fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    await screen.findByTestId('view-2d')
+
+    fireEvent.click(screen.getByRole('button', { name: '3D View' }))
+    // A fresh lazy instance suspends for at least one microtask even on a
+    // module-cache hit — the reappearing fallback is the observable proof
+    // of re-import. (The pre-amendment cached instance rendered
+    // synchronously with no fallback.)
+    expect(screen.getByText('Loading 3D network view…')).toBeInTheDocument()
+    expect(await screen.findByTestId('view-3d')).toBeInTheDocument()
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+
+  it('clicking the already-active view button neither remounts nor reloads it', async () => {
+    render(<App />)
+    const before = await screen.findByTestId('view-3d')
+    fireEvent.click(screen.getByRole('button', { name: '3D View' }))
+    expect(screen.getByTestId('view-3d')).toBe(before) // same DOM node: no remount
+    expect(screen.queryByText('Loading 3D network view…')).not.toBeInTheDocument()
+  })
+
+  it('manual Retry is preserved (direct harness reject-once)', async () => {
+    let attempts = 0
+    const factory = () => {
+      attempts++
+      return attempts === 1
+        ? Promise.reject(new Error('chunk failed'))
+        : Promise.resolve({ default: () => <div data-testid="late-view-2" /> })
+    }
+    function RetryHarness() {
+      const [LazyView, setLazyView] = useState(() => lazy(factory))
+      return (
+        <ViewErrorBoundary viewLabel="retry view" onRetry={() => setLazyView(() => lazy(factory))}>
+          <Suspense fallback={<div role="status">loading…</div>}>
+            <LazyView />
+          </Suspense>
+        </ViewErrorBoundary>
+      )
+    }
+    render(<RetryHarness />)
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry retry view' }))
+    expect(await screen.findByTestId('late-view-2')).toBeInTheDocument()
+  })
+})
