@@ -63,7 +63,16 @@ jobs:
       # bundle-budget gate.
 
       - name: Run smoke tests (${{ matrix.browser }})
-        run: npx playwright test --project=${{ matrix.browser }}
+        # Headless Firefox cannot create a WebGL context (the three.js 3D
+        # view needs one; Chromium/WebKit headless ship software GL).
+        # Firefox therefore runs HEADED under xvfb — xvfb-run is part of
+        # the ubuntu runner image; no extra installation.
+        run: |
+          if [ "${{ matrix.browser }}" = "firefox" ]; then
+            xvfb-run --auto-servernum npx playwright test --project=firefox --headed
+          else
+            npx playwright test --project=${{ matrix.browser }}
+          fi
 
       - name: Upload test report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
