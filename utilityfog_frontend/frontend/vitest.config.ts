@@ -30,19 +30,26 @@ export default defineConfig({
       // Reporter note: vitest 4.1.10's text table omits 100%-covered files;
       // json-summary carries every file (verified against this corpus).
       reporter: ['text', 'text-summary', 'json-summary'],
-      // COVERAGE CONTRACT (Package X): only explicitly unit-owned modules
-      // are measured and gated. Documented exclusions —
-      //   NetworkView2D/NetworkView3D/Edges/InstancedNodes/ThreeScene:
-      //     WebGL/canvas surfaces, owned by the Playwright E2E suite
-      //     (ui-smoke); jsdom cannot render them meaningfully.
-      //   adapters.ts: legacy format adapter, not yet unit-owned.
+      // COVERAGE CONTRACT (Packages X/Y/Z): only explicitly unit-owned
+      // modules are measured and gated. Documented exclusions —
+      //   NetworkView3D/Edges/InstancedNodes/ThreeScene: WebGL surfaces,
+      //     owned by the Playwright E2E suite (ui-smoke); jsdom cannot
+      //     render them meaningfully.
       //   utils.ts: only the foundation slice is covered so far; joins the
       //     contract when the corpus owns the rest of it.
       //   main.tsx: bootstrap entry point.
+      // NetworkView2D joined in Package Z with its subscription/ingress
+      // paths unit-owned; its canvas DRAW effect body is unreachable under
+      // jsdom (getContext → null, the component's own guarded early
+      // return), which is why the aggregate baseline steps down from
+      // Package Y's 97/94/97/97 — a scope expansion, not a coverage
+      // regression (every previously-owned module kept its numbers).
       include: [
         'src/App.tsx',
         'src/components/ConnectionBadge.tsx',
         'src/components/EventFeed.tsx',
+        'src/components/NetworkView2D.tsx',
+        'src/viz3d/adapters.ts',
         'src/viz3d/edgeValidation.ts',
         'src/viz3d/nodeValidation.ts',
         'src/viz3d/useEventQueue.ts',
@@ -50,16 +57,21 @@ export default defineConfig({
         'src/ws/SimBridgeClient.ts',
       ],
       // Thresholds are derived BELOW the measured stable baseline of the
-      // final corpus (aggregate over the include set: statements 97.01%,
-      // branches 93.10%, functions 97.50%, lines 97.38% — identical across
-      // repeated runs), with a small margin for future environment
-      // variance. Never raise these to aspirational values and never
-      // lower them merely to make CI green.
+      // final corpus. Package Z baseline over the expanded include set
+      // (three repeated runs): statements 90.00, functions 94.33, lines
+      // 90.63 — identical each run; branches 91.44–91.74 (one
+      // nondeterministic branch in the adapter's random-fallback path), so
+      // derivation uses the observed FLOOR. Margin ≈4 points for future
+      // environment variance. This re-derivation accompanies a SCOPE
+      // EXPANSION (NetworkView2D + adapters joined the contract; every
+      // previously-owned module kept its Package-Y numbers) — it is not a
+      // coverage reduction. Never raise these to aspirational values and
+      // never lower them merely to make CI green.
       thresholds: {
-        statements: 93,
-        branches: 85,
-        functions: 92,
-        lines: 93,
+        statements: 86,
+        branches: 87,
+        functions: 90,
+        lines: 86,
       },
     },
   },
