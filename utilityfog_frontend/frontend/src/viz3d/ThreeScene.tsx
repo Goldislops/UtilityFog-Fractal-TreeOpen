@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import InstancedNodes from './InstancedNodes'
 import Edges from './Edges'
 import { useSceneStore } from './useSceneStore'
@@ -10,8 +11,13 @@ interface ThreeSceneProps {
 
 export default function ThreeScene({ simClient }: ThreeSceneProps) {
   const { nodes, edges, updateNode, setNetwork } = useSceneStore()
-  
-  useEventQueue(simClient, { updateNode, setNetwork })
+
+  // Stable handlers identity (evidence: the store actions are stable, but
+  // the previous INLINE object changed identity on every render, which
+  // resubscribed all three SimBridge channels on every store change).
+  const handlers = useMemo(() => ({ updateNode, setNetwork }), [updateNode, setNetwork])
+
+  useEventQueue(simClient, handlers)
 
   return (
     <>

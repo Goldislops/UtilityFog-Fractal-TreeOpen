@@ -235,3 +235,64 @@ export function sanitizeNodeList(
   }
   return result
 }
+
+// ---------------------------------------------------------------------------
+// QUEUE-SIDE SEAM (Package AF): the event queue folds repeated updates for
+// the same node id before delivery. The fold lives HERE, next to the
+// admission contract it must match. EQUIVALENCE PRECONDITION (audit-
+// corrected): the per-field latest-valid-wins fold equals sequential
+// application ONLY when the fold target is ANCHORED (carries a valid
+// position — the node provably exists from that update on) or when both
+// updates are positionless (both merge into an existing node, or both are
+// rejected whole). A positionless update on an UNKNOWN node is rejected
+// WHOLE by sequential application, so folding its fields into a later
+// position-bearing update would resurrect them — the queue therefore
+// keeps a positionless→positionful transition as two ordered candidates
+// and never folds across snapshot barriers. The one deliberate difference
+// — intermediate per-event store notifications within a single drain — is
+// not a contract any consumer holds (renderers read latest state;
+// EventFeed subscribes to the transport, not the store).
+
+export interface NodeUpdateCandidate {
+  id: string
+  position: [number, number, number] | null
+  connections: string[] | null
+  status: NetworkNode['status'] | null
+}
+
+/// Contained single-pass read for queue-side use. Returns null for
+/// non-objects, hostile shapes, and UNIDENTIFIABLE payloads (no nonempty
+/// string id) — such payloads never enter the queue. Field semantics are
+/// identical to admission: invalid position/status/connections read as
+/// null (absent-equivalent).
+export function readNodeUpdate(incoming: unknown): NodeUpdateCandidate | null {
+  const c = readNodeCandidate(incoming)
+  if (c === null || !isNonEmptyString(c.id)) return null
+  return { id: c.id, position: c.position, connections: c.connections, status: c.status }
+}
+
+/// Fold two queued updates for the same id (older first). Per-field, the
+/// newer VALID value wins; a null (invalid/absent) field never erases an
+/// older valid one — mirroring sequential admission exactly.
+export function foldNodeUpdates(
+  older: NodeUpdateCandidate,
+  newer: NodeUpdateCandidate,
+): NodeUpdateCandidate {
+  return {
+    id: newer.id,
+    position: newer.position ?? older.position,
+    connections: newer.connections ?? older.connections,
+    status: newer.status ?? older.status,
+  }
+}
+
+/// Plain owned payload for store delivery — only fields with valid values
+/// are present, so the store's admission path treats the folded update
+/// exactly like the original sequence's net effect.
+export function nodeUpdatePayload(c: NodeUpdateCandidate): Record<string, unknown> {
+  const payload: Record<string, unknown> = { id: c.id }
+  if (c.position !== null) payload.position = c.position
+  if (c.connections !== null) payload.connections = c.connections
+  if (c.status !== null) payload.status = c.status
+  return payload
+}
