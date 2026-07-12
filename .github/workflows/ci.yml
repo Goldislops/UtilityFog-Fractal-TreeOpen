@@ -114,3 +114,44 @@ jobs:
           # 0 errors). pytest.ini scopes collection to tests/ and keeps
           # root-level legacy scripts out.
           python -m pytest tests/ -q
+
+  # Frontend quality gate (issue #6). The Node `verify` job above is inert
+  # for this repo layout (no root package.json), so frontend regressions
+  # never failed CI here. This job runs the real gates from the app
+  # directory on every push/PR — deliberately NO path filter, so the check
+  # is always present and branch protection can require it without wedging
+  # non-frontend PRs. Fork-compatible: read-only permissions, no secrets.
+  # The Playwright E2E suite is deliberately excluded (no browser
+  # downloads); ui-smoke.yml owns that.
+  frontend-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: utilityfog_frontend/frontend
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: utilityfog_frontend/frontend/package-lock.json
+
+      - name: Install (deterministic, from committed lockfile)
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Budget-script unit tests
+        run: npm run test:budget
+
+      - name: Build
+        run: npm run build
+
+      - name: Bundle budget
+        run: npm run check:budget
