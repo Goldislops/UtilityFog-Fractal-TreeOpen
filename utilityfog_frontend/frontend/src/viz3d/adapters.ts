@@ -1,4 +1,5 @@
 import { NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
+import { materializeEdge } from './edgeValidation'
 
 // Adapter functions to convert between different data formats.
 // Raw simulation payloads are an external-data boundary: elements are
@@ -10,16 +11,6 @@ interface RawAgent {
   position?: [number, number, number]
   connections?: string[]
   active?: boolean
-}
-
-interface RawConnection {
-  id?: string
-  source?: string
-  target?: string
-  from?: string
-  to?: string
-  strength?: number
-  weight?: number
 }
 
 export function adaptSimulationData(rawData: unknown): {
@@ -52,18 +43,15 @@ export function adaptSimulationData(rawData: unknown): {
     })
   }
 
-  if (raw.connections) {
+  if (Array.isArray(raw.connections)) {
     raw.connections.forEach((rawConn: unknown, index: number) => {
-      const conn = rawConn as RawConnection
-      edges.push({
-        id: conn.id || `edge_${index}`,
-        // Legacy adapter tolerance preserved exactly: a connection with
-        // neither field yields undefined at runtime (as before); edge
-        // consumers skip dangling references.
-        source: (conn.source || conn.from) as string,
-        target: (conn.target || conn.to) as string,
-        strength: conn.strength || conn.weight || 1
-      })
+      // Shared edge ownership contract (edgeValidation.ts) in its legacy
+      // dialect: source/from + target/to aliases, strength||weight||1
+      // fallback, and the index-generated id for missing/falsy ids.
+      // Connections without string endpoints are rejected (endpoints are
+      // never invented); well-formed dangling references stay admitted.
+      const edge = materializeEdge(rawConn, { legacyAliases: true, fallbackId: `edge_${index}` })
+      if (edge) edges.push(edge)
     })
   }
 
@@ -80,15 +68,12 @@ export function adaptSimulationData(rawData: unknown): {
     })
   }
 
-  if (raw.edges) {
+  if (Array.isArray(raw.edges)) {
     raw.edges.forEach((rawEdge: unknown) => {
-      const edge = rawEdge as Partial<NetworkEdge> & { id: string; source: string; target: string }
-      edges.push({
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        strength: edge.strength || 1
-      })
+      // Generic dialect of the same contract: string id/source/target
+      // required (no aliases, no generated ids), strength||1 preserved.
+      const edge = materializeEdge(rawEdge)
+      if (edge) edges.push(edge)
     })
   }
 

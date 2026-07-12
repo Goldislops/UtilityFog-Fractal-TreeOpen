@@ -280,3 +280,70 @@ describe('sanitizeNodeList', () => {
     expect(previous.map(n => n.id)).toEqual(['a'])
   })
 })
+
+describe('node materialization (ownership contract — Package Y)', () => {
+  it('never returns the untrusted incoming object itself, even for new nodes', () => {
+    const incoming = { id: 'own1', position: [1, 2, 3], connections: [], status: 'active' }
+    const result = reconcileNode(incoming, undefined)
+    expect(result).toEqual(node('own1', [1, 2, 3]))
+    expect(result).not.toBe(incoming)
+  })
+
+  it('does not retain live getters on admitted NEW nodes (each field read exactly once)', () => {
+    let positionReads = 0
+    let statusReads = 0
+    const sneaky = {
+      id: 'sneak',
+      get position(): unknown {
+        positionReads++
+        return [1, 2, 3]
+      },
+      connections: [],
+      get status(): unknown {
+        statusReads++
+        return 'active'
+      },
+    }
+    const result = reconcileNode(sneaky, undefined)!
+    expect(result).toEqual(node('sneak', [1, 2, 3]))
+    expect(positionReads).toBe(1)
+    expect(statusReads).toBe(1)
+    expect(Object.getOwnPropertyDescriptor(result, 'position')!.get).toBeUndefined()
+    expect(Object.getOwnPropertyDescriptor(result, 'status')!.get).toBeUndefined()
+  })
+
+  it('returns an owned position tuple, never the caller-supplied array', () => {
+    const suppliedPosition = [4, 5, 6]
+    const result = reconcileNode(
+      { id: 'own2', position: suppliedPosition, connections: [], status: 'active' },
+      undefined,
+    )!
+    expect(result.position).toEqual([4, 5, 6])
+    expect(result.position).not.toBe(suppliedPosition)
+    suppliedPosition[0] = 999 // later mutation of the input cannot reach the store
+    expect(result.position).toEqual([4, 5, 6])
+  })
+
+  it('contains a throwing getter on a non-position field when existing is undefined (new node)', () => {
+    const hostile = {
+      id: 'h-new',
+      position: [1, 2, 3],
+      get status(): unknown {
+        throw new Error('hostile status on new node')
+      },
+    }
+    expect(reconcileNode(hostile, undefined)).toBeNull()
+  })
+
+  it('owns only renderer-consumed fields — unknown extras are dropped, not carried', () => {
+    const incoming = {
+      id: 'own3',
+      position: [1, 2, 3],
+      connections: [],
+      status: 'active',
+      junk: { deep: 'payload' },
+    }
+    const result = reconcileNode(incoming, undefined)!
+    expect('junk' in result).toBe(false)
+  })
+})

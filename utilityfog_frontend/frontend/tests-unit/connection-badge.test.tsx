@@ -21,10 +21,12 @@ describe('ConnectionBadge (foundation)', () => {
   it('connected: the same region reads "Connected" and the dot stays decorative', () => {
     const { container } = render(<ConnectionBadge isConnected={true} />)
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
-    // The indicator dot is presentation only — hidden from the
-    // accessibility tree.
-    const dot = container.querySelector('[aria-hidden="true"]')
+    // The indicator dot is presentation only — queried by its structural
+    // class (independent of the attribute under test), then the hidden
+    // contract asserted explicitly.
+    const dot = container.querySelector('.connection-badge-dot')
     expect(dot).not.toBeNull()
+    expect(dot).toHaveAttribute('aria-hidden', 'true')
     expect(dot).toHaveTextContent('')
   })
 

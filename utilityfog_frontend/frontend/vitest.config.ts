@@ -43,6 +43,7 @@ export default defineConfig({
         'src/App.tsx',
         'src/components/ConnectionBadge.tsx',
         'src/components/EventFeed.tsx',
+        'src/viz3d/edgeValidation.ts',
         'src/viz3d/nodeValidation.ts',
         'src/viz3d/useEventQueue.ts',
         'src/viz3d/useSceneStore.ts',

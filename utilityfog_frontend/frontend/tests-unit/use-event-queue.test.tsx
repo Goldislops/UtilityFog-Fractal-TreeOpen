@@ -63,9 +63,15 @@ beforeEach(() => {
 
 afterEach(() => {
   client.disconnect()
-  vi.runAllTimers()
+  // Bounded drain (mirrors the SimBridge suite): pending timers only, with
+  // a hard cap so a recursive-timer defect fails instead of hanging.
+  for (let i = 0; i < 25 && vi.getTimerCount() > 0; i++) {
+    vi.runOnlyPendingTimers()
+  }
   expect(vi.getTimerCount()).toBe(0)
   FakeWebSocket.instances = []
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -184,5 +190,59 @@ describe('useEventQueue unmount safety', () => {
     unmount()
     await vi.runAllTimersAsync()
     expect(handlers.updateNode.mock.calls.length).toBe(deliveredBeforeUnmount)
+  })
+})
+
+describe('handler-error policy (Package Y)', () => {
+  it('a throwing handler does not lock the queue: error reported once, later events deliver', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    renderHook(() => useEventQueue(client, handlers))
+    handlers.updateNode.mockImplementationOnce(() => {
+      throw new Error('handler boom')
+    })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 1 } }) // throws inside drain
+    await vi.runAllTimersAsync()
+
+    // Later, INDEPENDENT event: must process normally (queue not locked).
+    socket().serverMessage({ type: 'node_update', payload: { seq: 2 } })
+    await vi.runAllTimersAsync()
+    expect(handlers.updateNode).toHaveBeenCalledTimes(2)
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(2, { seq: 2 })
+
+    // Bounded diagnostic channel: exactly one report for the one failure.
+    const reports = vi.mocked(console.error).mock.calls.filter(
+      args => args[0] === 'Event handler failed:',
+    )
+    expect(reports).toHaveLength(1)
+  })
+
+  it('a throwing handler does not abort the remaining handlers in its batch', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    renderHook(() => useEventQueue(client, handlers))
+    handlers.updateNode.mockImplementationOnce(() => {
+      throw new Error('first of batch fails')
+    })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 1 } })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 2 } })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 3 } })
+    await vi.runAllTimersAsync()
+    // Failed event is skipped (no retry); its batch-mates still deliver.
+    expect(handlers.updateNode).toHaveBeenCalledTimes(3)
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(2, { seq: 2 })
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(3, { seq: 3 })
+  })
+})
+
+describe('unmount during a handler (Package Y)', () => {
+  it('an unmount performed BY a handler prevents every remaining handler in that batch', async () => {
+    const view = renderHook(() => useEventQueue(client, handlers))
+    handlers.updateNode.mockImplementationOnce(() => {
+      view.unmount() // the handler itself tears the consumer down
+    })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 1 } })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 2 } })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 3 } })
+    await vi.runAllTimersAsync()
+    expect(handlers.updateNode).toHaveBeenCalledTimes(1)
   })
 })

@@ -70,9 +70,11 @@ describe('findNearbyNodes', () => {
     expect(findNearbyNodes([1000, 1000, 1000], nodes, 5)).toEqual([])
   })
 
-  it('does not mutate the node list', () => {
-    const before = nodes.map((n) => n.id)
+  it('does not mutate the node list or any node within it', () => {
+    // Deep snapshot BEFORE the call: every field of every node, not just
+    // ids/order, must be byte-equal afterwards.
+    const snapshot = structuredClone(nodes)
     findNearbyNodes([0, 0, 0], nodes, 5)
-    expect(nodes.map((n) => n.id)).toEqual(before)
+    expect(nodes).toEqual(snapshot)
   })
 })

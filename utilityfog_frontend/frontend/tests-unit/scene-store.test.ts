@@ -164,3 +164,70 @@ describe('deterministic sequence through the store boundary', () => {
     expect(state.edges).toEqual([edge('e1', 'b', 'c')])
   })
 })
+
+describe('store ownership (Package Y)', () => {
+  it('updateNode rejects a NEW node whose non-position getter throws; state unaffected', () => {
+    const hostile = {
+      id: 'h-new',
+      position: [1, 2, 3],
+      get status(): unknown {
+        throw new Error('hostile status')
+      },
+    }
+    expect(() => useSceneStore.getState().updateNode(hostile)).not.toThrow()
+    expect(useSceneStore.getState().nodes).toEqual([])
+  })
+
+  it('admitted nodes are materialized: no live getters survive into store state', () => {
+    const sneaky = {
+      id: 'sneak',
+      get position(): unknown {
+        return [1, 2, 3]
+      },
+      connections: [],
+      status: 'active',
+    }
+    useSceneStore.getState().updateNode(sneaky)
+    const [stored] = useSceneStore.getState().nodes
+    expect(stored).toEqual(node('sneak', [1, 2, 3]))
+    expect(stored).not.toBe(sneaky)
+    expect(Object.getOwnPropertyDescriptor(stored, 'position')!.get).toBeUndefined()
+  })
+
+  it('setNetwork filters edges with invalid property types and throwing getters', () => {
+    const hostile = {
+      id: 'h',
+      source: 'a',
+      get target(): unknown {
+        throw new Error('hostile target')
+      },
+    }
+    useSceneStore.getState().setNetwork(
+      [],
+      [edge('ok', 'a', 'b'), { id: 9, source: 'a', target: 'b' }, hostile, { id: 'e', source: 'a' }],
+    )
+    expect(useSceneStore.getState().edges).toEqual([edge('ok', 'a', 'b')])
+  })
+
+  it('admitted edges are materialized owned objects', () => {
+    let reads = 0
+    const sneakyEdge = {
+      id: 'se',
+      get source(): unknown {
+        reads++
+        return 'a'
+      },
+      target: 'b',
+      strength: 1,
+    }
+    useSceneStore.getState().setNetwork([], [sneakyEdge])
+    // Read-count asserted FIRST: vitest's .not.toBe failure-path fallback
+    // deep-compares its operands and would read the getter itself,
+    // polluting the count (probe-verified: the store path reads exactly
+    // once). Ownership is asserted via the property descriptor instead.
+    expect(reads).toBe(1)
+    const [stored] = useSceneStore.getState().edges
+    expect(stored).toEqual(edge('se', 'a', 'b'))
+    expect(Object.getOwnPropertyDescriptor(stored, 'source')!.get).toBeUndefined()
+  })
+})

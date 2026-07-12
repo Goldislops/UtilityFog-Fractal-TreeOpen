@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
 import { applyNodeUpdate, sanitizeNodeList } from './nodeValidation'
+import { sanitizeEdgeList } from './edgeValidation'
 
 interface SceneStore {
   nodes: NetworkNode[]
@@ -40,14 +41,12 @@ export const useSceneStore = create<SceneStore>((set) => ({
     set((state) => ({
       // Per-side tolerance: a malformed side never discards the valid
       // other side; explicit empty arrays remain meaningful and clear.
-      // Edge elements must at least be non-null objects — renderers index
-      // edge.source/edge.target, so a null/primitive element throws in
-      // render code. Dangling REFERENCES on real edge objects stay
-      // tolerated (renderers skip unmatched ids).
+      // Both sides go through their shared materializing validators —
+      // admitted records are plain owned objects (see nodeValidation.ts
+      // and edgeValidation.ts for the contracts). Dangling REFERENCES on
+      // well-formed edges stay tolerated (renderers skip unmatched ids).
       nodes: Array.isArray(nodes) ? sanitizeNodeList(nodes, state.nodes) : state.nodes,
-      edges: Array.isArray(edges)
-        ? edges.filter((e): e is NetworkEdge => !!e && typeof e === 'object')
-        : state.edges,
+      edges: sanitizeEdgeList(edges, state.edges),
     })),
 
   clearNetwork: () =>
