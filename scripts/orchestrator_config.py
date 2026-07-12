@@ -64,6 +64,7 @@ from scripts.agent_backends import (
     OpenAICompatBackend,
 )
 from scripts.orchestrator import (
+    DEFAULT_MAX_TOTAL_TOOL_CALLS,
     MODE_OBSERVE,
     Orchestrator,
     OrchestratorClient,
@@ -118,6 +119,7 @@ class OrchestratorConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     mode: OrchestratorMode = MODE_OBSERVE
     max_tool_depth: int = 8
+    max_total_tool_calls: int = DEFAULT_MAX_TOTAL_TOOL_CALLS
     max_tokens: int = 2048
     temperature: float = 0.0
     orchestrator_source: str = "agent:orchestrator"
@@ -145,6 +147,8 @@ class OrchestratorConfig:
             # Fail-closed: absent/malformed/unknown → observe (resolve_mode).
             mode=resolve_mode(os.environ.get("MEDUSA_ORCHESTRATOR_MODE")),
             max_tool_depth=int(os.environ.get("MEDUSA_MAX_TOOL_DEPTH", "8")),
+            max_total_tool_calls=int(os.environ.get(
+                "MEDUSA_MAX_TOTAL_TOOL_CALLS", str(DEFAULT_MAX_TOTAL_TOOL_CALLS))),
             max_tokens=int(os.environ.get("MEDUSA_MAX_TOKENS", "2048")),
             openai_base_url=os.environ.get("MEDUSA_OPENAI_BASE_URL") or None,
             openai_model=os.environ.get("MEDUSA_OPENAI_MODEL") or None,
@@ -236,6 +240,7 @@ def create_orchestrator(
         tools=tools_for_mode(config.mode),
         router=router,
         max_tool_depth=config.max_tool_depth,
+        max_total_tool_calls=config.max_total_tool_calls,
         max_tokens_per_call=config.max_tokens,
         temperature=config.temperature,
     )

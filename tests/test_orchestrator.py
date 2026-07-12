@@ -36,12 +36,16 @@ from scripts.agent_backends import (
     ToolUseBlock,
 )
 from scripts.orchestrator import (
+    DEFAULT_MAX_TOTAL_TOOL_CALLS,
     IterationResult,
+    MAX_LIMIT_CEILING,
+    MAX_RECEIPT_BYTES,
     MODE_OBSERVE,
     MODE_PROPOSE,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
+    build_audit_receipt,
     observation_tools,
     proposal_tools,
     resolve_mode,
@@ -223,15 +227,17 @@ def test_router_handler_exception_becomes_error_payload():
     assert payload["error"] == "tool_handler_exception"
 
 
-def test_router_http_error_status_propagates():
+def test_router_http_error_status_is_flagged_as_error():
+    """Package T: HTTP status >= 400 is a genuine tool error (is_error True),
+    categorized http_rejection, with bounded status/error metadata retained."""
     client, http = _client_with_fake()
     http.set("GET", "/api/census", 500, {"error": "server_broke"})
     router = ToolRouter(client)
     payload, is_error = router.execute("get_medusa_census", {})
-    # is_error is False at router level (handler succeeded), but _status is in payload.
-    assert is_error is False
+    assert is_error is True
     assert payload["_status"] == 500
     assert payload["error"] == "server_broke"
+    assert payload["category"] == "http_rejection"
 
 
 # -- Orchestrator ------------------------------------------------------------
@@ -634,3 +640,195 @@ def test_create_orchestrator_propose_mode_wires_router_and_tools():
     tool_names = {t.name for t in orch.tools}
     assert "propose_tuning" in tool_names
     assert "commit_tuning" not in tool_names
+
+
+# -- Package T: hard limits, error semantics, bounded audit receipts ---------
+
+
+def _obs_call(i: int):
+    return _tool_use_response(f"tu_{i}", "get_medusa_census", {})
+
+
+def test_total_tool_call_budget_executes_prefix_then_stops():
+    """A single turn emitting more tool calls than the total budget executes
+    only the permitted prefix; the rest get budget_rejection error results and
+    the iteration stops with tool_budget_exhausted. The cap is never exceeded."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [ToolUseBlock(id=f"tu_{i}", name="get_medusa_census", input={}) for i in range(5)]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4, max_total_tool_calls=3)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "tool_budget_exhausted"
+    assert result.tool_calls_executed == 3          # never exceeds the cap
+    assert result.outcome_counts.get("ok") == 3
+    assert result.outcome_counts.get("budget_rejection") == 2
+    assert len([c for c in http.calls if c["path"] == "/api/census"]) == 3
+
+
+def test_budget_shared_across_turns():
+    """The total budget is shared across turns, independent of max_tool_depth."""
+    backend = MockBackend(responses=[_obs_call(i) for i in range(10)] + [_text_response("x")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=10, max_total_tool_calls=2)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "tool_budget_exhausted"
+    assert result.tool_calls_executed == 2
+
+
+def test_second_proposal_attempt_is_refused():
+    """At most one proposal attempt per iteration, enforced in code."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [
+        ToolUseBlock(id="p1", name="propose_tuning",
+                     input={"params": {"signal_interval": 12}, "justification": "a"}),
+        ToolUseBlock(id="p2", name="propose_tuning",
+                     input={"params": {"signal_interval": 13}, "justification": "b"}),
+    ]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-1", "status": "accepted"})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        mode=MODE_PROPOSE, max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.proposals_created == ["prop-1"]           # only the first
+    assert result.outcome_counts.get("proposal_limit") == 1
+    assert len([c for c in http.calls if c["path"] == "/api/tuning/propose"]) == 1
+
+
+def test_http_rejections_are_errors_and_not_counted():
+    """403/422/500 tool responses are is_error, categorized http_rejection, and
+    never counted as created proposals or applied commits."""
+    for status in (403, 422, 500):
+        resp = _tool_use_response("tu_p", "propose_tuning",
+                                  {"params": {"signal_interval": 12}, "justification": "x"})
+        backend = MockBackend(responses=[resp, _text_response("done")])
+        http = FakeHttp()
+        client = OrchestratorClient("http://test:8080", http_do=http)
+        http.set("POST", "/api/tuning/propose", status, {"error": "nope"})
+        orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                            mode=MODE_PROPOSE, max_tool_depth=4)
+        result = orch.run_one_iteration("go")
+        assert result.proposals_created == []
+        assert result.outcome_counts.get("http_rejection") == 1
+
+
+def test_transport_failure_is_categorized():
+    """A URLError from the transport surfaces as a transport_failure category,
+    is_error True, without raising up into the loop."""
+    import urllib.error
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise urllib.error.URLError("network down")
+
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    router = ToolRouter(client)
+    payload, is_error = router.execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == "transport_failure"
+
+
+def test_handler_exception_message_does_not_leak_into_receipt():
+    """A handler exception carrying a sensitive-looking string is surfaced to
+    the LLM as a tool error, but the audit receipt records only the category —
+    never the exception text."""
+    secret = "SECRET_API_KEY_sk-abc123"
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise ValueError(secret)
+
+    resp = _tool_use_response("tu_c", "get_medusa_census", {})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s", max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.outcome_counts.get("handler_exception") == 1
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert secret not in receipt_json
+
+
+def test_audit_receipt_is_deterministic_and_bounded():
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    result = orch.run_one_iteration("go")
+    r1 = json.dumps(build_audit_receipt(result), sort_keys=True)
+    r2 = json.dumps(result.audit_receipt(), sort_keys=True)
+    assert r1 == r2                                   # deterministic
+    assert len(r1.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    receipt = build_audit_receipt(result)
+    assert receipt["schema"] == "leanctx-orchestrator-v1"
+    assert receipt["truncated"] is False
+    for banned in ("content", "payload", "system", "messages", "api_key", "headers"):
+        assert banned not in receipt
+
+
+def test_audit_receipt_excludes_large_tool_payloads():
+    """Even if a tool returns a huge body, the receipt stays bounded and holds
+    no payload text (it records only counts/ids)."""
+    huge = {"generation": 1, "blob": "z" * 200000}
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend)
+    http.set("GET", "/api/census", 200, huge)
+    result = orch.run_one_iteration("go")
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "z" * 1000 not in receipt_json
+
+
+def test_no_post_after_budget_exhaustion():
+    """Once the total budget is spent, no further HTTP POST is attempted."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [ToolUseBlock(id=f"p_{i}", name="propose_tuning",
+                           input={"params": {"signal_interval": 12}, "justification": "j"})
+              for i in range(3)]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-1", "status": "accepted"})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        mode=MODE_PROPOSE, max_tool_depth=4, max_total_tool_calls=1)
+    result = orch.run_one_iteration("go")
+    assert result.tool_calls_executed == 1
+    assert len([c for c in http.calls if c["method"] == "POST"]) == 1
+
+
+def test_numeric_limits_are_validated():
+    backend = MockBackend(responses=[_text_response("x")])
+    client = OrchestratorClient("http://test:8080", http_do=FakeHttp())
+    for bad in (0, -1, MAX_LIMIT_CEILING + 1, True):
+        with pytest.raises(ValueError):
+            Orchestrator(backend=backend, client=client, system_prompt="s",
+                         max_total_tool_calls=bad)
+    with pytest.raises(ValueError):
+        Orchestrator(backend=backend, client=client, system_prompt="s", max_tool_depth=0)
+
+
+def test_orchestrator_has_no_reverse_dependency_on_observer_or_engine():
+    """The legacy orchestrator must not import the offline detector, observer,
+    engine, or physics modules — the quarantine is one-directional."""
+    import inspect
+    import scripts.orchestrator as orch_mod
+    src = inspect.getsource(orch_mod)
+    for banned in ("continuous_evolution_ca", "nextness_observer",
+                   "nextness_calibration", "swarm_hunter"):
+        assert banned not in src

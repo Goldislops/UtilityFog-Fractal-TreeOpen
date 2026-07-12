@@ -275,6 +275,39 @@ def tools_for_mode(mode: OrchestratorMode) -> list[ToolSpec]:
     return tools
 
 
+# -- error categories & runtime limits ---------------------------------------
+
+# Deterministic outcome categories for every tool call. "ok" is success; the
+# rest are distinct failure kinds so the audit receipt can distinguish them.
+OUTCOME_OK = "ok"
+CATEGORY_UNKNOWN_TOOL = "unknown_tool"
+CATEGORY_HANDLER_EXCEPTION = "handler_exception"
+CATEGORY_TRANSPORT_FAILURE = "transport_failure"
+CATEGORY_HTTP_REJECTION = "http_rejection"
+CATEGORY_BUDGET_REJECTION = "budget_rejection"
+CATEGORY_PROPOSAL_LIMIT = "proposal_limit"
+
+DEFAULT_MAX_TOTAL_TOOL_CALLS = 24
+"""Total tool calls permitted across an entire iteration, independent of the
+per-turn `max_tool_depth`. Bounds a model that emits many tool calls per turn."""
+
+MAX_LIMIT_CEILING = 1000
+"""Defensible upper bound for any configurable numeric limit; values above this
+(or non-positive, or non-integer) are rejected rather than trusted."""
+
+MAX_RECEIPT_BYTES = 64 * 1024
+"""Hard ceiling on the serialized LeanCTX audit receipt."""
+
+
+def _validate_positive_limit(name: str, value: int) -> int:
+    """A configurable limit must be a positive int within the ceiling."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if value < 1 or value > MAX_LIMIT_CEILING:
+        raise ValueError(f"{name} must be in [1, {MAX_LIMIT_CEILING}], got {value}")
+    return value
+
+
 # -- tool router -------------------------------------------------------------
 
 
@@ -317,22 +350,39 @@ class ToolRouter:
         self._handlers: dict[str, ToolHandler] = handlers
 
     def execute(self, name: str, arguments: dict) -> tuple[dict, bool]:
-        """Run a tool call. Returns `(result_payload, is_error)`."""
+        """Run a tool call. Returns `(result_payload, is_error)`.
+
+        Error kinds are distinguished by a stable ``category`` field:
+        unknown_tool, transport_failure, handler_exception, and http_rejection
+        (HTTP status >= 400 is a genuine tool error, not a silent success)."""
         handler = self._handlers.get(name)
         if handler is None:
             return (
-                {"error": "unknown_tool", "message": f"tool {name} not registered"},
+                {"error": "unknown_tool", "category": CATEGORY_UNKNOWN_TOOL,
+                 "message": f"tool {name} not registered"},
                 True,
             )
         try:
-            return handler(arguments), False
-        except Exception as e:  # defensive: any handler bug → LLM-visible error
+            payload = handler(arguments)
+        except urllib.error.URLError as e:  # network/transport-level failure
             return (
-                {"error": "tool_handler_exception",
-                 "tool": name,
-                 "message": f"{type(e).__name__}: {e}"},
+                {"error": "transport_failure", "category": CATEGORY_TRANSPORT_FAILURE,
+                 "tool": name, "message": type(e).__name__},
                 True,
             )
+        except Exception as e:  # defensive: any handler bug → LLM-visible error
+            return (
+                {"error": "tool_handler_exception", "category": CATEGORY_HANDLER_EXCEPTION,
+                 "tool": name, "message": f"{type(e).__name__}: {e}"},
+                True,
+            )
+        status = payload.get("_status")
+        if isinstance(status, int) and status >= 400:
+            # An HTTP rejection is a genuine tool error. Keep bounded metadata
+            # (status + any error code/message) but flag it so callers do not
+            # count a rejected proposal/commit as applied.
+            return ({**payload, "category": CATEGORY_HTTP_REJECTION}, True)
+        return payload, False
 
     # handlers ---
 
@@ -391,26 +441,43 @@ class IterationResult:
     """Outcome of one observe-decide-act cycle."""
 
     stopped_because: str
-    """One of: "end_turn" (LLM finished), "max_depth" (tool_call cap reached),
-    "transport_error" (LLM call failed)."""
+    """One of: "end_turn" (LLM finished), "max_depth" (per-turn cap reached),
+    "tool_budget_exhausted" (total tool-call budget reached)."""
 
     turns: int
     """Number of LLM `complete()` calls made this iteration."""
 
     tool_calls_executed: int
-    """Total tool calls executed across all turns this iteration."""
+    """Total tool calls executed across all turns this iteration (excludes calls
+    refused unexecuted once the budget was exhausted)."""
 
     proposals_created: list[str] = field(default_factory=list)
     """Proposal IDs returned by successful propose_tuning calls."""
 
     commits_applied: list[str] = field(default_factory=list)
-    """Proposal IDs successfully committed."""
+    """Proposal IDs successfully committed. Always empty under the quarantine —
+    there is no LLM-facing commit path — but retained for shape stability."""
 
     final_text: Optional[str] = None
     """Last assistant text block, if any."""
 
     usage_total: dict[str, int] = field(default_factory=dict)
     """Sum of input/output tokens across all turns this iteration."""
+
+    outcome_counts: dict[str, int] = field(default_factory=dict)
+    """Deterministic count of tool-call outcomes by category (ok, unknown_tool,
+    handler_exception, transport_failure, http_rejection, budget_rejection,
+    proposal_limit)."""
+
+    def audit_receipt(self) -> dict[str, Any]:
+        """A bounded, payload-free LeanCTX audit handoff for this iteration.
+
+        Contains only outcome metadata: stop reason, counts, usage, and the
+        ids of successful proposals — never tool payloads, prompts, credentials,
+        headers, or raw backend responses. Deterministically serializable and
+        guaranteed <= MAX_RECEIPT_BYTES (deterministic truncation if ever
+        exceeded)."""
+        return build_audit_receipt(self)
 
 
 class Orchestrator:
@@ -432,6 +499,7 @@ class Orchestrator:
         tools: Optional[list[ToolSpec]] = None,
         router: Optional[ToolRouter] = None,
         max_tool_depth: int = 8,
+        max_total_tool_calls: int = DEFAULT_MAX_TOTAL_TOOL_CALLS,
         max_tokens_per_call: int = 2048,
         temperature: float = 0.0,
     ) -> None:
@@ -444,21 +512,49 @@ class Orchestrator:
         # but a bare Orchestrator is observation-only.
         self.tools = tools if tools is not None else tools_for_mode(mode)
         self.router = router or ToolRouter(client, mode=mode)
-        self.max_tool_depth = max_tool_depth
+        # Two independent, validated budgets: per-turn depth and total tool
+        # calls. Malformed/out-of-range limits are rejected at construction.
+        self.max_tool_depth = _validate_positive_limit("max_tool_depth", max_tool_depth)
+        self.max_total_tool_calls = _validate_positive_limit(
+            "max_total_tool_calls", max_total_tool_calls)
         self.max_tokens_per_call = max_tokens_per_call
         self.temperature = temperature
 
     def run_one_iteration(self, trigger_message: str) -> IterationResult:
-        """Run one observe-decide-act cycle triggered by `trigger_message`."""
+        """Run one observe-decide-act cycle triggered by `trigger_message`.
+
+        Two budgets bound the loop: `max_tool_depth` caps LLM turns, and
+        `max_total_tool_calls` caps total tool executions across the whole
+        iteration. When a turn's tool calls would exceed the total budget, only
+        the permitted prefix is executed; every remaining call in that turn gets
+        an explicit budget_rejection error result (so the conversation history
+        stays structurally valid) and the iteration stops."""
         messages: list[Message] = [Message(role="user", content=trigger_message)]
         turns = 0
         tool_calls_executed = 0
+        proposal_attempts = 0
         proposals_created: list[str] = []
         commits_applied: list[str] = []
         usage_total: dict[str, int] = {}
+        outcome_counts: dict[str, int] = {}
         final_text: Optional[str] = None
 
-        for depth in range(self.max_tool_depth):
+        def _record(category: str) -> None:
+            outcome_counts[category] = outcome_counts.get(category, 0) + 1
+
+        def _result(stopped: str) -> IterationResult:
+            return IterationResult(
+                stopped_because=stopped,
+                turns=turns,
+                tool_calls_executed=tool_calls_executed,
+                proposals_created=proposals_created,
+                commits_applied=commits_applied,
+                final_text=final_text,
+                usage_total=usage_total,
+                outcome_counts=dict(outcome_counts),
+            )
+
+        for _depth in range(self.max_tool_depth):
             response = self.backend.complete(
                 messages=messages,
                 tools=self.tools,
@@ -469,34 +565,49 @@ class Orchestrator:
             turns += 1
             _accumulate_usage(usage_total, response.usage)
             final_text = response.text if response.text is not None else final_text
-
-            # Append assistant content to history for the next turn.
             messages.append(Message(role="assistant", content=list(response.raw_content)))
 
             if not response.tool_calls:
-                return IterationResult(
-                    stopped_because="end_turn",
-                    turns=turns,
-                    tool_calls_executed=tool_calls_executed,
-                    proposals_created=proposals_created,
-                    commits_applied=commits_applied,
-                    final_text=final_text,
-                    usage_total=usage_total,
-                )
+                return _result("end_turn")
 
-            # Execute every tool call in this turn; gather result blocks.
             result_blocks: list = []
+            budget_hit = False
             for call in response.tool_calls:
+                # Total-tool-call budget: once exhausted, refuse every remaining
+                # call in this batch with an explicit error result (unexecuted).
+                if tool_calls_executed >= self.max_total_tool_calls:
+                    _record(CATEGORY_BUDGET_REJECTION)
+                    budget_hit = True
+                    result_blocks.append(_error_block(
+                        call.id, "budget_exhausted", CATEGORY_BUDGET_REJECTION,
+                        "total tool-call budget reached; call not executed"))
+                    continue
+
+                # At most one proposal attempt per iteration, enforced in code.
+                if call.name == "propose_tuning":
+                    if proposal_attempts >= 1:
+                        tool_calls_executed += 1
+                        _record(CATEGORY_PROPOSAL_LIMIT)
+                        result_blocks.append(_error_block(
+                            call.id, "proposal_limit_exceeded", CATEGORY_PROPOSAL_LIMIT,
+                            "at most one proposal attempt per iteration"))
+                        continue
+                    proposal_attempts += 1
+
                 payload, is_error = self.router.execute(call.name, call.arguments)
                 tool_calls_executed += 1
-                if call.name == "propose_tuning" and not is_error:
-                    pid = payload.get("proposal_id")
-                    if pid:
-                        proposals_created.append(pid)
-                elif call.name == "commit_tuning" and not is_error:
-                    pid = payload.get("proposal_id")
-                    if pid and payload.get("status") == "committed":
-                        commits_applied.append(pid)
+                if is_error:
+                    _record(str(payload.get("category", CATEGORY_HANDLER_EXCEPTION)))
+                else:
+                    _record(OUTCOME_OK)
+                    if call.name == "propose_tuning":
+                        pid = payload.get("proposal_id")
+                        if pid:
+                            proposals_created.append(pid)
+                    elif call.name == "commit_tuning":
+                        pid = payload.get("proposal_id")
+                        if pid and payload.get("status") == "committed":
+                            commits_applied.append(pid)
                 result_blocks.append(
                     ToolResultBlock(
                         tool_use_id=call.id,
@@ -505,17 +616,61 @@ class Orchestrator:
                     )
                 )
             messages.append(Message(role="user", content=result_blocks))
+            if budget_hit:
+                return _result("tool_budget_exhausted")
 
-        # Hit depth cap without the LLM naturally ending.
-        return IterationResult(
-            stopped_because="max_depth",
-            turns=turns,
-            tool_calls_executed=tool_calls_executed,
-            proposals_created=proposals_created,
-            commits_applied=commits_applied,
-            final_text=final_text,
-            usage_total=usage_total,
-        )
+        return _result("max_depth")
+
+
+def _error_block(tool_use_id: str, error: str, category: str, message: str) -> ToolResultBlock:
+    """A structured, bounded error tool-result block (no payloads)."""
+    return ToolResultBlock(
+        tool_use_id=tool_use_id,
+        content=json.dumps(
+            {"error": error, "category": category, "message": message},
+            sort_keys=True,
+        ),
+        is_error=True,
+    )
+
+
+def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
+    """Build a bounded, payload-free LeanCTX audit receipt from an
+    IterationResult. Deterministic (sorted keys, stable ordering) and capped at
+    MAX_RECEIPT_BYTES; if the id lists were ever large enough to exceed the cap
+    they are truncated deterministically and ``truncated`` is set true.
+
+    The receipt intentionally excludes tool payloads, prompts, credentials,
+    headers, and raw backend responses — only outcome metadata is retained."""
+    receipt: dict[str, Any] = {
+        "schema": "leanctx-orchestrator-v1",
+        "stopped_because": result.stopped_because,
+        "turns": result.turns,
+        "tool_calls_executed": result.tool_calls_executed,
+        "outcome_counts": dict(sorted(result.outcome_counts.items())),
+        "proposals_created": list(result.proposals_created),
+        "commits_applied": list(result.commits_applied),
+        "usage_total": dict(sorted(result.usage_total.items())),
+        "truncated": False,
+    }
+
+    def _size(obj: dict) -> int:
+        return len(json.dumps(obj, sort_keys=True).encode("utf-8"))
+
+    # Deterministic truncation safety net (never expected to trigger, since the
+    # receipt holds only ids/counts, but enforced so the bound is a guarantee).
+    while _size(receipt) > MAX_RECEIPT_BYTES:
+        receipt["truncated"] = True
+        if receipt["proposals_created"]:
+            receipt["proposals_created"] = receipt["proposals_created"][:-1]
+            continue
+        if receipt["commits_applied"]:
+            receipt["commits_applied"] = receipt["commits_applied"][:-1]
+            continue
+        # Nothing left to trim; drop the counts detail as a last resort.
+        receipt["outcome_counts"] = {}
+        break
+    return receipt
 
 
 def _accumulate_usage(total: dict[str, int], step: dict[str, Any]) -> None:
@@ -539,4 +694,15 @@ __all__ = [
     "observation_tools",
     "proposal_tools",
     "tools_for_mode",
+    "build_audit_receipt",
+    "DEFAULT_MAX_TOTAL_TOOL_CALLS",
+    "MAX_LIMIT_CEILING",
+    "MAX_RECEIPT_BYTES",
+    "OUTCOME_OK",
+    "CATEGORY_UNKNOWN_TOOL",
+    "CATEGORY_HANDLER_EXCEPTION",
+    "CATEGORY_TRANSPORT_FAILURE",
+    "CATEGORY_HTTP_REJECTION",
+    "CATEGORY_BUDGET_REJECTION",
+    "CATEGORY_PROPOSAL_LIMIT",
 ]
