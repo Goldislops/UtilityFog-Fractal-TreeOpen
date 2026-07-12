@@ -69,11 +69,11 @@ def resolve_mode(raw: Optional[str]) -> OrchestratorMode:
     resolve to the safe `observe` mode; only the exact tokens "observe" and
     "propose" (case-insensitive, trimmed) are honored. `propose` — the only
     mode that exposes any write-adjacent tool — must be opted into explicitly."""
-    if not isinstance(raw, str):
-        return MODE_OBSERVE
-    token = raw.strip().lower()
-    if token in VALID_MODES:
-        return token  # type: ignore[return-value]
+    # Only a normalized "propose" enables proposal mode; absent, malformed,
+    # unknown, or any other value fails closed to observe. Returning the
+    # module-level Literal constants keeps this typed with no cast/ignore.
+    if isinstance(raw, str) and raw.strip().lower() == MODE_PROPOSE:
+        return MODE_PROPOSE
     return MODE_OBSERVE
 
 
@@ -296,14 +296,14 @@ class ToolRouter:
         *,
         mode: OrchestratorMode = MODE_OBSERVE,
         orchestrator_source: str = "agent:orchestrator",
-        commit_approver: str = "policy:auto",
     ) -> None:
         self.client = client
         self.mode = mode
         self.source = orchestrator_source
-        # Retained for the non-LLM-facing client.commit_tuning primitive only;
-        # the router never calls commit on the LLM's behalf.
-        self.approver = commit_approver
+        # The router holds no commit approver: committing is not an LLM-facing
+        # capability, so it never calls commit on the model's behalf. The
+        # low-level `client.commit_tuning` primitive takes its approver as an
+        # explicit argument and needs no router state.
         handlers: dict[str, ToolHandler] = {
             "get_medusa_census": self._h_census,
             "get_medusa_equanimity": self._h_equanimity,

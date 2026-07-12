@@ -456,7 +456,7 @@ def test_config_defaults_sensibly():
     cfg = OrchestratorConfig()
     assert cfg.base_url == DEFAULT_BASE_URL
     assert cfg.backend_name == "mock"
-    assert cfg.commit_approver == "policy:auto"  # never accidentally human:
+    assert cfg.mode == "observe"  # fail-closed default; no LLM-facing write surface
 
 
 def test_config_from_env(monkeypatch):

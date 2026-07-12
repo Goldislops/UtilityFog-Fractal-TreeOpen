@@ -79,8 +79,11 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 # Crafted to work with Phase 18's tool surface. Not model-specific.
 # Describes the quarantined surface accurately: observation is always
 # available; in `propose` mode a dry-run-only proposal tool is added; there is
-# no LLM-facing commit tool. Tool errors are structured (is_error result
-# blocks), not "[ERROR]"-prefixed strings.
+# no LLM-facing commit tool. Tool errors are surfaced two ways depending on
+# transport: native backends expose an `is_error` result flag; the
+# OpenAI-compatible backend marks the same condition with a leading "[ERROR]"
+# in the tool-result text (it has no native error flag). The prompt names both
+# so the model recognises an error regardless of backend.
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Medusa legacy tuning orchestrator. Your job is to observe the
 Medusa cellular-automata engine and report what you see. In `propose` mode you
@@ -99,8 +102,11 @@ Rules:
   4. LOCKED params are off-limits entirely. Don't propose changes to them.
      HUMAN_APPROVAL params may be proposed as dry-run for a human to review.
   5. If the matrix looks healthy, say so and stop. No tuning is correct.
-  6. A tool result may be flagged as an error (is_error). Read it, then decide
-     whether to retry, choose a different tool, or stop and report.
+  6. A tool result may be reported as an error. Native backends flag it with
+     `is_error`; the OpenAI-compatible backend marks the same condition with a
+     leading `[ERROR]` in the result text. Either form means the call failed —
+     read it, then decide whether to retry, choose a different tool, or stop
+     and report.
 
 Be concise. Observation first, then at most one dry-run proposal per iteration."""
 
@@ -115,7 +121,6 @@ class OrchestratorConfig:
     max_tokens: int = 2048
     temperature: float = 0.0
     orchestrator_source: str = "agent:orchestrator"
-    commit_approver: str = "policy:auto"
     # Used only when backend_name == "openai-compat":
     openai_base_url: Optional[str] = None
     openai_model: Optional[str] = None
@@ -222,7 +227,6 @@ def create_orchestrator(
         client,
         mode=config.mode,
         orchestrator_source=config.orchestrator_source,
-        commit_approver=config.commit_approver,
     )
     return Orchestrator(
         backend=backend,
