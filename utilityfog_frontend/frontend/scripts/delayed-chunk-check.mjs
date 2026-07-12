@@ -5,7 +5,7 @@
 // the view must arrive once it lands. Run manually / in the lab:
 //   node scripts/delayed-chunk-check.mjs
 // Not wired into CI (spawns a server + real browser).
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chromium } from '@playwright/test'
 
 const PORT = 4199
@@ -22,7 +22,9 @@ const kill = () => {
   // elsewhere the direct kill suffices for vite preview.
   try {
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/PID', String(server.pid), '/T', '/F'], { shell: true })
+      // Synchronous: the script exits right after kill(), and an async
+      // taskkill would race that exit and never fire.
+      spawnSync('taskkill', ['/PID', String(server.pid), '/T', '/F'], { shell: true })
     } else {
       process.kill(server.pid)
     }
