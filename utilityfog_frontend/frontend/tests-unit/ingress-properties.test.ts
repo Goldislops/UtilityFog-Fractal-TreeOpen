@@ -13,7 +13,7 @@
 // Seed strategy: FC_SEED overrides the recorded default so the suite can
 // be repeated under several fixed seeds; FC_NUM_RUNS overrides the run
 // count (local verification used 2000 per central invariant).
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fc from 'fast-check'
 import {
   isValidPosition,
@@ -38,6 +38,27 @@ const EXISTING: NetworkNode = {
 }
 
 const jsonValue = () => fc.jsonValue({ maxDepth: 4 })
+
+// Global-store isolation (audit amendment): the zustand store is a module
+// singleton, so every test starts from an ASSERTED empty state and must
+// leave it empty — store-mutating predicates reset at the end of every
+// property iteration, making cross-test (and cross-iteration) state
+// dependence structurally impossible. Verified additionally by
+// order-randomized runs (--sequence.shuffle.tests).
+const assertStoreEmpty = () => {
+  expect(useSceneStore.getState().nodes).toEqual([])
+  expect(useSceneStore.getState().edges).toEqual([])
+}
+
+beforeEach(() => {
+  useSceneStore.setState({ nodes: [], edges: [] })
+  assertStoreEmpty()
+})
+
+afterEach(() => {
+  assertStoreEmpty()
+  useSceneStore.setState({ nodes: [], edges: [] })
+})
 
 describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, () => {
   it('validators never throw for generated JSON-like values', () => {
@@ -78,6 +99,7 @@ describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, ()
           expect(typeof e.target).toBe('string')
           expect(Number.isFinite(e.strength)).toBe(true)
         }
+        useSceneStore.setState({ nodes: [], edges: [] })
       }),
       PARAMS,
     )
@@ -167,6 +189,7 @@ describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, ()
         s.setNetwork(nodes, edges)
         expect(useSceneStore.getState().nodes).toEqual(first)
         expect(useSceneStore.getState().edges).toEqual(firstEdges)
+        useSceneStore.setState({ nodes: [], edges: [] })
       }),
       PARAMS,
     )
@@ -316,6 +339,7 @@ describe('handcrafted adversaries (shapes JSON cannot express)', () => {
       expect(typeof e.source).toBe('string')
       expect(typeof e.target).toBe('string')
     }
+    useSceneStore.setState({ nodes: [], edges: [] })
   })
 
   it('a cyclic node is admitted with only owned fields (cycle never enters the store)', () => {
@@ -327,5 +351,6 @@ describe('handcrafted adversaries (shapes JSON cannot express)', () => {
     expect(stored.id).toBe('cyc')
     expect('self' in stored).toBe(false) // unknown extras dropped by materialization
     expect(() => structuredClone(stored)).not.toThrow() // acyclic, plain data
+    useSceneStore.setState({ nodes: [], edges: [] })
   })
 })
