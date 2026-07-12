@@ -28,7 +28,7 @@
 // Exit codes: 0 pass · 1 floor regression or missing module row ·
 // 2 malformed/unreadable summary. Machine line: UNIT_COVERAGE v1.
 import { readFileSync } from 'node:fs'
-import { resolve, sep } from 'node:path'
+import { resolve } from 'node:path'
 
 const METRICS = ['statements', 'branches', 'functions', 'lines']
 
@@ -52,11 +52,14 @@ export function checkCoverage(summary, floors = FLOORS) {
     return { status: 'MALFORMED', failures: ['summary is not an object'] }
   }
   // Normalize absolute Windows/POSIX paths to repo-relative forward-slash
-  // keys so the table stays platform-independent.
+  // keys HOST-INDEPENDENTLY: the summary may have been generated on a
+  // different platform than the checker runs on (Windows-authored
+  // fixtures checked on the Ubuntu CI runner), so BOTH separators are
+  // normalized explicitly — never via node:path's host-specific sep.
   const byModule = new Map()
   for (const [key, value] of Object.entries(summary)) {
     if (key === 'total') continue
-    const normalized = key.split(sep).join('/').split('/')
+    const normalized = key.replace(/\\/g, '/').split('/')
     const srcIndex = normalized.lastIndexOf('src')
     if (srcIndex === -1) continue
     byModule.set(normalized.slice(srcIndex).join('/'), value)
@@ -106,6 +109,9 @@ function main() {
   if (status === 'FAIL') process.exit(1)
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split(sep).join('/').split('/').pop())) {
+const invokedBasename = process.argv[1]
+  ? process.argv[1].replace(/\\/g, '/').split('/').pop()
+  : ''
+if (invokedBasename && import.meta.url.endsWith(`/${invokedBasename}`)) {
   main()
 }
