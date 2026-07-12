@@ -172,6 +172,22 @@ input:focus-visible,
   min-height: 44px;
 }
 
+/* Camera view presets (Package AN-1): overlay inside the 3D region,
+   44x44 touch targets like every other control surface. */
+.view-presets {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 1000;
+  display: flex;
+  gap: 8px;
+}
+
+.view-presets button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
 @media (max-width: 767px) {
   /* Stacked flow can exceed a short viewport (landscape phones):
      the app container itself scrolls vertically; desktop overlays

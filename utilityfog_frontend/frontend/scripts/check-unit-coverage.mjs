@@ -40,6 +40,7 @@ export const FLOORS = {
   'src/components/NetworkView2D.tsx': [43, 49, 68, 40],
   'src/components/ViewErrorBoundary.tsx': [100, 100, 100, 100],
   'src/viz3d/adapters.ts': [96, 94, 100, 100],
+  'src/viz3d/cameraPresets.ts': [100, 100, 100, 100],
   'src/viz3d/edgeValidation.ts': [100, 100, 100, 100],
   'src/viz3d/nodeValidation.ts': [100, 100, 100, 100],
   'src/viz3d/useEventQueue.ts': [95, 90, 91, 96],
