@@ -212,7 +212,8 @@ test('v2: single-chunk build classifies as entry-only (no async dimension)', () 
     assert.deepEqual(c.entry.names, ['index-abc.js'])
     assert.equal(c.entry.raw, 100)
     assert.equal(c.asyncCount, 0)
-    assert.equal(c.largestAsync, null)
+    assert.equal(c.largestAsyncRaw, null)
+    assert.equal(c.largestAsyncGzip, null)
     const result = checkBudgets(summarize(inv), undefined, c)
     assert.equal(result.pass, true)
   } finally {
@@ -233,8 +234,8 @@ test('v2: several async chunks — largest identified by raw size', () => {
   try {
     const c = classifyAssets(dir, inventoryAssets(join(dir, 'assets')))
     assert.equal(c.asyncCount, 3)
-    assert.equal(c.largestAsync.name, 'chunk-b.js')
-    assert.equal(c.largestAsync.raw, 900)
+    assert.equal(c.largestAsyncRaw.name, 'chunk-b.js')
+    assert.equal(c.largestAsyncRaw.raw, 900)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -272,7 +273,7 @@ test('v2: malformed script references fail closed', () => {
   try {
     assert.throws(
       () => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))),
-      /malformed script reference/,
+      /external script reference/,
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -354,7 +355,7 @@ test('v2: machine line is stable, versioned and carries the chunk dimensions', (
     const line = machineLine(summarize(inv), { pass: true }, c)
     assert.match(
       line,
-      /^BUNDLE_BUDGET v2 js_raw=\d+ js_gzip=\d+ css_raw=\d+ css_gzip=\d+ entry_raw=10 entry_gzip=\d+ async_chunks=1 largest_async_raw=20 largest_async_gzip=\d+ total_raw=\d+ total_gzip=\d+ status=PASS$/,
+      /^BUNDLE_BUDGET v2 js_raw=\d+ js_gzip=\d+ css_raw=\d+ css_gzip=\d+ entry_raw=10 entry_gzip=\d+ async_chunks=1 largest_async_raw=20 largest_async_raw_chunk=chunk-a\.js largest_async_gzip=\d+ largest_async_gzip_chunk=chunk-a\.js total_raw=\d+ total_gzip=\d+ status=PASS$/,
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -375,5 +376,73 @@ test('v2: gzip settings are deterministic (same bytes, same gzip size, twice)', 
   } finally {
     rmSync(dir1, { recursive: true, force: true })
     rmSync(dir2, { recursive: true, force: true })
+  }
+})
+
+test('v2 audit: accepted reference forms — relative, dot-relative, query and hash', () => {
+  for (const form of ['/assets/index-e.js', 'assets/index-e.js', './assets/index-e.js', '/assets/index-e.js?v=1', 'assets/index-e.js#frag', './assets/index-e.js?v=1#frag']) {
+    const dir = v2Fixture({ 'index-e.js': 'e' }, `<script type="module" src="${form}"></script>`)
+    try {
+      const c = classifyAssets(dir, inventoryAssets(join(dir, 'assets')))
+      assert.deepEqual(c.entry.names, ['index-e.js'], form)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('v2 audit: rejected reference forms — external origins, traversal, non-JS, protocol-relative', () => {
+  const cases = [
+    ['http://evil.example/assets/x.js', /external/],
+    ['https://evil.example/assets/x.js', /external/],
+    ['//evil.example/assets/x.js', /external/],
+    ['/assets/../secrets.js', /malformed|traversal/],
+    ['/assets/x.css', /malformed/],
+    ['/other/x.js', /malformed/],
+    ['/assets/%2e%2e.js', /traversal/],
+  ]
+  for (const [form, expected] of cases) {
+    const dir = v2Fixture({ 'index-e.js': 'e' }, `<script type="module" src="${form}"></script>`)
+    try {
+      assert.throws(() => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))), expected, form)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('v2 audit: gzip budget binds the GZIP-largest chunk, not the raw-largest', () => {
+  // A: raw-largest but hugely compressible. B: smaller raw, incompressible
+  // — the gzip maximum, and over the gzip budget. The gate must fail on B.
+  let seed = 99
+  const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648
+  let noise = ''
+  for (let i = 0; i < 3000; i++) noise += String.fromCharCode(33 + Math.floor(rand() * 90))
+  const dir = v2Fixture(
+    { 'index-e.js': 'e', 'chunk-a.js': 'a'.repeat(10000), 'chunk-b.js': noise },
+    INDEX(['index-e.js']),
+  )
+  try {
+    const inv = inventoryAssets(join(dir, 'assets'))
+    const c = classifyAssets(dir, inv)
+    assert.equal(c.largestAsyncRaw.name, 'chunk-a.js')
+    assert.equal(c.largestAsyncGzip.name, 'chunk-b.js')
+    assert.ok(c.largestAsyncGzip.gzip > c.largestAsyncRaw.gzip, 'B must be the gzip max')
+    const budgets = {
+      js_raw: 1_000_000, js_gzip: 1_000_000, css_raw: 1_000_000, css_gzip: 1_000_000,
+      entry_raw: 1_000_000, entry_gzip: 1_000_000,
+      largest_async_raw: 1_000_000,
+      largest_async_gzip: 1_000, // under B's gzip, above A's
+    }
+    assert.ok(c.largestAsyncRaw.gzip < 1_000, 'A gzip must be under the budget')
+    const result = checkBudgets(summarize(inv), budgets, c)
+    assert.equal(result.pass, false)
+    assert.match(result.failures.join(';'), /largest_async_gzip \d+ bytes exceeds budget 1000/)
+    // The machine line names BOTH maxima distinctly.
+    const line = machineLine(summarize(inv), result, c)
+    assert.match(line, /largest_async_raw_chunk=chunk-a\.js/)
+    assert.match(line, /largest_async_gzip_chunk=chunk-b\.js/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

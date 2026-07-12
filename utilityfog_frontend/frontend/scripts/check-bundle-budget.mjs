@@ -69,11 +69,32 @@ export function classifyAssets(distDir, inventory) {
   const refs = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1])
   const entryNames = new Set()
   for (const ref of refs) {
-    const match = /\/assets\/([^/"?#]+\.js)$/.exec(ref)
+    // Accepted forms: /assets/x.js · assets/x.js · ./assets/x.js, each
+    // optionally with a query string and/or hash fragment. Rejected (fail
+    // closed): external origins and protocol-relative URLs, path
+    // traversal, non-JS, and anything else — a reference may never escape
+    // dist/assets. Decoding is applied to the FILENAME only, purely to
+    // re-check for smuggled separators/traversal; the raw name is used
+    // for the inventory match.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(ref) || ref.startsWith('//')) {
+      throw new Error(`external script reference in index.html: ${ref} (fail closed)`)
+    }
+    const withoutSuffix = ref.split(/[?#]/)[0]
+    const match = /^(?:\.?\/)?assets\/([^/\\]+\.js)$/.exec(withoutSuffix)
     if (!match) {
       throw new Error(`malformed script reference in index.html: ${ref} (fail closed)`)
     }
-    entryNames.add(match[1])
+    const name = match[1]
+    let decoded = name
+    try {
+      decoded = decodeURIComponent(name)
+    } catch {
+      throw new Error(`undecodable script reference in index.html: ${ref} (fail closed)`)
+    }
+    if (decoded.includes('/') || decoded.includes('\\') || decoded.includes('..')) {
+      throw new Error(`traversal in script reference in index.html: ${ref} (fail closed)`)
+    }
+    entryNames.add(name)
   }
   if (entryNames.size === 0) {
     throw new Error('index.html references no entry script (fail closed)')
@@ -88,9 +109,15 @@ export function classifyAssets(distDir, inventory) {
     entries.push(asset)
   }
   const asyncChunks = inventory.filter((i) => i.kind === 'js' && !entryNames.has(i.name))
-  let largestAsync = null
+  // Raw-largest and gzip-largest are tracked INDEPENDENTLY: a chunk that
+  // is smaller raw but less compressible can be the gzip maximum, and the
+  // gzip budget must bind THAT chunk (audit correction — previously the
+  // gzip limit was applied to the raw-largest chunk only).
+  let largestAsyncRaw = null
+  let largestAsyncGzip = null
   for (const chunk of asyncChunks) {
-    if (largestAsync === null || chunk.raw > largestAsync.raw) largestAsync = chunk
+    if (largestAsyncRaw === null || chunk.raw > largestAsyncRaw.raw) largestAsyncRaw = chunk
+    if (largestAsyncGzip === null || chunk.gzip > largestAsyncGzip.gzip) largestAsyncGzip = chunk
   }
   return {
     entry: {
@@ -99,7 +126,8 @@ export function classifyAssets(distDir, inventory) {
       gzip: entries.reduce((n, a) => n + a.gzip, 0),
     },
     asyncCount: asyncChunks.length,
-    largestAsync,
+    largestAsyncRaw,
+    largestAsyncGzip,
   }
 }
 
@@ -140,12 +168,13 @@ export function checkBudgets(summary, budgets = BUDGETS, classification = null) 
       ['entry_gzip', classification.entry.gzip],
     )
     // A build with no async chunks has no largest-chunk dimension; the
-    // entry and total budgets still bound it completely.
-    if (classification.largestAsync !== null) {
-      checks.push(
-        ['largest_async_raw', classification.largestAsync.raw],
-        ['largest_async_gzip', classification.largestAsync.gzip],
-      )
+    // entry and total budgets still bound it completely. Raw and gzip
+    // maxima are checked against their own maximal chunks.
+    if (classification.largestAsyncRaw !== null) {
+      checks.push(['largest_async_raw', classification.largestAsyncRaw.raw])
+    }
+    if (classification.largestAsyncGzip !== null) {
+      checks.push(['largest_async_gzip', classification.largestAsyncGzip.gzip])
     }
   }
   for (const [key, actual] of checks) {
@@ -175,8 +204,10 @@ export function machineLine(summary, result, classification = null) {
       ? ''
       : `entry_raw=${classification.entry.raw} entry_gzip=${classification.entry.gzip} ` +
         `async_chunks=${classification.asyncCount} ` +
-        `largest_async_raw=${classification.largestAsync?.raw ?? 0} ` +
-        `largest_async_gzip=${classification.largestAsync?.gzip ?? 0} `
+        `largest_async_raw=${classification.largestAsyncRaw?.raw ?? 0} ` +
+        `largest_async_raw_chunk=${classification.largestAsyncRaw?.name ?? '-'} ` +
+        `largest_async_gzip=${classification.largestAsyncGzip?.gzip ?? 0} ` +
+        `largest_async_gzip_chunk=${classification.largestAsyncGzip?.name ?? '-'} `
   return (
     `BUNDLE_BUDGET v2 ` +
     `js_raw=${summary.js.raw} js_gzip=${summary.js.gzip} ` +
@@ -213,9 +244,14 @@ function main() {
   console.log(
     `  entry (${classification.entry.names.join('+')}): raw=${classification.entry.raw}/${BUDGETS.entry_raw} gzip=${classification.entry.gzip}/${BUDGETS.entry_gzip}`,
   )
-  if (classification.largestAsync !== null) {
+  if (classification.largestAsyncRaw !== null) {
     console.log(
-      `  largest async (${classification.largestAsync.name}): raw=${classification.largestAsync.raw}/${BUDGETS.largest_async_raw} gzip=${classification.largestAsync.gzip}/${BUDGETS.largest_async_gzip}`,
+      `  largest async raw (${classification.largestAsyncRaw.name}): ${classification.largestAsyncRaw.raw}/${BUDGETS.largest_async_raw}`,
+    )
+  }
+  if (classification.largestAsyncGzip !== null) {
+    console.log(
+      `  largest async gzip (${classification.largestAsyncGzip.name}): ${classification.largestAsyncGzip.gzip}/${BUDGETS.largest_async_gzip}`,
     )
   }
   console.log(machineLine(summary, result, classification))
