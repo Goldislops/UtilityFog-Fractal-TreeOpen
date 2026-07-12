@@ -445,3 +445,28 @@ describe('referential stability (Jack audit amendment)', () => {
     expect(reduced).toEqual([])
   })
 })
+
+describe('coverage-contract completions (Package AC)', () => {
+  it.each([
+    { label: 'invalid y coordinate', position: [1, 'two', 3] },
+    { label: 'invalid z coordinate', position: [1, 2, Number.NaN] },
+  ])('owned-position reads reject $label through the public seam', ({ position }) => {
+    expect(reconcileNode({ id: 'n', position }, undefined)).toBeNull()
+  })
+
+  it('connections comparisons detect length and element mismatches (new refs, not reuse)', () => {
+    const existing = node('n', [1, 2, 3], { connections: ['x'] })
+    const lengthChanged = reconcileNode(
+      { id: 'n', position: [1, 2, 3], status: 'active', connections: ['x', 'y'] },
+      existing,
+    )!
+    expect(lengthChanged).not.toBe(existing)
+    expect(lengthChanged.connections).toEqual(['x', 'y'])
+    const elementChanged = reconcileNode(
+      { id: 'n', position: [1, 2, 3], status: 'active', connections: ['y'] },
+      existing,
+    )!
+    expect(elementChanged).not.toBe(existing)
+    expect(elementChanged.connections).toEqual(['y'])
+  })
+})
