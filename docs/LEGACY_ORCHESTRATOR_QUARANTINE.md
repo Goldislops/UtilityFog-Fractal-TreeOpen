@@ -72,12 +72,27 @@ Error-shape guarantees (Jack amendment):
 ## LeanCTX audit receipt
 
 `IterationResult.audit_receipt()` returns a bounded, deterministic,
-payload-free handoff (`build_audit_receipt`): stop reason, turn/tool-call
-counts, per-category outcome counts, successful proposal ids, and token usage —
-**never** tool payloads, prompts, credentials, headers, or raw backend
-responses. It serializes deterministically (sorted keys) and is guaranteed
-≤ 64 KiB (`MAX_RECEIPT_BYTES`), with deterministic truncation as a last-resort
-safety net.
+payload-free handoff (`build_audit_receipt`) built by **strict allowlist
+normalization** — the receipt carries only a fixed schema, and any value
+outside it is discarded or replaced by a fixed token, never stringified:
+
+| Field | Supported domain | Out-of-domain handling |
+|---|---|---|
+| `schema` | fixed literal `leanctx-orchestrator-v1` | — |
+| `stopped_because` | `end_turn` / `max_depth` / `tool_budget_exhausted` | any other value → `unknown` (text never copied) |
+| `turns`, `tool_calls_executed` | non-negative int, magnitude-clamped (≤ 10¹²) | bool/negative/non-int → `0`; oversized → clamped |
+| `outcome_counts` | only the known categories (`ok`, `unknown_tool`, `handler_exception`, `transport_failure`, `http_rejection`, `budget_rejection`, `proposal_limit`, `local_rejection`) → non-negative ints | unknown / non-string keys discarded |
+| `usage_total` | only `input_tokens` / `output_tokens` → non-negative ints | other keys discarded |
+| `proposals_created`, `commits_applied` | id-alphabet strings (`[A-Za-z0-9_-]`, ≤ 128 chars), list-capped at 64 | invalid / non-string entries omitted (no `__str__`) |
+| `truncated` | `true` whenever any value was normalized away, or the trim loop / minimal fallback fired | — |
+
+Because every surviving value is a bounded JSON primitive, it serializes with
+ordinary `json.dumps(..., sort_keys=True)` (no `default=str`), the ≤ 64 KiB
+(`MAX_RECEIPT_BYTES`) bound holds **before** serialization, and no arbitrary
+input key, secret-looking text, or object `__str__` can enter the receipt. A
+deterministic trim loop and a fixed minimal fallback are the final size
+guarantee. The receipt **never** contains tool payloads, prompts, credentials,
+headers, or raw backend responses.
 
 ## Supported modes and invocation
 

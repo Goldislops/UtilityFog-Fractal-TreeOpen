@@ -37,6 +37,7 @@ Capability quarantine (Package S):
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -493,21 +494,25 @@ class IterationResult:
     """Last assistant text block, if any."""
 
     usage_total: dict[str, int] = field(default_factory=dict)
-    """Sum of input/output tokens across all turns this iteration."""
+    """Sum of tokens across all turns this iteration. In the audit receipt only
+    ``input_tokens`` / ``output_tokens`` are retained (other keys discarded)."""
 
     outcome_counts: dict[str, int] = field(default_factory=dict)
-    """Deterministic count of tool-call outcomes by category (ok, unknown_tool,
-    handler_exception, transport_failure, http_rejection, budget_rejection,
-    proposal_limit)."""
+    """Deterministic count of tool-call outcomes by category: ``ok``,
+    ``unknown_tool``, ``handler_exception``, ``transport_failure``,
+    ``http_rejection``, ``budget_rejection``, ``proposal_limit``,
+    ``local_rejection``. The audit receipt keeps only these known categories."""
 
     def audit_receipt(self) -> dict[str, Any]:
         """A bounded, payload-free LeanCTX audit handoff for this iteration.
 
-        Contains only outcome metadata: stop reason, counts, usage, and the
-        ids of successful proposals — never tool payloads, prompts, credentials,
-        headers, or raw backend responses. Deterministically serializable and
-        guaranteed <= MAX_RECEIPT_BYTES (deterministic truncation if ever
-        exceeded)."""
+        Built by strict allowlist normalization (see ``build_audit_receipt``):
+        only the fixed receipt schema survives — stop reason (allowlisted or
+        ``unknown``), non-negative clamped counts, known outcome/usage keys, and
+        id-alphabet proposal/commit ids. Never tool payloads, prompts,
+        credentials, headers, or raw backend responses. Deterministically
+        serializable with plain ``json.dumps`` and guaranteed
+        ≤ MAX_RECEIPT_BYTES."""
         return build_audit_receipt(self)
 
 
@@ -665,103 +670,144 @@ def _error_block(tool_use_id: str, error: str, category: str, message: str) -> T
     )
 
 
-# -- audit receipt bounding helpers -----------------------------------------
+# -- audit receipt: strict allowlist normalization --------------------------
+#
+# The receipt carries ONLY known, fixed-schema values. Every field is
+# allowlisted, so no arbitrary input key, secret-looking text, or object
+# __str__ can ever enter it — unknown/invalid values are DISCARDED or replaced
+# by a fixed token, never stringified. Because every surviving value is already
+# a bounded JSON primitive, the receipt serializes with plain
+# ``json.dumps(..., sort_keys=True)`` (no ``default=str`` crutch), and the size
+# guarantee holds before serialization rather than being patched after it.
 
-_RECEIPT_MAX_STR = 256
-"""Max length of any single bounded string field before it is truncated."""
 _RECEIPT_MAX_ID = 128
-"""Max length of a single id string in a list field."""
+"""Max length of a single retained id string."""
 _RECEIPT_MAX_LIST = 64
 """Max number of ids retained in a list field."""
-_RECEIPT_MAX_MAP = 64
-"""Max number of entries retained in a count/usage map."""
+_RECEIPT_MAX_UINT = 10 ** 12
+"""Magnitude clamp for any count/usage integer (well beyond any real value)."""
+
+_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,%d}\Z" % _RECEIPT_MAX_ID)
+"""The proposal/commit id alphabet: ASCII word chars and dashes, bounded."""
+
+_ALLOWED_STOP_REASONS = frozenset({"end_turn", "max_depth", "tool_budget_exhausted"})
+_ALLOWED_OUTCOME_KEYS = frozenset({
+    OUTCOME_OK, CATEGORY_UNKNOWN_TOOL, CATEGORY_HANDLER_EXCEPTION,
+    CATEGORY_TRANSPORT_FAILURE, CATEGORY_HTTP_REJECTION,
+    CATEGORY_BUDGET_REJECTION, CATEGORY_PROPOSAL_LIMIT, CATEGORY_LOCAL_REJECTION,
+})
+_ALLOWED_USAGE_KEYS = frozenset({"input_tokens", "output_tokens"})
 
 
-# Each bounding helper returns (value, truncated) so build_audit_receipt can
-# honestly flag ``truncated=True`` whenever real data was dropped (an overlong
-# string shortened, or a list/map that had more entries than the cap). Pure
-# type coercion of a scalar count is normalization, not truncation, and does
-# not set the flag.
+def _norm_uint(value: Any) -> tuple[int, bool]:
+    """Non-negative bounded integer normalizer → (value, changed). Rejects
+    bool, negatives and non-integers (→ 0) and clamps oversized magnitudes.
+    Never invokes ``__str__`` and never raises (even on 10**10000)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0, True
+    if value < 0:
+        return 0, True
+    if value > _RECEIPT_MAX_UINT:
+        return _RECEIPT_MAX_UINT, True
+    return value, False
 
 
-def _bounded_str(value: Any, limit: int = _RECEIPT_MAX_STR) -> tuple[str, bool]:
-    s = value if isinstance(value, str) else str(value)
-    if len(s) <= limit:
-        return s, False
-    return s[:limit] + "…", True
+def _norm_stop_reason(value: Any) -> tuple[str, bool]:
+    """Allowlist the stop reason. Any unknown or non-string value becomes the
+    fixed token ``"unknown"`` — its text is never copied or prefixed."""
+    if isinstance(value, str) and value in _ALLOWED_STOP_REASONS:
+        return value, False
+    return "unknown", True
 
 
-def _bounded_int(value: Any) -> int:
-    # bool is a subclass of int; treat non-ints (and bools) as 0 so the receipt
-    # never carries an unexpected type or a huge repr.
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _bounded_id_list(values: Any) -> tuple[list[str], bool]:
+def _norm_id_list(values: Any) -> tuple[list[str], bool]:
+    """Keep only safe id-alphabet strings (``[A-Za-z0-9_-]``, ≤128 chars), up to
+    the list cap → (ids, changed). Invalid or non-string entries are omitted
+    without invoking ``__str__``; a non-list input yields an empty list."""
     if not isinstance(values, (list, tuple)):
-        return [], False
+        return [], True
     items = list(values)
-    truncated = len(items) > _RECEIPT_MAX_LIST
+    changed = len(items) > _RECEIPT_MAX_LIST
     out: list[str] = []
     for v in items[:_RECEIPT_MAX_LIST]:
-        s, t = _bounded_str(v, _RECEIPT_MAX_ID)
-        out.append(s)
-        truncated = truncated or t
-    return out, truncated
+        if isinstance(v, str) and _ID_RE.match(v):
+            out.append(v)
+        else:
+            changed = True  # dropped an invalid / non-string id
+    return out, changed
 
 
-def _bounded_count_map(mapping: Any) -> tuple[dict[str, int], bool]:
+def _norm_count_map(mapping: Any, allowed_keys: frozenset) -> tuple[dict[str, int], bool]:
+    """Keep only allowlisted string keys mapped to normalized non-negative
+    integers → (map, changed). Unknown or non-string keys are discarded (never
+    stringified, so coercion cannot create a key collision)."""
     if not isinstance(mapping, dict):
-        return {}, False
-    items = list(mapping.items())
-    truncated = len(items) > _RECEIPT_MAX_MAP
+        return {}, True
     out: dict[str, int] = {}
-    for key, value in items[:_RECEIPT_MAX_MAP]:
-        ks, t = _bounded_str(key, 64)
-        out[ks] = _bounded_int(value)
-        truncated = truncated or t
-    return dict(sorted(out.items())), truncated
+    changed = False
+    for key, value in mapping.items():
+        if not isinstance(key, str) or key not in allowed_keys:
+            changed = True  # discard unknown / non-string key, no __str__
+            continue
+        iv, ic = _norm_uint(value)
+        out[key] = iv
+        changed = changed or ic
+    return dict(sorted(out.items())), changed
 
 
 def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
     """Build a bounded, payload-free LeanCTX audit receipt from an
-    IterationResult. Deterministic (sorted keys, stable ordering) and
-    **guaranteed** ≤ MAX_RECEIPT_BYTES.
+    IterationResult. Deterministic (sorted keys) and **guaranteed**
+    ≤ MAX_RECEIPT_BYTES.
 
-    Every field is whitelisted and bounded on the way in (string lengths, list
-    lengths, map sizes, numeric types), so even a manually- or adversarially-
-    constructed IterationResult — a huge stop reason, oversized outcome/usage
-    keys, enormous id lists, or unusual value types — cannot inflate the
-    receipt. A progressive deterministic trim plus a fixed minimal fallback
-    make the size cap a hard guarantee rather than a hope.
+    Supported schema (all other input is discarded, never stringified):
 
-    The receipt intentionally excludes tool payloads, prompts, credentials,
-    headers, and raw backend responses — only outcome metadata is retained."""
-    stopped, t_stop = _bounded_str(getattr(result, "stopped_because", ""))
-    outcome_counts, t_oc = _bounded_count_map(getattr(result, "outcome_counts", {}))
-    proposals, t_pc = _bounded_id_list(getattr(result, "proposals_created", []))
-    commits, t_ca = _bounded_id_list(getattr(result, "commits_applied", []))
-    usage, t_us = _bounded_count_map(getattr(result, "usage_total", {}))
+    - ``schema`` — fixed literal.
+    - ``stopped_because`` — one of ``end_turn`` / ``max_depth`` /
+      ``tool_budget_exhausted``; any other value becomes ``unknown``.
+    - ``turns`` / ``tool_calls_executed`` — non-negative integers, magnitude-
+      clamped.
+    - ``outcome_counts`` — only the known outcome categories → non-negative
+      ints.
+    - ``usage_total`` — only ``input_tokens`` / ``output_tokens`` → non-negative
+      ints.
+    - ``proposals_created`` / ``commits_applied`` — id-alphabet strings only,
+      list-capped.
+    - ``truncated`` — true whenever any value was normalized away, or the
+      trim loop / fixed minimal fallback fired.
+
+    Because every surviving value is a bounded JSON primitive, no arbitrary
+    input key, secret-looking text, or object ``__str__`` can enter the
+    receipt, and it excludes tool payloads, prompts, credentials, headers, and
+    raw backend responses."""
+    stopped, t_stop = _norm_stop_reason(getattr(result, "stopped_because", ""))
+    turns, t_turns = _norm_uint(getattr(result, "turns", 0))
+    tce, t_tce = _norm_uint(getattr(result, "tool_calls_executed", 0))
+    outcome_counts, t_oc = _norm_count_map(
+        getattr(result, "outcome_counts", {}), _ALLOWED_OUTCOME_KEYS)
+    proposals, t_pc = _norm_id_list(getattr(result, "proposals_created", []))
+    commits, t_ca = _norm_id_list(getattr(result, "commits_applied", []))
+    usage, t_us = _norm_count_map(
+        getattr(result, "usage_total", {}), _ALLOWED_USAGE_KEYS)
     receipt: dict[str, Any] = {
         "schema": "leanctx-orchestrator-v1",
         "stopped_because": stopped,
-        "turns": _bounded_int(getattr(result, "turns", 0)),
-        "tool_calls_executed": _bounded_int(getattr(result, "tool_calls_executed", 0)),
+        "turns": turns,
+        "tool_calls_executed": tce,
         "outcome_counts": outcome_counts,
         "proposals_created": proposals,
         "commits_applied": commits,
         "usage_total": usage,
-        # Honest flag: any field-level drop (overlong string, over-cap list/map)
-        # already marks the receipt truncated; the trim loop below may set it too.
-        "truncated": any((t_stop, t_oc, t_pc, t_ca, t_us)),
+        "truncated": any((t_stop, t_turns, t_tce, t_oc, t_pc, t_ca, t_us)),
     }
 
+    # Every value is already a bounded JSON primitive → plain dumps, no
+    # default=str. This is the true size, computed before any external consumer.
     def _size(obj: dict) -> int:
-        return len(json.dumps(obj, sort_keys=True, default=str).encode("utf-8"))
+        return len(json.dumps(obj, sort_keys=True).encode("utf-8"))
 
-    # The whitelisting above already bounds the receipt well under the cap;
-    # this progressive trim is the hard guarantee if the constants were ever
-    # mis-set. Steps are deterministic and ordered least- to most-destructive.
+    # Allowlisting already bounds the receipt far under the cap; this
+    # deterministic trim + fixed minimal fallback are the final guarantee.
     while _size(receipt) > MAX_RECEIPT_BYTES:
         receipt["truncated"] = True
         if receipt["proposals_created"]:
@@ -776,13 +822,11 @@ def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
         if receipt["usage_total"]:
             receipt["usage_total"] = {}
             continue
-        if len(receipt["stopped_because"]) > 16:
-            receipt["stopped_because"] = receipt["stopped_because"][:16]
-            continue
-        # Fixed minimal fallback — guaranteed tiny, always within the cap.
+        # stopped_because is already a short allowlisted token; nothing else to
+        # trim → fixed minimal fallback, guaranteed tiny.
         receipt = {
             "schema": "leanctx-orchestrator-v1",
-            "stopped_because": "truncated",
+            "stopped_because": "unknown",
             "truncated": True,
         }
         break

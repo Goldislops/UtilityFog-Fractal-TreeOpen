@@ -879,53 +879,114 @@ _RECEIPT_SCHEMA_KEYS = {
 }
 
 
+class _StrBoom:
+    """An object whose __str__/__repr__ raise — must never be invoked by the
+    receipt builder (allowlisting discards it without stringifying)."""
+    def __str__(self):  # pragma: no cover - must not be called
+        raise RuntimeError("__str__ must not be invoked")
+    def __repr__(self):  # pragma: no cover
+        raise RuntimeError("__repr__ must not be invoked")
+    def __hash__(self):
+        return 7
+    def __eq__(self, other):
+        return False
+
+
 def _adversarial_iteration_result() -> IterationResult:
     return IterationResult(
-        stopped_because="X" * 300_000,                       # extremely large
-        turns=7,
-        tool_calls_executed=9,
-        proposals_created=["prop-" + "y" * 400 for _ in range(5_000)],  # thousands, oversized
-        commits_applied=["commit-" + "z" * 400 for _ in range(5_000)],
-        outcome_counts={"K" * 20_000: 1, "ok": 3, "weird" * 100: 2},    # huge/unknown keys
-        usage_total={"U" * 20_000: 999, "input_tokens": [1, 2, 3]},      # huge key + unusual value
+        stopped_because="sk-SECRET_" + "X" * 300_000,        # secret-looking, huge, unknown
+        turns=10 ** 10000,                                   # absurd magnitude
+        tool_calls_executed=-9,                              # negative
+        proposals_created=["prop-abc123", "bad id!!", "y" * 400, None,
+                           _StrBoom(), "ok-1"],              # valid + invalid + non-str
+        commits_applied=["commit_9", 42],
+        outcome_counts={"K" * 20_000: 1, "ok": 3, "weird" * 100: 2,    # huge/unknown keys
+                        1: 9, "1": 11, "local_rejection": -3,          # colliding + negative
+                        "handler_exception": _StrBoom(), True: 1},     # __str__-boom value, bool key
+        usage_total={"U" * 20_000: 999, "input_tokens": 10 ** 10000,   # huge key + huge value
+                     "output_tokens": [1, 2, 3], _StrBoom(): 4},       # list value + boom key
     )
 
 
 def test_receipt_bounded_against_adversarial_result():
     """A manually/adversarially-constructed IterationResult cannot inflate the
-    receipt past the cap, is deterministic, flags truncation, keeps only the
-    fixed schema keys, and coerces unusual value types."""
+    receipt, is deterministic under PLAIN json.dumps (no default=str), flags
+    truncation, and survives with only allowlisted, JSON-primitive values."""
     result = _adversarial_iteration_result()
     receipt = build_audit_receipt(result)
-    blob = json.dumps(receipt, sort_keys=True, default=str)
-    # Deterministic serialization.
-    assert blob == json.dumps(build_audit_receipt(result), sort_keys=True, default=str)
-    # Hard byte bound.
+    blob = json.dumps(receipt, sort_keys=True)          # plain dumps — no default=str
+    assert blob == json.dumps(build_audit_receipt(result), sort_keys=True)  # deterministic
     assert len(blob.encode("utf-8")) <= MAX_RECEIPT_BYTES
-    # Reduction occurred → flagged.
     assert receipt["truncated"] is True
-    # Only fixed-schema top-level keys survive — no arbitrary input key.
     assert set(receipt.keys()) == _RECEIPT_SCHEMA_KEYS
-    # Per-field caps.
-    assert len(receipt["proposals_created"]) <= 64
-    assert len(receipt["commits_applied"]) <= 64
-    assert len(receipt["outcome_counts"]) <= 64
-    assert len(receipt["usage_total"]) <= 64
-    assert len(receipt["stopped_because"]) <= 257  # 256 + ellipsis
-    # Unusual usage value coerced to int; no list survives as a value.
-    assert all(isinstance(v, int) for v in receipt["usage_total"].values())
-    assert all(isinstance(v, int) for v in receipt["outcome_counts"].values())
+    # Magnitude-clamped, non-negative ints.
+    assert receipt["turns"] == 10 ** 12
+    assert receipt["tool_calls_executed"] == 0
+    # Stop reason: unknown token, secret text gone entirely (incl. prefixes).
+    assert receipt["stopped_because"] == "unknown"
+    assert "SECRET" not in blob and "sk-" not in blob
+    # Outcome/usage: only allowlisted keys, all non-negative ints.
+    assert set(receipt["outcome_counts"]) <= {
+        "ok", "unknown_tool", "handler_exception", "transport_failure",
+        "http_rejection", "budget_rejection", "proposal_limit", "local_rejection"}
+    assert set(receipt["usage_total"]) <= {"input_tokens", "output_tokens"}
+    assert all(isinstance(v, int) and v >= 0 for v in receipt["outcome_counts"].values())
+    assert all(isinstance(v, int) and v >= 0 for v in receipt["usage_total"].values())
+    # Specific coercions.
+    assert receipt["outcome_counts"]["ok"] == 10 ** 12          # clamped
+    assert receipt["outcome_counts"].get("local_rejection", 0) == 0   # negative → 0
+    assert receipt["outcome_counts"]["handler_exception"] == 0        # boom value → 0
+    assert receipt["usage_total"]["output_tokens"] == 0              # list value → 0
+    # Unknown/secret keys removed entirely.
+    for banned in ("K" * 20_000, "weird", "U" * 20_000, "unknown_junk"):
+        assert banned not in blob
+    # Ids: only valid id-alphabet strings survive; invalid/non-str omitted.
+    assert receipt["proposals_created"] == ["prop-abc123", "ok-1"]
+    assert receipt["commits_applied"] == ["commit_9"]
 
 
-def test_receipt_truncates_oversized_secret_like_stop_reason():
-    """A secret-looking string longer than the cap does not survive intact in
-    the receipt (it is bounded to 256 chars and the receipt is flagged)."""
-    secret = "sk-" + "A" * 5_000
-    result = IterationResult(stopped_because=secret, turns=1, tool_calls_executed=0)
+def test_receipt_colliding_int_and_str_keys_both_discarded():
+    """Integer 1 and string '1' are both outside the outcome allowlist and are
+    discarded — no coercion, no key collision, no exception."""
+    result = IterationResult(stopped_because="end_turn", turns=1, tool_calls_executed=0,
+                             outcome_counts={1: 5, "1": 7})
     receipt = build_audit_receipt(result)
+    assert receipt["outcome_counts"] == {}
     assert receipt["truncated"] is True
-    assert secret not in json.dumps(receipt)  # the full secret does not survive
-    assert len(receipt["stopped_because"]) <= 257
+    # Deterministic plain serialization round-trips.
+    assert json.dumps(receipt, sort_keys=True) == json.dumps(build_audit_receipt(result), sort_keys=True)
+
+
+@pytest.mark.parametrize("count", [True, False, -1, 1.5, "3", None, 10 ** 10000])
+def test_receipt_rejects_non_uint_counts(count):
+    """bool / negative / non-integer / oversized counts are normalized to a
+    bounded non-negative int without raising, and flag truncation."""
+    result = IterationResult(stopped_because="end_turn", turns=count, tool_calls_executed=0,
+                             outcome_counts={"ok": count}, usage_total={"input_tokens": count})
+    receipt = build_audit_receipt(result)
+    assert isinstance(receipt["turns"], int) and receipt["turns"] >= 0
+    assert receipt["turns"] <= 10 ** 12
+    assert isinstance(receipt["outcome_counts"]["ok"], int) and receipt["outcome_counts"]["ok"] >= 0
+    assert isinstance(receipt["usage_total"]["input_tokens"], int)
+    assert receipt["truncated"] is True
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= MAX_RECEIPT_BYTES
+
+
+def test_receipt_str_boom_object_never_stringified():
+    """Objects whose __str__ raises appear as ids, keys, and values; the builder
+    discards them without invoking __str__ and never raises."""
+    result = IterationResult(
+        stopped_because=_StrBoom(), turns=1, tool_calls_executed=1,
+        proposals_created=[_StrBoom(), "prop-ok"],
+        outcome_counts={"ok": _StrBoom()},
+        usage_total={"input_tokens": _StrBoom()},
+    )
+    receipt = build_audit_receipt(result)   # must not raise
+    assert receipt["stopped_because"] == "unknown"
+    assert receipt["proposals_created"] == ["prop-ok"]
+    assert receipt["outcome_counts"]["ok"] == 0
+    assert receipt["usage_total"]["input_tokens"] == 0
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= MAX_RECEIPT_BYTES
 
 
 def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
@@ -934,14 +995,14 @@ def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
     through to the fixed minimal fallback, which is itself within the limit."""
     import scripts.orchestrator as orch_mod
     minimal = {"schema": "leanctx-orchestrator-v1",
-               "stopped_because": "truncated", "truncated": True}
+               "stopped_because": "unknown", "truncated": True}
     minimal_size = len(json.dumps(minimal, sort_keys=True).encode("utf-8"))
     monkeypatch.setattr(orch_mod, "MAX_RECEIPT_BYTES", minimal_size + 5)
     result = IterationResult(
-        stopped_because="a long reason " * 50,
+        stopped_because="end_turn",
         turns=1, tool_calls_executed=1,
         proposals_created=[f"prop-{i}" for i in range(500)],
-        outcome_counts={f"k{i}": i for i in range(100)},
+        outcome_counts={"ok": 500},
         usage_total={"input_tokens": 999_999},
     )
     receipt = build_audit_receipt(result)
