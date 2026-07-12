@@ -957,7 +957,17 @@ def test_receipt_colliding_int_and_str_keys_both_discarded():
     assert json.dumps(receipt, sort_keys=True) == json.dumps(build_audit_receipt(result), sort_keys=True)
 
 
-@pytest.mark.parametrize("count", [True, False, -1, 1.5, "3", None, 10 ** 10000])
+@pytest.mark.parametrize("count", [
+    pytest.param(True, id="bool_true"),
+    pytest.param(False, id="bool_false"),
+    pytest.param(-1, id="negative"),
+    pytest.param(1.5, id="float"),
+    pytest.param("3", id="str"),
+    pytest.param(None, id="none"),
+    # Explicit id: a 10001-digit int must not be stringified for the test id
+    # (Python's int->str 4300-digit limit) — the builder clamps it by value.
+    pytest.param(10 ** 10000, id="ten_pow_10000"),
+])
 def test_receipt_rejects_non_uint_counts(count):
     """bool / negative / non-integer / oversized counts are normalized to a
     bounded non-negative int without raising, and flag truncation."""
