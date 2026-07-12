@@ -266,6 +266,26 @@ describe('overflow boundary', () => {
     expect(overflowReports()).toHaveLength(2) // new episode, one new report
   })
 
+  it('snapshots occupy the same finite bound — no barrier evades accounting — and overflow stays explicitly lossy', async () => {
+    const view = renderHook(() => useEventQueue(client, handlers, { maxPendingWork: 2 }))
+    netMsg({ nodes: [] })
+    netMsg({ nodes: [] }) // the bound filled ENTIRELY by snapshots
+    expect(view.result.current.pendingCount()).toBe(2)
+
+    netMsg({ nodes: [] }) // a further snapshot is dropped, not privileged
+    nodeMsg(NODE('a')) //    and so is a new node item
+    expect(view.result.current.stats.dropped).toBe(2)
+    expect(view.result.current.pendingCount()).toBe(2)
+    const report = vi
+      .mocked(console.error)
+      .mock.calls.find(args => String(args[0]).startsWith('Event queue overflow'))
+    expect(String(report?.[0])).toContain('NOT lossless')
+
+    await vi.runAllTimersAsync()
+    expect(handlers.setNetwork).toHaveBeenCalledTimes(2)
+    expect(handlers.updateNode).not.toHaveBeenCalled()
+  })
+
   it('the documented default limit is in force when no injection is provided', () => {
     const view = renderHook(() => useEventQueue(client, handlers))
     expect(DEFAULT_MAX_PENDING_WORK).toBe(5000)

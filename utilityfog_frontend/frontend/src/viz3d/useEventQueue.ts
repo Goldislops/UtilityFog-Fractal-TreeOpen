@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { SimBridgeClient } from '../ws/SimBridgeClient'
 import {
   NodeUpdateCandidate,
@@ -70,10 +70,14 @@ export interface EventQueueStats {
 // yields one continuation frame per batch and requests no trailing or
 // post-unmount frames.
 //
-// HANDLERS: delivered through a ref refreshed on every commit — handler
-// identity changes NEVER resubscribe the WebSocket (subscription depends
-// only on the client), and the next event after a rerender reaches the
-// NEWEST handlers with no gap.
+// HANDLERS: delivered through a ref refreshed COMMIT-SYNCHRONOUSLY
+// (layout phase) — handler identity changes NEVER resubscribe the
+// WebSocket (subscription depends only on the client), and because the
+// refresh happens inside the commit itself, no delivery can observe
+// stale handlers after a committed rerender. A passive-effect refresh
+// would leave a window between commit and effect flush in which an
+// already-scheduled rAF drain (paint-aligned, and paint is not ordered
+// after passive effects) delivers to the PREVIOUS handlers.
 export const DEFAULT_MAX_PENDING_WORK = 5000
 const BATCH_SIZE = 50
 
@@ -113,9 +117,10 @@ export function useEventQueue(
     dropped: 0,
     invalidDropped: 0,
   })
-  // Newest handlers, refreshed every commit — see HANDLERS note above.
+  // Newest handlers, refreshed inside every commit (layout phase, before
+  // any paint/rAF can run) — see HANDLERS note above.
   const handlersRef = useRef(handlers)
-  useEffect(() => {
+  useLayoutEffect(() => {
     handlersRef.current = handlers
   })
   // Lifetime guard: rAF callbacks scheduled while mounted can fire AFTER
