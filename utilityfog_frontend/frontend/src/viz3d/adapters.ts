@@ -1,5 +1,6 @@
 import { NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
 import { materializeEdge } from './edgeValidation'
+import { isValidStatus } from './nodeValidation'
 
 // Adapter functions to convert between different data formats.
 // Raw simulation payloads are an external-data boundary. Ownership
@@ -37,10 +38,24 @@ function readTriple(p: unknown): [number, number, number] | null {
   return [x, y, z]
 }
 
+/// Owned connection copy retaining STRING elements only — no untrusted
+/// array reference or non-string element survives into adapted output.
+function readStringElements(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  const out: string[] = []
+  for (const item of v) {
+    if (typeof item === 'string') out.push(item)
+  }
+  return out
+}
+
 /// Legacy agents dialect: id || agent_<index>, random-scatter position
 /// fallback, active flag → status.
 function readAgent(raw: unknown, index: number): NetworkNode | null {
-  if (!raw || typeof raw !== 'object') return null
+  // Arrays are not records: without this check an array would satisfy the
+  // object test, read as field-less, and mint a phantom node with a
+  // generated id and fallback position.
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   try {
     const a = raw as Record<string, unknown>
     const id = 'id' in a ? a.id : undefined
@@ -54,7 +69,7 @@ function readAgent(raw: unknown, index: number): NetworkNode | null {
         Math.random() * 20 - 10,
         Math.random() * 20 - 10,
       ],
-      connections: Array.isArray(connections) ? ([...connections] as string[]) : [],
+      connections: readStringElements(connections),
       status: active ? 'active' : 'inactive',
     }
   } catch {
@@ -65,7 +80,8 @@ function readAgent(raw: unknown, index: number): NetworkNode | null {
 /// Generic nodes dialect: string id required (nothing to key on without
 /// one), [0,0,0] position fallback, status || 'active'.
 function readGenericNode(raw: unknown): NetworkNode | null {
-  if (!raw || typeof raw !== 'object') return null
+  // Arrays are not records (see readAgent).
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   try {
     const n = raw as Record<string, unknown>
     const id = 'id' in n ? n.id : undefined
@@ -76,8 +92,11 @@ function readGenericNode(raw: unknown): NetworkNode | null {
     return {
       id,
       position: position ?? [0, 0, 0],
-      connections: Array.isArray(connections) ? ([...connections] as string[]) : [],
-      status: (status || 'active') as NetworkNode['status'],
+      connections: readStringElements(connections),
+      // Validated against the real union; the source-evidenced fallback
+      // ('active', the pre-existing || fallback for falsy values) also
+      // covers invalid non-falsy values — never a type assertion.
+      status: isValidStatus(status) ? status : 'active',
     }
   } catch {
     return null

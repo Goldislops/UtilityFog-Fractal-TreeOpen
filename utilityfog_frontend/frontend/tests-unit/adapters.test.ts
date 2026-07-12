@@ -10,7 +10,7 @@
 // falsy chains. Ownership (Package Y): admitted records are materialized —
 // hostile elements or containers are skipped, never allowed to throw out
 // of the adapter.
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { adaptSimulationData, generateRandomNetwork } from '../src/viz3d/adapters'
 
 describe('adaptSimulationData — agents dialect', () => {
@@ -34,17 +34,18 @@ describe('adaptSimulationData — agents dialect', () => {
     expect(nodes.map(n => n.id)).toEqual(['agent_0', 'agent_1', 'agent_2'])
   })
 
-  it('unusable positions take the documented random legacy fallback (bounded, finite)', () => {
+  it('unusable positions take the documented random legacy fallback (stubbed deterministic)', () => {
+    // Math.random stubbed so the fallback is exact and coverage is
+    // deterministic: 0.75 -> 0.75*20-10 = 5 on every axis.
+    vi.spyOn(Math, 'random').mockReturnValue(0.75)
     const { nodes } = adaptSimulationData({
       agents: [{ id: 'a' }, { id: 'b', position: 'garbage' }, { id: 'c', position: [1, 2] }],
     })
-    for (const n of nodes) {
-      expect(n.position).toHaveLength(3)
-      for (const v of n.position) {
-        expect(Number.isFinite(v)).toBe(true)
-        expect(Math.abs(v)).toBeLessThanOrEqual(10)
-      }
-    }
+    expect(nodes.map(n => n.position)).toEqual([
+      [5, 5, 5],
+      [5, 5, 5],
+      [5, 5, 5],
+    ])
   })
 
   it('admitted agents are materialized owned records (no live getters, owned position tuple)', () => {
@@ -241,7 +242,13 @@ describe('adaptSimulationData — cross-cutting', () => {
 })
 
 describe('generateRandomNetwork (dev utility)', () => {
-  it('generates the requested node count with well-formed, in-bounds records', () => {
+  it('generates the requested node count with well-formed, in-bounds records (stubbed deterministic)', () => {
+    // A fixed cycling sequence drives every random draw: both status
+    // branches, both self-edge outcomes and exact positions are hit
+    // deterministically on every run (no coverage wobble).
+    const sequence = [0.05, 0.95, 0.5, 0.25, 0.75, 0.6, 0.4, 0.9, 0.1, 0.8]
+    let i = 0
+    vi.spyOn(Math, 'random').mockImplementation(() => sequence[i++ % sequence.length])
     const { nodes, edges } = generateRandomNetwork(10)
     expect(nodes).toHaveLength(10)
     expect(nodes.map(n => n.id)).toEqual(Array.from({ length: 10 }, (_, i) => `node_${i}`))
@@ -268,5 +275,43 @@ describe('generateRandomNetwork (dev utility)', () => {
     for (const e of edges) {
       expect(nodes.find(n => n.id === e.source)!.connections).toContain(e.target)
     }
+  })
+})
+
+describe('Z audit amendments', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('array-shaped agent/generic-node records are rejected — no phantom nodes', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.75)
+    const { nodes } = adaptSimulationData({
+      agents: [[1, 2, 3], []],
+      nodes: [['n', [1, 2, 3]]],
+    })
+    expect(nodes).toEqual([])
+  })
+
+  it('mixed connection arrays retain only string ids, copied owned', () => {
+    const supplied = ['a', 1, null, 'b', { evil: true }]
+    const { nodes } = adaptSimulationData({
+      agents: [{ id: 'ag', position: [1, 1, 1], connections: supplied, active: true }],
+      nodes: [{ id: 'gn', position: [2, 2, 2], connections: supplied }],
+    })
+    expect(nodes[0].connections).toEqual(['a', 'b'])
+    expect(nodes[1].connections).toEqual(['a', 'b'])
+    expect(nodes[0].connections).not.toBe(supplied)
+    expect(nodes[1].connections).not.toBe(supplied)
+  })
+
+  it('invalid generic-node status takes the source-evidenced fallback, never an assertion-lie', () => {
+    const { nodes } = adaptSimulationData({
+      nodes: [
+        { id: 'ok', position: [1, 1, 1], status: 'error' },
+        { id: 'bad', position: [1, 1, 1], status: 'weird' },
+        { id: 'num', position: [1, 1, 1], status: 42 },
+      ],
+    })
+    expect(nodes.map(n => n.status)).toEqual(['error', 'active', 'active'])
   })
 })
