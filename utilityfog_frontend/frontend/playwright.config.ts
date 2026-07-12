@@ -14,10 +14,21 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
 
+  // Cross-browser matrix (Package AJ, issue #2): the same SEMANTIC tests
+  // run per engine — no screenshot/pixel comparisons, so engine rendering
+  // variance cannot create brittleness.
   projects: [
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'firefox',
+      use: { ...devices['Desktop Firefox'] },
+    },
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
     },
   ],
 

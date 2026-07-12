@@ -17,6 +17,14 @@ jobs:
   ui-smoke:
     runs-on: ubuntu-latest
 
+    # Cross-browser matrix (Package AJ, issue #2): the same semantic suite
+    # per engine. fail-fast off so one engine's failure still surfaces the
+    # other engines' results.
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+
     defaults:
       run:
         working-directory: utilityfog_frontend/frontend
@@ -47,20 +55,20 @@ jobs:
       - name: Bundle budget check
         run: npm run check:budget
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browser (matrix engine only)
+        run: npx playwright install --with-deps ${{ matrix.browser }}
 
       # Playwright smoke tests still run against the Vite dev server (see
       # playwright.config.ts); the production build above exists to feed the
       # bundle-budget gate.
 
-      - name: Run smoke tests
-        run: npm run test:ui
+      - name: Run smoke tests (${{ matrix.browser }})
+        run: npx playwright test --project=${{ matrix.browser }}
 
       - name: Upload test report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: utilityfog_frontend/frontend/playwright-report/
           retention-days: 7

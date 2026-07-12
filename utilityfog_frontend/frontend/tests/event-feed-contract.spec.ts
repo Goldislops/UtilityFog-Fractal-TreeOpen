@@ -105,6 +105,23 @@ async function setupPage(page: Page) {
   await page.goto('/');
   // The app's client(s) exist once the root renders; the active one is last.
   await expect(page.locator('#root')).toBeVisible();
+  // Portability (Package AJ): waiting for #root alone raced the
+  // subscription effects — Chromium happened to win the race, WebKit lost
+  // it (events emitted before EventFeed subscribed were silently missed).
+  // Semantic readiness: the app socket must exist AND two paint ticks must
+  // pass so the post-commit subscription effects have flushed, in every
+  // engine.
+  await page.waitForFunction(() =>
+    (window as unknown as { __fakeSockets: Array<{ url: string }> }).__fakeSockets.some(s =>
+      String(s.url).includes('/ws'),
+    ),
+  );
+  await page.evaluate(
+    () =>
+      new Promise(resolve =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
 }
 
 // Inject one already-parsed-shape message on the app's active socket.
