@@ -8,7 +8,8 @@ import { applicationSocketReady } from '../tests/helpers/waitForApplicationSocke
 
 type Registry = Array<{ url?: unknown; readyState?: unknown } | undefined>
 const install = (registry: Registry | undefined) => {
-  ;(window as unknown as { __fakeSockets?: Registry }).__fakeSockets = registry
+  const w = window as unknown as { __fakeSockets?: Registry }
+  w.__fakeSockets = registry
 }
 const ready = (minCount = 1, path = '/ws') => applicationSocketReady({ path, minCount })
 
