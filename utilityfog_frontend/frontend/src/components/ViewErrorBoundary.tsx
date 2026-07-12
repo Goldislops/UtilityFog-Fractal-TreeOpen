@@ -40,8 +40,11 @@ export default class ViewErrorBoundary extends Component<
     return { failed: true }
   }
 
-  componentDidCatch(error: unknown, _info: ErrorInfo): void {
-    console.error('View render failed:', error)
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    // The SINGLE application-owned diagnostic for this failure — error plus
+    // the component stack that locates it. (React's own development-mode
+    // logging is separate and not this boundary's contract.)
+    console.error('View render failed:', error, info.componentStack)
   }
 
   handleRetry = (): void => {
@@ -65,7 +68,9 @@ export default class ViewErrorBoundary extends Component<
           }}
         >
           <p style={{ margin: 0 }}>The {this.props.viewLabel} failed to render.</p>
-          <button onClick={this.handleRetry}>Retry {this.props.viewLabel}</button>
+          <button type="button" onClick={this.handleRetry}>
+            Retry {this.props.viewLabel}
+          </button>
         </div>
       )
     }

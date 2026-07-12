@@ -57,8 +57,9 @@ const shellAlive = () => {
   expect(screen.getAllByRole('status')).toHaveLength(1)
   expect(screen.getAllByRole('log')).toHaveLength(1)
 }
-const reportCount = () =>
-  vi.mocked(console.error).mock.calls.filter(args => args[0] === 'View render failed:').length
+const boundaryReports = () =>
+  vi.mocked(console.error).mock.calls.filter(args => args[0] === 'View render failed:')
+const reportCount = () => boundaryReports().length
 
 beforeEach(() => {
   failures.v3d = false
@@ -171,5 +172,29 @@ describe('view failure containment', () => {
     expect(screen.getAllByRole('status')).toHaveLength(1)
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
     expect(screen.getAllByRole('log')).toHaveLength(1)
+  })
+})
+
+describe('AB audit amendments', () => {
+  it('the single diagnostic carries the error AND the locating componentStack', () => {
+    failures.v3d = true
+    render(<App />)
+    const reports = boundaryReports()
+    expect(reports).toHaveLength(1)
+    const [, error, componentStack] = reports[0]
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('synthetic 3D render failure')
+    expect(typeof componentStack).toBe('string')
+    expect((componentStack as string).length).toBeGreaterThan(0)
+    // React dev logging also hits console.error — the boundary-owned
+    // channel stays exactly one call, distinguished by its first argument.
+    expect(vi.mocked(console.error).mock.calls.length).toBeGreaterThanOrEqual(reports.length)
+  })
+
+  it('the Retry control is an explicit type="button" (never an implicit submit)', () => {
+    failures.v3d = true
+    render(<App />)
+    expect(screen.getByRole('button', { name: 'Retry 3D network view' }))
+      .toHaveAttribute('type', 'button')
   })
 })
