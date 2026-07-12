@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { useState, useEffect, useRef, lazy } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, lazy } from 'react'
 import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
 import ViewErrorBoundary from './components/ViewErrorBoundary'
@@ -76,12 +76,23 @@ function App() {
   // user-paced button in the fallback below. A successful probe does not
   // guarantee Three.js will render — runtime renderer failures still
   // belong to ViewErrorBoundary.
+  //
+  // useLayoutEffect (amendment): the probe resolves commit-synchronously,
+  // BEFORE the browser paints — the 3D region never paints an empty
+  // pending frame while a passive effect waits to run.
   const [webglSupport, setWebglSupport] = useState<boolean | null>(null)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (view === '3d' && webglSupport === null) {
       setWebglSupport(probeWebGLSupport())
     }
   }, [view, webglSupport])
+
+  // Injected reload seam (Package AL amendment): the boundary presents
+  // "Reload application" for chunk-load failures and calls back through
+  // this — the boundary itself never touches a global.
+  const requestReload = () => {
+    window.location.reload()
+  }
 
   useEffect(() => {
     const client = new SimBridgeClient(WS_URL)
@@ -163,6 +174,7 @@ function App() {
               viewLabel="3D network view"
               onRetry={() => setLazy3D(() => lazy(load3D))}
               onRecovered={focusViewRegion}
+              onReloadRequest={requestReload}
               suspenseFallback={
                 /* The transient loading status is scoped inside the active
                    region; steady-state keeps the badge as the only status
@@ -189,6 +201,7 @@ function App() {
             viewLabel="2D network view"
             onRetry={() => setLazy2D(() => lazy(load2D))}
             onRecovered={focusViewRegion}
+            onReloadRequest={requestReload}
             suspenseFallback={
               <div role="status" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>
                 Loading 2D network view…

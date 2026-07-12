@@ -45,6 +45,34 @@ describe('probeWebGLSupport', () => {
     expect(getContext).toHaveBeenCalledWith('webgl')
   })
 
+  it('probes the RENDERER context set in order: webgl2, webgl, experimental-webgl', () => {
+    const getContext = vi.fn((_type: string) => null)
+    stubCanvas(getContext)
+    expect(probeWebGLSupport()).toBe(false)
+    expect(getContext.mock.calls.map(args => args[0])).toEqual([
+      'webgl2',
+      'webgl',
+      'experimental-webgl',
+    ])
+  })
+
+  it('supported via experimental-webgl ONLY (older engines), context still released', () => {
+    const loseContext = vi.fn()
+    const getContext = vi.fn((type: string) =>
+      type === 'experimental-webgl'
+        ? { getExtension: (name: string) => (name === 'WEBGL_lose_context' ? { loseContext } : null) }
+        : null,
+    )
+    stubCanvas(getContext)
+    expect(probeWebGLSupport()).toBe(true)
+    expect(loseContext).toHaveBeenCalledTimes(1)
+  })
+
+  it('an experimental-webgl context WITHOUT getExtension still probes true (release is best-effort)', () => {
+    stubCanvas((type: string) => (type === 'experimental-webgl' ? {} : null))
+    expect(probeWebGLSupport()).toBe(true)
+  })
+
   it('supported even when WEBGL_lose_context is unavailable (release is best-effort)', () => {
     stubCanvas(() => ({ getExtension: () => null }))
     expect(probeWebGLSupport()).toBe(true)

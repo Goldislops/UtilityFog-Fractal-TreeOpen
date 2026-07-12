@@ -62,12 +62,13 @@ test('no-WebGL: probing is bounded — view switches and time never re-probe', a
   await setupNoWebGL(page);
   await expect(page.getByRole('button', { name: 'Use 2D view' })).toBeVisible();
 
-  // The single mount-time probe issues at most two context requests
-  // (webgl2 then webgl); StrictMode's dev double-effect can at most
-  // double that. The load-bearing assertion is STABILITY below.
+  // The single mount-time probe issues at most three context requests
+  // (webgl2, webgl, experimental-webgl — the amended renderer context
+  // set); StrictMode's dev double-effect can at most double that. The
+  // load-bearing assertion is STABILITY below.
   const initial = await contextRequests(page);
   expect(initial).toBeGreaterThanOrEqual(1);
-  expect(initial).toBeLessThanOrEqual(4);
+  expect(initial).toBeLessThanOrEqual(6);
 
   await page.getByRole('button', { name: '2D View', exact: true }).click();
   await expect(page.getByRole('region', { name: '2D network view' })).toBeVisible();

@@ -139,7 +139,8 @@ input:focus-visible,
   margin: 0;
 }
 
-.view-retry-button {
+.view-retry-button,
+.view-reload-button {
   min-width: 44px;
   min-height: 44px;
 }

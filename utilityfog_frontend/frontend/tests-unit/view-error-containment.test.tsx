@@ -11,10 +11,11 @@ import { StrictMode } from 'react'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import App from '../src/App'
 
-const failures = { v3d: false, v2d: false }
+const failures = { v3d: false, v2d: false, v3dError: null as Error | null }
 
 vi.mock('../src/viz3d/NetworkView3D', () => ({
   default: () => {
+    if (failures.v3dError) throw failures.v3dError
     if (failures.v3d) throw new Error('synthetic 3D render failure')
     return <div data-testid="view-3d" />
   },
@@ -71,6 +72,7 @@ const reportCount = () => boundaryReports().length
 beforeEach(() => {
   failures.v3d = false
   failures.v2d = false
+  failures.v3dError = null
   vi.stubGlobal('WebSocket', FakeWebSocket)
   FakeWebSocket.instances = []
   vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -290,6 +292,42 @@ describe('retry focus recovery (Package AK, success-aware amendment)', () => {
   })
 })
 
+
+describe('chunk-load failure recovery at the App seam (Package AL amendment)', () => {
+  const chunkError = () =>
+    new TypeError('Failed to fetch dynamically imported module: http://localhost:4173/x.tsx')
+
+  // vitest sniffs the engine import-failure messages as its OWN module
+  // failures when React dev re-reports them on the window channel — mark
+  // them handled for this describe (see chunk-load-recovery.test.tsx).
+  const swallowWindowError = (e: ErrorEvent) => e.preventDefault()
+  beforeEach(() => window.addEventListener('error', swallowWindowError))
+  afterEach(() => window.removeEventListener('error', swallowWindowError))
+
+  it('a chunk-shaped failure presents Reload application, advertises NO Retry, and the shell survives', async () => {
+    failures.v3dError = chunkError()
+    render(<App />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('failed to download')
+    expect(screen.getByRole('button', { name: 'Reload application' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument()
+    shellAlive()
+  })
+
+  it('switch-away/back: the healthy view works, the fresh boundary re-classifies, one socket throughout', async () => {
+    failures.v3dError = chunkError()
+    render(<App />)
+    await screen.findByRole('button', { name: 'Reload application' })
+    fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    expect(await screen.findByTestId('view-2d')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '3D View' }))
+    expect(await screen.findByRole('button', { name: 'Reload application' })).toBeInTheDocument()
+    shellAlive()
+    expect(FakeWebSocket.instances).toHaveLength(1) // no hidden reconnect
+  })
+})
+
 describe('focus-indicator decision and fallback styling contracts (source-level)', () => {
   // The stylesheet is the single owner of these decisions; :focus-visible
   // matching on programmatic focus is deliberately left to each UA (see
@@ -316,8 +354,8 @@ describe('focus-indicator decision and fallback styling contracts (source-level)
   })
 
   it('the static Retry dimensions live in CSS, and the button carries the class', async () => {
-    expect(css).toMatch(/\.view-retry-button\s*\{[^}]*min-width:\s*44px/)
-    expect(css).toMatch(/\.view-retry-button\s*\{[^}]*min-height:\s*44px/)
+    expect(css).toMatch(/\.view-retry-button[^{]*\{[^}]*min-width:\s*44px/)
+    expect(css).toMatch(/\.view-retry-button[^{]*\{[^}]*min-height:\s*44px/)
     failures.v3d = true
     render(<App />)
     const retry = await screen.findByRole('button', { name: 'Retry 3D network view' })
