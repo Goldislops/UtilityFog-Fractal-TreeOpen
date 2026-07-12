@@ -56,6 +56,8 @@ beforeEach(() => {
 
 afterEach(() => {
   FakeWebSocket.instances = []
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('App view switching', () => {

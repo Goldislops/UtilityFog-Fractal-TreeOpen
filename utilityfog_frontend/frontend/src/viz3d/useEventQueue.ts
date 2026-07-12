@@ -29,18 +29,39 @@ export function useEventQueue(
   const processQueue = useCallback(async () => {
     if (processingRef.current) return
     processingRef.current = true
+    try {
+      // The active guard is re-checked before EVERY handler (not merely
+      // every batch): an unmount performed by a handler stops the rest of
+      // its own batch, and an unmount between frames stops the drain.
+      while (activeRef.current && queueRef.current.length > 0) {
+        const batch = queueRef.current.splice(0, 10) // Process in batches of 10
+        for (const fn of batch) {
+          if (!activeRef.current) return
+          try {
+            fn()
+          } catch (error) {
+            // Handler-error policy: one failing handler must not lock the
+            // queue, abort its batch-mates, or be retried. The failure is
+            // reported exactly once through the bounded diagnostic channel
+            // and later independent events process normally.
+            console.error('Event handler failed:', error)
+          }
+        }
 
-    // Re-checked after every awaited frame: an unmount mid-drain stops the
-    // loop at the batch boundary.
-    while (activeRef.current && queueRef.current.length > 0) {
-      const batch = queueRef.current.splice(0, 10) // Process in batches of 10
-      batch.forEach(fn => fn())
-
-      // Allow browser to render
-      await new Promise(resolve => requestAnimationFrame(resolve))
+        // Schedule the next yield frame ONLY while still active with more
+        // work queued — an unmount during the LAST handler (or an emptied
+        // queue) must not request an extra animation frame.
+        if (!activeRef.current || queueRef.current.length === 0) break
+        // Allow browser to render
+        await new Promise(resolve => requestAnimationFrame(resolve))
+      }
+    } finally {
+      // Restoration lives in a finally boundary so no exit path — normal,
+      // early-return on unmount, or a future throw — can leave the queue
+      // permanently locked. Nothing in the loop rethrows, so this async
+      // fire-and-forget drain also never yields an unhandled rejection.
+      processingRef.current = false
     }
-
-    processingRef.current = false
   }, [])
 
   const enqueueUpdate = useCallback(

@@ -84,7 +84,15 @@ let client: SimBridgeClient
 let events: string[]
 
 const sockets = () => FakeWebSocket.instances
-const last = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+const last = () => {
+  const instance = FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
+  if (!instance) {
+    throw new Error(
+      'No fake socket has been constructed yet — call client.connect() before driving socket events.',
+    )
+  }
+  return instance
+}
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -107,12 +115,21 @@ afterEach(() => {
   // reconnect delay must produce NO new sockets and leave NO timers —
   // the teardown contract itself.
   client.disconnect()
-  vi.runAllTimers()
+  // Bounded drain: run only the timers pending at each step, with a hard
+  // iteration cap — a recursive-timer defect fails this assertion loudly
+  // instead of hanging the runner the way runAllTimers() could.
+  for (let i = 0; i < 25 && vi.getTimerCount() > 0; i++) {
+    vi.runOnlyPendingTimers()
+  }
   const settled = sockets().length
   vi.advanceTimersByTime(60 * DELAY)
   expect(sockets().length).toBe(settled)
   expect(vi.getTimerCount()).toBe(0)
   FakeWebSocket.reset()
+  // Explicit restoration (the config also does this; stating it here makes
+  // the isolation contract local and audit-visible).
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
