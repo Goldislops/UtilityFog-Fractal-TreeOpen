@@ -4,6 +4,7 @@ import NetworkView3D from './viz3d/NetworkView3D'
 import NetworkView2D from './components/NetworkView2D'
 import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
+import ViewErrorBoundary from './components/ViewErrorBoundary'
 import { SimBridgeClient } from './ws/SimBridgeClient'
 
 // Robust WS URL computation
@@ -54,22 +55,36 @@ function App() {
           mirrors the flex slot the view roots already expect (a flex:1 child
           of the column-flex .app-container) and is itself a flex container,
           so the view root's own flex:1 fills it and child canvas sizing is
-          unchanged. minHeight/minWidth 0 keep flex overflow semantics. */}
+          unchanged. minHeight/minWidth 0 keep flex overflow semantics.
+          ViewErrorBoundary guards ONLY the replaceable view inside the
+          region: a view render exception shows an accessible fallback there
+          while the shell (controls, feed, badge) stays mounted; switching
+          views remounts a fresh boundary. */}
+      {/* The key is load-bearing: both branches are same-type elements in
+          the same tree position, so WITHOUT it React reconciles them as one
+          component and a failed boundary's state would survive the switch.
+          Distinct keys force a remount — a fresh boundary per view. */}
       {view === '3d' ? (
         <section
+          key="view-3d"
           role="region"
           aria-label="3D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
-          <NetworkView3D simClient={simClient} />
+          <ViewErrorBoundary viewLabel="3D network view">
+            <NetworkView3D simClient={simClient} />
+          </ViewErrorBoundary>
         </section>
       ) : (
         <section
+          key="view-2d"
           role="region"
           aria-label="2D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
-          <NetworkView2D simClient={simClient} />
+          <ViewErrorBoundary viewLabel="2D network view">
+            <NetworkView2D simClient={simClient} />
+          </ViewErrorBoundary>
         </section>
       )}
     </div>

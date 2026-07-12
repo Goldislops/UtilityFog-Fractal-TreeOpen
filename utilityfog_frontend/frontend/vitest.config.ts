@@ -48,6 +48,7 @@ export default defineConfig({
         'src/App.tsx',
         'src/components/ConnectionBadge.tsx',
         'src/components/EventFeed.tsx',
+        'src/components/ViewErrorBoundary.tsx',
         'src/components/NetworkView2D.tsx',
         'src/viz3d/adapters.ts',
         'src/viz3d/edgeValidation.ts',
