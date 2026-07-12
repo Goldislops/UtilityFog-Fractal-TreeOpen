@@ -1,11 +1,22 @@
 /// <reference types="vite/client" />
-import { useState, useEffect } from 'react'
-import NetworkView3D from './viz3d/NetworkView3D'
-import NetworkView2D from './components/NetworkView2D'
+import { useState, useEffect, lazy, Suspense } from 'react'
 import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
 import ViewErrorBoundary from './components/ViewErrorBoundary'
 import { SimBridgeClient } from './ws/SimBridgeClient'
+
+// LAZY VIEW DELIVERY (Package AG): the heavy 3D/2D view modules are
+// code-split behind dynamic imports — the shell (controls, badge, feed)
+// renders independently of view code. No eager static import of a view
+// module may appear in this file.
+//
+// React caches a REJECTED lazy factory permanently, so the lazy components
+// live in state: the error boundary's Retry mints a fresh lazy instance
+// whose mount re-runs the dynamic import — reloading a failed chunk
+// without touching the SimBridge connection (which lives in this
+// component, above the boundary).
+const load3D = () => import('./viz3d/NetworkView3D')
+const load2D = () => import('./components/NetworkView2D')
 
 // Robust WS URL computation
 const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
@@ -26,6 +37,10 @@ function App() {
   const [view, setView] = useState<'2d' | '3d'>('3d')
   const [isConnected, setIsConnected] = useState(false)
   const [simClient, setSimClient] = useState<SimBridgeClient | null>(null)
+  // Lazy components live in STATE so Retry can mint a fresh instance (a
+  // rejected lazy caches its rejection; a new lazy re-runs the import).
+  const [Lazy3D, setLazy3D] = useState(() => lazy(load3D))
+  const [Lazy2D, setLazy2D] = useState(() => lazy(load2D))
 
   useEffect(() => {
     const client = new SimBridgeClient(WS_URL)
@@ -71,8 +86,22 @@ function App() {
           aria-label="3D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
-          <ViewErrorBoundary viewLabel="3D network view">
-            <NetworkView3D simClient={simClient} />
+          <ViewErrorBoundary
+            viewLabel="3D network view"
+            onRetry={() => setLazy3D(() => lazy(load3D))}
+          >
+            {/* The transient loading status is scoped inside the active
+                region; steady-state keeps the badge as the only status
+                region. */}
+            <Suspense
+              fallback={
+                <div role="status" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>
+                  Loading 3D network view…
+                </div>
+              }
+            >
+              <Lazy3D simClient={simClient} />
+            </Suspense>
           </ViewErrorBoundary>
         </section>
       ) : (
@@ -82,8 +111,19 @@ function App() {
           aria-label="2D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
-          <ViewErrorBoundary viewLabel="2D network view">
-            <NetworkView2D simClient={simClient} />
+          <ViewErrorBoundary
+            viewLabel="2D network view"
+            onRetry={() => setLazy2D(() => lazy(load2D))}
+          >
+            <Suspense
+              fallback={
+                <div role="status" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>
+                  Loading 2D network view…
+                </div>
+              }
+            >
+              <Lazy2D simClient={simClient} />
+            </Suspense>
           </ViewErrorBoundary>
         </section>
       )}

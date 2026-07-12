@@ -125,7 +125,10 @@ const activeSocket = (page: Page, action: '_open' | '_close') =>
     active[act]();
   }, action);
 
-const status = (page: Page) => page.getByRole('status');
+// The badge's live region specifically: lazy view delivery (Package AG)
+// shows a TRANSIENT role=status loading indicator inside the view region,
+// so the badge is disambiguated by its aria-atomic contract.
+const status = (page: Page) => page.getByRole('status').and(page.locator('[aria-atomic="true"]'))
 const dot = (page: Page) => page.locator('.connection-badge [aria-hidden="true"]');
 const dotAnimation = (page: Page) =>
   dot(page).evaluate((el) => getComputedStyle(el).animationName);
