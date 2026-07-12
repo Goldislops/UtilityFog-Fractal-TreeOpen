@@ -7,7 +7,7 @@
 // variants interleave the microtasks the drain loop awaits.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook } from '@testing-library/react'
-import { useEventQueue, DEFAULT_MAX_PENDING_NODES } from '../src/viz3d/useEventQueue'
+import { useEventQueue, DEFAULT_MAX_PENDING_WORK } from '../src/viz3d/useEventQueue'
 import { SimBridgeClient } from '../src/ws/SimBridgeClient'
 import { applyNodeUpdate, sanitizeNodeList } from '../src/viz3d/nodeValidation'
 import { sanitizeEdgeList } from '../src/viz3d/edgeValidation'
@@ -150,46 +150,63 @@ describe('coalescing and ordering', () => {
   })
 })
 
-describe('snapshot supersession', () => {
-  it('a nodes-carrying snapshot supersedes OLDER queued node updates; later ones stay ordered after it', async () => {
-    const view = renderHook(() => useEventQueue(client, handlers))
+describe('snapshot barriers (audit redesign)', () => {
+  it('a nodes-carrying snapshot PRESERVES earlier queued node updates, in order', async () => {
+    renderHook(() => useEventQueue(client, handlers))
     nodeMsg(NODE('pre1'))
     nodeMsg(NODE('pre2'))
     netMsg({ nodes: [NODE('snap')], edges: [] })
     nodeMsg(NODE('post1'))
     await vi.runAllTimersAsync()
 
-    expect(view.result.current.stats.superseded).toBe(2)
+    // Barrier ordering: pre-updates deliver BEFORE the snapshot, post-
+    // updates after — nothing is discarded.
+    expect(handlers.updateNode).toHaveBeenCalledTimes(3)
     expect(handlers.setNetwork).toHaveBeenCalledTimes(1)
-    expect(handlers.updateNode).toHaveBeenCalledTimes(1)
-    expect((handlers.updateNode.mock.calls[0][0] as { id: string }).id).toBe('post1')
-    // Ordering: snapshot delivered BEFORE the post-snapshot update.
-    expect(handlers.setNetwork.mock.invocationCallOrder[0]).toBeLessThan(
-      handlers.updateNode.mock.invocationCallOrder[0],
-    )
+    const preOrders = handlers.updateNode.mock.invocationCallOrder.slice(0, 2)
+    const snapOrder = handlers.setNetwork.mock.invocationCallOrder[0]
+    const postOrder = handlers.updateNode.mock.invocationCallOrder[2]
+    expect(Math.max(...preOrders)).toBeLessThan(snapOrder)
+    expect(snapOrder).toBeLessThan(postOrder)
   })
 
-  it('an edges-only update supersedes nothing on the node side', async () => {
-    const view = renderHook(() => useEventQueue(client, handlers))
-    nodeMsg(NODE('keep'))
-    netMsg({ edges: [{ id: 'e', source: 'a', target: 'b' }] })
+  it('updates never fold ACROSS a barrier — same id before and after stays two deliveries', async () => {
+    renderHook(() => useEventQueue(client, handlers))
+    nodeMsg({ id: 'x', position: [1, 1, 1] })
+    netMsg({ nodes: [] })
+    nodeMsg({ id: 'x', position: [2, 2, 2] })
     await vi.runAllTimersAsync()
-    expect(view.result.current.stats.superseded).toBe(0)
-    expect(handlers.updateNode).toHaveBeenCalledTimes(1)
-    expect(handlers.setNetwork).toHaveBeenCalledWith(undefined, [
-      { id: 'e', source: 'a', target: 'b' },
-    ])
+    expect(handlers.updateNode).toHaveBeenCalledTimes(2)
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(1, { id: 'x', position: [1, 1, 1] })
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(2, { id: 'x', position: [2, 2, 2] })
   })
 
-  it('queued snapshots keep the latest side each (per-side latest-wins)', async () => {
+  it('consecutive snapshots stay ordered as separate deliveries (never merged)', async () => {
     renderHook(() => useEventQueue(client, handlers))
     netMsg({ nodes: [NODE('n1')], edges: [{ id: 'e1', source: 'a', target: 'b' }] })
     netMsg({ nodes: [NODE('n2')] })
     await vi.runAllTimersAsync()
-    expect(handlers.setNetwork).toHaveBeenCalledTimes(1)
-    const [nodes, edges] = handlers.setNetwork.mock.calls[0]
-    expect((nodes as Array<{ id: string }>)[0].id).toBe('n2')
-    expect((edges as Array<{ id: string }>)[0].id).toBe('e1')
+    expect(handlers.setNetwork).toHaveBeenCalledTimes(2)
+    expect((handlers.setNetwork.mock.calls[0][0] as Array<{ id: string }>)[0].id).toBe('n1')
+    expect((handlers.setNetwork.mock.calls[1][0] as Array<{ id: string }>)[0].id).toBe('n2')
+    expect(handlers.setNetwork.mock.calls[1][1]).toBeUndefined()
+  })
+
+  it('the positionless->positionful transition stays two ordered candidates (CE1 mechanism)', async () => {
+    const view = renderHook(() => useEventQueue(client, handlers))
+    nodeMsg({ id: 'x', status: 'error' })            // positionless: not folded forward
+    nodeMsg({ id: 'x', position: [1, 2, 3] })        // anchored: new candidate
+    nodeMsg({ id: 'x', status: 'inactive' })         // folds into the anchored one
+    expect(view.result.current.pendingCount()).toBe(2)
+    await vi.runAllTimersAsync()
+    expect(handlers.updateNode).toHaveBeenCalledTimes(2)
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(1, { id: 'x', status: 'error' })
+    expect(handlers.updateNode).toHaveBeenNthCalledWith(2, {
+      id: 'x',
+      position: [1, 2, 3],
+      status: 'inactive',
+    })
+    expect(view.result.current.stats.coalesced).toBe(1)
   })
 
   it('null/primitive/empty network payloads enqueue nothing', async () => {
@@ -206,7 +223,7 @@ describe('snapshot supersession', () => {
 describe('overflow boundary', () => {
   it('exact limit fills; limit+1 NEW id drops with an accurate counter; folds still proceed', async () => {
     const view = renderHook(() =>
-      useEventQueue(client, handlers, { maxPendingNodes: 3 }),
+      useEventQueue(client, handlers, { maxPendingWork: 3 }),
     )
     nodeMsg(NODE('a'))
     nodeMsg(NODE('b'))
@@ -230,7 +247,7 @@ describe('overflow boundary', () => {
   })
 
   it('one bounded diagnostic per overflow episode — no console spam', async () => {
-    renderHook(() => useEventQueue(client, handlers, { maxPendingNodes: 2 }))
+    renderHook(() => useEventQueue(client, handlers, { maxPendingWork: 2 }))
     nodeMsg(NODE('a'))
     nodeMsg(NODE('b'))
     nodeMsg(NODE('c'))
@@ -251,7 +268,7 @@ describe('overflow boundary', () => {
 
   it('the documented default limit is in force when no injection is provided', () => {
     const view = renderHook(() => useEventQueue(client, handlers))
-    expect(DEFAULT_MAX_PENDING_NODES).toBe(5000)
+    expect(DEFAULT_MAX_PENDING_WORK).toBe(5000)
     expect(view.result.current.stats.dropped).toBe(0)
   })
 })
@@ -259,7 +276,7 @@ describe('overflow boundary', () => {
 describe('100,000-event deterministic burst', () => {
   it('bounded memory, coalesced counters, latest state per id, single-drain discipline', async () => {
     const view = renderHook(() =>
-      useEventQueue(client, handlers, { maxPendingNodes: 1000 }),
+      useEventQueue(client, handlers, { maxPendingWork: 1000 }),
     )
     const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
     const IDS = 500

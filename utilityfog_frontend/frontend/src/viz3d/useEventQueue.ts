@@ -13,89 +13,110 @@ interface EventQueueHandlers {
 }
 
 export interface EventQueueOptions {
-  // Deterministic test seam. The default is derived from measured evidence
-  // (see DEFAULT_MAX_PENDING_NODES); read once at mount.
-  maxPendingNodes?: number
+  // Deterministic test seam; read once at mount. Bounds TOTAL queued work
+  // items (node candidates + snapshots/barriers).
+  maxPendingWork?: number
 }
 
 export interface EventQueueStats {
   // Stable counters (a live object, mutated in place — a diagnostic/test
   // seam, deliberately not reactive state).
   coalesced: number
-  superseded: number
   dropped: number
   invalidDropped: number
 }
 
-// TYPED QUEUE (Package AF). The previous queue stored arbitrary closures:
-// unbounded growth under bursts, one rAF callback scheduled PER enqueue
-// before the first drain ran (measured: 15 synchronous enqueues scheduled
-// 15 frames), and invalid payloads occupied queue slots. This queue stores
-// typed work instead:
-//   - pendingSnapshot: the latest authoritative network_update, kept per
-//     side (a newer nodes/edges side replaces the older queued one);
-//   - pendingUpdates: post-snapshot node updates keyed by id in insertion
-//     order, folded latest-valid-wins per field (see nodeValidation's
-//     foldNodeUpdates for the sequential-equivalence argument).
+// TYPED ORDERED QUEUE (Package AF, audit redesign). The queue is an
+// ORDERED list of typed work items — node-update candidates and
+// snapshot/barrier items — delivered strictly in arrival order.
 //
-// Semantics:
-//   1. At most one scheduled drain exists at any time (scheduledRef), and
-//      the drain loop yields at most one continuation frame at a time.
-//   2. A full network_update carrying a nodes side supersedes queued node
-//      updates OLDER than that snapshot (the snapshot replaces node state
-//      wholesale, so their net effect was overwritten anyway); the
-//      superseded count is recorded. An edges-only update supersedes
-//      nothing on the node side.
-//   3. node_update events arriving AFTER the snapshot stay ordered after
-//      it (snapshot delivers first in the drain).
-//   4. Repeated updates for one id coalesce; distinct ids preserve
-//      insertion order.
-//   5. Invalid/unidentifiable payloads are counted and dropped at the
-//      boundary — they can never grow the queue. (Contract change from
-//      the closure queue, which forwarded garbage for the store to
-//      reject; the net store state is identical.)
-//   6. Pending DISTINCT node ids are bounded. Default derivation
-//      (measured on this corpus, Node 24 + jsdom): one folded candidate
-//      costs ≈200–400 bytes (5,000 ≈ ≤2 MB, trivial next to the three.js
-//      scene) and the drain retires 50 items/frame (5,000 ≈ 100 frames
-//      ≈ 1.7 s to fully retire, acceptable recovery for a burst 100×
-//      the 50-node default scene). Overflow drops NEW ids only — folds
-//      into already-pending ids always proceed.
-//   7. Overflow is explicit: stable dropped/coalesced/superseded counters
-//      and ONE bounded diagnostic per overflow episode (an episode ends
-//      when the queue fully drains). No losslessness is claimed.
-//   8. Unmount clears all queued work and scheduling state.
-//   9. A throwing handler is contained (report-once channel), never locks
-//      processing, and never aborts its batch-mates.
-//  10. For ordinary (non-overflowing) traffic the delivered FINAL state is
-//      identical to sequential application — locked by an
-//      equivalence-versus-reference test.
-export const DEFAULT_MAX_PENDING_NODES = 5000
+// SEQUENTIAL EQUIVALENCE is the load-bearing contract: for every
+// non-overflowing trace, the delivered final store state equals plain
+// sequential application (locked by a differential harness incl. the two
+// audit counterexamples). Consequences:
+//   - Snapshots are ORDERING BARRIERS. They never discard earlier queued
+//     node updates (a partial snapshot must observe them), they are never
+//     merged with each other (a later partial snapshot reconciles against
+//     the state the earlier one produced), and node updates never fold
+//     across them.
+//   - Coalescing happens only within an uninterrupted node-update segment
+//     and only when ALGEBRAICALLY SAFE for both the node-exists and
+//     node-unknown cases: a candidate may fold into the id's latest
+//     queued candidate unless that candidate is POSITIONLESS and the new
+//     one carries a position. Sequential application rejects a
+//     positionless update on an unknown node WHOLE, so folding its fields
+//     into a later creating update would resurrect them (audit CE1);
+//     keeping the positionless→positionful transition as two ordered
+//     candidates preserves that semantics exactly. Positionless→
+//     positionless folds are safe (both merge, or both reject); an
+//     anchored (position-bearing) candidate accepts every later fold —
+//     the node exists from that candidate on, so per-field latest-valid
+//     equals sequential merging, and the anchored candidate also pins the
+//     node's creation slot so array append order is preserved.
+//   - Invalid/unidentifiable payloads are counted and dropped at the
+//     boundary; they never occupy queue capacity.
+//
+// BOUND: total work items (candidates + snapshots) ≤ maxPendingWork.
+// Fold-into-existing never grows the queue and is always allowed; NEW
+// items (including snapshots — no barrier evades accounting) are dropped
+// under overflow with stable counters and ONE diagnostic per overflow
+// episode (an episode ends when the queue fully drains). Overflow is
+// explicitly lossy; no losslessness is claimed. Default derivation
+// (measured, Node 24 + jsdom): a queued item costs ≈200–400 bytes
+// (5,000 ≈ ≤2 MB) and the drain retires 50 items/frame (5,000 ≈ 100
+// frames ≈ 1.7 s full recovery) — 100× the default 50-node scene.
+//
+// SCHEDULING: at most one scheduled rAF drain at any time; the drain
+// yields one continuation frame per batch and requests no trailing or
+// post-unmount frames.
+//
+// HANDLERS: delivered through a ref refreshed on every commit — handler
+// identity changes NEVER resubscribe the WebSocket (subscription depends
+// only on the client), and the next event after a rerender reaches the
+// NEWEST handlers with no gap.
+export const DEFAULT_MAX_PENDING_WORK = 5000
 const BATCH_SIZE = 50
 
-interface PendingSnapshot {
+interface NodeWorkItem {
+  kind: 'node'
+  id: string
+  candidate: NodeUpdateCandidate
+}
+interface SnapshotWorkItem {
+  kind: 'snapshot'
   nodes: unknown
   hasNodes: boolean
   edges: unknown
   hasEdges: boolean
 }
+type WorkItem = NodeWorkItem | SnapshotWorkItem
 
 export function useEventQueue(
   simClient: SimBridgeClient | null,
   handlers: EventQueueHandlers,
   options?: EventQueueOptions,
 ) {
-  const updatesRef = useRef<Map<string, NodeUpdateCandidate>>(new Map())
-  const snapshotRef = useRef<PendingSnapshot | null>(null)
+  const queueRef = useRef<WorkItem[]>([])
+  // Drained items are passed by advancing head (index-stable, so the
+  // per-id fold index below never dangles); storage is reclaimed on full
+  // drain.
+  const headRef = useRef(0)
+  // id → index of that id's LATEST queued node item within the current
+  // tail segment. Cleared at every barrier and on full drain.
+  const lastNodeIndexRef = useRef<Map<string, number>>(new Map())
   const processingRef = useRef(false)
   const scheduledRef = useRef(false)
   const overflowEpisodeRef = useRef(false)
-  const maxPendingRef = useRef(options?.maxPendingNodes ?? DEFAULT_MAX_PENDING_NODES)
+  const maxPendingRef = useRef(options?.maxPendingWork ?? DEFAULT_MAX_PENDING_WORK)
   const statsRef = useRef<EventQueueStats>({
     coalesced: 0,
-    superseded: 0,
     dropped: 0,
     invalidDropped: 0,
+  })
+  // Newest handlers, refreshed every commit — see HANDLERS note above.
+  const handlersRef = useRef(handlers)
+  useEffect(() => {
+    handlersRef.current = handlers
   })
   // Lifetime guard: rAF callbacks scheduled while mounted can fire AFTER
   // unmount, and queued work must never invoke handlers then. Armed on
@@ -105,20 +126,36 @@ export function useEventQueue(
 
   useEffect(() => {
     activeRef.current = true
-    // The Map instance is created once and never reassigned; captured
-    // locally so the cleanup closes over the instance itself.
-    const updates = updatesRef.current
+    const lastNodeIndex = lastNodeIndexRef.current
     return () => {
       activeRef.current = false
-      updates.clear()
-      snapshotRef.current = null
+      queueRef.current = []
+      headRef.current = 0
+      lastNodeIndex.clear()
       overflowEpisodeRef.current = false
     }
   }, [])
 
-  const hasWork = useCallback(
-    () => snapshotRef.current !== null || updatesRef.current.size > 0,
-    [],
+  const pendingCount = useCallback(() => queueRef.current.length - headRef.current, [])
+
+  const admitOrDrop = useCallback(
+    (item: WorkItem): boolean => {
+      if (pendingCount() >= maxPendingRef.current) {
+        statsRef.current.dropped++
+        if (!overflowEpisodeRef.current) {
+          overflowEpisodeRef.current = true
+          console.error(
+            `Event queue overflow: dropping new ${item.kind} work ` +
+              `(pending=${pendingCount()}, limit=${maxPendingRef.current}). ` +
+              'Dropped/coalesced counts are tracked; delivery is NOT lossless under overflow.',
+          )
+        }
+        return false
+      }
+      queueRef.current.push(item)
+      return true
+    },
+    [pendingCount],
   )
 
   const processQueue = useCallback(async () => {
@@ -126,48 +163,44 @@ export function useEventQueue(
     if (processingRef.current) return
     processingRef.current = true
     try {
-      while (activeRef.current && hasWork()) {
+      while (activeRef.current && pendingCount() > 0) {
         let budget = BATCH_SIZE
-
-        const snapshot = snapshotRef.current
-        if (snapshot !== null) {
-          snapshotRef.current = null
-          budget--
-          try {
-            handlers.setNetwork(
-              snapshot.hasNodes ? snapshot.nodes : undefined,
-              snapshot.hasEdges ? snapshot.edges : undefined,
-            )
-          } catch (error) {
-            // Handler-error policy (unchanged): contained, reported once
-            // through the bounded diagnostic channel, never retried.
-            console.error('Event handler failed:', error)
-          }
-        }
-
-        const updates = updatesRef.current
-        for (const [id, candidate] of updates) {
-          if (budget <= 0) break
+        const queue = queueRef.current
+        while (budget > 0 && headRef.current < queue.length) {
           if (!activeRef.current) return
-          updates.delete(id)
+          const item = queue[headRef.current]
+          headRef.current++
           budget--
           try {
-            handlers.updateNode(nodeUpdatePayload(candidate))
+            if (item.kind === 'node') {
+              handlersRef.current.updateNode(nodeUpdatePayload(item.candidate))
+            } else {
+              handlersRef.current.setNetwork(
+                item.hasNodes ? item.nodes : undefined,
+                item.hasEdges ? item.edges : undefined,
+              )
+            }
           } catch (error) {
+            // Handler-error policy: contained, reported once through the
+            // bounded diagnostic channel, never retried, batch-mates
+            // unaffected.
             console.error('Event handler failed:', error)
           }
         }
 
-        if (!activeRef.current || !hasWork()) break
+        if (headRef.current >= queueRef.current.length) {
+          // Fully drained: reclaim storage and end any overflow episode.
+          queueRef.current = []
+          headRef.current = 0
+          lastNodeIndexRef.current.clear()
+          overflowEpisodeRef.current = false
+          break
+        }
+        if (!activeRef.current) break
         // Schedule the next yield frame ONLY while still active with more
         // work queued — an unmount during the LAST handler (or an emptied
         // queue) must not request an extra animation frame.
         await new Promise(resolve => requestAnimationFrame(resolve))
-      }
-      if (!hasWork()) {
-        // The overflow episode ends once the queue fully drains; the next
-        // overflow starts a new episode with its own single diagnostic.
-        overflowEpisodeRef.current = false
       }
     } finally {
       // Restoration lives in a finally boundary so no exit path — normal,
@@ -175,11 +208,11 @@ export function useEventQueue(
       // permanently locked.
       processingRef.current = false
     }
-  }, [handlers, hasWork])
+  }, [pendingCount])
 
   const schedule = useCallback(() => {
     // At most one scheduled drain at any time: enqueues while a frame is
-    // already pending (or a drain is running, which re-checks hasWork)
+    // already pending (or a drain is running, which re-checks the queue)
     // schedule nothing.
     if (scheduledRef.current || processingRef.current) return
     scheduledRef.current = true
@@ -198,30 +231,20 @@ export function useEventQueue(
       if (!data || typeof data !== 'object') return
       const d = data as { nodes?: unknown; edges?: unknown }
       if (d.nodes === undefined && d.edges === undefined) return
-      const prior = snapshotRef.current
-      const next: PendingSnapshot = prior ?? {
-        nodes: undefined,
-        hasNodes: false,
-        edges: undefined,
-        hasEdges: false,
+      const admitted = admitOrDrop({
+        kind: 'snapshot',
+        nodes: d.nodes,
+        hasNodes: d.nodes !== undefined,
+        edges: d.edges,
+        hasEdges: d.edges !== undefined,
+      })
+      if (admitted) {
+        // BARRIER: later node updates start a fresh segment — they must
+        // never fold across this snapshot. Earlier queued work is KEPT
+        // (the snapshot must observe it).
+        lastNodeIndexRef.current.clear()
+        schedule()
       }
-      if (d.nodes !== undefined) {
-        next.nodes = d.nodes
-        next.hasNodes = true
-        // Supersession: this snapshot replaces node state wholesale, so
-        // node updates queued BEFORE it can never affect the final state.
-        const superseded = updatesRef.current.size
-        if (superseded > 0) {
-          statsRef.current.superseded += superseded
-          updatesRef.current.clear()
-        }
-      }
-      if (d.edges !== undefined) {
-        next.edges = d.edges
-        next.hasEdges = true
-      }
-      snapshotRef.current = next
-      schedule()
     }
 
     const handleNodeUpdate = (node?: unknown) => {
@@ -232,28 +255,23 @@ export function useEventQueue(
         statsRef.current.invalidDropped++
         return
       }
-      const updates = updatesRef.current
-      const prior = updates.get(candidate.id)
-      if (prior !== undefined) {
-        // Coalesce latest-valid-wins; refolding an existing id never grows
-        // the queue, so it is always allowed — even during overflow.
-        updates.set(candidate.id, foldNodeUpdates(prior, candidate))
-        statsRef.current.coalesced++
-      } else if (updates.size >= maxPendingRef.current) {
-        statsRef.current.dropped++
-        if (!overflowEpisodeRef.current) {
-          overflowEpisodeRef.current = true
-          console.error(
-            'Event queue overflow: dropping updates for new node ids ' +
-              `(pending=${updates.size}, limit=${maxPendingRef.current}). ` +
-              'Dropped/coalesced counts are tracked; delivery is NOT lossless under overflow.',
-          )
+      const lastIndex = lastNodeIndexRef.current.get(candidate.id)
+      if (lastIndex !== undefined && lastIndex >= headRef.current) {
+        const target = queueRef.current[lastIndex] as NodeWorkItem
+        // Anchored-fold safety rule (see header): never fold a
+        // position-bearing candidate into a positionless one.
+        const safe = target.candidate.position !== null || candidate.position === null
+        if (safe) {
+          target.candidate = foldNodeUpdates(target.candidate, candidate)
+          statsRef.current.coalesced++
+          schedule()
+          return
         }
-        return
-      } else {
-        updates.set(candidate.id, candidate)
       }
-      schedule()
+      if (admitOrDrop({ kind: 'node', id: candidate.id, candidate })) {
+        lastNodeIndexRef.current.set(candidate.id, queueRef.current.length - 1)
+        schedule()
+      }
     }
 
     const handleEdgeUpdate = (edge?: unknown) => {
@@ -270,15 +288,14 @@ export function useEventQueue(
       simClient.off('node_update', handleNodeUpdate)
       simClient.off('edge_update', handleEdgeUpdate)
     }
-  }, [simClient, handlers, schedule])
+  }, [simClient, admitOrDrop, schedule])
 
   return useMemo(
     () => ({
       stats: statsRef.current,
-      pendingCount: () =>
-        updatesRef.current.size + (snapshotRef.current !== null ? 1 : 0),
+      pendingCount,
       isProcessing: () => processingRef.current,
     }),
-    [],
+    [pendingCount],
   )
 }

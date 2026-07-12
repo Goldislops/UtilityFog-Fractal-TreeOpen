@@ -239,14 +239,19 @@ export function sanitizeNodeList(
 // ---------------------------------------------------------------------------
 // QUEUE-SIDE SEAM (Package AF): the event queue folds repeated updates for
 // the same node id before delivery. The fold lives HERE, next to the
-// admission contract it must match, with the equivalence argument:
-// sequential application resolves each field to the LATEST VALID value
-// (invalid reads behave as absent and never erase an earlier valid one),
-// so a per-field latest-valid-wins fold applied once produces the exact
-// final state the same updates applied one-by-one would produce. The one
-// deliberate difference — intermediate per-event store notifications
-// within a single drain — is not a contract any consumer holds (renderers
-// read latest state; EventFeed subscribes to the transport, not the store).
+// admission contract it must match. EQUIVALENCE PRECONDITION (audit-
+// corrected): the per-field latest-valid-wins fold equals sequential
+// application ONLY when the fold target is ANCHORED (carries a valid
+// position — the node provably exists from that update on) or when both
+// updates are positionless (both merge into an existing node, or both are
+// rejected whole). A positionless update on an UNKNOWN node is rejected
+// WHOLE by sequential application, so folding its fields into a later
+// position-bearing update would resurrect them — the queue therefore
+// keeps a positionless→positionful transition as two ordered candidates
+// and never folds across snapshot barriers. The one deliberate difference
+// — intermediate per-event store notifications within a single drain — is
+// not a contract any consumer holds (renderers read latest state;
+// EventFeed subscribes to the transport, not the store).
 
 export interface NodeUpdateCandidate {
   id: string
