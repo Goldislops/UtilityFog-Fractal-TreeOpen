@@ -20,6 +20,16 @@ export interface OrbitControlsHandle {
   update(): void
 }
 
+// The stable, ordered preset name tuple — the single source consumers
+// (rendering, tests) iterate, instead of Object.keys (which loses order
+// and literal-narrowing and needs a cast). CameraPresetName is derived
+// from it, and the coordinate map + labels are `satisfies`-checked
+// against that type, so the tuple, the map and the labels can never
+// drift apart without a compile error.
+export const CAMERA_PRESET_NAMES = ['default', 'top', 'side'] as const
+
+export type CameraPresetName = (typeof CAMERA_PRESET_NAMES)[number]
+
 export const CAMERA_PRESETS = {
   // The application's mount default (NetworkView3D's <Canvas camera>).
   default: [50, 50, 50],
@@ -27,15 +37,13 @@ export const CAMERA_PRESETS = {
   // OrbitControls (a perfectly vertical eye ray degenerates the orbit).
   top: [0, 120, 0.01],
   side: [120, 0, 0],
-} as const
+} as const satisfies Record<CameraPresetName, readonly [number, number, number]>
 
-export type CameraPresetName = keyof typeof CAMERA_PRESETS
-
-export const CAMERA_PRESET_LABELS: Record<CameraPresetName, string> = {
+export const CAMERA_PRESET_LABELS = {
   default: 'Default view',
   top: 'Top view',
   side: 'Side view',
-}
+} as const satisfies Record<CameraPresetName, string>
 
 // Reposition the camera to a named preset, re-aim at the origin and
 // commit via controls.update(). Returns false (and does nothing) when
