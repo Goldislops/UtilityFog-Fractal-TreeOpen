@@ -16,8 +16,16 @@ const server = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--stric
   stdio: 'pipe',
 })
 const kill = () => {
+  // shell:true wraps the server in a shell: killing only server.pid leaves
+  // the node child alive holding esbuild/rollup binaries (observed live —
+  // it broke a later npm ci with EPERM). Kill the whole tree on Windows;
+  // elsewhere the direct kill suffices for vite preview.
   try {
-    process.kill(server.pid)
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/PID', String(server.pid), '/T', '/F'], { shell: true })
+    } else {
+      process.kill(server.pid)
+    }
   } catch {
     /* already gone */
   }
