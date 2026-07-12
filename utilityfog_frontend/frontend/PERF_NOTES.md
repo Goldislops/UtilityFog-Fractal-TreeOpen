@@ -102,3 +102,38 @@ Budgets change **only with evidence**: a PR that (a) re-measures and records
 the new baseline in this file, (b) names the change that legitimately moved
 it (e.g. an approved dependency), and (c) re-derives the limits from the
 stated policy. Casually raising limits to silence the gate defeats it.
+
+## Bundle budget v2 — entry/chunk budgets (Package AH, 2026-07-12)
+
+Package AG split the build: the shell entry loads synchronously and the
+heavy views arrive as async chunks. v2 adds fail-closed budgets for the
+pieces while KEEPING the v1 totals unchanged — chunk splitting must never
+disguise total growth.
+
+Measured baseline (AG build, Node zlib gzip level 9):
+
+| dimension | measured | budget | derivation |
+|---|---|---|---|
+| entry raw | 155,478 | 196,608 | 12 x 16 KiB (~+26.5%) |
+| entry gzip | 50,240 | 65,536 | 4 x 16 KiB (~+30%) |
+| largest async raw (3D) | 826,250 | 1,048,576 | 64 x 16 KiB (~+26.9%) |
+| largest async gzip | 223,412 | 294,912 | 18 x 16 KiB (~+32%) |
+| total JS raw/gzip | 986,638 / 275,640 | 1,228,800 / 344,064 | **kept from v1** |
+| CSS raw/gzip | 912 / 483 | 16,384 / 16,384 | floor, kept |
+
+Mechanics: the entry set is every module `<script src="/assets/*.js">` in
+the BUILT `dist/index.html` (duplicates count once); every other JS asset
+is an async chunk; the largest is budgeted individually. Fail-closed exits:
+missing dist/assets, missing or script-less `index.html`, malformed script
+references, references to absent assets, and empty JS output all exit 2/1
+rather than passing silently. Machine line: `BUNDLE_BUDGET v2 ...` (the v1
+line is retired with this change).
+
+Non-claims: budgets bound BUILT sizes only — nothing here measures network
+transfer, caching behavior, or user-perceived latency.
+
+Budget-change protocol (unchanged from v1, restated): budgets move only in
+a dedicated commit that (1) states the measured trigger, (2) re-derives via
+baseline + 25% rounded up to the next 16 KiB (16 KiB floor), and (3) is
+reviewed like any contract change. Never widen a budget to absorb
+unexplained growth; find the growth first.
