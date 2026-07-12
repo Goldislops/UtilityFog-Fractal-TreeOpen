@@ -933,7 +933,8 @@ def test_receipt_bounded_against_adversarial_result():
     assert all(isinstance(v, int) and v >= 0 for v in receipt["outcome_counts"].values())
     assert all(isinstance(v, int) and v >= 0 for v in receipt["usage_total"].values())
     # Specific coercions.
-    assert receipt["outcome_counts"]["ok"] == 10 ** 12          # clamped
+    assert receipt["outcome_counts"]["ok"] == 3                       # valid small int kept
+    assert receipt["usage_total"]["input_tokens"] == 10 ** 12         # huge value clamped
     assert receipt["outcome_counts"].get("local_rejection", 0) == 0   # negative → 0
     assert receipt["outcome_counts"]["handler_exception"] == 0        # boom value → 0
     assert receipt["usage_total"]["output_tokens"] == 0              # list value → 0
