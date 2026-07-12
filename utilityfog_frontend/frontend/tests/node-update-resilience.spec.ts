@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { waitForApplicationSocket } from './helpers/waitForApplicationSocket';
 
 // ---------------------------------------------------------------------------
 // Typed test-harness surface (no `any`): the in-page fake socket and the
@@ -116,6 +117,11 @@ async function setupPage(page: Page) {
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
+  // Portability (Package AJ): #root alone raced socket construction — the
+  // _open() below dereferenced the newest registry entry, which could be
+  // ABSENT in a losing engine. The SHARED semantic gate waits for the
+  // active application socket plus the paint/effect turn first.
+  await waitForApplicationSocket(page);
   await page.evaluate(() => {
     const w = window as HarnessWindow;
     const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));

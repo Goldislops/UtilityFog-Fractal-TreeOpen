@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { waitForApplicationSocket } from './helpers/waitForApplicationSocket';
 
 // ---------------------------------------------------------------------------
 // Typed test-harness surface (no `any`): the in-page fake socket and the
@@ -105,6 +106,10 @@ async function setupPage(page: Page) {
   await page.goto('/');
   // The app's client(s) exist once the root renders; the active one is last.
   await expect(page.locator('#root')).toBeVisible();
+  // Portability (Package AJ): #root alone raced the subscription effects.
+  // The SHARED semantic gate waits for the active application socket plus
+  // the paint/effect turn — see tests/helpers/waitForApplicationSocket.ts.
+  await waitForApplicationSocket(page);
 }
 
 // Inject one already-parsed-shape message on the app's active socket.
