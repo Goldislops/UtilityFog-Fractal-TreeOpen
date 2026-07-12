@@ -378,17 +378,16 @@ describe('array-container adversaries (custom properties on the LIST itself)', (
     // Seam-level recorded behavior: the sanitizer itself surfaces the trap
     // throw (Array.isArray passes; iteration trips the trap)...
     expect(() => sanitizeNodeList(bomb, [])).toThrow('hostile list trap')
-    // ...and the STORE seam contains it: handler-level try/catch in the
-    // event queue (use-event-queue handler-error policy test) plus the
-    // store's own ingestion guard decide system behavior. Record the store
-    // seam directly: state is unchanged when the trap throws inside an
-    // action.
+    // ...and the STORE action SURFACES it explicitly (Jack delta-audit):
+    // setNetwork does NOT swallow the trap — the sanitizer throws before
+    // the store's set(), so the throw propagates to the caller AND state
+    // is never mutated. The per-delivery containment that decides SYSTEM
+    // behavior lives one layer up, in the event queue's handler-error
+    // policy (locked by use-event-queue.test.tsx). Asserting toThrow here
+    // (not a silent try/catch, which would pass even if the store began
+    // swallowing) keeps the surfacing contract under test.
     useSceneStore.setState({ nodes: [], edges: [] })
-    try {
-      useSceneStore.getState().setNetwork(bomb, [])
-    } catch {
-      // surfaced to the caller - the queue's per-delivery containment owns it
-    }
+    expect(() => useSceneStore.getState().setNetwork(bomb, [])).toThrow('hostile list trap')
     expect(useSceneStore.getState().nodes).toEqual([])
     expect(useSceneStore.getState().edges).toEqual([])
   })
