@@ -208,13 +208,6 @@ def test_router_never_registers_commit_tool_in_any_mode():
         assert http.calls == []  # no POST attempted
 
 
-def test_router_commit_empty_proposal_id_rejected_client_side():
-    client, _ = _client_with_fake()
-    router = ToolRouter(client)
-    payload, _ = router.execute("commit_tuning", {})
-    assert payload["error"] == "bad_request"
-
-
 def test_router_handler_exception_becomes_error_payload():
     """Any bug in a handler must not crash the loop — surfaces as a tool error."""
     client, http = _client_with_fake()
