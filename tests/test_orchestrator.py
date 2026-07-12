@@ -36,12 +36,15 @@ from scripts.agent_backends import (
     ToolUseBlock,
 )
 from scripts.orchestrator import (
+    CATEGORY_HANDLER_EXCEPTION,
+    CATEGORY_LOCAL_REJECTION,
     DEFAULT_MAX_TOTAL_TOOL_CALLS,
     IterationResult,
     MAX_LIMIT_CEILING,
     MAX_RECEIPT_BYTES,
     MODE_OBSERVE,
     MODE_PROPOSE,
+    OUTCOME_OK,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
@@ -173,15 +176,20 @@ def test_router_routes_get_census_through_client():
 
 
 def test_router_propose_requires_nonempty_justification():
+    """A blank justification is a local rejection (Package T amendment): the
+    router refuses it before any HTTP call, flags is_error=True, and categorizes
+    it local_rejection. No `_local_rejection` marker leaks to the model."""
     client, _ = _client_with_fake()
     router = ToolRouter(client, mode=MODE_PROPOSE)
     payload, is_error = router.execute(
         "propose_tuning",
         {"params": {"signal_interval": 12}, "justification": "   "},
     )
-    assert is_error is False  # the handler returns the error as a payload, not raises
+    assert is_error is True
     assert payload["error"] == "bad_request"
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
     assert "justification" in payload["message"]
+    assert "_local_rejection" not in payload
 
 
 def test_router_propose_calls_client_with_orchestrator_source():
@@ -335,7 +343,8 @@ def test_iteration_commit_tool_call_is_unknown_and_uncommitted():
 
 def test_iteration_commit_pending_proposal_is_rejected():
     """propose mode forces dry-run: a commit-pending request is refused with a
-    deterministic error, not silently downgraded."""
+    deterministic local rejection (Package T amendment), not silently
+    downgraded. It counts under local_rejection, never ok, never a proposal."""
     backend = MockBackend(responses=[
         _tool_use_response("tu_1", "propose_tuning", {
             "params": {"signal_interval": 12},
@@ -350,6 +359,9 @@ def test_iteration_commit_pending_proposal_is_rejected():
     # No proposal was created (the router refused commit-pending before POSTing).
     assert result.proposals_created == []
     assert http.calls == []  # no POST — rejected at the router boundary
+    # Accounting: counted as a local rejection, not a success.
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION) == 1
+    assert result.outcome_counts.get(OUTCOME_OK, 0) == 0
 
 
 def test_iteration_hits_max_depth():
@@ -791,6 +803,151 @@ def test_audit_receipt_excludes_large_tool_payloads():
     receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
     assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
     assert "z" * 1000 not in receipt_json
+
+
+# -- Package T amendment (Jack audit): non-dict handlers, local rejections,
+#    and adversarial audit-receipt bounding -----------------------------------
+
+
+@pytest.mark.parametrize("bad_return", [None, [1, 2, 3], "scalar-string", True, 42])
+def test_non_dict_handler_return_becomes_handler_exception(bad_return):
+    """A handler that returns a non-dict (None, list, scalar, bool) is caught by
+    the defensive try boundary and surfaced as a bounded handler_exception —
+    router.execute returns normally, so the iteration loop can never crash."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client)
+    # Simulate a buggy handler returning a non-dict.
+    router._handlers["get_medusa_census"] = lambda _args: bad_return
+    payload, is_error = router.execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["error"] == "tool_handler_exception"
+
+
+@pytest.mark.parametrize("justification", ["", "   ", "\t\n "])
+def test_router_local_rejection_blank_justification(justification):
+    """Blank/whitespace-only justification is a local rejection: is_error, the
+    local_rejection category, no HTTP POST, and no internal marker leaked."""
+    client, http = _client_with_fake()
+    router = ToolRouter(client, mode=MODE_PROPOSE)
+    payload, is_error = router.execute(
+        "propose_tuning",
+        {"params": {"signal_interval": 12}, "justification": justification},
+    )
+    assert is_error is True
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert "_local_rejection" not in payload
+    assert http.calls == []  # refused before any POST
+
+
+def test_router_local_rejection_commit_pending():
+    """commit-pending is a local rejection, not a silent downgrade: is_error,
+    local_rejection category, no POST."""
+    client, http = _client_with_fake()
+    router = ToolRouter(client, mode=MODE_PROPOSE)
+    payload, is_error = router.execute(
+        "propose_tuning",
+        {"params": {"signal_interval": 12}, "justification": "ok", "mode": "commit-pending"},
+    )
+    assert is_error is True
+    assert payload["error"] == "commit_pending_forbidden"
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert "_local_rejection" not in payload
+    assert http.calls == []
+
+
+def test_iteration_blank_justification_accounting():
+    """Iteration-level accounting: a blank-justification proposal increments the
+    local_rejection category, never ok, and never enters proposals_created."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "propose_tuning",
+                           {"params": {"signal_interval": 12}, "justification": "  "}),
+        _text_response("acknowledged"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    result = orch.run_one_iteration("observe")
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION) == 1
+    assert result.outcome_counts.get(OUTCOME_OK, 0) == 0
+    assert result.proposals_created == []
+    assert http.calls == []
+
+
+_RECEIPT_SCHEMA_KEYS = {
+    "schema", "stopped_because", "turns", "tool_calls_executed",
+    "outcome_counts", "proposals_created", "commits_applied",
+    "usage_total", "truncated",
+}
+
+
+def _adversarial_iteration_result() -> IterationResult:
+    return IterationResult(
+        stopped_because="X" * 300_000,                       # extremely large
+        turns=7,
+        tool_calls_executed=9,
+        proposals_created=["prop-" + "y" * 400 for _ in range(5_000)],  # thousands, oversized
+        commits_applied=["commit-" + "z" * 400 for _ in range(5_000)],
+        outcome_counts={"K" * 20_000: 1, "ok": 3, "weird" * 100: 2},    # huge/unknown keys
+        usage_total={"U" * 20_000: 999, "input_tokens": [1, 2, 3]},      # huge key + unusual value
+    )
+
+
+def test_receipt_bounded_against_adversarial_result():
+    """A manually/adversarially-constructed IterationResult cannot inflate the
+    receipt past the cap, is deterministic, flags truncation, keeps only the
+    fixed schema keys, and coerces unusual value types."""
+    result = _adversarial_iteration_result()
+    receipt = build_audit_receipt(result)
+    blob = json.dumps(receipt, sort_keys=True, default=str)
+    # Deterministic serialization.
+    assert blob == json.dumps(build_audit_receipt(result), sort_keys=True, default=str)
+    # Hard byte bound.
+    assert len(blob.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    # Reduction occurred → flagged.
+    assert receipt["truncated"] is True
+    # Only fixed-schema top-level keys survive — no arbitrary input key.
+    assert set(receipt.keys()) == _RECEIPT_SCHEMA_KEYS
+    # Per-field caps.
+    assert len(receipt["proposals_created"]) <= 64
+    assert len(receipt["commits_applied"]) <= 64
+    assert len(receipt["outcome_counts"]) <= 64
+    assert len(receipt["usage_total"]) <= 64
+    assert len(receipt["stopped_because"]) <= 257  # 256 + ellipsis
+    # Unusual usage value coerced to int; no list survives as a value.
+    assert all(isinstance(v, int) for v in receipt["usage_total"].values())
+    assert all(isinstance(v, int) for v in receipt["outcome_counts"].values())
+
+
+def test_receipt_truncates_oversized_secret_like_stop_reason():
+    """A secret-looking string longer than the cap does not survive intact in
+    the receipt (it is bounded to 256 chars and the receipt is flagged)."""
+    secret = "sk-" + "A" * 5_000
+    result = IterationResult(stopped_because=secret, turns=1, tool_calls_executed=0)
+    receipt = build_audit_receipt(result)
+    assert receipt["truncated"] is True
+    assert secret not in json.dumps(receipt)  # the full secret does not survive
+    assert len(receipt["stopped_because"]) <= 257
+
+
+def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
+    """Exercise the fixed minimal fallback directly: with the cap forced just
+    above the minimal receipt but below any populated one, the trim loop falls
+    through to the fixed minimal fallback, which is itself within the limit."""
+    import scripts.orchestrator as orch_mod
+    minimal = {"schema": "leanctx-orchestrator-v1",
+               "stopped_because": "truncated", "truncated": True}
+    minimal_size = len(json.dumps(minimal, sort_keys=True).encode("utf-8"))
+    monkeypatch.setattr(orch_mod, "MAX_RECEIPT_BYTES", minimal_size + 5)
+    result = IterationResult(
+        stopped_because="a long reason " * 50,
+        turns=1, tool_calls_executed=1,
+        proposals_created=[f"prop-{i}" for i in range(500)],
+        outcome_counts={f"k{i}": i for i in range(100)},
+        usage_total={"input_tokens": 999_999},
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt == minimal
+    assert receipt["truncated"] is True
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= minimal_size + 5
 
 
 def test_no_post_after_budget_exhaustion():

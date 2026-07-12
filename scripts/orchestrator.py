@@ -286,6 +286,11 @@ CATEGORY_TRANSPORT_FAILURE = "transport_failure"
 CATEGORY_HTTP_REJECTION = "http_rejection"
 CATEGORY_BUDGET_REJECTION = "budget_rejection"
 CATEGORY_PROPOSAL_LIMIT = "proposal_limit"
+CATEGORY_LOCAL_REJECTION = "local_rejection"
+"""A request the router refused locally before any HTTP call — e.g. a blank
+justification or a forbidden `commit-pending` mode. Distinct from
+`http_rejection` (server said no) because no request left the process; still a
+genuine tool error (is_error=True) that never creates a proposal."""
 
 DEFAULT_MAX_TOTAL_TOOL_CALLS = 24
 """Total tool calls permitted across an entire iteration, independent of the
@@ -362,8 +367,19 @@ class ToolRouter:
                  "message": f"tool {name} not registered"},
                 True,
             )
+        # Handler invocation, return-shape validation, and the _status /
+        # local-rejection inspection all live inside the defensive try, so a
+        # handler that returns a non-dict (None, list, scalar, …) or that
+        # raises becomes a bounded handler_exception error — it can never crash
+        # the iteration loop.
         try:
             payload = handler(arguments)
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    f"handler returned {type(payload).__name__}, expected dict"
+                )
+            is_local_rejection = bool(payload.get("_local_rejection"))
+            status = payload.get("_status")
         except urllib.error.URLError as e:  # network/transport-level failure
             return (
                 {"error": "transport_failure", "category": CATEGORY_TRANSPORT_FAILURE,
@@ -376,7 +392,15 @@ class ToolRouter:
                  "tool": name, "message": f"{type(e).__name__}: {e}"},
                 True,
             )
-        status = payload.get("_status")
+        if is_local_rejection:
+            # A refusal the router enforced locally (blank justification,
+            # commit-pending). A genuine error: flagged is_error, categorized
+            # local_rejection, and — because no request was sent — it cannot
+            # have created a proposal. The internal marker is stripped so it
+            # never reaches the model.
+            clean = {k: v for k, v in payload.items() if k != "_local_rejection"}
+            clean.setdefault("category", CATEGORY_LOCAL_REJECTION)
+            return (clean, True)
         if isinstance(status, int) and status >= 400:
             # An HTTP rejection is a genuine tool error. Keep bounded metadata
             # (status + any error code/message) but flag it so callers do not
@@ -411,13 +435,20 @@ class ToolRouter:
         params = args.get("params") or {}
         justification = args.get("justification") or ""
         requested_mode = args.get("mode", "dry-run")
+        # Local refusals carry `_local_rejection` so execute() flags them
+        # is_error with the local_rejection category and no request is sent —
+        # so they can never mint a proposal id.
         if not justification.strip():
             return {"error": "bad_request",
+                    "category": CATEGORY_LOCAL_REJECTION,
+                    "_local_rejection": True,
                     "message": "justification is required and must be non-empty"}
         # commit-pending is rejected outright (not silently downgraded) so the
         # caller sees that only dry-run is available in this quarantined path.
         if requested_mode == "commit-pending":
             return {"error": "commit_pending_forbidden",
+                    "category": CATEGORY_LOCAL_REJECTION,
+                    "_local_rejection": True,
                     "message": "This orchestrator validates dry-run only; "
                                "commit-pending is not permitted."}
         # Any other requested mode is forced to dry-run at the boundary.
@@ -634,31 +665,103 @@ def _error_block(tool_use_id: str, error: str, category: str, message: str) -> T
     )
 
 
+# -- audit receipt bounding helpers -----------------------------------------
+
+_RECEIPT_MAX_STR = 256
+"""Max length of any single bounded string field before it is truncated."""
+_RECEIPT_MAX_ID = 128
+"""Max length of a single id string in a list field."""
+_RECEIPT_MAX_LIST = 64
+"""Max number of ids retained in a list field."""
+_RECEIPT_MAX_MAP = 64
+"""Max number of entries retained in a count/usage map."""
+
+
+# Each bounding helper returns (value, truncated) so build_audit_receipt can
+# honestly flag ``truncated=True`` whenever real data was dropped (an overlong
+# string shortened, or a list/map that had more entries than the cap). Pure
+# type coercion of a scalar count is normalization, not truncation, and does
+# not set the flag.
+
+
+def _bounded_str(value: Any, limit: int = _RECEIPT_MAX_STR) -> tuple[str, bool]:
+    s = value if isinstance(value, str) else str(value)
+    if len(s) <= limit:
+        return s, False
+    return s[:limit] + "…", True
+
+
+def _bounded_int(value: Any) -> int:
+    # bool is a subclass of int; treat non-ints (and bools) as 0 so the receipt
+    # never carries an unexpected type or a huge repr.
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _bounded_id_list(values: Any) -> tuple[list[str], bool]:
+    if not isinstance(values, (list, tuple)):
+        return [], False
+    items = list(values)
+    truncated = len(items) > _RECEIPT_MAX_LIST
+    out: list[str] = []
+    for v in items[:_RECEIPT_MAX_LIST]:
+        s, t = _bounded_str(v, _RECEIPT_MAX_ID)
+        out.append(s)
+        truncated = truncated or t
+    return out, truncated
+
+
+def _bounded_count_map(mapping: Any) -> tuple[dict[str, int], bool]:
+    if not isinstance(mapping, dict):
+        return {}, False
+    items = list(mapping.items())
+    truncated = len(items) > _RECEIPT_MAX_MAP
+    out: dict[str, int] = {}
+    for key, value in items[:_RECEIPT_MAX_MAP]:
+        ks, t = _bounded_str(key, 64)
+        out[ks] = _bounded_int(value)
+        truncated = truncated or t
+    return dict(sorted(out.items())), truncated
+
+
 def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
     """Build a bounded, payload-free LeanCTX audit receipt from an
-    IterationResult. Deterministic (sorted keys, stable ordering) and capped at
-    MAX_RECEIPT_BYTES; if the id lists were ever large enough to exceed the cap
-    they are truncated deterministically and ``truncated`` is set true.
+    IterationResult. Deterministic (sorted keys, stable ordering) and
+    **guaranteed** ≤ MAX_RECEIPT_BYTES.
+
+    Every field is whitelisted and bounded on the way in (string lengths, list
+    lengths, map sizes, numeric types), so even a manually- or adversarially-
+    constructed IterationResult — a huge stop reason, oversized outcome/usage
+    keys, enormous id lists, or unusual value types — cannot inflate the
+    receipt. A progressive deterministic trim plus a fixed minimal fallback
+    make the size cap a hard guarantee rather than a hope.
 
     The receipt intentionally excludes tool payloads, prompts, credentials,
     headers, and raw backend responses — only outcome metadata is retained."""
+    stopped, t_stop = _bounded_str(getattr(result, "stopped_because", ""))
+    outcome_counts, t_oc = _bounded_count_map(getattr(result, "outcome_counts", {}))
+    proposals, t_pc = _bounded_id_list(getattr(result, "proposals_created", []))
+    commits, t_ca = _bounded_id_list(getattr(result, "commits_applied", []))
+    usage, t_us = _bounded_count_map(getattr(result, "usage_total", {}))
     receipt: dict[str, Any] = {
         "schema": "leanctx-orchestrator-v1",
-        "stopped_because": result.stopped_because,
-        "turns": result.turns,
-        "tool_calls_executed": result.tool_calls_executed,
-        "outcome_counts": dict(sorted(result.outcome_counts.items())),
-        "proposals_created": list(result.proposals_created),
-        "commits_applied": list(result.commits_applied),
-        "usage_total": dict(sorted(result.usage_total.items())),
-        "truncated": False,
+        "stopped_because": stopped,
+        "turns": _bounded_int(getattr(result, "turns", 0)),
+        "tool_calls_executed": _bounded_int(getattr(result, "tool_calls_executed", 0)),
+        "outcome_counts": outcome_counts,
+        "proposals_created": proposals,
+        "commits_applied": commits,
+        "usage_total": usage,
+        # Honest flag: any field-level drop (overlong string, over-cap list/map)
+        # already marks the receipt truncated; the trim loop below may set it too.
+        "truncated": any((t_stop, t_oc, t_pc, t_ca, t_us)),
     }
 
     def _size(obj: dict) -> int:
-        return len(json.dumps(obj, sort_keys=True).encode("utf-8"))
+        return len(json.dumps(obj, sort_keys=True, default=str).encode("utf-8"))
 
-    # Deterministic truncation safety net (never expected to trigger, since the
-    # receipt holds only ids/counts, but enforced so the bound is a guarantee).
+    # The whitelisting above already bounds the receipt well under the cap;
+    # this progressive trim is the hard guarantee if the constants were ever
+    # mis-set. Steps are deterministic and ordered least- to most-destructive.
     while _size(receipt) > MAX_RECEIPT_BYTES:
         receipt["truncated"] = True
         if receipt["proposals_created"]:
@@ -667,8 +770,21 @@ def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
         if receipt["commits_applied"]:
             receipt["commits_applied"] = receipt["commits_applied"][:-1]
             continue
-        # Nothing left to trim; drop the counts detail as a last resort.
-        receipt["outcome_counts"] = {}
+        if receipt["outcome_counts"]:
+            receipt["outcome_counts"] = {}
+            continue
+        if receipt["usage_total"]:
+            receipt["usage_total"] = {}
+            continue
+        if len(receipt["stopped_because"]) > 16:
+            receipt["stopped_because"] = receipt["stopped_because"][:16]
+            continue
+        # Fixed minimal fallback — guaranteed tiny, always within the cap.
+        receipt = {
+            "schema": "leanctx-orchestrator-v1",
+            "stopped_because": "truncated",
+            "truncated": True,
+        }
         break
     return receipt
 
@@ -705,4 +821,5 @@ __all__ = [
     "CATEGORY_HTTP_REJECTION",
     "CATEGORY_BUDGET_REJECTION",
     "CATEGORY_PROPOSAL_LIMIT",
+    "CATEGORY_LOCAL_REJECTION",
 ]

@@ -50,9 +50,24 @@ permitted prefix executes; every remaining call gets an explicit
 valid, and the iteration stops (`tool_budget_exhausted`) — the cap is never
 exceeded. At most one proposal attempt per iteration is enforced in code. Tool
 outcomes are categorized (`ok`, `unknown_tool`, `handler_exception`,
-`transport_failure`, `http_rejection`, `budget_rejection`, `proposal_limit`);
-HTTP status ≥ 400 is a genuine tool error and is never counted as a created
-proposal or applied commit.
+`transport_failure`, `http_rejection`, `budget_rejection`, `proposal_limit`,
+`local_rejection`); HTTP status ≥ 400 is a genuine tool error and is never
+counted as a created proposal or applied commit.
+
+Error-shape guarantees (Jack amendment):
+
+- **Non-dict handler returns** — the handler call, its return-shape check, and
+  the `_status`/`_local_rejection` inspection all run inside one defensive
+  `try`, so a handler that returns `None`, a list, a scalar, or any non-dict
+  becomes a bounded `handler_exception` result and can never crash the loop.
+- **`local_rejection`** — a request the router refuses *before* any HTTP call
+  (blank justification, forbidden `commit-pending`) is flagged `is_error=True`
+  with category `local_rejection`, counted as an error (not `ok`), and — since
+  no request is sent — never mints a proposal id. Distinct from
+  `http_rejection`, where the server said no.
+- **Error visibility across transports** — an `is_error` result is surfaced by
+  native backends via the `is_error` flag and by the OpenAI-compatible backend
+  via a leading `[ERROR]` marker, so a model recognises the failure either way.
 
 ## LeanCTX audit receipt
 
