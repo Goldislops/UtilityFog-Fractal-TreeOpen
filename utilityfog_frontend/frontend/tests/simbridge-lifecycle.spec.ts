@@ -175,10 +175,11 @@ test('unexpected close emits disconnected and schedules exactly one reconnect', 
   });
   expect(await events(page)).toEqual(['connected', 'disconnected']);
 
-  // Exactly one replacement socket after the injected delay — and still
-  // exactly one after another full delay (at most one reconnect per close).
-  await page.waitForTimeout(AFTER_RECONNECT_MS);
-  expect(await socketCount(page)).toBe(2);
+  // Exactly one replacement socket after the injected delay — POLLED for
+  // arrival (fixed sleeps flaked under WebKit timer jitter; Package AJ/AK
+  // portability audit) — and still exactly one after another full delay
+  // (at most one reconnect per close).
+  await expect.poll(() => socketCount(page), { timeout: 2000 }).toBe(2);
   await page.waitForTimeout(AFTER_RECONNECT_MS);
   expect(await socketCount(page)).toBe(2);
 
@@ -233,7 +234,7 @@ test('late callbacks from an obsolete socket cannot affect the current connectio
     h.sockets()[0]._open();
     h.sockets()[0]._close(); // drop → reconnect scheduled
   });
-  await page.waitForTimeout(AFTER_RECONNECT_MS);
+  await expect.poll(() => socketCount(page), { timeout: 2000 }).toBe(2);
   await page.evaluate(() => (window as HarnessWindow).__h.sockets()[1]._open());
   const before = await events(page);
 

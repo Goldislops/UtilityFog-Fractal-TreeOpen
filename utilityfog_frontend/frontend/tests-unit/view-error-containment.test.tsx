@@ -4,9 +4,11 @@
 // The WebGL-heavy views are mocked at the module seam (no real WebGL in
 // unit tests) with CONTROLLABLE failure flags, so genuine render throws
 // exercise the real ViewErrorBoundary inside the real App.
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { StrictMode } from 'react'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import App from '../src/App'
 
 const failures = { v3d: false, v2d: false }
@@ -213,5 +215,108 @@ describe('AB audit amendments', () => {
     render(<App />)
     expect(await screen.findByRole('button', { name: 'Retry 3D network view' }))
       .toHaveAttribute('type', 'button')
+  })
+})
+
+describe('retry focus recovery (Package AK, success-aware amendment)', () => {
+  it('successful Retry moves focus to the recovered view region (never dropped on body)', async () => {
+    failures.v3d = true
+    render(<App />)
+    const retry = await screen.findByRole('button', { name: 'Retry 3D network view' })
+    retry.focus()
+    expect(retry).toHaveFocus()
+
+    failures.v3d = false
+    fireEvent.click(retry)
+    await screen.findByTestId('view-3d')
+    // Success-aware focus: onRecovered fires from the post-reveal commit
+    // probe, so the region receives focus only after the view committed.
+    await waitFor(() => {
+      expect(screen.getByRole('region', { name: '3D network view' })).toHaveFocus()
+    })
+  })
+
+  it('a retry that FAILS AGAIN keeps focus on the new Retry button, not the region', async () => {
+    failures.v3d = true
+    render(<App />)
+    const retry = await screen.findByRole('button', { name: 'Retry 3D network view' })
+    retry.focus()
+    fireEvent.click(retry) // still failing: the old button unmounts, a new one renders
+    const retryAgain = await screen.findByRole('button', { name: 'Retry 3D network view' })
+    // The keyboard user must stay in the retry loop: focus is restored to
+    // the NEW Retry button, and the region is never focused (the view
+    // never committed).
+    await waitFor(() => expect(retryAgain).toHaveFocus())
+    expect(screen.queryByRole('region', { name: '3D network view' })).not.toHaveFocus()
+  })
+
+  it('eventual success after repeated failures: the region is focused exactly then', async () => {
+    failures.v3d = true
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry 3D network view' }))
+    await screen.findByRole('alert') // first retry failed again
+    failures.v3d = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry 3D network view' }))
+    await screen.findByTestId('view-3d')
+    await waitFor(() => {
+      expect(screen.getByRole('region', { name: '3D network view' })).toHaveFocus()
+    })
+  })
+
+  it('ordinary lazy loading steals no focus', async () => {
+    render(<App />)
+    const button2d = screen.getByRole('button', { name: '2D View' })
+    button2d.focus()
+    fireEvent.click(button2d)
+    await screen.findByTestId('view-2d')
+    expect(button2d).toHaveFocus() // load completed without focus theft
+  })
+
+  it('a FIRST failure (no retry involved) steals no focus either', async () => {
+    render(<App />)
+    await screen.findByTestId('view-3d')
+    const button2d = screen.getByRole('button', { name: '2D View' })
+    button2d.focus()
+    failures.v2d = true
+    fireEvent.click(button2d)
+    await screen.findByRole('alert')
+    // The boundary self-focuses its button ONLY inside a retry cycle.
+    expect(button2d).toHaveFocus()
+  })
+})
+
+describe('focus-indicator decision and fallback styling contracts (source-level)', () => {
+  // The stylesheet is the single owner of these decisions; :focus-visible
+  // matching on programmatic focus is deliberately left to each UA (see
+  // the DECISION comment in index.css), so the testable contract is that
+  // we neither removed the indicator nor styled by role. Read from the
+  // vitest root (`?raw` is intercepted empty by vitest's CSS pipeline;
+  // vitest always runs at the frontend root via the npm scripts) and
+  // strip comments — the assertions target RULES, and the documentation
+  // comments deliberately name the rejected patterns.
+  const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  )
+
+  it('the tabIndex=-1 view region keeps the :focus-visible indicator (documented decision, not suppressed)', () => {
+    expect(css).toContain('[tabindex]:focus-visible')
+    expect(css).not.toMatch(/outline:\s*none/)
+  })
+
+  it('fallback styling binds to the explicit class, never the alert ROLE', () => {
+    expect(css).toContain('.view-error-fallback')
+    expect(css).toContain('.view-retry-button')
+    expect(css).not.toMatch(/\[role=["']?alert["']?\]/)
+  })
+
+  it('the static Retry dimensions live in CSS, and the button carries the class', async () => {
+    expect(css).toMatch(/\.view-retry-button\s*\{[^}]*min-width:\s*44px/)
+    expect(css).toMatch(/\.view-retry-button\s*\{[^}]*min-height:\s*44px/)
+    failures.v3d = true
+    render(<App />)
+    const retry = await screen.findByRole('button', { name: 'Retry 3D network view' })
+    expect(retry).toHaveClass('view-retry-button')
+    expect(retry.getAttribute('style')).toBeNull() // no inline dimensions remain
   })
 })
