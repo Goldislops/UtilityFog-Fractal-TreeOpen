@@ -73,7 +73,11 @@ export default class ViewErrorBoundary extends Component<
           }}
         >
           <p style={{ margin: 0 }}>The {this.props.viewLabel} failed to render.</p>
-          <button type="button" onClick={this.handleRetry}>
+          <button
+            type="button"
+            style={{ minWidth: 44, minHeight: 44 }}
+            onClick={this.handleRetry}
+          >
             Retry {this.props.viewLabel}
           </button>
         </div>

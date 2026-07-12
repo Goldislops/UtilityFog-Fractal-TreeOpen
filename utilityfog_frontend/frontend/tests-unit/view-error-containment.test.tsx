@@ -6,7 +6,7 @@
 // exercise the real ViewErrorBoundary inside the real App.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { StrictMode } from 'react'
-import { render, screen, fireEvent, act } from '@testing-library/react'
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import App from '../src/App'
 
 const failures = { v3d: false, v2d: false }
@@ -213,5 +213,32 @@ describe('AB audit amendments', () => {
     render(<App />)
     expect(await screen.findByRole('button', { name: 'Retry 3D network view' }))
       .toHaveAttribute('type', 'button')
+  })
+})
+
+describe('retry focus recovery (Package AK)', () => {
+  it('successful Retry moves focus to the recovered view region (never dropped on body)', async () => {
+    failures.v3d = true
+    render(<App />)
+    const retry = await screen.findByRole('button', { name: 'Retry 3D network view' })
+    retry.focus()
+    expect(retry).toHaveFocus()
+
+    failures.v3d = false
+    fireEvent.click(retry)
+    await screen.findByTestId('view-3d')
+    // The rAF-deferred focus lands on the labelled region.
+    await waitFor(() => {
+      expect(screen.getByRole('region', { name: '3D network view' })).toHaveFocus()
+    })
+  })
+
+  it('ordinary lazy loading steals no focus', async () => {
+    render(<App />)
+    const button2d = screen.getByRole('button', { name: '2D View' })
+    button2d.focus()
+    fireEvent.click(button2d)
+    await screen.findByTestId('view-2d')
+    expect(button2d).toHaveFocus() // load completed without focus theft
   })
 })

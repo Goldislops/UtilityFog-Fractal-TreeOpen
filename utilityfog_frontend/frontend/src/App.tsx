@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { useState, useEffect, lazy, Suspense } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import ConnectionBadge from './components/ConnectionBadge'
 import EventFeed from './components/EventFeed'
 import ViewErrorBoundary from './components/ViewErrorBoundary'
@@ -55,6 +55,16 @@ function App() {
     setView(target)
   }
 
+  // Predictable focus recovery (Package AK): after a successful Retry the
+  // Retry button unmounts, which would silently drop keyboard focus on
+  // <body>. The active view region (tabIndex=-1) receives focus instead —
+  // announced by its aria-label, stealing nothing during ordinary lazy
+  // loading (this runs only from the user-initiated Retry).
+  const viewRegionRef = useRef<HTMLElement | null>(null)
+  const focusViewRegionAfterRetry = () => {
+    requestAnimationFrame(() => viewRegionRef.current?.focus())
+  }
+
   useEffect(() => {
     const client = new SimBridgeClient(WS_URL)
     
@@ -95,13 +105,18 @@ function App() {
       {view === '3d' ? (
         <section
           key="view-3d"
+          ref={viewRegionRef}
+          tabIndex={-1}
           role="region"
           aria-label="3D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
           <ViewErrorBoundary
             viewLabel="3D network view"
-            onRetry={() => setLazy3D(() => lazy(load3D))}
+            onRetry={() => {
+              setLazy3D(() => lazy(load3D))
+              focusViewRegionAfterRetry()
+            }}
           >
             {/* The transient loading status is scoped inside the active
                 region; steady-state keeps the badge as the only status
@@ -120,13 +135,18 @@ function App() {
       ) : (
         <section
           key="view-2d"
+          ref={viewRegionRef}
+          tabIndex={-1}
           role="region"
           aria-label="2D network view"
           style={{ flex: 1, display: 'flex', position: 'relative', minHeight: 0, minWidth: 0 }}
         >
           <ViewErrorBoundary
             viewLabel="2D network view"
-            onRetry={() => setLazy2D(() => lazy(load2D))}
+            onRetry={() => {
+              setLazy2D(() => lazy(load2D))
+              focusViewRegionAfterRetry()
+            }}
           >
             <Suspense
               fallback={

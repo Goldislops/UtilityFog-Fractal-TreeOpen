@@ -74,3 +74,47 @@ body {
   right: 20px;
   z-index: 1000;
 }
+
+/* ------------------------------------------------------------------------
+   Responsive + keyboard contracts (Package AK, issue #2 slice).
+   Desktop keeps the overlay layout; below 768px the overlays become
+   stacked flow so the feed can never cover the controls or the view, and
+   the active view keeps a useful minimum height. */
+
+/* Touch targets: view controls and the boundary Retry meet 44x44 CSS px. */
+.controls button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* A visible, engine-neutral focus indicator (some UA resets suppress the
+   default; keyboard users must always see where they are). */
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+/* The replaceable view slot never collapses below a usable height. */
+.app-container > section {
+  min-height: 240px;
+}
+
+@media (max-width: 767px) {
+  .controls {
+    position: static;
+    padding: 12px 12px 0;
+  }
+  .event-feed {
+    position: static;
+    width: auto;
+    margin: 8px 12px;
+    max-height: 35vh;
+  }
+  .connection-badge {
+    position: static;
+    align-self: flex-start;
+    margin: 0 12px 8px;
+  }
+}
