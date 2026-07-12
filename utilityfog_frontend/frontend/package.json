@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview --port 4173",
-    "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0 && npm run check:lint-rules",
     "test:ui": "playwright test",
     "test:ui:headed": "playwright test --headed",
     "test:ui:report": "npx playwright show-report",

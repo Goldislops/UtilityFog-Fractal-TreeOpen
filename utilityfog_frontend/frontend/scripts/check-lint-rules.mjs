@@ -7,6 +7,14 @@
 //   node scripts/check-lint-rules.mjs        -> exit 0 when every
 //   expectation holds; exit 1 with a report otherwise.
 import { ESLint } from 'eslint'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// cwd-INDEPENDENT (audit amendment): the frontend root is resolved from
+// THIS FILE's location, never from the caller's working directory — the
+// gate behaves identically from the frontend dir, the repo root, or any
+// unrelated cwd (all three receipted).
+const FRONTEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const EXPECTATIONS = [
   {
@@ -45,10 +53,10 @@ const EXPECTATIONS = [
   },
 ]
 
-const eslint = new ESLint({ ignore: false })
+const eslint = new ESLint({ ignore: false, cwd: FRONTEND_ROOT })
 const failures = []
 for (const { file, rule, expect } of EXPECTATIONS) {
-  const [result] = await eslint.lintFiles([file])
+  const [result] = await eslint.lintFiles([resolve(FRONTEND_ROOT, file)])
   const hits = result.messages.filter((m) => m.ruleId === rule)
   const fired = hits.length > 0
   if (expect === 'fires' && !fired) {
