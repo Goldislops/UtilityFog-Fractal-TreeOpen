@@ -61,10 +61,11 @@ VALID_MODES = ("dry-run", "commit-pending")
 AUTO_COMMIT_APPROVER = "policy:auto"
 """The autonomous approver identity the legacy orchestrator commits with.
 
-Commits presenting this exact approver are rejected at the boundary
-(``auto_commit_disabled``). Re-enabling autonomous commits must be a reviewed
-code change here — there is deliberately no env flag, query param, header, or
-alternate route that turns it back on."""
+Stored lowercase; the commit boundary compares against ``approver.strip()
+.casefold()`` so whitespace- and case-variant spellings of the same autonomous
+identity are all rejected (``auto_commit_disabled``). Re-enabling autonomous
+commits must be a reviewed code change here — there is deliberately no env flag,
+query param, header, or alternate route that turns it back on."""
 
 
 # -- helpers ----------------------------------------------------------------
@@ -222,6 +223,18 @@ class TuningState:
 
     def _commit_locked(self, proposal_id: str, approver: str) -> dict[str, Any]:
         with self._lock:
+            # Type guard: `approver` must be a string before any string
+            # operation (the quarantine comparison and the human-approval
+            # startswith check below both assume str). A bool/number/null/
+            # list/dict is a malformed request → stable 400 bad_request, never
+            # an AttributeError. Checked first so a bad type cannot slip past
+            # on an otherwise-valid proposal.
+            if not isinstance(approver, str):
+                raise TuningError(
+                    400, "bad_request",
+                    "approver must be a string.",
+                )
+
             proposal = self._proposals.get(proposal_id)
             if proposal is None:
                 raise TuningError(
@@ -241,7 +254,15 @@ class TuningState:
             # it shut, no LLM-facing tool call can mutate a parameter. Checked
             # before the human-approval branch so policy:auto yields one stable
             # reason. A human commit (approver="human:<name>") is unaffected.
-            if approver == AUTO_COMMIT_APPROVER:
+            #
+            # The match is stripped + case-insensitive so surface variants of
+            # the same autonomous identity — " POLICY:AUTO ", tab/newline
+            # padding, mixed case — cannot slip a mutation through. This
+            # normalization is used ONLY for the quarantine comparison; the
+            # human approver identity is never stripped or rewritten (the
+            # startswith check below and the ledger entry both keep the raw
+            # value, preserving existing human semantics exactly).
+            if approver.strip().casefold() == AUTO_COMMIT_APPROVER:
                 raise TuningError(
                     403, "auto_commit_disabled",
                     "Autonomous commits (approver='policy:auto') are disabled at "

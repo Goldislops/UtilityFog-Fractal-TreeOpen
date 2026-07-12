@@ -333,6 +333,102 @@ def test_locked_and_dryrun_paths_unchanged_by_quarantine(tuning):
     assert body["proposal_id"].startswith("prop-")
 
 
+# -- Package R amendment (Jack audit): type-guard + normalized match --------
+
+
+class _RecordingBus:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, topic, payload):
+        self.published.append((topic, payload))
+
+
+def _committed_ledger_entries(tmp_path):
+    p = tmp_path / "tuning_ledger.jsonl"
+    if not p.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("type") == "commit"
+    ]
+
+
+_BLOCKED_APPROVER_VARIANTS = [
+    "policy:auto",
+    " policy:auto ",
+    "POLICY:AUTO",
+    " POLICY:AUTO ",
+    "\tPolicy:Auto\n",
+    "policy:auto\n",
+]
+
+
+@pytest.mark.parametrize("approver", _BLOCKED_APPROVER_VARIANTS)
+def test_commit_normalized_policy_auto_variants_all_disabled(tmp_path, approver):
+    """Every whitespace/case variant of the autonomous identity is refused with
+    the same stable 403 auto_commit_disabled, and none of them touches any of
+    the four write surfaces: effective params, pending file, commit ledger, or
+    the tuning.committed event."""
+    gen = FakeGen()
+    bus = _RecordingBus()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    client = app.test_client()
+
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": approver},
+    ))
+    assert code == 403
+    assert body["error"] == "auto_commit_disabled"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+    assert not (tmp_path / "tuning_pending.json").exists()
+    assert _committed_ledger_entries(tmp_path) == []
+    assert "tuning.committed" not in [t for t, _ in bus.published]
+
+
+@pytest.mark.parametrize("approver", [True, 123, 1.5, ["human:kevin"], {"who": "human:kevin"}])
+def test_commit_non_string_approver_is_bad_request(tmp_path, approver):
+    """A non-string approver (bool/number/list/object) is a malformed request:
+    stable 400 bad_request checked before any string operation, never an
+    AttributeError, and no state mutation."""
+    gen = FakeGen()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    client = app.test_client()
+
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": approver},
+    ))
+    assert code == 400
+    assert body["error"] == "bad_request"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_commit_preserves_raw_human_approver_identity(tuning):
+    """The quarantine normalization is comparison-only. A human approver's raw
+    identity — mixed case and trailing whitespace — is stored verbatim in the
+    committed ledger entry, never stripped or lowercased."""
+    client, state, gen, tmp_path = tuning
+    pid = _propose(client, {"signal_interval": 15})
+    raw = "human:Kevin "  # valid human prefix; capitalised name; trailing space
+    code, _ = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": raw},
+    ))
+    assert code == 200
+    commits = _committed_ledger_entries(tmp_path)
+    assert commits and commits[-1]["approver"] == raw
+
+
 # -- POST /api/tuning/rollback ---------------------------------------------
 
 
