@@ -163,3 +163,31 @@ describe('sanitizeEdgeList', () => {
     expect(previous).toEqual([])
   })
 })
+
+describe('edge referential stability (Jack audit amendment)', () => {
+  it('reuses unchanged edge objects and returns the previous array when wholesale-identical', () => {
+    const previous = [edge('e1', 'a', 'b', 2), edge('e2', 'b', 'c', 1)]
+    const wholesale = [
+      { id: 'e1', source: 'a', target: 'b', strength: 2 },
+      { id: 'e2', source: 'b', target: 'c', strength: 1 },
+    ]
+    const result = sanitizeEdgeList(wholesale, previous)
+    expect(result).toBe(previous)
+  })
+
+  it('reuses unchanged elements while changed ones get new owned references', () => {
+    const keep = edge('keep', 'a', 'b', 1)
+    const previous = [keep, edge('mod', 'a', 'b', 1)]
+    const result = sanitizeEdgeList(
+      [
+        { id: 'keep', source: 'a', target: 'b', strength: 1 },
+        { id: 'mod', source: 'a', target: 'b', strength: 9 },
+      ],
+      previous,
+    )
+    expect(result).not.toBe(previous)
+    expect(result[0]).toBe(keep) // unchanged element reference reused
+    expect(result[1]).not.toBe(previous[1])
+    expect(result[1].strength).toBe(9)
+  })
+})

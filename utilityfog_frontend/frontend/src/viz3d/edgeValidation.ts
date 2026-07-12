@@ -70,16 +70,30 @@ export function materializeEdge(
 // Sanitize a wholesale edge list. Mirrors sanitizeNodeList: a non-array
 // keeps the previous list (per-side tolerance); elements are materialized
 // individually; duplicate ids keep the first occurrence.
+//
+// REFERENTIAL STABILITY: an admitted edge whose owned fields equal the
+// previous edge with the same id REUSES that previous object, and when
+// length, order and every element reference are unchanged the previous
+// ARRAY reference is returned — no-op wholesale updates notify nobody.
 export function sanitizeEdgeList(incoming: unknown, previous: NetworkEdge[]): NetworkEdge[] {
   if (!Array.isArray(incoming)) return previous
+  const byId = new Map(previous.map(e => [e.id, e]))
   const result: NetworkEdge[] = []
   const seen = new Set<string>()
   for (const candidate of incoming) {
     const edge = materializeEdge(candidate)
-    if (edge !== null && !seen.has(edge.id)) {
-      result.push(edge)
-      seen.add(edge.id)
-    }
+    if (edge === null || seen.has(edge.id)) continue
+    const prior = byId.get(edge.id)
+    const unchanged =
+      prior !== undefined &&
+      prior.source === edge.source &&
+      prior.target === edge.target &&
+      prior.strength === edge.strength
+    result.push(unchanged ? prior : edge)
+    seen.add(edge.id)
+  }
+  if (result.length === previous.length && result.every((e, i) => e === previous[i])) {
+    return previous
   }
   return result
 }

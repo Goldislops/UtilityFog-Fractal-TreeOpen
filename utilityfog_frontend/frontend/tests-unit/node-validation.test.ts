@@ -347,3 +347,101 @@ describe('node materialization (ownership contract — Package Y)', () => {
     expect('junk' in result).toBe(false)
   })
 })
+
+describe('node contract hardening (Jack audit amendment)', () => {
+  it.each([
+    { label: 'numeric id', incoming: { id: 7, position: [1, 2, 3] } },
+    { label: 'empty-string id', incoming: { id: '', position: [1, 2, 3] } },
+  ])('rejects $label at every public admission seam', ({ incoming }) => {
+    expect(reconcileNode(incoming, undefined)).toBeNull()
+    const previous = [node('a', [1, 2, 3])]
+    expect(applyNodeUpdate(previous, incoming)).toBe(previous)
+    expect(sanitizeNodeList([incoming], [])).toEqual([])
+  })
+
+  it('discards an invalid status as absent on a new node (documented rule, no assertion-lie)', () => {
+    const result = reconcileNode({ id: 'n', position: [1, 2, 3], status: 'weird' }, undefined)!
+    expect(result.id).toBe('n')
+    expect(result.status).toBeUndefined()
+  })
+
+  it('an invalid incoming status never clobbers a valid existing one', () => {
+    const existing = node('n', [1, 2, 3], { status: 'error' })
+    const result = reconcileNode({ id: 'n', status: 'nonsense' }, existing)!
+    expect(result.status).toBe('error')
+  })
+
+  it.each(['active', 'inactive', 'error'] as const)('valid status %s passes', (status) => {
+    expect(reconcileNode({ id: 'n', position: [1, 2, 3], status }, undefined)!.status).toBe(status)
+  })
+
+  it('mixed connection arrays retain only strings, copied into an owned array', () => {
+    const suppliedConnections = ['a', 1, null, 'b', { evil: true }, 'c']
+    const result = reconcileNode(
+      { id: 'n', position: [1, 2, 3], connections: suppliedConnections },
+      undefined,
+    )!
+    expect(result.connections).toEqual(['a', 'b', 'c'])
+    expect(result.connections).not.toBe(suppliedConnections)
+  })
+
+  it('non-array connections are treated as absent (existing value survives)', () => {
+    const existing = node('n', [1, 2, 3], { connections: ['keep'] })
+    const result = reconcileNode({ id: 'n', connections: 'garbage' }, existing)!
+    expect(result.connections).toEqual(['keep'])
+  })
+
+  it('a hostile getter inside a connections ELEMENT is contained', () => {
+    const hostileElement = {}
+    Object.defineProperty(hostileElement, 'toString', {
+      get(): unknown {
+        throw new Error('hostile element')
+      },
+    })
+    const result = reconcileNode(
+      { id: 'n', position: [1, 2, 3], connections: ['ok', hostileElement] },
+      undefined,
+    )!
+    expect(result.connections).toEqual(['ok'])
+  })
+})
+
+describe('referential stability (Jack audit amendment)', () => {
+  const EXISTING = node('stable', [1, 2, 3], { status: 'active', connections: ['x'] })
+
+  it('reconcileNode returns the EXISTING object when every owned field is unchanged', () => {
+    const identical = { id: 'stable', position: [1, 2, 3], status: 'active', connections: ['x'] }
+    expect(reconcileNode(identical, EXISTING)).toBe(EXISTING)
+  })
+
+  it('a positionless partial that changes nothing returns the existing reference', () => {
+    expect(reconcileNode({ id: 'stable', status: 'active' }, EXISTING)).toBe(EXISTING)
+  })
+
+  it('changed fields still produce a NEW owned reference', () => {
+    const changed = reconcileNode({ id: 'stable', status: 'error' }, EXISTING)!
+    expect(changed).not.toBe(EXISTING)
+    expect(changed.status).toBe('error')
+    const moved = reconcileNode({ id: 'stable', position: [9, 9, 9] }, EXISTING)!
+    expect(moved).not.toBe(EXISTING)
+    expect(moved.position).toEqual([9, 9, 9])
+  })
+
+  it('applyNodeUpdate returns the previous ARRAY reference for a no-op update', () => {
+    const previous = [EXISTING]
+    expect(applyNodeUpdate(previous, { id: 'stable', status: 'active' })).toBe(previous)
+  })
+
+  it('sanitizeNodeList returns the previous array reference when nothing changed', () => {
+    const previous = [EXISTING]
+    const wholesale = [{ id: 'stable', position: [1, 2, 3], status: 'active', connections: ['x'] }]
+    expect(sanitizeNodeList(wholesale, previous)).toBe(previous)
+  })
+
+  it('sanitizeNodeList produces a new array when membership or order changes', () => {
+    const previous = [EXISTING]
+    const reduced = sanitizeNodeList([], previous)
+    expect(reduced).not.toBe(previous)
+    expect(reduced).toEqual([])
+  })
+})

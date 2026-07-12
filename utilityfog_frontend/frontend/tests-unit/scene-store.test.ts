@@ -231,3 +231,41 @@ describe('store ownership (Package Y)', () => {
     expect(Object.getOwnPropertyDescriptor(stored, 'source')!.get).toBeUndefined()
   })
 })
+
+describe('zustand notification measurement (Jack audit amendment)', () => {
+  it('identical updates notify NO subscriber; changed updates notify exactly once', () => {
+    const s = useSceneStore.getState()
+    s.updateNode({ id: 'n', position: [1, 2, 3], connections: [], status: 'active' })
+    s.setNetwork(
+      [{ id: 'n', position: [1, 2, 3], connections: [], status: 'active' }],
+      [{ id: 'e', source: 'n', target: 'n', strength: 1 }],
+    )
+
+    let notifications = 0
+    const unsubscribe = useSceneStore.subscribe(() => {
+      notifications++
+    })
+
+    // Identical singular update: same refs -> zero notifications.
+    s.updateNode({ id: 'n', position: [1, 2, 3], connections: [], status: 'active' })
+    expect(notifications).toBe(0)
+    // Identical wholesale update: zero notifications.
+    s.setNetwork(
+      [{ id: 'n', position: [1, 2, 3], connections: [], status: 'active' }],
+      [{ id: 'e', source: 'n', target: 'n', strength: 1 }],
+    )
+    expect(notifications).toBe(0)
+    // Rejected garbage: zero notifications.
+    s.updateNode({ id: 'ghost' })
+    s.updateNode('junk')
+    expect(notifications).toBe(0)
+
+    // Real changes notify exactly once each.
+    s.updateNode({ id: 'n', status: 'error' })
+    expect(notifications).toBe(1)
+    s.setNetwork([], [])
+    expect(notifications).toBe(2)
+
+    unsubscribe()
+  })
+})

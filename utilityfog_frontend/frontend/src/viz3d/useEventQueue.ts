@@ -48,6 +48,10 @@ export function useEventQueue(
           }
         }
 
+        // Schedule the next yield frame ONLY while still active with more
+        // work queued — an unmount during the LAST handler (or an emptied
+        // queue) must not request an extra animation frame.
+        if (!activeRef.current || queueRef.current.length === 0) break
         // Allow browser to render
         await new Promise(resolve => requestAnimationFrame(resolve))
       }

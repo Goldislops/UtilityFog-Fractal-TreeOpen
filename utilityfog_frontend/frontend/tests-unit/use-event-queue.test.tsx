@@ -246,3 +246,30 @@ describe('unmount during a handler (Package Y)', () => {
     expect(handlers.updateNode).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('frame-scheduling discipline (Jack audit amendment)', () => {
+  it('unmount during the LAST handler schedules no extra animation frame', async () => {
+    const view = renderHook(() => useEventQueue(client, handlers))
+    const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+    handlers.updateNode.mockImplementationOnce(() => {
+      view.unmount()
+    })
+    socket().serverMessage({ type: 'node_update', payload: { seq: 1 } }) // schedules exactly one frame
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await vi.runAllTimersAsync()
+    // The drain must NOT have scheduled a post-batch yield frame: the
+    // active/empty check runs BEFORE requesting the next frame.
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    expect(handlers.updateNode).toHaveBeenCalledTimes(1)
+  })
+
+  it('an emptied queue schedules no trailing yield frame either', async () => {
+    renderHook(() => useEventQueue(client, handlers))
+    const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+    socket().serverMessage({ type: 'node_update', payload: { seq: 1 } })
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await vi.runAllTimersAsync()
+    expect(rafSpy).toHaveBeenCalledTimes(1) // batch drained; no idle frame requested
+    expect(handlers.updateNode).toHaveBeenCalledTimes(1)
+  })
+})
