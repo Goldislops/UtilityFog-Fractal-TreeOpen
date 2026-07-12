@@ -153,6 +153,15 @@ jobs:
         # repeated runs, adds ~2s over the plain unit run.
         run: npm run test:unit:coverage
 
+      - name: Coverage-gate self-tests
+        run: npm run test:coverage-gate
+
+      - name: Per-file coverage floors
+        # Enforceable per-module floors over the json-summary the previous
+        # step generated — a regression, a silently missing module row, or
+        # a malformed summary all fail (scripts/check-unit-coverage.mjs).
+        run: npm run check:unit-coverage
+
       - name: Budget-script unit tests
         run: npm run test:budget
 

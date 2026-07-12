@@ -14,7 +14,9 @@
     "test:budget": "node --test scripts/check-bundle-budget.test.mjs",
     "check:budget": "node scripts/check-bundle-budget.mjs",
     "test:unit": "vitest run",
-    "test:unit:coverage": "vitest run --coverage"
+    "test:unit:coverage": "vitest run --coverage",
+    "check:unit-coverage": "node scripts/check-unit-coverage.mjs",
+    "test:coverage-gate": "node --test scripts/check-unit-coverage.test.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^9.92.0",

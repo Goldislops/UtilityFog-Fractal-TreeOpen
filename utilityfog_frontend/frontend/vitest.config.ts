@@ -42,8 +42,13 @@ export default defineConfig({
       // paths unit-owned; its canvas DRAW effect body is unreachable under
       // jsdom (getContext → null, the component's own guarded early
       // return), which is why the aggregate baseline steps down from
-      // Package Y's 97/94/97/97 — a scope expansion, not a coverage
-      // regression (every previously-owned module kept its numbers).
+      // Package Y's 97/94/97/97. The earlier prose assurance that the
+      // expansion "kept every module's numbers" was UNENFORCED and is
+      // withdrawn as a guarantee — it is now made mechanically true by
+      // scripts/check-unit-coverage.mjs, which gates an explicit
+      // checked-in PER-FILE floor for every unit-owned module (missing
+      // rows fail; malformed summaries fail; run via check:unit-coverage
+      // in frontend-quality after coverage generation).
       include: [
         'src/App.tsx',
         'src/components/ConnectionBadge.tsx',
