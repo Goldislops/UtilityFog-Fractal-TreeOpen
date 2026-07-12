@@ -24,7 +24,25 @@ interface FakeSocketHarness {
   _open: () => void;
   _message: (obj: unknown) => void;
 }
-type HarnessWindow = Window & typeof globalThis & { __fakeSockets: FakeSocketHarness[] };
+// The read-only slice of the scene store this spec observes.
+interface SceneStoreHandle {
+  getState: () => { nodes: unknown[]; edges: unknown[] };
+}
+type HarnessWindow = Window &
+  typeof globalThis & {
+    __fakeSockets: FakeSocketHarness[];
+    // Guarded accessor for the active application socket: throws a
+    // descriptive error instead of dereferencing `undefined` when the
+    // registry is empty or the app socket has not been constructed yet
+    // (Jack delta-audit #350).
+    __activeAppSocket: () => FakeSocketHarness;
+    // The store instance the APP actually writes to, stashed once the
+    // readiness probe is observed landing on it. A dynamic import() of
+    // the store module resolves to a DISTINCT instance per page.evaluate
+    // under Vite dev, so the observation poll must read this one proven
+    // reference rather than re-importing (Jack delta-audit #350).
+    __sceneStore?: SceneStoreHandle;
+  };
 
 async function setupPage(page: Page) {
   await page.addInitScript(() => {
@@ -58,6 +76,19 @@ async function setupPage(page: Page) {
       }
     }
     w.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    w.__activeAppSocket = () => {
+      const registry = Array.isArray(w.__fakeSockets) ? w.__fakeSockets : [];
+      const appSockets = registry.filter((s) => String(s.url).includes('/ws'));
+      const active = appSockets[appSockets.length - 1];
+      if (!active) {
+        throw new Error(
+          `No active application fake socket (registry size ${registry.length}, ` +
+            `app-URL sockets ${appSockets.length}) — did the init script install ` +
+            `FakeWebSocket before the app loaded?`,
+        );
+      }
+      return active;
+    };
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
@@ -65,58 +96,72 @@ async function setupPage(page: Page) {
 }
 
 test('1,000-node network: full ingestion, live shell, working interaction afterwards', async ({ page }) => {
+  // Application-owned diagnostics (console.error) AND uncaught page errors
+  // are both captured; a crash-free ingestion leaves BOTH empty (Jack
+  // delta-audit #350).
   const consoleErrors: string[] = [];
-  page.on('console', m => {
+  const pageErrors: string[] = [];
+  page.on('console', (m) => {
     if (m.type() === 'error') consoleErrors.push(m.text());
+  });
+  page.on('pageerror', (err) => {
+    pageErrors.push(err.message);
   });
   await setupPage(page);
 
-  // The STORE consumer (useEventQueue inside ThreeScene, itself inside
-  // the R3F canvas root) subscribes only once the lazy 3D view has fully
-  // mounted — and paint-based waits proved FLAKY on a cold dev server.
-  // Semantic readiness instead: a single probe update for n0 (one of the
-  // snapshot's own ids, so the final count is unaffected) must land in
-  // the store, proving the socket→queue→store pipeline is live.
+  // Establish the ingestion pipeline is LIVE and capture the store the
+  // app actually writes to, before the functional assertion. Two coupled
+  // realities force a bounded readiness HANDSHAKE here rather than a
+  // strict single send (both empirically demonstrated on WebKit under the
+  // Vite dev server):
+  //   1. The store consumer (useEventQueue inside ThreeScene, inside the
+  //      R3F canvas root) subscribes only after the lazy 3D view mounts,
+  //      the SimBridgeClient does not buffer events (emit drops with no
+  //      listeners), and the subscription exposes no external ready
+  //      signal — so a single probe sent at canvas-visible is lost (a
+  //      strict-single-send variant failed 5/5 on WebKit).
+  //   2. A dynamic import() of the store module resolves to a DISTINCT
+  //      instance per page.evaluate under Vite dev — so the observation
+  //      poll must read the exact instance a write is proven to land on.
+  // The handshake re-sends a probe update for n0 — one of the snapshot's
+  // own ids, so the final count is unaffected — until it lands, then
+  // stashes THAT proven store instance. The functional assertion below is
+  // strictly observation-only, and the bulk snapshot is sent exactly once.
   await expect(
     page.getByRole('region', { name: '3D network view' }).locator('canvas'),
   ).toBeVisible();
-  await page.evaluate(() => {
-    const w = window as unknown as {
-      __fakeSockets: Array<{ url: string; _open: () => void; _message: (o: unknown) => void }>;
-    };
-    const socks = w.__fakeSockets.filter(s => String(s.url).includes('/ws'));
-    const live = socks[socks.length - 1];
+  // Single-evaluate handshake (its own establishment step, NOT an
+  // assertion poll): open the socket, then re-send the n0 probe with
+  // short waits until the store reflects it, capturing THAT proven
+  // instance on window for the observation poll. All within one evaluate
+  // because the stash and the confirming read must share one module
+  // resolution (see the context above); returns the attempt count.
+  const readinessSends = await page.evaluate(async () => {
+    const w = window as HarnessWindow;
+    const live = w.__activeAppSocket();
     live._open();
+    const mod = (await import('/src/viz3d/useSceneStore.ts')) as { useSceneStore: SceneStoreHandle };
+    const store = mod.useSceneStore;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    for (let attempt = 1; attempt <= 60; attempt++) {
+      w.__activeAppSocket()._message({
+        type: 'node_update',
+        payload: { id: 'n0', position: [0, 0, 0], connections: [], status: 'active' },
+      });
+      await sleep(50);
+      if (store.getState().nodes.length > 0) {
+        w.__sceneStore = store;
+        return attempt;
+      }
+    }
+    throw new Error('Scene pipeline never went live: the n0 readiness probe did not reach the store');
   });
-  await expect
-    .poll(
-      () =>
-        page.evaluate(async () => {
-          const w = window as unknown as {
-            __fakeSockets: Array<{ url: string; _message: (o: unknown) => void }>;
-          };
-          const socks = w.__fakeSockets.filter(s => String(s.url).includes('/ws'));
-          socks[socks.length - 1]._message({
-            type: 'node_update',
-            payload: { id: 'n0', position: [0, 0, 0], connections: [], status: 'active' },
-          });
-          const mod = (await import('/src/viz3d/useSceneStore.ts')) as {
-            useSceneStore: { getState: () => { nodes: unknown[] } };
-          };
-          return mod.useSceneStore.getState().nodes.length;
-        }),
-      { timeout: 20000 },
-    )
-    .toBeGreaterThan(0);
+  expect(readinessSends).toBeGreaterThan(0);
 
-  // Build and inject the snapshot in-page (one network_update message):
-  // 1,000 positioned nodes on a deterministic lattice + 1,500 edges.
+  // Inject the full snapshot EXACTLY ONCE (guarded): 1,000 positioned
+  // nodes on a deterministic lattice + 1,500 edges, one network_update.
   await page.evaluate(() => {
-    const w = window as unknown as {
-      __fakeSockets: Array<{ url: string; _open: () => void; _message: (o: unknown) => void }>;
-    };
-    const socks = w.__fakeSockets.filter(s => String(s.url).includes('/ws'));
-    const live = socks[socks.length - 1];
+    const live = (window as HarnessWindow).__activeAppSocket();
     const nodes = Array.from({ length: 1000 }, (_, i) => ({
       id: `n${i}`,
       position: [(i % 10) * 8, Math.floor((i % 100) / 10) * 8, Math.floor(i / 100) * 8],
@@ -132,16 +177,14 @@ test('1,000-node network: full ingestion, live shell, working interaction afterw
     live._message({ type: 'network_update', payload: { nodes, edges } });
   });
 
-  // Ingestion completes and the store admits exactly the valid records —
-  // read through the SAME Vite-served store module the app graph uses.
+  // Ingestion completes and the store admits exactly the valid records.
+  // Observation-only poll (no side effects) reading the ONE proven store
+  // reference captured above.
   await expect
     .poll(
       () =>
-        page.evaluate(async () => {
-          const mod = (await import('/src/viz3d/useSceneStore.ts')) as {
-            useSceneStore: { getState: () => { nodes: unknown[]; edges: unknown[] } };
-          };
-          const s = mod.useSceneStore.getState();
+        page.evaluate(() => {
+          const s = (window as HarnessWindow).__sceneStore!.getState();
           return { nodes: s.nodes.length, edges: s.edges.length };
         }),
       { timeout: 15000 },
@@ -157,8 +200,9 @@ test('1,000-node network: full ingestion, live shell, working interaction afterw
   await page.getByRole('button', { name: '3D View' }).click();
   await expect(page.getByRole('region', { name: '3D network view' })).toBeVisible();
 
-  // No page errors surfaced during ingestion or the switches (the app's
-  // own bounded diagnostics are console.error-scoped and would show here;
-  // an empty list is the no-crash receipt).
+  // No application diagnostics and no uncaught page errors surfaced during
+  // ingestion or the switches — empty on both channels is the no-crash
+  // receipt (no FPS/quality claim is made).
   expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
 });
