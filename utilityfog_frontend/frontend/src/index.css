@@ -139,7 +139,35 @@ input:focus-visible,
   margin: 0;
 }
 
-.view-retry-button {
+.view-retry-button,
+.view-reload-button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* WebGL capability fallback (Package AL): rendered inside the 3D view
+   region when the probe finds no usable WebGL. Same explicit-class
+   discipline as the boundary fallback; both action buttons meet the
+   44x44 CSS-pixel touch-target floor. */
+.webgl-fallback {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: white;
+  background-color: #1a1a1a;
+  text-align: center;
+  padding: 0 16px;
+}
+
+.webgl-fallback p {
+  margin: 0;
+}
+
+.webgl-use-2d-button,
+.webgl-reprobe-button {
   min-width: 44px;
   min-height: 44px;
 }

@@ -199,47 +199,35 @@ test('keyboard-only journey: tab order, visible focus, Enter/Space activation, t
   await expect(page.getByRole('status').and(page.locator('[aria-atomic="true"]'))).toHaveCount(1);
 });
 
-test('keyboard-only retry loop: every repeated failure restores focus to the new Retry button; the keyboard escape route stays live', async ({ page }) => {
+test('keyboard journey for an unrecoverable chunk failure: Reload application is offered — never a false Retry', async ({ page }) => {
   await setupPage(page);
   await expect(page.getByRole('region', { name: '3D network view' })).toBeVisible();
 
-  // Force the 2D chunk import to fail at the network seam.
-  //
-  // MEASURED PLATFORM LIMIT (this runway, request-log receipt): after a
-  // network-failed dynamic import, Chromium's module map caches the
-  // rejection for that URL — a later import() of the SAME specifier
-  // re-rejects instantly with NO new network request, even after the
-  // route is repaired. So "eventual success after network repair" is
-  // not stageable end-to-end in Chromium without a reload; the
-  // success-side focus contract (region focused only after the child
-  // commit) is locked at the unit seam instead, where fresh factories
-  // give real fresh imports. What IS provable in every engine — and is
-  // the part a stranded keyboard user needs — is the failure loop and
-  // the escape route below.
+  // Force the 2D chunk import to fail at the network seam. MEASURED
+  // (request-log receipt): Chromium's module map caches this failed URL,
+  // so a fresh lazy wrapper cannot recover it — the boundary must offer
+  // reload, not a Retry it cannot honor.
   await page.route('**/NetworkView2D*', route => route.abort());
-  await page.getByRole('button', { name: '2D View' }).click();
-  await expect(page.getByRole('alert')).toContainText('The 2D network view failed to render.');
+  await page.getByRole('button', { name: '2D View', exact: true }).click();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('failed to download');
+  await expect(page.getByRole('button', { name: /Retry/ })).toHaveCount(0);
+  const reload = page.getByRole('button', { name: 'Reload application' });
+  await expect(reload).toBeVisible();
+  const box = (await reload.boundingBox())!;
+  expect(box.width).toBeGreaterThanOrEqual(44);
+  expect(box.height).toBeGreaterThanOrEqual(44);
 
-  // Keyboard-only activation (focus() stands in for tab navigation to
-  // keep the journey engine-stable; the activation itself is a real
-  // keyboard Enter). Each retry fails again: the old Retry unmounts and
-  // focus must be RESTORED to the new Retry button — the keyboard user
-  // stays in the retry loop, never dropped on <body>.
-  const retry = page.getByRole('button', { name: 'Retry 2D network view' });
-  await retry.focus();
+  // Keyboard-only activation. The network is repaired FIRST so the
+  // reloaded document can boot — reload is a recovery ATTEMPT, and the
+  // fallback copy makes no guarantee.
+  await page.unroute('**/NetworkView2D*');
+  await reload.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('alert')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry 2D network view' })).toBeFocused();
-
-  // Second loop iteration behaves identically (bounded, user-paced).
-  await page.keyboard.press('Enter');
-  await expect(page.getByRole('alert')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retry 2D network view' })).toBeFocused();
-
-  // The escape route works by keyboard: the already-loaded 3D view is
-  // reachable and healthy; the failed slot never trapped focus.
-  await page.getByRole('button', { name: '3D View' }).focus();
-  await page.keyboard.press('Enter');
+  await page.waitForLoadState('load');
+  await expect(page.locator('#root')).toBeVisible();
   await expect(page.getByRole('region', { name: '3D network view' })).toBeVisible();
-  await expect(page.getByRole('alert')).toHaveCount(0);
+  // The previously failed view loads in the fresh session.
+  await page.getByRole('button', { name: '2D View', exact: true }).click();
+  await expect(page.getByRole('region', { name: '2D network view' })).toBeVisible();
 });
