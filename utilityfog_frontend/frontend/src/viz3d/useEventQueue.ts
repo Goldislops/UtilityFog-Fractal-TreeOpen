@@ -12,15 +12,30 @@ export function useEventQueue(
 ) {
   const queueRef = useRef<Array<() => void>>([])
   const processingRef = useRef(false)
+  // Lifetime guard: rAF callbacks scheduled while mounted can fire AFTER
+  // unmount, and queued work must never invoke handlers then. Armed on
+  // mount, disarmed (and the queue released) in cleanup; StrictMode's
+  // mount→cleanup→mount cycle re-arms correctly.
+  const activeRef = useRef(false)
+
+  useEffect(() => {
+    activeRef.current = true
+    return () => {
+      activeRef.current = false
+      queueRef.current = []
+    }
+  }, [])
 
   const processQueue = useCallback(async () => {
     if (processingRef.current) return
     processingRef.current = true
 
-    while (queueRef.current.length > 0) {
+    // Re-checked after every awaited frame: an unmount mid-drain stops the
+    // loop at the batch boundary.
+    while (activeRef.current && queueRef.current.length > 0) {
       const batch = queueRef.current.splice(0, 10) // Process in batches of 10
       batch.forEach(fn => fn())
-      
+
       // Allow browser to render
       await new Promise(resolve => requestAnimationFrame(resolve))
     }
@@ -30,6 +45,7 @@ export function useEventQueue(
 
   const enqueueUpdate = useCallback(
     (updateFn: () => void) => {
+      if (!activeRef.current) return
       queueRef.current.push(updateFn)
       if (!processingRef.current) {
         requestAnimationFrame(processQueue)

@@ -147,8 +147,11 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-      - name: Unit tests (Vitest, jsdom — Playwright E2E stays in ui-smoke)
-        run: npm run test:unit
+      - name: Unit tests + coverage contract (Vitest, jsdom — Playwright E2E stays in ui-smoke)
+        # Coverage thresholds gate only the explicitly unit-owned modules
+        # (see vitest.config.ts coverage block); measured stable across
+        # repeated runs, adds ~2s over the plain unit run.
+        run: npm run test:unit:coverage
 
       - name: Budget-script unit tests
         run: npm run test:budget
