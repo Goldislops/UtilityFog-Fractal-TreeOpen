@@ -12,6 +12,7 @@ import {
   summarize,
   checkBudgets,
   machineLine,
+  classifyAssets,
 } from './check-bundle-budget.mjs'
 
 // Populate a freshly created temp dir; on ANY setup failure the created
@@ -179,12 +180,200 @@ test('machine-readable line has the stable shape', () => {
     const line = machineLine(summary, checkBudgets(summary, { js_raw: 100, js_gzip: 100, css_raw: 100, css_gzip: 100 }))
     assert.match(
       line,
-      /^BUNDLE_BUDGET v1 js_raw=\d+ js_gzip=\d+ css_raw=\d+ css_gzip=\d+ total_raw=\d+ total_gzip=\d+ status=(PASS|FAIL)$/,
+      /^BUNDLE_BUDGET v2 js_raw=\d+ js_gzip=\d+ css_raw=\d+ css_gzip=\d+ total_raw=\d+ total_gzip=\d+ status=(PASS|FAIL)$/,
     )
     assert.match(line, /js_raw=40 /)
     assert.match(line, /css_raw=9 /)
     assert.match(line, /status=PASS$/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v2: entry/chunk classification and budgets (Package AH).
+
+function v2Fixture(files, indexHtml) {
+  const dir = mkdtempSync(join(tmpdir(), 'budget-v2-'))
+  populateAssets(dir, files)
+  if (indexHtml !== null) writeFileSync(join(dir, 'index.html'), indexHtml)
+  return dir
+}
+const INDEX = (names) =>
+  '<!doctype html><html><head>' +
+  names.map((n) => `<script type="module" crossorigin src="/assets/${n}"></script>`).join('') +
+  '</head><body></body></html>'
+
+test('v2: single-chunk build classifies as entry-only (no async dimension)', () => {
+  const dir = v2Fixture({ 'index-abc.js': 'x'.repeat(100) }, INDEX(['index-abc.js']))
+  try {
+    const inv = inventoryAssets(join(dir, 'assets'))
+    const c = classifyAssets(dir, inv)
+    assert.deepEqual(c.entry.names, ['index-abc.js'])
+    assert.equal(c.entry.raw, 100)
+    assert.equal(c.asyncCount, 0)
+    assert.equal(c.largestAsync, null)
+    const result = checkBudgets(summarize(inv), undefined, c)
+    assert.equal(result.pass, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: several async chunks — largest identified by raw size', () => {
+  const dir = v2Fixture(
+    {
+      'index-e.js': 'e'.repeat(50),
+      'chunk-a.js': 'a'.repeat(200),
+      'chunk-b.js': 'b'.repeat(900),
+      'chunk-c.js': 'c'.repeat(400),
+    },
+    INDEX(['index-e.js']),
+  )
+  try {
+    const c = classifyAssets(dir, inventoryAssets(join(dir, 'assets')))
+    assert.equal(c.asyncCount, 3)
+    assert.equal(c.largestAsync.name, 'chunk-b.js')
+    assert.equal(c.largestAsync.raw, 900)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: missing index.html fails closed', () => {
+  const dir = v2Fixture({ 'index-e.js': 'e' }, null)
+  try {
+    assert.throws(
+      () => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))),
+      /missing built index\.html/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: index.html referencing a missing entry asset fails closed', () => {
+  const dir = v2Fixture({ 'chunk-a.js': 'a' }, INDEX(['index-gone.js']))
+  try {
+    assert.throws(
+      () => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))),
+      /references a missing asset: index-gone\.js/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: malformed script references fail closed', () => {
+  const dir = v2Fixture(
+    { 'index-e.js': 'e' },
+    '<script type="module" src="http://evil.example/outside.js"></script>',
+  )
+  try {
+    assert.throws(
+      () => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))),
+      /malformed script reference/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: index.html with no script reference at all fails closed', () => {
+  const dir = v2Fixture({ 'index-e.js': 'e' }, '<!doctype html><html><body></body></html>')
+  try {
+    assert.throws(
+      () => classifyAssets(dir, inventoryAssets(join(dir, 'assets'))),
+      /references no entry script/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: duplicate references to the same entry count once', () => {
+  const dir = v2Fixture(
+    { 'index-e.js': 'e'.repeat(60) },
+    INDEX(['index-e.js', 'index-e.js']),
+  )
+  try {
+    const c = classifyAssets(dir, inventoryAssets(join(dir, 'assets')))
+    assert.deepEqual(c.entry.names, ['index-e.js'])
+    assert.equal(c.entry.raw, 60)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: windows/posix path handling — classification works from a backslash dist path', () => {
+  const dir = v2Fixture({ 'index-e.js': 'e' }, INDEX(['index-e.js']))
+  try {
+    // join() produced the platform path; feeding an explicitly
+    // forward-slashed variant must classify identically (the HTML refs are
+    // always forward-slash).
+    const alt = dir.split('\\').join('/')
+    const c = classifyAssets(alt, inventoryAssets(join(dir, 'assets')))
+    assert.deepEqual(c.entry.names, ['index-e.js'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: exact limit passes and limit+1 fails, for entry and largest-async budgets', () => {
+  const budgets = {
+    js_raw: 10_000, js_gzip: 10_000, css_raw: 10_000, css_gzip: 10_000,
+    entry_raw: 100, entry_gzip: 10_000, largest_async_raw: 200, largest_async_gzip: 10_000,
+  }
+  const mk = (entryBytes, chunkBytes) => {
+    const dir = v2Fixture(
+      { 'index-e.js': 'e'.repeat(entryBytes), 'chunk-a.js': 'a'.repeat(chunkBytes) },
+      INDEX(['index-e.js']),
+    )
+    const inv = inventoryAssets(join(dir, 'assets'))
+    const result = checkBudgets(summarize(inv), budgets, classifyAssets(dir, inv))
+    rmSync(dir, { recursive: true, force: true })
+    return result
+  }
+  assert.equal(mk(100, 200).pass, true)   // both exactly at limit
+  const overEntry = mk(101, 200)
+  assert.equal(overEntry.pass, false)
+  assert.match(overEntry.failures.join(';'), /entry_raw 101 bytes exceeds budget 100/)
+  const overChunk = mk(100, 201)
+  assert.equal(overChunk.pass, false)
+  assert.match(overChunk.failures.join(';'), /largest_async_raw 201 bytes exceeds budget 200/)
+})
+
+test('v2: machine line is stable, versioned and carries the chunk dimensions', () => {
+  const dir = v2Fixture(
+    { 'index-e.js': 'e'.repeat(10), 'chunk-a.js': 'a'.repeat(20) },
+    INDEX(['index-e.js']),
+  )
+  try {
+    const inv = inventoryAssets(join(dir, 'assets'))
+    const c = classifyAssets(dir, inv)
+    const line = machineLine(summarize(inv), { pass: true }, c)
+    assert.match(
+      line,
+      /^BUNDLE_BUDGET v2 js_raw=\d+ js_gzip=\d+ css_raw=\d+ css_gzip=\d+ entry_raw=10 entry_gzip=\d+ async_chunks=1 largest_async_raw=20 largest_async_gzip=\d+ total_raw=\d+ total_gzip=\d+ status=PASS$/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('v2: gzip settings are deterministic (same bytes, same gzip size, twice)', () => {
+  const content = 'const x = 1;\n'.repeat(500)
+  const a = gzipSync(Buffer.from(content), { level: 9 }).length
+  const b = gzipSync(Buffer.from(content), { level: 9 }).length
+  assert.equal(a, b)
+  const dir1 = v2Fixture({ 'index-e.js': content }, INDEX(['index-e.js']))
+  const dir2 = v2Fixture({ 'index-e.js': content }, INDEX(['index-e.js']))
+  try {
+    const g1 = inventoryAssets(join(dir1, 'assets'))[0].gzip
+    const g2 = inventoryAssets(join(dir2, 'assets'))[0].gzip
+    assert.equal(g1, g2)
+  } finally {
+    rmSync(dir1, { recursive: true, force: true })
+    rmSync(dir2, { recursive: true, force: true })
   }
 })
