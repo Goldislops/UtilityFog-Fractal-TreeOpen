@@ -1,4 +1,5 @@
 import { test, expect, Page } from '@playwright/test';
+import { waitForApplicationSocket } from './helpers/waitForApplicationSocket';
 
 // Package AK: responsive + keyboard contracts (issue #2 slice). Semantic
 // measurements only — scrollWidth/clientWidth, bounding boxes, focus and
@@ -51,19 +52,20 @@ async function setupPage(page: Page) {
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
-  await page.waitForFunction(() =>
-    (window as unknown as { __fakeSockets: Array<{ url: string }> }).__fakeSockets.some(s =>
-      String(s.url).includes('/ws'),
-    ),
-  );
-  await page.evaluate(
-    () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-  );
+  // Portability (Package AJ): the SHARED semantic gate — active
+  // application socket plus the paint/effect turn.
+  await waitForApplicationSocket(page);
 }
 
 const VIEWPORTS = [
   { name: 'phone-320', width: 320, height: 568 },
   { name: 'phone-390', width: 390, height: 844 },
+  // Short-landscape phones (Package AK amendment): stacked flow CANNOT
+  // fit these heights, so the scrolling-container contract carries the
+  // reachability proof below.
+  { name: 'landscape-667', width: 667, height: 375 },
+  { name: 'landscape-740', width: 740, height: 360 },
+  { name: 'landscape-844', width: 844, height: 390 },
   { name: 'tablet-768', width: 768, height: 1024 },
   { name: 'desktop', width: 1280, height: 800 },
 ];
@@ -102,6 +104,37 @@ for (const viewport of VIEWPORTS) {
     const region = page.getByRole('region');
     const regionBox = (await region.boundingBox())!;
     expect(regionBox.height, `${viewport.name} view height`).toBeGreaterThanOrEqual(200);
+
+    // Reachability by scrolling (Package AK amendment): below 768px the
+    // app container is the vertical scroller. Short-landscape viewports
+    // CANNOT fit the stacked flow, so there the container must actually
+    // overflow — and every shell piece plus the active view must be
+    // reachable by scrolling it.
+    if (viewport.width < 768) {
+      const container = page.locator('.app-container');
+      const scroll = await container.evaluate(el => ({
+        scrollable: el.scrollHeight > el.clientHeight,
+        overflowY: getComputedStyle(el).overflowY,
+      }));
+      expect(scroll.overflowY, `${viewport.name} container overflow-y`).toBe('auto');
+      if (viewport.height < 500) {
+        expect(scroll.scrollable, `${viewport.name} short viewport must scroll`).toBe(true);
+      }
+      const reachables = [
+        ['controls', button3d],
+        ['feed', page.getByRole('log', { name: 'Event feed' })],
+        ['badge', page.getByRole('status').and(page.locator('[aria-atomic="true"]'))],
+        ['active view', region],
+      ] as const;
+      for (const [label, target] of reachables) {
+        await target.scrollIntoViewIfNeeded();
+        const box = (await target.boundingBox())!;
+        expect(box.y, `${viewport.name} ${label} reachable (top above fold)`).toBeLessThan(
+          viewport.height,
+        );
+        expect(box.y + box.height, `${viewport.name} ${label} reachable (bottom on screen)`).toBeGreaterThan(0);
+      }
+    }
 
     // Both regions reachable: switch to 2D and back.
     await button2d.click();
@@ -164,4 +197,49 @@ test('keyboard-only journey: tab order, visible focus, Enter/Space activation, t
 
   // Exactly one live status region after all the switching.
   await expect(page.getByRole('status').and(page.locator('[aria-atomic="true"]'))).toHaveCount(1);
+});
+
+test('keyboard-only retry loop: every repeated failure restores focus to the new Retry button; the keyboard escape route stays live', async ({ page }) => {
+  await setupPage(page);
+  await expect(page.getByRole('region', { name: '3D network view' })).toBeVisible();
+
+  // Force the 2D chunk import to fail at the network seam.
+  //
+  // MEASURED PLATFORM LIMIT (this runway, request-log receipt): after a
+  // network-failed dynamic import, Chromium's module map caches the
+  // rejection for that URL — a later import() of the SAME specifier
+  // re-rejects instantly with NO new network request, even after the
+  // route is repaired. So "eventual success after network repair" is
+  // not stageable end-to-end in Chromium without a reload; the
+  // success-side focus contract (region focused only after the child
+  // commit) is locked at the unit seam instead, where fresh factories
+  // give real fresh imports. What IS provable in every engine — and is
+  // the part a stranded keyboard user needs — is the failure loop and
+  // the escape route below.
+  await page.route('**/NetworkView2D*', route => route.abort());
+  await page.getByRole('button', { name: '2D View' }).click();
+  await expect(page.getByRole('alert')).toContainText('The 2D network view failed to render.');
+
+  // Keyboard-only activation (focus() stands in for tab navigation to
+  // keep the journey engine-stable; the activation itself is a real
+  // keyboard Enter). Each retry fails again: the old Retry unmounts and
+  // focus must be RESTORED to the new Retry button — the keyboard user
+  // stays in the retry loop, never dropped on <body>.
+  const retry = page.getByRole('button', { name: 'Retry 2D network view' });
+  await retry.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry 2D network view' })).toBeFocused();
+
+  // Second loop iteration behaves identically (bounded, user-paced).
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry 2D network view' })).toBeFocused();
+
+  // The escape route works by keyboard: the already-loaded 3D view is
+  // reachable and healthy; the failed slot never trapped focus.
+  await page.getByRole('button', { name: '3D View' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('region', { name: '3D network view' })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });
