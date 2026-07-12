@@ -35,11 +35,16 @@ export function isValidPosition(p: unknown): p is [number, number, number] {
 /// renderer. A previously unknown node with a valid position is therefore
 /// admitted as supplied — no missing fields are invented.
 export function reconcileNode(
-  incoming: NetworkNode,
+  incoming: unknown,
   existing: NetworkNode | undefined,
 ): NetworkNode | null {
-  const merged = existing ? { ...existing, ...incoming } : incoming
-  if (isValidPosition((incoming as { position?: unknown }).position)) {
+  if (!incoming || typeof incoming !== 'object') return null
+  // The candidate is only trusted after the runtime position validation
+  // below (id is checked by callers); status/connections stay tolerated
+  // per the source-verified renderer-requirements evidence.
+  const candidate = incoming as Partial<NetworkNode> & { position?: unknown }
+  const merged = (existing ? { ...existing, ...candidate } : candidate) as NetworkNode
+  if (isValidPosition(candidate.position)) {
     return merged
   }
   if (existing && isValidPosition(existing.position)) {
@@ -55,7 +60,7 @@ export function reconcileNode(
 /// always by id.
 export function applyNodeUpdate(
   previous: NetworkNode[],
-  incoming: NetworkNode,
+  incoming: unknown,
 ): NetworkNode[] {
   const id = (incoming as { id?: unknown } | null | undefined)?.id
   if (typeof id !== 'string') return previous
@@ -74,7 +79,7 @@ export function applyNodeUpdate(
 /// against the previously known nodes so a bulk update cannot smuggle
 /// invalid positions past the boundary either.
 export function sanitizeNodeList(
-  incoming: NetworkNode[],
+  incoming: unknown,
   previous: NetworkNode[],
 ): NetworkNode[] {
   if (!Array.isArray(incoming)) return previous

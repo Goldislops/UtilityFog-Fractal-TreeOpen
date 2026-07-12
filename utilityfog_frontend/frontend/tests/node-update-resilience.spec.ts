@@ -1,5 +1,58 @@
 import { test, expect, Page } from '@playwright/test';
 
+// ---------------------------------------------------------------------------
+// Typed test-harness surface (no `any`): the in-page fake socket and the
+// harness slots this spec pins onto window. Types are erased at runtime, so
+// page.evaluate closures may reference them freely.
+interface FakeSocketHarness {
+  url: string;
+  readyState: number;
+  sent: string[];
+  onopen: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: string }) => void) | null;
+  onclose: ((ev: unknown) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  _open: () => void;
+  _close: () => void;
+  _message: (obj: unknown) => void;
+  _messageRaw: (raw: string) => void;
+}
+interface SimClientLike {
+  connect: () => void;
+  disconnect: () => void;
+  on: (event: string, cb: (data?: unknown) => void) => void;
+  off: (event: string, cb: (data?: unknown) => void) => void;
+  send: (data: unknown) => void;
+  readonly isConnected: boolean;
+}
+interface ExportCapture {
+  revoked: string[];
+  sequence: string[];
+  download: string;
+  href: string;
+  text: string;
+  blob?: Blob;
+}
+interface LifecycleHarness {
+  events: string[];
+  payloads: Array<{ channel: string; payload: unknown }>;
+  client: SimClientLike;
+  sockets: () => FakeSocketHarness[];
+  removable?: (p?: unknown) => void;
+}
+type HarnessWindow = Window &
+  typeof globalThis & {
+    __fakeSockets: FakeSocketHarness[];
+    __throwNextConstruction?: boolean;
+    __h: LifecycleHarness;
+    __exportCapture: ExportCapture;
+    __cap: ExportCapture;
+    __pwned?: boolean;
+    __pwned2?: boolean;
+  };
+// ---------------------------------------------------------------------------
+
+
 // Positionless/malformed node_update resilience (Package N).
 //
 // Reproduced defect (combined-lab, 2026-07-11): a node_update whose payload
@@ -16,7 +69,7 @@ import { test, expect, Page } from '@playwright/test';
 
 async function setupPage(page: Page) {
   await page.addInitScript(() => {
-    const w = window as any;
+    const w = window as HarnessWindow;
     w.__fakeSockets = [];
     class FakeWebSocket {
       static CONNECTING = 0;
@@ -57,23 +110,23 @@ async function setupPage(page: Page) {
       construct(target, args) {
         const url = String(args[0] ?? '');
         if (url.includes('/ws')) return new target(url);
-        return new (RealWebSocket as any)(...args);
+        return new RealWebSocket(...(args as ConstructorParameters<typeof WebSocket>));
       },
-    });
+    }) as unknown as typeof WebSocket;
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
   await page.evaluate(() => {
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     socks[socks.length - 1]._open();
   });
 }
 
 const inject = (page: Page, type: string, payload: unknown) =>
   page.evaluate(({ type, payload }) => {
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     socks[socks.length - 1]._message({ type, payload });
   }, { type, payload });
 
@@ -87,7 +140,7 @@ const inject = (page: Page, type: string, payload: unknown) =>
 const storeNodes = (page: Page) =>
   page.evaluate(async () => {
     const mod = await import('/src/viz3d/useSceneStore.ts');
-    return mod.useSceneStore.getState().nodes as Array<{ id: string; position: unknown }>;
+    return mod.useSceneStore.getState().nodes as Array<{ id: string; position: unknown; connections?: unknown; status?: unknown }>;
   });
 const storeUpdate = (page: Page, payload: unknown) =>
   page.evaluate(async (payload) => {
@@ -142,7 +195,7 @@ test('existing node + positionless update: no error, last valid position preserv
   await page.waitForTimeout(150);
   const node = (await storeNodes(page)).find(n => n.id === 'n-keep')!;
   expect(node.position).toEqual([7, 8, 9]); // last valid preserved
-  expect((node as any).status).toBe('error'); // other fields updated
+  expect(node.status).toBe('error'); // other fields updated
   await appMounted(page);
   expect(errors).toHaveLength(0);
 });
@@ -189,7 +242,7 @@ test('malformed positions never crash: null, string, wrong lengths, non-numbers'
 test('partial status-only update preserves position AND connections (merge semantics)', async ({ page }) => {
   await storeUpdate(page, { id: 'n-merge', position: [1, 2, 3], connections: ['a', 'b'], status: 'active' });
   await storeUpdate(page, { id: 'n-merge', status: 'error' }); // partial, no position/connections
-  const node = (await storeNodes(page)).find(n => n.id === 'n-merge') as any;
+  const node = (await storeNodes(page)).find(n => n.id === 'n-merge')!;
   expect(node.position).toEqual([1, 2, 3]);
   expect(node.connections).toEqual(['a', 'b']); // omitted field survives
   expect(node.status).toBe('error');
@@ -198,7 +251,7 @@ test('partial status-only update preserves position AND connections (merge seman
 test('valid-position partial update preserves omitted fields', async ({ page }) => {
   await storeUpdate(page, { id: 'n-move', position: [1, 1, 1], connections: ['x'], status: 'active' });
   await storeUpdate(page, { id: 'n-move', position: [9, 9, 9] }); // no connections/status
-  const node = (await storeNodes(page)).find(n => n.id === 'n-move') as any;
+  const node = (await storeNodes(page)).find(n => n.id === 'n-move')!;
   expect(node.position).toEqual([9, 9, 9]);
   expect(node.connections).toEqual(['x']);
   expect(node.status).toBe('active');
@@ -209,7 +262,7 @@ test('unknown node with valid position but missing connections is admitted (rend
   page.on('pageerror', (e) => errors.push(e.message));
   await storeUpdate(page, { id: 'n-min', position: [2, 2, 2] }); // no connections/status
   await page.waitForTimeout(300); // let the 3D effect render it
-  const node = (await storeNodes(page)).find(n => n.id === 'n-min') as any;
+  const node = (await storeNodes(page)).find(n => n.id === 'n-min')!;
   expect(node.position).toEqual([2, 2, 2]);
   expect(errors).toHaveLength(0); // renderers tolerate missing optional fields
   await appMounted(page);
@@ -226,7 +279,7 @@ test('bulk network_update: null/undefined/primitive payloads never throw', async
   // a NEIGHBORING fragility owned and fixed by #318/#320 (documented in
   // the PR body), not by this PR's files.
   for (const payload of [null, undefined, 42, 'garbage', { nodes: null, edges: null }]) {
-    await storeSetNetwork(page, (payload as any)?.nodes, (payload as any)?.edges);
+    await storeSetNetwork(page, (payload as { nodes?: unknown } | null | undefined)?.nodes, (payload as { edges?: unknown } | null | undefined)?.edges);
   }
   await inject(page, 'network_update', {}); // object-shaped, side-free
   await inject(page, 'network_update', { nodes: null, edges: null });
@@ -269,8 +322,8 @@ test('rapid mixed valid/invalid updates do not duplicate nodes', async ({ page }
   page.on('pageerror', (e) => errors.push(e.message));
   await page.evaluate(async () => {
     const mod = await import('/src/viz3d/useSceneStore.ts');
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     const s = socks[socks.length - 1];
     for (let n = 0; n < 40; n++) {
       // Alternate valid and invalid updates for the SAME node id, through
@@ -321,13 +374,13 @@ test('2D↔3D switching stays functional after malformed bursts (both ingestion 
 
 test('invalid data causes no reconnect and no duplicate socket lineage', async ({ page }) => {
   const before = await page.evaluate(() =>
-    (window as any).__fakeSockets.filter((s: any) => String(s.url).includes('/ws')).length);
+    (window as HarnessWindow).__fakeSockets.filter((s) => String(s.url).includes('/ws')).length);
   for (let i = 0; i < 10; i++) {
     await inject(page, 'node_update', { id: `spam-${i}`, position: null });
   }
   await page.waitForTimeout(400);
   const after = await page.evaluate(() =>
-    (window as any).__fakeSockets.filter((s: any) => String(s.url).includes('/ws')).length);
+    (window as HarnessWindow).__fakeSockets.filter((s) => String(s.url).includes('/ws')).length);
   expect(after).toBe(before); // transport untouched — no reconnect churn
   await appMounted(page);
 });

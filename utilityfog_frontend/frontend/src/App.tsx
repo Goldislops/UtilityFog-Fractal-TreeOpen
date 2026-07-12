@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { useState, useEffect } from 'react'
 import NetworkView3D from './viz3d/NetworkView3D'
 import NetworkView2D from './components/NetworkView2D'
@@ -6,7 +7,7 @@ import EventFeed from './components/EventFeed'
 import { SimBridgeClient } from './ws/SimBridgeClient'
 
 // Robust WS URL computation
-const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
+const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
 
 function computeDefaultWsUrl(): string {
   const origin = window.location.origin; // http(s)://host[:port]

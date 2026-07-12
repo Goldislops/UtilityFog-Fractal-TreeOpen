@@ -1,5 +1,58 @@
 import { test, expect, Page } from '@playwright/test';
 
+// ---------------------------------------------------------------------------
+// Typed test-harness surface (no `any`): the in-page fake socket and the
+// harness slots this spec pins onto window. Types are erased at runtime, so
+// page.evaluate closures may reference them freely.
+interface FakeSocketHarness {
+  url: string;
+  readyState: number;
+  sent: string[];
+  onopen: ((ev: unknown) => void) | null;
+  onmessage: ((ev: { data: string }) => void) | null;
+  onclose: ((ev: unknown) => void) | null;
+  onerror: ((ev: unknown) => void) | null;
+  _open: () => void;
+  _close: () => void;
+  _message: (obj: unknown) => void;
+  _messageRaw: (raw: string) => void;
+}
+interface SimClientLike {
+  connect: () => void;
+  disconnect: () => void;
+  on: (event: string, cb: (data?: unknown) => void) => void;
+  off: (event: string, cb: (data?: unknown) => void) => void;
+  send: (data: unknown) => void;
+  readonly isConnected: boolean;
+}
+interface ExportCapture {
+  revoked: string[];
+  sequence: string[];
+  download: string;
+  href: string;
+  text: string;
+  blob?: Blob;
+}
+interface LifecycleHarness {
+  events: string[];
+  payloads: Array<{ channel: string; payload: unknown }>;
+  client: SimClientLike;
+  sockets: () => FakeSocketHarness[];
+  removable?: (p?: unknown) => void;
+}
+type HarnessWindow = Window &
+  typeof globalThis & {
+    __fakeSockets: FakeSocketHarness[];
+    __throwNextConstruction?: boolean;
+    __h: LifecycleHarness;
+    __exportCapture: ExportCapture;
+    __cap: ExportCapture;
+    __pwned?: boolean;
+    __pwned2?: boolean;
+  };
+// ---------------------------------------------------------------------------
+
+
 // EventFeed OPERATIONS tests (Package J — filtering, search, summary, clear,
 // JSON export). Same in-page FakeWebSocket harness as the contract spec;
 // fixed benign JSON fixtures; nothing external.
@@ -12,7 +65,7 @@ import { test, expect, Page } from '@playwright/test';
 
 async function setupPage(page: Page) {
   await page.addInitScript(() => {
-    const w = window as any;
+    const w = window as HarnessWindow;
     w.__fakeSockets = [];
     class FakeWebSocket {
       static CONNECTING = 0;
@@ -48,9 +101,9 @@ async function setupPage(page: Page) {
       construct(target, args) {
         const url = String(args[0] ?? '');
         if (url.includes('/ws')) return new target(url);
-        return new (RealWebSocket as any)(...args);
+        return new RealWebSocket(...(args as ConstructorParameters<typeof WebSocket>));
       },
-    });
+    }) as unknown as typeof WebSocket;
   });
   await page.goto('/');
   await expect(page.locator('#root')).toBeVisible();
@@ -58,8 +111,8 @@ async function setupPage(page: Page) {
 
 const inject = (page: Page, type: string, payload: unknown) =>
   page.evaluate(({ type, payload }) => {
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     socks[socks.length - 1]._message({ type, payload });
   }, { type, payload });
 
@@ -83,10 +136,10 @@ const injectFour = async (page: Page) => {
 // Install export-capture stubs (blob text, anchor download/href, revocations)
 const armExportCapture = (page: Page) =>
   page.evaluate(() => {
-    const w = window as any;
+    const w = window as HarnessWindow;
     // Ordered event sequence proves the download click happens BEFORE the
     // (deferred) revocation — no fixed sleeps; tests poll for 'revoke'.
-    w.__exportCapture = { revoked: [] as string[], sequence: [] as string[], download: '', href: '', text: '' };
+    w.__exportCapture = { revoked: [], sequence: [], download: '', href: '', text: '' };
     URL.createObjectURL = ((blob: Blob) => {
       w.__exportCapture.blob = blob;
       w.__exportCapture.sequence.push('create');
@@ -104,15 +157,15 @@ const armExportCapture = (page: Page) =>
   });
 const awaitRevocation = async (page: Page) => {
   await expect
-    .poll(async () => page.evaluate(() => (window as any).__exportCapture.revoked.length))
+    .poll(async () => page.evaluate(() => (window as HarnessWindow).__exportCapture.revoked.length))
     .toBe(1);
-  const seq: string[] = await page.evaluate(() => (window as any).__exportCapture.sequence);
+  const seq = await page.evaluate(() => (window as HarnessWindow).__exportCapture.sequence);
   expect(seq.indexOf('click')).toBeGreaterThanOrEqual(0);
   expect(seq.indexOf('click')).toBeLessThan(seq.indexOf('revoke'));
 };
 const readExport = (page: Page) =>
   page.evaluate(async () => {
-    const c = (window as any).__exportCapture;
+    const c = (window as HarnessWindow).__exportCapture;
     return {
       download: c.download,
       href: c.href,
@@ -228,8 +281,8 @@ test('the 50-event retained cap holds regardless of filters', async ({ page }) =
     await chan(page, off).click();
   }
   await page.evaluate(() => {
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     const s = socks[socks.length - 1];
     for (let n = 1; n <= 55; n++) s._message({ type: 'simulation_event', payload: { seq: `m-${n}` } });
   });
@@ -262,7 +315,7 @@ test('export: visible-only, newest-first, schema/version, full payloads, revoked
   expect(result.download).toBe('event-feed-export.json');
   expect(result.href).toBe('blob:capture-1');
   await awaitRevocation(page);
-  expect(await page.evaluate(() => (window as any).__exportCapture.revoked)).toContain('blob:capture-1');
+  expect(await page.evaluate(() => (window as HarnessWindow).__exportCapture.revoked)).toContain('blob:capture-1');
   expect(result.doc.schema).toBe('utilityfog.event-feed-export');
   expect(result.doc.version).toBe(1);
   // Visible-only (edge_update excluded), newest first.
@@ -296,8 +349,8 @@ test('export composes with search + filter and is disabled at zero visible', asy
 test('export normalizes absent payloads to null and preserves falsy payloads distinctly', async ({ page }) => {
   // Injection order (oldest→newest): absent, null, false, 0, ''.
   await page.evaluate(() => {
-    const w = window as any;
-    const socks = w.__fakeSockets.filter((s: any) => String(s.url).includes('/ws'));
+    const w = window as HarnessWindow;
+    const socks = w.__fakeSockets.filter((s) => String(s.url).includes('/ws'));
     const s = socks[socks.length - 1];
     s._message({ type: 'simulation_event' }); // payload property absent
     s._message({ type: 'simulation_event', payload: null });

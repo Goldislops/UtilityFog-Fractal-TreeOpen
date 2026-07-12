@@ -1,7 +1,7 @@
 interface SimEvent {
   type: string
   timestamp: number
-  data: any
+  data: unknown
 }
 
 interface NetworkNode {
@@ -34,7 +34,7 @@ interface NetworkEdge {
 export class SimBridgeClient {
   private ws: WebSocket | null = null
   private url: string
-  private listeners: Map<string, Set<(data?: any) => void>> = new Map()
+  private listeners: Map<string, Set<(data?: unknown) => void>> = new Map()
   private reconnectInterval: number
   private reconnectTimer: number | null = null
   private shouldReconnect = false
@@ -72,18 +72,18 @@ export class SimBridgeClient {
     }
   }
 
-  on(event: string, callback: (data?: any) => void): void {
+  on(event: string, callback: (data?: unknown) => void): void {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, new Set())
     }
     this.listeners.get(event)!.add(callback)
   }
 
-  off(event: string, callback: (data?: any) => void): void {
+  off(event: string, callback: (data?: unknown) => void): void {
     this.listeners.get(event)?.delete(callback)
   }
 
-  send(data: any): void {
+  send(data: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data))
     }
@@ -120,7 +120,7 @@ export class SimBridgeClient {
       // Parse inside the catch boundary; dispatch outside it. A listener
       // exception must surface through the page error channel, not be
       // swallowed and mislabelled as a JSON parsing failure.
-      let data: any
+      let data: unknown
       try {
         data = JSON.parse(event.data)
       } catch (error) {
@@ -147,26 +147,34 @@ export class SimBridgeClient {
     }
   }
 
-  private handleMessage(data: any): void {
-    switch (data.type) {
+  private handleMessage(data: unknown): void {
+    // External-data boundary: parsed JSON is unknown until narrowed. A
+    // non-object message (null, number, string) is logged and dropped
+    // instead of dereferencing .type on it.
+    if (!data || typeof data !== 'object') {
+      console.log('Unknown message type:', data)
+      return
+    }
+    const msg = data as { type?: unknown; payload?: unknown }
+    switch (msg.type) {
       case 'simulation_event':
-        this.emit('simulation_event', data.payload)
+        this.emit('simulation_event', msg.payload)
         break
       case 'network_update':
-        this.emit('network_update', data.payload)
+        this.emit('network_update', msg.payload)
         break
       case 'node_update':
-        this.emit('node_update', data.payload)
+        this.emit('node_update', msg.payload)
         break
       case 'edge_update':
-        this.emit('edge_update', data.payload)
+        this.emit('edge_update', msg.payload)
         break
       default:
-        console.log('Unknown message type:', data.type)
+        console.log('Unknown message type:', msg.type)
     }
   }
 
-  private emit(event: string, data?: any): void {
+  private emit(event: string, data?: unknown): void {
     this.listeners.get(event)?.forEach(callback => callback(data))
   }
 
