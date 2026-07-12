@@ -26,6 +26,11 @@ vi.mock('../src/components/NetworkView2D', () => ({
   },
 }))
 
+// Package AL: jsdom has no WebGL, so the capability gate would fail
+// closed and block the mocked 3D view. These suites test view
+// lifecycle, not capability - the probe is pinned supported here.
+vi.mock('../src/viz3d/webglSupport', () => ({ probeWebGLSupport: () => true }))
+
 class FakeWebSocket {
   static CONNECTING = 0
   static OPEN = 1
