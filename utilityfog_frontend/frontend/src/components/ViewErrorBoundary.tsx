@@ -23,6 +23,10 @@ import type { ErrorInfo, ReactNode } from 'react'
 interface ViewErrorBoundaryProps {
   // Names the guarded surface in the fallback message ("3D network view").
   viewLabel: string
+  // Invoked when the user clicks Retry, BEFORE the boundary clears its
+  // failed state — the owner can mint fresh lazy-loaded children so a
+  // cached chunk-load rejection is retried (Package AG).
+  onRetry?: () => void
   children: ReactNode
 }
 
@@ -48,6 +52,7 @@ export default class ViewErrorBoundary extends Component<
   }
 
   handleRetry = (): void => {
+    this.props.onRetry?.()
     this.setState({ failed: false })
   }
 

@@ -79,93 +79,109 @@ afterEach(() => {
 })
 
 describe('view failure containment', () => {
-  it('a throwing 3D view shows an accessible fallback while the shell survives', () => {
+  it('a throwing 3D view shows an accessible fallback while the shell survives', async () => {
     failures.v3d = true
     render(<App />)
-    const alert = screen.getByRole('alert')
+    const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('The 3D network view failed to render.')
     expect(screen.queryByTestId('view-3d')).not.toBeInTheDocument()
     shellAlive()
     expect(reportCount()).toBe(1) // reported once, not swallowed
   })
 
-  it('a throwing 2D view is contained identically', () => {
+  it('a throwing 2D view is contained identically', async () => {
     failures.v2d = true
     render(<App />)
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
-    expect(screen.getByRole('alert')).toHaveTextContent('The 2D network view failed to render.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('The 2D network view failed to render.')
     shellAlive()
     expect(reportCount()).toBe(1)
   })
 
-  it('connection state survives a view failure (badge keeps announcing)', () => {
+  it('connection state survives a view failure (badge keeps announcing)', async () => {
     failures.v3d = true
     render(<App />)
+    await screen.findByRole('alert') // failure settled: the transient loading status is gone
     act(() => live().serverOpen())
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
     expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(FakeWebSocket.instances).toHaveLength(1) // no hidden reconnect
   })
 
-  it('switching away recovers: the healthy view renders with no fallback', () => {
+  it('switching away recovers: the healthy view renders with no fallback', async () => {
     failures.v3d = true
     render(<App />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    expect(await screen.findByTestId('view-2d')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByTestId('view-2d')).toBeInTheDocument()
   })
 
-  it('switching back after the failure clears remounts a healthy view (boundary reset)', () => {
+  it('switching back after the failure clears remounts a healthy view (boundary reset)', async () => {
     failures.v3d = true
     render(<App />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
     failures.v3d = false
     fireEvent.click(screen.getByRole('button', { name: '3D View' }))
+    expect(await screen.findByTestId('view-3d')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByTestId('view-3d')).toBeInTheDocument()
   })
 
-  it('explicit retry remounts only the failed view', () => {
+  it('explicit retry remounts only the failed view', async () => {
     failures.v3d = true
     render(<App />)
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
     failures.v3d = false
     fireEvent.click(screen.getByRole('button', { name: 'Retry 3D network view' }))
+    expect(await screen.findByTestId('view-3d')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByTestId('view-3d')).toBeInTheDocument()
     shellAlive()
   })
 
-  it('repeated failure stays bounded: each retry yields one fallback and one report — no loop', () => {
+  it('repeated failure stays bounded: each retry yields one fallback and one report — no loop', async () => {
     failures.v3d = true
     render(<App />)
+    await screen.findByRole('alert')
     expect(reportCount()).toBe(1)
     fireEvent.click(screen.getByRole('button', { name: 'Retry 3D network view' })) // still failing
+    await screen.findByRole('alert')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(reportCount()).toBe(2) // one more failure, one more report — user-paced, no retry loop
     fireEvent.click(screen.getByRole('button', { name: 'Retry 3D network view' }))
+    await screen.findByRole('alert')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(reportCount()).toBe(3)
   })
 
-  it('successful views never show the fallback', () => {
+  it('explicit retry recovers the 2D view identically (fresh lazy instance)', async () => {
+    failures.v2d = true
     render(<App />)
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByTestId('view-3d')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    await screen.findByRole('alert')
+    failures.v2d = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry 2D network view' }))
+    expect(await screen.findByTestId('view-2d')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getByTestId('view-2d')).toBeInTheDocument()
   })
 
-  it('StrictMode: single fallback, singular connection lifecycle, no duplicate live regions', () => {
+  it('successful views never show the fallback', async () => {
+    render(<App />)
+    expect(await screen.findByTestId('view-3d')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    expect(await screen.findByTestId('view-2d')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('StrictMode: single fallback, singular connection lifecycle, no duplicate live regions', async () => {
     failures.v3d = true
     render(
       <StrictMode>
         <App />
       </StrictMode>,
     )
+    await screen.findByRole('alert')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(FakeWebSocket.instances).toHaveLength(2) // documented dev-mode double-mount artifact
     act(() => live().serverOpen())
@@ -176,9 +192,10 @@ describe('view failure containment', () => {
 })
 
 describe('AB audit amendments', () => {
-  it('the single diagnostic carries the error AND the locating componentStack', () => {
+  it('the single diagnostic carries the error AND the locating componentStack', async () => {
     failures.v3d = true
     render(<App />)
+    await screen.findByRole('alert')
     const reports = boundaryReports()
     expect(reports).toHaveLength(1)
     const [, error, componentStack] = reports[0]
@@ -191,10 +208,10 @@ describe('AB audit amendments', () => {
     expect(vi.mocked(console.error).mock.calls.length).toBeGreaterThanOrEqual(reports.length)
   })
 
-  it('the Retry control is an explicit type="button" (never an implicit submit)', () => {
+  it('the Retry control is an explicit type="button" (never an implicit submit)', async () => {
     failures.v3d = true
     render(<App />)
-    expect(screen.getByRole('button', { name: 'Retry 3D network view' }))
+    expect(await screen.findByRole('button', { name: 'Retry 3D network view' }))
       .toHaveAttribute('type', 'button')
   })
 })

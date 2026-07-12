@@ -61,19 +61,20 @@ afterEach(() => {
 })
 
 describe('App view switching', () => {
-  it('defaults to the 3D view with semantic pressed state and a labelled region', () => {
+  it('defaults to the 3D view with semantic pressed state and a labelled region', async () => {
     render(<App />)
-    expect(screen.getByTestId('view-3d')).toBeInTheDocument()
+    expect(await screen.findByTestId('view-3d')).toBeInTheDocument()
     expect(screen.queryByTestId('view-2d')).not.toBeInTheDocument()
     expect(screen.getByRole('region', { name: '3D network view' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '3D View' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: '2D View' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('switching shows exactly one active view and swaps pressed state + region label', () => {
+  it('switching shows exactly one active view and swaps pressed state + region label', async () => {
     render(<App />)
+    await screen.findByTestId('view-3d')
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
-    expect(screen.getByTestId('view-2d')).toBeInTheDocument()
+    expect(await screen.findByTestId('view-2d')).toBeInTheDocument()
     expect(screen.queryByTestId('view-3d')).not.toBeInTheDocument()
     expect(screen.getAllByRole('region')).toHaveLength(1)
     expect(screen.getByRole('region', { name: '2D network view' })).toBeInTheDocument()
@@ -81,8 +82,9 @@ describe('App view switching', () => {
     expect(screen.getByRole('button', { name: '3D View' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('switching preserves the persistent connection/status surfaces and feed content', () => {
+  it('switching preserves the persistent connection/status surfaces and feed content', async () => {
     render(<App />)
+    await screen.findByTestId('view-3d')
     act(() => live().serverOpen())
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
 
@@ -91,6 +93,7 @@ describe('App view switching', () => {
     expect(feed.querySelectorAll('[data-event-channel]')).toHaveLength(1)
 
     fireEvent.click(screen.getByRole('button', { name: '2D View' }))
+    await screen.findByTestId('view-2d')
     // One status region, one log region — same content, nothing remounted.
     expect(screen.getAllByRole('status')).toHaveLength(1)
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
@@ -100,18 +103,20 @@ describe('App view switching', () => {
     ).toHaveLength(1)
 
     fireEvent.click(screen.getByRole('button', { name: '3D View' }))
+    await screen.findByTestId('view-3d')
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
     expect(
       screen.getByRole('log', { name: 'Event feed' }).querySelectorAll('[data-event-channel]'),
     ).toHaveLength(1)
   })
 
-  it('StrictMode: one live socket lineage, single status region, no duplicated feed entries', () => {
+  it('StrictMode: one live socket lineage, single status region, no duplicated feed entries', async () => {
     render(
       <StrictMode>
         <App />
       </StrictMode>,
     )
+    await screen.findByTestId('view-3d')
     // Development StrictMode mounts effects twice: the first client is
     // disconnected by its own cleanup; the LAST socket is the live one.
     expect(FakeWebSocket.instances.length).toBe(2)
