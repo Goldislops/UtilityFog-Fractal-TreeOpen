@@ -1,5 +1,6 @@
-import { Component, Suspense, createRef, useEffect } from 'react'
+import { Component, Suspense, createRef } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
+import RecoveryProbe from './RecoveryProbe'
 
 // Narrow error boundary for the REPLACEABLE 2D/3D view surface only — the
 // application shell (controls, event feed, connection badge) deliberately
@@ -37,16 +38,7 @@ import type { ErrorInfo, ReactNode } from 'react'
 //    boundary self-focuses only inside a user-initiated retry cycle, so
 //    ordinary loads and first failures steal nothing.
 
-// Commit probe: rendered INSIDE the suspense boundary, after the real
-// children. Its effect can only run once the suspended children have
-// revealed — i.e. the child commit the focus contract keys on. It fires
-// on every subsequent commit too; the boundary gates on its retry flag.
-function RecoveryProbe({ onCommit }: { onCommit: () => void }) {
-  useEffect(() => {
-    onCommit()
-  })
-  return null
-}
+// The commit probe lives in ./RecoveryProbe — see its header.
 
 interface ViewErrorBoundaryProps {
   // Names the guarded surface in the fallback message ("3D network view").
