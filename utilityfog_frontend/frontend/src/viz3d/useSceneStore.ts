@@ -40,10 +40,14 @@ export const useSceneStore = create<SceneStore>((set) => ({
     set((state) => ({
       // Per-side tolerance: a malformed side never discards the valid
       // other side; explicit empty arrays remain meaningful and clear.
-      // Edge ELEMENT shape stays tolerated (renderers skip dangling
-      // references) — the array check is the documented boundary.
+      // Edge elements must at least be non-null objects — renderers index
+      // edge.source/edge.target, so a null/primitive element throws in
+      // render code. Dangling REFERENCES on real edge objects stay
+      // tolerated (renderers skip unmatched ids).
       nodes: Array.isArray(nodes) ? sanitizeNodeList(nodes, state.nodes) : state.nodes,
-      edges: Array.isArray(edges) ? (edges as NetworkEdge[]) : state.edges,
+      edges: Array.isArray(edges)
+        ? edges.filter((e): e is NetworkEdge => !!e && typeof e === 'object')
+        : state.edges,
     })),
 
   clearNetwork: () =>
