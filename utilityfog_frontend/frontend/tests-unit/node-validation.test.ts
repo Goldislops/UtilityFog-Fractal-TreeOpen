@@ -11,6 +11,9 @@ import {
   reconcileNode,
   applyNodeUpdate,
   sanitizeNodeList,
+  readNodeUpdate,
+  foldNodeUpdates,
+  nodeUpdatePayload,
 } from '../src/viz3d/nodeValidation'
 import type { NetworkNode } from '../src/ws/SimBridgeClient'
 
@@ -468,5 +471,72 @@ describe('coverage-contract completions (Package AC)', () => {
     )!
     expect(elementChanged).not.toBe(existing)
     expect(elementChanged.connections).toEqual(['y'])
+  })
+})
+
+describe('queue-side fold seam (Package AF)', () => {
+  it('readNodeUpdate rejects non-objects, hostile shapes and unidentifiable payloads', () => {
+    expect(readNodeUpdate(null)).toBeNull()
+    expect(readNodeUpdate('junk')).toBeNull()
+    expect(readNodeUpdate({ status: 'active' })).toBeNull() // no id
+    expect(readNodeUpdate({ id: '', position: [1, 2, 3] })).toBeNull()
+    expect(readNodeUpdate({ id: 7, position: [1, 2, 3] })).toBeNull()
+    expect(
+      readNodeUpdate({
+        get id(): unknown {
+          throw new Error('hostile')
+        },
+      }),
+    ).toBeNull()
+  })
+
+  it('readNodeUpdate reads valid fields once into owned values, invalid fields as null', () => {
+    const c = readNodeUpdate({
+      id: 'n',
+      position: [1, 2, 3],
+      connections: ['a', 1, 'b'],
+      status: 'weird',
+    })!
+    expect(c).toEqual({ id: 'n', position: [1, 2, 3], connections: ['a', 'b'], status: null })
+  })
+
+  it('foldNodeUpdates: newer valid values win, null never erases older valid ones', () => {
+    const older = readNodeUpdate({ id: 'n', position: [1, 1, 1], status: 'active', connections: ['x'] })!
+    const newer = readNodeUpdate({ id: 'n', position: 'garbage', status: 'error' })!
+    expect(foldNodeUpdates(older, newer)).toEqual({
+      id: 'n',
+      position: [1, 1, 1], // newer invalid position never erases the older valid one
+      connections: ['x'],
+      status: 'error',
+    })
+    const newerValid = readNodeUpdate({ id: 'n', position: [9, 9, 9] })!
+    expect(foldNodeUpdates(older, newerValid).position).toEqual([9, 9, 9])
+  })
+
+  it('fold equivalence: folded-once delivery equals sequential application', () => {
+    const updates: unknown[] = [
+      { id: 'n', position: [1, 1, 1], status: 'active' },
+      { id: 'n', status: 'nonsense' },     // invalid status: absent-equivalent
+      { id: 'n', position: [2, 2, 2] },
+      { id: 'n', position: 'garbage', connections: ['c1'] },
+    ]
+    // Sequential (the old queue's semantics).
+    let seq: ReturnType<typeof applyNodeUpdate> = []
+    for (const u of updates) seq = applyNodeUpdate(seq, u)
+    // Folded-once (the new queue's semantics).
+    let folded = readNodeUpdate(updates[0])!
+    for (const u of updates.slice(1)) folded = foldNodeUpdates(folded, readNodeUpdate(u)!)
+    const once = applyNodeUpdate([], nodeUpdatePayload(folded))
+    expect(once).toEqual(seq)
+  })
+
+  it('nodeUpdatePayload emits only fields with valid values', () => {
+    expect(nodeUpdatePayload(readNodeUpdate({ id: 'n', position: [1, 2, 3] })!)).toEqual({
+      id: 'n',
+      position: [1, 2, 3],
+    })
+    expect(
+      nodeUpdatePayload(readNodeUpdate({ id: 'n', status: 'error', connections: ['a'] })!),
+    ).toEqual({ id: 'n', status: 'error', connections: ['a'] })
   })
 })
