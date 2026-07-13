@@ -35,7 +35,7 @@ local-model work must respect.
 | Shard protocol | `scripts/shard_protocol.py` | Transport-agnostic halo-exchange protocol (Phase 17b) with bitwise-reproducibility as a design invariant. |
 | Shard transport | `scripts/shard_transport_zmq.py` | The one concrete cross-process transport (ZeroMQ PUSH/PULL); siblings (Ray/MPI/TCP) plug in without protocol change. |
 | Provider taxonomy | `BACKEND_PROVIDER_MATRIX.md` | Canonical table of which provider is which backend configuration. |
-| Smoke-test plan + log | `LOCAL_OLLAMA_SMOKE_TEST.md` | The 2026-05-01 plan and the 2026-05-05 execution log, now amended by this package. |
+| Smoke-test plan + log | [`LOCAL_OLLAMA_SMOKE_TEST.md`](../LOCAL_OLLAMA_SMOKE_TEST.md) | The 2026-05-01 plan and the 2026-05-05 execution log, now amended by this package. |
 
 **Boundary: reuse, don't reinvent.** Any future local-model work uses the
 `AgentBackend` seam for model I/O and the existing shard protocol for any
@@ -44,7 +44,8 @@ distribution need. **No second transport stack is to be invented.**
 ## 2. What has been tested (evidence on record)
 
 - **2026-05-05, single backend call, PASSED** (execution log in
-  `LOCAL_OLLAMA_SMOKE_TEST.md`): `OpenAICompatBackend` → real Ollama 0.23.0
+  [`LOCAL_OLLAMA_SMOKE_TEST.md`](../LOCAL_OLLAMA_SMOKE_TEST.md)):
+  `OpenAICompatBackend` → real Ollama 0.23.0
   server → `granite4:3b` (IBM Granite 4, 3.4B, Q4_K_M) over the LAN, one
   read-only-shaped tool offered, well-formed tool call returned and parsed
   round-trip. 3.21 s cold latency, 300 tokens total.
@@ -70,15 +71,26 @@ Reverting Aurora's `0.0.0.0` binding (as recorded in the 2026-05-05
 execution log; re-verify actual state at the time) to the loopback default
 is a **later operator action** — this documentation PR changes no machine.
 
-### 3.2 Ollama's native API has no request authentication
+### 3.2 The local Ollama API requires no authentication
 
-Neither the official API reference
-([github.com/ollama/ollama/docs/api.md](https://github.com/ollama/ollama/blob/main/docs/api.md))
-nor the FAQ documents any authentication mechanism for the native API, and
-the 2026-05-05 execution log confirms the behaviour empirically: the
-backend's dummy `api_key` and a plain credential-less `curl` both succeeded
-against Ollama 0.23.0. In practice, any process that can reach the port can
-use the models. The FAQ's own
+Ollama's official documentation states it directly: **"No authentication is
+required when accessing Ollama's API locally via `http://localhost:11434`"**
+([docs.ollama.com/api/authentication](https://docs.ollama.com/api/authentication),
+accessed 2026-07-14). Authentication exists separately for ollama.com cloud
+models, publishing, and private-model downloads (`ollama signin` /
+`OLLAMA_API_KEY`) — so this is a bounded statement about the **local** API,
+not a claim that Ollama has no authentication anywhere.
+
+Two supports, kept at their correct weights:
+
+- **Documentation**: the official statement above covers the local API.
+- **Historical receipt**: the 2026-05-05 execution log — the backend's dummy
+  `api_key` and a plain credential-less `curl` both succeeded against
+  Ollama 0.23.0.
+
+**Neither fact by itself proves that a broadly exposed LAN service is
+safe.** What follows from them is only this: a process that can reach the
+port can use the models, so reachability *is* the access control. The FAQ's
 network-exposure guidance covers reverse proxies (Nginx) and tunnels (Ngrok,
 Cloudflare Tunnel) — access control is left entirely to the deployment.
 
@@ -133,10 +145,12 @@ comparison candidates only**. This document does not recommend, perform, or
 schedule any download.
 
 Future **read-only inventory** of what is installed/loaded may use Ollama's
-documented endpoints — `GET /api/tags` ("List models that are available
-locally") and `GET /api/ps` ("List models that are currently loaded into
-memory") — but even that read-only probe **requires its own execution
-authorization** when the time comes. Nothing was probed for this PR.
+documented endpoints — `GET /api/tags` (list available models,
+[docs.ollama.com/api/tags](https://docs.ollama.com/api/tags)) and
+`GET /api/ps` (list models currently loaded into memory,
+[docs.ollama.com/api/ps](https://docs.ollama.com/api/ps)) — but even that
+read-only probe **requires its own execution authorization** when the time
+comes. Nothing was probed for this PR.
 
 ## 6. Concurrent workloads are senior
 
@@ -151,7 +165,8 @@ inference experiment:
   human operator's decision, made outside this system, every time.
 
 (The old plan's "pause F@H during the test" checklist steps are superseded
-accordingly — see the amendment in `LOCAL_OLLAMA_SMOKE_TEST.md`.)
+accordingly — see the amendment in
+[`LOCAL_OLLAMA_SMOKE_TEST.md`](../LOCAL_OLLAMA_SMOKE_TEST.md).)
 
 ## 7. Future worker roles (bounded; no controller)
 
@@ -193,13 +208,18 @@ implementation in this PR**):
 
 ## 9. Citations
 
-- Ollama FAQ — default bind address, `OLLAMA_HOST`, proxy/tunnel exposure
-  guidance; no authentication mechanism documented:
-  <https://docs.ollama.com/faq> (accessed 2026-07-13).
-- Ollama API reference — `GET /api/tags` (List Local Models), `GET /api/ps`
-  (List Running Models); no authentication mechanism documented:
-  <https://github.com/ollama/ollama/blob/main/docs/api.md> (accessed
-  2026-07-13).
+- Ollama — Authentication: "No authentication is required when accessing
+  Ollama's API locally via `http://localhost:11434`"; cloud models,
+  publishing, and private-model downloads authenticate separately:
+  <https://docs.ollama.com/api/authentication> (accessed 2026-07-14).
+- Ollama — List models (`GET /api/tags`):
+  <https://docs.ollama.com/api/tags> (accessed 2026-07-14).
+- Ollama — List running models (`GET /api/ps`):
+  <https://docs.ollama.com/api/ps> (accessed 2026-07-14).
+- Ollama FAQ — "Ollama binds 127.0.0.1 port 11434 by default"; `OLLAMA_HOST`;
+  proxy/tunnel exposure guidance:
+  <https://docs.ollama.com/faq> (accessed 2026-07-13, re-confirmed
+  2026-07-14).
 
 ---
 

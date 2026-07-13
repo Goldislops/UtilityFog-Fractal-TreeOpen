@@ -2,8 +2,9 @@
 
 > **⚠ AMENDED 2026-07-13 (PACKAGE NP3).** Parts of this plan are superseded
 > by [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md).
-> The execution log below remains a faithful historical record; the following
-> **guidance** no longer stands:
+> The execution log below remains a faithful historical record. **The
+> following corrections supersede the prior guidance in this file and are
+> ACTIVE requirements** — each bullet states the rule that now stands:
 >
 > 1. **No live re-run of this smoke test** until the R/S/T quarantine stack
 >    (PRs #328/#333/#334) has merged **and** passed post-merge audit.
@@ -13,9 +14,12 @@
 > 3. The `OLLAMA_HOST=0.0.0.0:11434` recommendation is **withdrawn** — see
 >    the amended section below. Prove one-host/**loopback** behaviour first;
 >    cross-machine use requires a separately reviewed, operator-approved
->    protected transport (Ollama's native API has no documented
->    authentication, and the 2026-05-05 test confirmed credential-less
->    requests succeed).
+>    protected transport. (Per Ollama's official documentation, **no
+>    authentication is required for the local API at
+>    `http://localhost:11434`** — cloud/private-model operations authenticate
+>    separately; the 2026-05-05 credential-less result is the historical
+>    empirical receipt. Neither fact by itself makes a broadly exposed LAN
+>    service safe.)
 > 4. Recorded IPs (`192.168.86.3`, `192.168.86.29`) are 2026-05 observations —
 >    **do not assume they are still current.**
 > 5. The "pause F@H" checklist steps are superseded: **Folding@home and BOINC
@@ -120,14 +124,19 @@ run. Likely explanations (in order of probability):
 
 ### ~~CRITICAL pre-install note: Ollama's default bind address~~ — SUPERSEDED 2026-07-13
 
-> **This section's recommendation is withdrawn.** Binding Ollama to
-> `0.0.0.0` exposes an **unauthenticated** API on every LAN interface —
-> Ollama's official API reference and FAQ document no authentication
-> mechanism for the native API, and the 2026-05-05 execution log below
-> confirms the behaviour empirically (dummy `api_key` backend and plain
-> credential-less `curl` both succeeded against Ollama 0.23.0) — so anything
-> that can reach the port can use the models. The official default is the
-> safe one: *"Ollama binds 127.0.0.1 port 11434 by default"*
+> **This section's recommendation is withdrawn.** Ollama's official
+> documentation states that **"No authentication is required when accessing
+> Ollama's API locally via `http://localhost:11434`"**
+> (<https://docs.ollama.com/api/authentication>; authentication exists
+> separately for ollama.com cloud models, publishing, and private-model
+> downloads — the no-auth statement is about the **local** API, not Ollama
+> universally). Binding that local API to `0.0.0.0` therefore extends an
+> unauthenticated surface to every LAN interface. The 2026-05-05 execution
+> log below is the historical empirical receipt (dummy `api_key` backend and
+> plain credential-less `curl` both succeeded against Ollama 0.23.0, LAN
+> included once bound). Neither the documentation statement nor that receipt
+> makes a broadly exposed LAN service safe. The official default is the safe
+> posture: *"Ollama binds 127.0.0.1 port 11434 by default"*
 > (<https://docs.ollama.com/faq>).
 >
 > Standing guidance is now: **stay on loopback.** Any future cross-machine
