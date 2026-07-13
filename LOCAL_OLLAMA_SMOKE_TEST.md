@@ -1,5 +1,31 @@
 # LOCAL_OLLAMA_SMOKE_TEST.md — Design / Planning Doc
 
+> **⚠ AMENDED 2026-07-13 (PACKAGE NP3).** Parts of this plan are superseded
+> by [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md).
+> The execution log below remains a faithful historical record; the following
+> **guidance** no longer stands:
+>
+> 1. **No live re-run of this smoke test** until the R/S/T quarantine stack
+>    (PRs #328/#333/#334) has merged **and** passed post-merge audit.
+> 2. The first future model role is **observation-only** — it may summarise
+>    bounded evidence but cannot propose or apply runtime changes (stricter
+>    than the dry-run-proposal framing used below).
+> 3. The `OLLAMA_HOST=0.0.0.0:11434` recommendation is **withdrawn** — see
+>    the amended section below. Prove one-host/**loopback** behaviour first;
+>    cross-machine use requires a separately reviewed, operator-approved
+>    protected transport (Ollama's native API has no documented
+>    authentication, and the 2026-05-05 test confirmed credential-less
+>    requests succeed).
+> 4. Recorded IPs (`192.168.86.3`, `192.168.86.29`) are 2026-05 observations —
+>    **do not assume they are still current.**
+> 5. The "pause F@H" checklist steps are superseded: **Folding@home and BOINC
+>    remain running.** Future experiments defer when declared CPU/GPU/memory
+>    reservations are unavailable; Medusa software must never pause, stop, or
+>    reprioritize those workloads automatically.
+>
+> This amendment is documentation-only: nothing was executed, probed, or
+> reconfigured in making it.
+
 > **Status**: design only. **No execution authorised by this document.**
 >
 > AURA + Jack scoped this on 2026-05-01 as the cautious follow-up to Phase 18.
@@ -37,14 +63,17 @@ Medusa REST API and records:
   (we use dry-run mode for the proposal).
 - **NOT an abliterated/uncensored model trial.** Per Jack: the first local
   controller is the boring, reliable one. If the wiring works with Granite
-  it'll work with anything else later.
+  it'll work with anything else later. *(2026-07-13: "controller" here is
+  loose 2026-05 phrasing — no controller role exists in the current design;
+  the first future role is observation-only. See
+  [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md) §7.)*
 
 ## Hardware topology (proposed)
 
 | Role | Machine | GPU | Notes |
 |------|---------|-----|-------|
 | **Medusa engine** | Area 51 (workstation, 192.168.86.29) | RTX 5090 | UNTOUCHED. Continues baking. |
-| **Local LLM host** | Aurora — **Alienware Aurora Ultra Core 9 285 + RTX 4090** | RTX 4090 | Hosts Ollama + Granite. F@H paused during the test. |
+| **Local LLM host** | Aurora — **Alienware Aurora Ultra Core 9 285 + RTX 4090** | RTX 4090 | Hosts Ollama + Granite. ~~F@H paused during the test.~~ *(SUPERSEDED 2026-07-13: F@H and BOINC remain running — see header point 5.)* |
 | **Orchestrator** | **Area 51** (default) | none | Pure Python; the orchestrator already imports `scripts.medusa_api` so Area 51 is the natural host. **Do not clone the repo to Aurora for the first smoke test** — keeping the orchestrator on Area 51 is cleaner separation. |
 
 **Communication path**: orchestrator (Area 51) → HTTP → Ollama (Aurora,
@@ -54,10 +83,18 @@ HTTP → Medusa REST API (Area 51 :8080) → ledger.
 The two HTTP hops are intentional and prove out the LAN-distributed
 shape we'd eventually use for cluster work.
 
+> *2026-07-13 note: this two-machine LAN shape is now **sequenced behind**
+> a one-host/loopback proof and a protected-transport design — see header
+> points 3–4. It remains the eventual shape, not the next step.*
+
 > **Aurora's IP is `192.168.86.3`** (confirmed by Kevin, 2026-05-05).
 > This is the same machine previously listed in the Vanguard cluster
 > table as `DellUltracore9 (192.168.86.3)` — Alienware Aurora chassis,
 > Ultra Core 9 285, RTX 4090.
+>
+> *2026-07-13 note: that confirmation is a point-in-time DHCP observation.
+> **Do not assume this address is still current** — any future step that
+> needs it re-verifies on the machine itself, at that time.*
 
 ### Pre-flight probe results (2026-05-05)
 
@@ -81,7 +118,27 @@ run. Likely explanations (in order of probability):
 3. **DHCP has handed Aurora a new IP.** Verify with `ipconfig` on the
    machine itself if the above explanations don't pan out.
 
-### CRITICAL pre-install note: Ollama's default bind address
+### ~~CRITICAL pre-install note: Ollama's default bind address~~ — SUPERSEDED 2026-07-13
+
+> **This section's recommendation is withdrawn.** Binding Ollama to
+> `0.0.0.0` exposes an **unauthenticated** API on every LAN interface —
+> Ollama's official API reference and FAQ document no authentication
+> mechanism for the native API, and the 2026-05-05 execution log below
+> confirms the behaviour empirically (dummy `api_key` backend and plain
+> credential-less `curl` both succeeded against Ollama 0.23.0) — so anything
+> that can reach the port can use the models. The official default is the
+> safe one: *"Ollama binds 127.0.0.1 port 11434 by default"*
+> (<https://docs.ollama.com/faq>).
+>
+> Standing guidance is now: **stay on loopback.** Any future cross-machine
+> use requires a separately reviewed, operator-approved protected transport
+> (narrow single-source firewall rule, authenticated reverse proxy, or
+> operator-controlled tunnel) — see
+> [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md) §3.
+> Reverting Aurora's existing `0.0.0.0` binding to the default is a later
+> operator action; this amendment changes no machine.
+
+The original text is preserved below as history only:
 
 Ollama installs with `OLLAMA_HOST=127.0.0.1:11434` by default. **It will
 NOT accept connections from Area 51 unless this is changed.** Before the
@@ -102,7 +159,7 @@ to save future-Kevin and future-84 the head-scratching.
 | Component | Where | How |
 |-----------|-------|-----|
 | Ollama runtime | Aurora | `winget install Ollama.Ollama` (Windows) or Linux installer; provides `ollama` CLI + a server on `:11434` |
-| Granite 4 model | Aurora (Ollama-managed) | `ollama pull <granite-tag>`. **Verified Ollama tags** (per Jack's review of Ollama's Granite page): `granite4:3b`, `granite4:micro`, `granite4:tiny-h`, `granite4:small-h`. **For the first smoke test, prefer `granite4:3b`** — smallest, fastest, sufficient for proving plumbing. Fall back to `granite4:tiny-h` if 3B is too weak at tool use. **Do NOT start with `granite4:small-h` (~19 GB)** — overkill for first plumbing test. |
+| Granite 4 model | Aurora (Ollama-managed) | `ollama pull <granite-tag>`. **Verified Ollama tags** (per Jack's review of Ollama's Granite page): `granite4:3b`, `granite4:micro`, `granite4:tiny-h`, `granite4:small-h`. **For the first smoke test, prefer `granite4:3b`** — smallest, fastest, sufficient for proving plumbing. Fall back to `granite4:tiny-h` if 3B is too weak at tool use. **Do NOT start with `granite4:small-h` (~19 GB)** — overkill for first plumbing test. *(2026-07-13: pull completed 2026-05-05 — see execution log; no new download recommended.)* |
 | `OpenAICompatBackend` | already in repo | imported from `scripts.agent_backends`; pointed at Aurora's Ollama endpoint |
 | `medusa_api.py` | Area 51 | already running per existing `:8080` deployment |
 
@@ -115,19 +172,28 @@ the SDK crashing at construction.
 
 1. **Capture Medusa baseline**: note the latest snapshot generation
    (`ls data/v070_gen*.npz | tail -1`) and the gap to the last snapshot.
-2. **Pause F@H on Aurora** for the duration of the test. BOINC can stay
-   running but throttle if VRAM pressure is a concern.
-3. **Pause F@H on Area 51 too** if it's running there — orchestrator does
-   minimal CPU work but we want clean latency numbers.
+2. ~~**Pause F@H on Aurora** for the duration of the test. BOINC can stay
+   running but throttle if VRAM pressure is a concern.~~ *(SUPERSEDED
+   2026-07-13: F@H and BOINC remain running. A future experiment declares
+   its CPU/GPU/memory reservations and **defers** if they are unavailable;
+   Medusa software never pauses/stops/reprioritizes those workloads
+   automatically. Any change to them is a human operator's own action.)*
+3. ~~**Pause F@H on Area 51 too** if it's running there — orchestrator does
+   minimal CPU work but we want clean latency numbers.~~ *(SUPERSEDED
+   2026-07-13: same rule as step 2.)*
 4. **Verify Aurora reachable from Area 51**: `ping 192.168.86.<aurora>`.
-5. **Install Ollama on Aurora** (one-time): operator action.
+5. **Install Ollama on Aurora** (one-time): operator action. *(Completed
+   2026-05-05 — see execution log.)*
 6. **Pull the Granite model on Aurora** (one-time): `ollama pull <tag>`.
-   Note disk usage and download time.
+   Note disk usage and download time. *(Completed 2026-05-05 — see execution
+   log; no new download recommended.)*
 7. **Verify the Ollama server responds**: from Aurora,
    `curl http://localhost:11434/api/tags` should list the pulled model.
 8. **Verify Aurora reachable from Area 51 on port 11434**:
-   `curl http://192.168.86.<aurora>:11434/api/tags`. (Firewall? May need
-   to allow inbound 11434 on Aurora.)
+   `curl http://192.168.86.<aurora>:11434/api/tags`. ~~(Firewall? May need
+   to allow inbound 11434 on Aurora.)~~ *(SUPERSEDED 2026-07-13: do not open
+   inbound 11434 broadly — loopback-only until a protected transport is
+   designed and operator-approved; see header points 3–4.)*
 9. **Verify Medusa REST API up**: `curl http://localhost:8080/api/health`
    from Area 51.
 10. **Snapshot the tuning ledger BEFORE the test**:
@@ -199,7 +265,7 @@ report makes the post-mortem easy. Suggested output filename:
 - Zero tool calls → model can't do tool-use with this provider's chat-completions surface; pick a different model or check Ollama's tool-call support.
 - Validation errors on every proposal → model isn't reading the schema correctly; try `granite4:tiny-h` (next size up) before considering `granite4:small-h`.
 - Commit applied → safety rail breach. Roll back ledger from backup, investigate.
-- Connection refused on Aurora's :11434 → firewall / Ollama not bound externally. Fix and retry.
+- ~~Connection refused on Aurora's :11434 → firewall / Ollama not bound externally. Fix and retry.~~ *(SUPERSEDED 2026-07-13: do not "fix" by binding externally — loopback-only until a protected transport is approved; see header point 3.)*
 
 ## Abort criteria (kill the test mid-run)
 
@@ -212,7 +278,9 @@ report makes the post-mortem easy. Suggested output filename:
 If anything looks weird after the test:
 1. `cp data/tuning_ledger.before.bak.jsonl data/tuning_ledger.jsonl` (restore ledger).
 2. Restart `medusa_api.py` so the in-memory `TuningState` re-replays from the restored ledger.
-3. Stop Ollama on Aurora; resume F@H.
+3. Stop Ollama on Aurora~~; resume F@H~~. *(2026-07-13: "resume F@H"
+   presupposed the superseded pause — F@H and BOINC remain running
+   throughout; see header point 5.)*
 4. Document what happened in this file as a "lessons learned" appendix.
 
 Ledger restore is safe because the API hasn't been used by Kevin or AURA
@@ -236,7 +304,9 @@ entries.
   been exercised under a boring model first.
 - Cluster-distributed orchestration (Aurora + other Vanguard nodes
   running observers / proposers / critics in parallel) — but only after
-  the single-node case is solid.
+  the single-node case is solid. *(2026-07-13: role vocabulary is now
+  bounded **observer / predictor / critic** — no proposer, no controller;
+  see [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md) §7.)*
 
 ## Open questions — RESOLVED via Jack's review (2026-05-05)
 
@@ -269,7 +339,8 @@ service — the working pattern is:
    Kevin to paste (if it's on Aurora).**
 5. **Result comes back; the next command goes through the same loop.**
 
-Today, the only commands worth approving are read-only / inspection:
+As of 2026-05-05, the only commands worth approving were read-only /
+inspection:
 - identify Aurora's IP (`ipconfig` or `ip addr` — read-only).
 - check whether SSH is already running on Aurora (read-only).
 - check whether Ollama is already installed on Aurora (read-only).
@@ -361,13 +432,22 @@ System prompt: "You are a careful tuning agent. Use tools to gather state before
 - **Windows env-var inheritance**: `[System.Environment]::SetEnvironmentVariable(..., 'Machine')` writes to the registry but does not update *running* processes' env blocks. Sign out + sign back in is the cheapest way to make explorer.exe (and therefore Start-menu launches) pick up the change. Documented in the relevant doc section above.
 - **Admin PowerShell PATH**: an elevated PowerShell may inherit a different PATH than the user shell. When running an executable installed in user-scope `%LOCALAPPDATA%\Programs\...`, prefer absolute paths in admin contexts.
 - **Ollama on Windows binds to `::` (IPv6 dual-stack)** when `OLLAMA_HOST=0.0.0.0:11434`. This is fine — Go sockets default to IPv4-mapped-IPv6 dual-stack, so IPv4 LAN clients (like Mega's curl from `192.168.86.x`) reach it transparently. The literal `LocalAddress` will be `::` not `0.0.0.0` in `Get-NetTCPConnection`; this is correct.
-- **Firewall auto-allow**: Windows pops a "do you want to allow" dialog on the first non-localhost bind. If accepted, no manual `netsh advfirewall` rule is needed. (If declined or never prompted, the manual rule from the plan above is still the right fallback.)
+- **Firewall auto-allow**: Windows pops a "do you want to allow" dialog on the first non-localhost bind. If accepted, no manual `netsh advfirewall` rule is needed. ~~(If declined or never prompted, the manual rule from the plan above is still the right fallback.)~~ *(SUPERSEDED 2026-07-13: no broad inbound-11434 rule is a "right fallback" any more — loopback-only until a protected transport is approved; see header point 3.)*
 
 ### Operational state after this test
 
 - Aurora's Ollama is permanently configured for LAN access.
-- `granite4:3b` is on disk, persistent across reboots.
-- Mega can reach Aurora's Ollama API without RDP being active.
+  *(2026-07-13 note: this recorded state is now **flagged for operator
+  review** — standing guidance is loopback-only until a protected transport
+  is designed and approved; see
+  [`docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md).
+  Reverting the bind is a later operator action; nothing was changed by the
+  amendment.)*
+- `granite4:3b` is on disk, persistent across reboots. *(2026-07-13: Granite
+  remains the first future compatibility candidate; other models are later
+  comparison candidates — no downloads recommended.)*
+- Mega can reach Aurora's Ollama API without RDP being active. *(2026-07-13:
+  a point-in-time observation, not a maintained guarantee.)*
 - F@H can be safely un-paused; Ollama doesn't reserve VRAM when idle.
 - Medusa was untouched throughout; her run continues uninterrupted.
 
