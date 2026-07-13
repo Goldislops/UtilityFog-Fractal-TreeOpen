@@ -81,25 +81,32 @@ describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, ()
   it('the store never throws and never admits invalid records', () => {
     fc.assert(
       fc.property(jsonValue(), jsonValue(), (a, b) => {
+        // Cleanup lives in FINALLY (adversarial-residual repair): a failing
+        // assertion previously skipped the trailing reset, so fast-check's
+        // SHRINK iterations ran against a polluted store and the afterEach
+        // leak detector masked the real counterexample with its own throw.
         useSceneStore.setState({ nodes: [], edges: [] })
-        const s = useSceneStore.getState()
-        s.updateNode(a)
-        s.setNetwork(a, b)
-        s.updateNode(b)
-        const state = useSceneStore.getState()
-        for (const n of state.nodes) {
-          expect(typeof n.id).toBe('string')
-          expect(isValidPosition(n.position)).toBe(true)
-          // Materialized: data properties only, no live getters.
-          expect(Object.getOwnPropertyDescriptor(n, 'position')!.get).toBeUndefined()
+        try {
+          const s = useSceneStore.getState()
+          s.updateNode(a)
+          s.setNetwork(a, b)
+          s.updateNode(b)
+          const state = useSceneStore.getState()
+          for (const n of state.nodes) {
+            expect(typeof n.id).toBe('string')
+            expect(isValidPosition(n.position)).toBe(true)
+            // Materialized: data properties only, no live getters.
+            expect(Object.getOwnPropertyDescriptor(n, 'position')!.get).toBeUndefined()
+          }
+          for (const e of state.edges) {
+            expect(typeof e.id).toBe('string')
+            expect(typeof e.source).toBe('string')
+            expect(typeof e.target).toBe('string')
+            expect(Number.isFinite(e.strength)).toBe(true)
+          }
+        } finally {
+          useSceneStore.setState({ nodes: [], edges: [] })
         }
-        for (const e of state.edges) {
-          expect(typeof e.id).toBe('string')
-          expect(typeof e.source).toBe('string')
-          expect(typeof e.target).toBe('string')
-          expect(Number.isFinite(e.strength)).toBe(true)
-        }
-        useSceneStore.setState({ nodes: [], edges: [] })
       }),
       PARAMS,
     )
@@ -182,14 +189,17 @@ describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, ()
     fc.assert(
       fc.property(jsonValue(), jsonValue(), (nodes, edges) => {
         useSceneStore.setState({ nodes: [], edges: [] })
-        const s = useSceneStore.getState()
-        s.setNetwork(nodes, edges)
-        const first = structuredClone(useSceneStore.getState().nodes)
-        const firstEdges = structuredClone(useSceneStore.getState().edges)
-        s.setNetwork(nodes, edges)
-        expect(useSceneStore.getState().nodes).toEqual(first)
-        expect(useSceneStore.getState().edges).toEqual(firstEdges)
-        useSceneStore.setState({ nodes: [], edges: [] })
+        try {
+          const s = useSceneStore.getState()
+          s.setNetwork(nodes, edges)
+          const first = structuredClone(useSceneStore.getState().nodes)
+          const firstEdges = structuredClone(useSceneStore.getState().edges)
+          s.setNetwork(nodes, edges)
+          expect(useSceneStore.getState().nodes).toEqual(first)
+          expect(useSceneStore.getState().edges).toEqual(firstEdges)
+        } finally {
+          useSceneStore.setState({ nodes: [], edges: [] })
+        }
       }),
       PARAMS,
     )
@@ -237,6 +247,149 @@ describe(`ingress properties (seed ${SEED}, ${NUM_RUNS} runs per invariant)`, ()
       }),
       PARAMS,
     )
+  })
+})
+
+
+describe('property-cleanup isolation contract (adversarial-residual repair)', () => {
+  // FAILING-FIRST RECEIPT (probe, not committed): under the previous
+  // pattern — trailing reset NOT in finally — a deliberately failing
+  // store-mutating property (seed 42, 20 runs) left pollutedEntries > 0
+  // across fast-check's shrink iterations and a dirty store after
+  // fc.check returned. The finally-based pattern below is the repair;
+  // this self-test locks it without failing the suite (fc.check reports
+  // instead of throwing).
+  it('a FAILING store-mutating property still enters every shrink iteration clean and exits with an empty store', () => {
+    useSceneStore.setState({ nodes: [], edges: [] })
+    const entryClean: boolean[] = []
+    const result = fc.check(
+      fc.property(fc.integer({ min: 1, max: 100 }), (n) => {
+        entryClean.push(useSceneStore.getState().nodes.length === 0)
+        useSceneStore.setState({ nodes: [], edges: [] })
+        try {
+          useSceneStore
+            .getState()
+            .updateNode({ id: `iso-${n}`, position: [1, 2, 3], connections: [], status: 'active' })
+          expect(n).toBeLessThan(0) // deliberate failure: every iteration throws
+        } finally {
+          useSceneStore.setState({ nodes: [], edges: [] })
+        }
+      }),
+      { seed: 42, numRuns: 20 },
+    )
+    expect(result.failed).toBe(true) // the property genuinely failed and shrank
+    expect(entryClean.length).toBeGreaterThan(1) // shrink iterations ran
+    expect(entryClean.every(Boolean)).toBe(true) // EVERY iteration started isolated
+    expect(useSceneStore.getState().nodes).toEqual([]) // nothing escaped fc.check
+  })
+})
+
+describe('array-container adversaries (custom properties on the LIST itself)', () => {
+  // The recorded residual: the ARRAYS carrying node/edge lists can bear
+  // custom enumerable/non-index properties, hostile getters on those
+  // properties, symbol keys, holes, and proxy wrappers. Contract locked
+  // here: only numeric index elements are candidate records; everything
+  // else is ignored, never materialized, and never READ. (No total-
+  // correctness claim — these are the recorded adversary shapes.)
+  const nodeItem = (id: string) => ({ id, position: [1, 2, 3], connections: [], status: 'active' })
+  const edgeItem = (id: string) => ({ id, source: 'a', target: 'b', strength: 1 })
+
+  it('harmless custom enumerable properties on the list are ignored and never materialized', () => {
+    const nlist: unknown[] = [nodeItem('n1'), nodeItem('n2')]
+    ;(nlist as unknown as Record<string, unknown>).smuggled = { payload: 'x' }
+    const nout = sanitizeNodeList(nlist, [])
+    expect(nout.map(n => n.id)).toEqual(['n1', 'n2'])
+    expect(Object.keys(nout)).toEqual(['0', '1']) // fresh array: index keys only
+    expect((nout as unknown as Record<string, unknown>).smuggled).toBeUndefined()
+
+    const elist: unknown[] = [edgeItem('e1')]
+    ;(elist as unknown as Record<string, unknown>).smuggled = 'y'
+    const eout = sanitizeEdgeList(elist, [])
+    expect(eout.map(e => e.id)).toEqual(['e1'])
+    expect(Object.keys(eout)).toEqual(['0'])
+    expect((eout as unknown as Record<string, unknown>).smuggled).toBeUndefined()
+  })
+
+  it('a THROWING getter on a custom list property is never touched by either sanitizer', () => {
+    let touched = 0
+    const arm = (list: unknown[]) =>
+      Object.defineProperty(list, 'evil', {
+        enumerable: true,
+        get(): unknown {
+          touched++
+          throw new Error('hostile custom list property')
+        },
+      })
+    const nlist = arm([nodeItem('n1')]) as unknown[]
+    expect(sanitizeNodeList(nlist, []).map(n => n.id)).toEqual(['n1'])
+    const elist = arm([edgeItem('e1')]) as unknown[]
+    expect(sanitizeEdgeList(elist, []).map(e => e.id)).toEqual(['e1'])
+    expect(touched).toBe(0)
+  })
+
+  it('symbol-keyed list properties are never read', () => {
+    let touched = 0
+    const sym = Symbol('smuggle')
+    const nlist: unknown[] = [nodeItem('n1')]
+    Object.defineProperty(nlist, sym, {
+      enumerable: true,
+      get(): unknown {
+        touched++
+        return 'x'
+      },
+    })
+    expect(sanitizeNodeList(nlist, []).map(n => n.id)).toEqual(['n1'])
+    expect(touched).toBe(0)
+  })
+
+  it('sparse LIST slots read as absent items: rejected without inventing records, valid items kept', () => {
+    const nlist: unknown[] = new Array(3)
+    nlist[0] = nodeItem('n1')
+    nlist[2] = nodeItem('n2') // hole at index 1
+    expect(sanitizeNodeList(nlist, []).map(n => n.id)).toEqual(['n1', 'n2'])
+    const elist: unknown[] = new Array(2)
+    elist[1] = edgeItem('e1') // hole at index 0
+    expect(sanitizeEdgeList(elist, []).map(e => e.id)).toEqual(['e1'])
+  })
+
+  it('a proxy-wrapped list is read ONLY through the iterator protocol and index slots (recorded)', () => {
+    const touchedKeys: Array<string | symbol> = []
+    const proxy = new Proxy([nodeItem('n1')], {
+      get(t, k, r) {
+        touchedKeys.push(k)
+        return Reflect.get(t, k, r)
+      },
+    })
+    expect(sanitizeNodeList(proxy, []).map(n => n.id)).toEqual(['n1'])
+    const nonProtocol = touchedKeys.filter(k =>
+      typeof k === 'symbol' ? k !== Symbol.iterator : !/^\d+$/.test(k) && k !== 'length',
+    )
+    // Recorded behavior: no enumeration of non-index keys ever happens —
+    // custom properties are structurally unreachable via this read path.
+    expect(nonProtocol).toEqual([])
+  })
+
+  it('a proxy list whose traps THROW is contained at the delivery boundary (recorded system behavior)', () => {
+    const bomb = new Proxy([], {
+      get(): unknown {
+        throw new Error('hostile list trap')
+      },
+    })
+    // Seam-level recorded behavior: the sanitizer itself surfaces the trap
+    // throw (Array.isArray passes; iteration trips the trap)...
+    expect(() => sanitizeNodeList(bomb, [])).toThrow('hostile list trap')
+    // ...and the STORE action SURFACES it explicitly (Jack delta-audit):
+    // setNetwork does NOT swallow the trap — the sanitizer throws before
+    // the store's set(), so the throw propagates to the caller AND state
+    // is never mutated. The per-delivery containment that decides SYSTEM
+    // behavior lives one layer up, in the event queue's handler-error
+    // policy (locked by use-event-queue.test.tsx). Asserting toThrow here
+    // (not a silent try/catch, which would pass even if the store began
+    // swallowing) keeps the surfacing contract under test.
+    useSceneStore.setState({ nodes: [], edges: [] })
+    expect(() => useSceneStore.getState().setNetwork(bomb, [])).toThrow('hostile list trap')
+    expect(useSceneStore.getState().nodes).toEqual([])
+    expect(useSceneStore.getState().edges).toEqual([])
   })
 })
 
