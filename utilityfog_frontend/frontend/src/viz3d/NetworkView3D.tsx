@@ -1,19 +1,43 @@
 /// <reference types="vite/client" />
 // Vite's client type declarations (shipped with the installed vite package)
 // type import.meta.env — no compiler flags or casts needed.
-import { Suspense } from 'react'
+import { Suspense, useRef, type ElementRef } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { OrbitControls, Grid, Stats } from '@react-three/drei'
 import ThreeScene from './ThreeScene'
 import { SimBridgeClient } from '../ws/SimBridgeClient'
+import {
+  CAMERA_PRESET_NAMES,
+  CAMERA_PRESET_LABELS,
+  applyCameraPreset,
+} from './cameraPresets'
 
 interface NetworkView3DProps {
   simClient: SimBridgeClient | null
 }
 
 export default function NetworkView3D({ simClient }: NetworkView3DProps) {
+  // Package AN-1: view presets. The ref uses React's inferred element-ref
+  // type for the drei OrbitControls (its three-stdlib instance) — no cast
+  // — and the pure seam (cameraPresets) consumes only the structural
+  // slice it needs, tolerating the not-yet-mounted interlude.
+  const controlsRef = useRef<ElementRef<typeof OrbitControls>>(null)
   return (
     <div style={{ flex: 1, position: 'relative' }}>
+      {/* Presets are ACTIONS, not state: after any manual orbit a pressed
+          indicator would lie, so these carry no aria-pressed (decision
+          documented in cameraPresets.ts). */}
+      <div className="view-presets" role="group" aria-label="Camera view presets">
+        {CAMERA_PRESET_NAMES.map(name => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => applyCameraPreset(controlsRef.current, name)}
+          >
+            {CAMERA_PRESET_LABELS[name]}
+          </button>
+        ))}
+      </div>
       <Canvas
         camera={{
           position: [50, 50, 50],
@@ -44,6 +68,7 @@ export default function NetworkView3D({ simClient }: NetworkView3DProps) {
           />
           
           <OrbitControls
+            ref={controlsRef}
             enablePan={true}
             enableZoom={true}
             enableRotate={true}

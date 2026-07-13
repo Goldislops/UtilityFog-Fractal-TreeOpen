@@ -56,6 +56,7 @@ export default defineConfig({
         'src/components/ViewErrorBoundary.tsx',
         'src/components/NetworkView2D.tsx',
         'src/viz3d/adapters.ts',
+        'src/viz3d/cameraPresets.ts',
         'src/viz3d/edgeValidation.ts',
         'src/viz3d/nodeValidation.ts',
         'src/viz3d/useEventQueue.ts',
