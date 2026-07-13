@@ -897,9 +897,10 @@ def _adversarial_iteration_result() -> IterationResult:
         stopped_because="sk-SECRET_" + "X" * 300_000,        # secret-looking, huge, unknown
         turns=10 ** 10000,                                   # absurd magnitude
         tool_calls_executed=-9,                              # negative
-        proposals_created=["prop-abc123", "bad id!!", "y" * 400, None,
-                           _StrBoom(), "ok-1"],              # valid + invalid + non-str
-        commits_applied=["commit_9", 42],
+        proposals_created=["prop-deadbeef", "sk-SECRET_TOKEN", "prop-ABCDEF01",
+                           "prop-abc", "y" * 400, None, _StrBoom(),
+                           "prop-0123abcd"],                 # canonical + secret + malformed + non-str
+        commits_applied=["prop-0123abcd", 42, "commit_9"],
         outcome_counts={"K" * 20_000: 1, "ok": 3, "weird" * 100: 2,    # huge/unknown keys
                         1: 9, "1": 11, "local_rejection": -3,          # colliding + negative
                         "handler_exception": _StrBoom(), True: 1},     # __str__-boom value, bool key
@@ -941,9 +942,10 @@ def test_receipt_bounded_against_adversarial_result():
     # Unknown/secret keys removed entirely.
     for banned in ("K" * 20_000, "weird", "U" * 20_000, "unknown_junk"):
         assert banned not in blob
-    # Ids: only valid id-alphabet strings survive; invalid/non-str omitted.
-    assert receipt["proposals_created"] == ["prop-abc123", "ok-1"]
-    assert receipt["commits_applied"] == ["commit_9"]
+    # Ids: only canonical prop-<8 hex> survive; secret/malformed/non-str omitted.
+    assert receipt["proposals_created"] == ["prop-deadbeef", "prop-0123abcd"]
+    assert receipt["commits_applied"] == ["prop-0123abcd"]
+    assert "SECRET_TOKEN" not in blob  # alphabet-valid secret-looking id dropped
 
 
 def test_receipt_colliding_int_and_str_keys_both_discarded():
@@ -988,16 +990,96 @@ def test_receipt_str_boom_object_never_stringified():
     discards them without invoking __str__ and never raises."""
     result = IterationResult(
         stopped_because=_StrBoom(), turns=1, tool_calls_executed=1,
-        proposals_created=[_StrBoom(), "prop-ok"],
+        proposals_created=[_StrBoom(), "prop-0000000a"],
         outcome_counts={"ok": _StrBoom()},
         usage_total={"input_tokens": _StrBoom()},
     )
     receipt = build_audit_receipt(result)   # must not raise
     assert receipt["stopped_because"] == "unknown"
-    assert receipt["proposals_created"] == ["prop-ok"]
+    assert receipt["proposals_created"] == ["prop-0000000a"]
     assert receipt["outcome_counts"]["ok"] == 0
     assert receipt["usage_total"]["input_tokens"] == 0
     assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= MAX_RECEIPT_BYTES
+
+
+def test_receipt_keeps_only_canonical_proposal_ids():
+    """Only canonical production ids (``prop-`` + 8 lowercase hex) survive.
+    Secret-looking but alphabet-valid strings, arbitrary text, uppercase,
+    overlong, short, non-hex, and non-string entries are all dropped —
+    including their prefixes."""
+    result = IterationResult(
+        stopped_because="end_turn", turns=1, tool_calls_executed=1,
+        proposals_created=[
+            "prop-deadbeef", "prop-0123abcd",   # canonical → survive
+            "sk-SECRET_TOKEN",                  # secret-looking, alphabet-valid → drop
+            "arbitrary-valid-text",             # arbitrary → drop
+            "prop-DEADBEEF",                    # uppercase hex → drop
+            "prop-deadbeef00",                  # overlong → drop
+            "prop-abc",                         # too short → drop
+            "prop-ghijklmn",                    # non-hex letters → drop
+            None, 42,                           # non-string → drop
+        ],
+        commits_applied=["prop-0123abcd"],
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt["proposals_created"] == ["prop-deadbeef", "prop-0123abcd"]
+    assert receipt["commits_applied"] == ["prop-0123abcd"]
+    blob = json.dumps(receipt, sort_keys=True)
+    for banned in ("SECRET", "sk-", "arbitrary", "DEADBEEF", "ghij"):
+        assert banned not in blob
+    assert receipt["truncated"] is True
+
+
+class _HostileList(list):
+    def __iter__(self):  # pragma: no cover - must not be invoked
+        raise RuntimeError("__iter__ must not be invoked")
+
+
+class _HostileDict(dict):
+    def items(self):  # pragma: no cover
+        raise RuntimeError("items must not be invoked")
+
+    def __iter__(self):  # pragma: no cover
+        raise RuntimeError("__iter__ must not be invoked")
+
+
+def test_receipt_rejects_hostile_container_subclasses():
+    """A list/dict subclass whose iteration hooks raise is rejected by exact
+    type BEFORE any iteration — the receipt normalizes to empty with
+    truncated=True and never invokes the hostile __iter__/items."""
+    hostile_ids = _HostileList(["prop-deadbeef"])
+    hostile_map = _HostileDict({"ok": 1})
+    result = IterationResult(
+        stopped_because="end_turn", turns=1, tool_calls_executed=1,
+        proposals_created=hostile_ids, commits_applied=hostile_ids,
+        outcome_counts=hostile_map, usage_total=hostile_map,
+    )
+    receipt = build_audit_receipt(result)   # must not raise
+    assert receipt["proposals_created"] == []
+    assert receipt["commits_applied"] == []
+    assert receipt["outcome_counts"] == {}
+    assert receipt["usage_total"] == {}
+    assert receipt["truncated"] is True
+
+
+def test_receipt_normal_production_result_not_truncated():
+    """A realistic production IterationResult — canonical ids, known outcome
+    categories, token usage — passes through untouched with truncated=False and
+    serializes deterministically with plain json.dumps."""
+    result = IterationResult(
+        stopped_because="end_turn", turns=2, tool_calls_executed=3,
+        proposals_created=["prop-deadbeef"],
+        commits_applied=[],
+        outcome_counts={"ok": 3, "local_rejection": 1},
+        usage_total={"input_tokens": 120, "output_tokens": 340},
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt["truncated"] is False
+    assert receipt["proposals_created"] == ["prop-deadbeef"]
+    assert receipt["outcome_counts"] == {"local_rejection": 1, "ok": 3}
+    assert receipt["usage_total"] == {"input_tokens": 120, "output_tokens": 340}
+    assert json.dumps(receipt, sort_keys=True) == json.dumps(
+        build_audit_receipt(result), sort_keys=True)
 
 
 def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
@@ -1012,7 +1094,7 @@ def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
     result = IterationResult(
         stopped_because="end_turn",
         turns=1, tool_calls_executed=1,
-        proposals_created=[f"prop-{i}" for i in range(500)],
+        proposals_created=[f"prop-{i:08x}" for i in range(500)],  # canonical ids
         outcome_counts={"ok": 500},
         usage_total={"input_tokens": 999_999},
     )

@@ -509,7 +509,7 @@ class IterationResult:
         Built by strict allowlist normalization (see ``build_audit_receipt``):
         only the fixed receipt schema survives — stop reason (allowlisted or
         ``unknown``), non-negative clamped counts, known outcome/usage keys, and
-        id-alphabet proposal/commit ids. Never tool payloads, prompts,
+        canonical proposal ids. Never tool payloads, prompts,
         credentials, headers, or raw backend responses. Deterministically
         serializable with plain ``json.dumps`` and guaranteed
         ≤ MAX_RECEIPT_BYTES."""
@@ -680,15 +680,17 @@ def _error_block(tool_use_id: str, error: str, category: str, message: str) -> T
 # ``json.dumps(..., sort_keys=True)`` (no ``default=str`` crutch), and the size
 # guarantee holds before serialization rather than being patched after it.
 
-_RECEIPT_MAX_ID = 128
-"""Max length of a single retained id string."""
 _RECEIPT_MAX_LIST = 64
 """Max number of ids retained in a list field."""
 _RECEIPT_MAX_UINT = 10 ** 12
 """Magnitude clamp for any count/usage integer (well beyond any real value)."""
 
-_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,%d}\Z" % _RECEIPT_MAX_ID)
-"""The proposal/commit id alphabet: ASCII word chars and dashes, bounded."""
+_ID_RE = re.compile(r"\Aprop-[0-9a-f]{8}\Z")
+"""The canonical production proposal id: ``prop-`` + 8 lowercase hex chars, as
+minted by ``tuning_api._new_proposal_id`` (``"prop-" + secrets.token_hex(4)``).
+Both ``proposals_created`` and ``commits_applied`` hold proposal ids. Anything
+that is not exactly this shape — a secret-looking string, arbitrary otherwise-
+valid text, an uppercase/overlong/malformed id, or a non-string — is discarded."""
 
 _ALLOWED_STOP_REASONS = frozenset({"end_turn", "max_depth", "tool_budget_exhausted"})
 _ALLOWED_OUTCOME_KEYS = frozenset({
@@ -721,10 +723,12 @@ def _norm_stop_reason(value: Any) -> tuple[str, bool]:
 
 
 def _norm_id_list(values: Any) -> tuple[list[str], bool]:
-    """Keep only safe id-alphabet strings (``[A-Za-z0-9_-]``, ≤128 chars), up to
-    the list cap → (ids, changed). Invalid or non-string entries are omitted
-    without invoking ``__str__``; a non-list input yields an empty list."""
-    if not isinstance(values, (list, tuple)):
+    """Keep only canonical proposal ids (``prop-`` + 8 lowercase hex), up to the
+    list cap → (ids, changed). Anything else is omitted without invoking
+    ``__str__``. Only an EXACT built-in ``list``/``tuple`` is iterated — a
+    hostile subclass (e.g. one whose ``__iter__`` raises) is rejected by type
+    before iteration, yielding an empty list with ``changed=True``."""
+    if type(values) not in (list, tuple):
         return [], True
     items = list(values)
     changed = len(items) > _RECEIPT_MAX_LIST
@@ -733,15 +737,17 @@ def _norm_id_list(values: Any) -> tuple[list[str], bool]:
         if isinstance(v, str) and _ID_RE.match(v):
             out.append(v)
         else:
-            changed = True  # dropped an invalid / non-string id
+            changed = True  # dropped a non-canonical / non-string id
     return out, changed
 
 
 def _norm_count_map(mapping: Any, allowed_keys: frozenset) -> tuple[dict[str, int], bool]:
     """Keep only allowlisted string keys mapped to normalized non-negative
     integers → (map, changed). Unknown or non-string keys are discarded (never
-    stringified, so coercion cannot create a key collision)."""
-    if not isinstance(mapping, dict):
+    stringified, so coercion cannot create a key collision). Only an EXACT
+    built-in ``dict`` is read — a hostile subclass (e.g. one whose ``items``
+    raises) is rejected by type before ``.items()`` is ever called."""
+    if type(mapping) is not dict:
         return {}, True
     out: dict[str, int] = {}
     changed = False
@@ -771,8 +777,8 @@ def build_audit_receipt(result: "IterationResult") -> dict[str, Any]:
       ints.
     - ``usage_total`` — only ``input_tokens`` / ``output_tokens`` → non-negative
       ints.
-    - ``proposals_created`` / ``commits_applied`` — id-alphabet strings only,
-      list-capped.
+    - ``proposals_created`` / ``commits_applied`` — canonical proposal ids only
+      (``prop-`` + 8 lowercase hex), list-capped; anything else discarded.
     - ``truncated`` — true whenever any value was normalized away, or the
       trim loop / fixed minimal fallback fired.
 
