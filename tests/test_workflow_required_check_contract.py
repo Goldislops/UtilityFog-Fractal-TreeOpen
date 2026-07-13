@@ -23,10 +23,15 @@ BLOCK-SCALAR AWARE (Jack delta-audit): the literal content of ``|`` and
 ``>`` scalars (``run:`` scripts, ``path:`` lists) is excluded from every
 structural scan, so shell text can never be mistaken for a job id, a
 ``uses:`` ref, a ``permissions`` grant or a ``pull_request_target``
-trigger. Every rule reports file/job/rule in its failure message, and
-the self-tests at the bottom fire each rule against inline VIOLATION
-fixtures -- including multiline decoys -- without ever mutating the real
-workflows.
+trigger. Permissions parsing is additionally FAIL-CLOSED (Jack final
+delta): inline forms (``write-all``, ``{scope: write}``, or any
+unrecognised inline scalar/mapping) are rejected with a precise
+diagnostic rather than silently passing, while ``read-all`` and the
+empty mapping ``{}`` are allowed; pull_request ``types:`` are
+quote-normalised. Every rule reports file/job/rule in its failure
+message, and the self-tests at the bottom fire each rule against inline
+VIOLATION fixtures -- including multiline decoys -- without ever
+mutating the real workflows.
 """
 
 from __future__ import annotations
@@ -49,6 +54,15 @@ CORE_PR_TYPES = frozenset({"opened", "synchronize", "reopened"})
 # End-of-line block scalar indicator: `key: |`, `key: >`, with optional
 # chomping (+/-) and explicit-indent digits, optional trailing comment.
 _BLOCK_SCALAR_OPENER = re.compile(r":[ \t]*[|>][+-]?[0-9]*[ \t]*(#.*)?$")
+
+
+def _strip_quotes(token: str) -> str:
+    """Strip a single matching pair of surrounding quotes from a scalar
+    token (YAML flow/block list items may be single- or double-quoted)."""
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
 
 
 class _WorkflowDoc:
@@ -168,14 +182,17 @@ class _WorkflowDoc:
             rest = m.group(1)
             flow = re.match(r"^\[(.*)\]$", rest)
             if flow:
-                return {t.strip() for t in flow.group(1).split(",") if t.strip()}
-            # Block-list form: subsequent `- item` lines, more indented.
+                # Flow list: strip matching quotes around each item so
+                # ['opened', "synchronize", reopened] parses uniformly.
+                return {_strip_quotes(t) for t in flow.group(1).split(",") if t.strip()}
+            # Block-list form: subsequent `- item` lines, more indented;
+            # items may likewise be quoted.
             types: set[str] = set()
             for _, item in pr[idx + 1 :]:
-                bm = re.match(r"^      -\s*(\S+)", item)
+                bm = re.match(r"^      -\s*(\S.*?)\s*(#.*)?$", item)
                 if not bm:
                     break
-                types.add(bm.group(1))
+                types.add(_strip_quotes(bm.group(1)))
             return types
         return None
 
@@ -191,21 +208,54 @@ class _WorkflowDoc:
                 out.append((i, m.group(1)))
         return out
 
-    def permissions_write_grants(self) -> list[tuple[int, str]]:
-        """(line, text) of write scopes inside any structural permissions:
-        block — block-scalar content (e.g. a `run:` script mentioning
-        `contents: write`) is excluded."""
-        grants: list[tuple[int, str]] = []
+    def permissions_violations(self) -> list[tuple[int, str]]:
+        """(line, message) for any disallowed permissions declaration.
+
+        Fail-closed classification (block-scalar content excluded):
+          - Block (mapping) form: each indented ``scope: write`` grant is
+            a violation; ``scope: read`` is fine.
+          - Inline ``read-all`` and the empty mapping ``{}`` are allowed.
+          - Inline ``write-all`` is a violation.
+          - Inline mapping ``{scope: write, ...}``: each write scope is a
+            violation; an unknown scope value fails closed.
+          - Any OTHER inline scalar/mapping is unrecognised and fails
+            closed with a precise diagnostic, rather than silently
+            passing."""
+        out: list[tuple[int, str]] = []
         for i, line in enumerate(self.lines):
             if not self._structural(i):
                 continue
-            if re.match(r"^\s*permissions:\s*(#.*)?$", line):
+            m = re.match(r"^\s*permissions:\s*(.*?)\s*(#.*)?$", line)
+            if not m:
+                continue
+            value = m.group(1).strip()
+            if value == "":
+                # Block (mapping) form.
                 for j, inner in self._block(i):
                     if re.search(r":\s*write(-all)?\s*(#.*)?$", inner.split("#")[0]):
-                        grants.append((j, inner.strip()))
-            elif re.match(r"^\s*permissions:\s*write-all\s*(#.*)?$", line):
-                grants.append((i, line.strip()))
-        return grants
+                        out.append((j, f"permissions grant a write scope ({inner.strip()!r})"))
+                continue
+            if value in ("read-all", "{}"):
+                continue  # blanket read / no permissions — allowed
+            if value == "write-all":
+                out.append((i, "inline 'permissions: write-all' grants blanket write"))
+                continue
+            mapping = re.match(r"^\{(.*)\}$", value)
+            if mapping:
+                for entry in (e.strip() for e in mapping.group(1).split(",") if e.strip()):
+                    em = re.match(r"^([A-Za-z][\w-]*):\s*(\S+)$", entry)
+                    if not em:
+                        out.append((i, f"unparseable inline permissions entry ({entry!r}) — fail closed"))
+                        continue
+                    scope = em.group(2)
+                    if scope in ("write", "write-all"):
+                        out.append((i, f"inline permissions grant a write scope ({entry!r})"))
+                    elif scope not in ("read", "none"):
+                        out.append((i, f"unsupported inline permissions scope ({entry!r}) — fail closed"))
+                continue
+            # Unrecognised inline scalar/mapping: fail closed.
+            out.append((i, f"unrecognised inline permissions form ({value!r}) — fail closed"))
+        return out
 
     def structural_hits(self, needle: str) -> list[int]:
         """1-indexed structural line numbers containing ``needle`` (comment
@@ -301,10 +351,10 @@ def test_required_workflows_keep_least_privilege_permissions() -> None:
             f"every required job -- required jobs must keep explicit "
             f"least-privilege permissions"
         )
-        for line_no, grant in doc.permissions_write_grants():
+        for line_no, message in doc.permissions_violations():
             raise AssertionError(
-                f"{filename}:{line_no + 1}: permissions grant a write scope "
-                f"({grant!r}) -- required workflows are read-only"
+                f"{filename}:{line_no + 1}: {message} -- required workflows must "
+                f"declare read-only / fail-closed permissions"
             )
 
 
@@ -526,8 +576,71 @@ def test_selftest_returned_verify_job_is_detected() -> None:
 def test_selftest_write_permission_grant_is_detected() -> None:
     broken = _FIXTURE_OK.replace("  contents: read", "  contents: write")
     doc = _WorkflowDoc(broken, "fixture.yml")
-    grants = doc.permissions_write_grants()
-    assert [g for _, g in grants] == ["contents: write"]
+    violations = doc.permissions_violations()
+    assert len(violations) == 1
+    assert "write scope" in violations[0][1]
+
+
+def _fixture_with_permissions(value_line: str) -> str:
+    # Replace the block-form permissions with a single inline value line.
+    return _FIXTURE_OK.replace("permissions:\n  contents: read\n", value_line + "\n")
+
+
+def test_selftest_inline_write_mapping_fails_closed() -> None:
+    doc = _WorkflowDoc(_fixture_with_permissions("permissions: {contents: write}"), "fixture.yml")
+    violations = doc.permissions_violations()
+    assert len(violations) == 1
+    assert "write scope" in violations[0][1]
+
+
+def test_selftest_inline_write_all_fails_closed() -> None:
+    doc = _WorkflowDoc(_fixture_with_permissions("permissions: write-all"), "fixture.yml")
+    violations = doc.permissions_violations()
+    assert len(violations) == 1
+    assert "write-all" in violations[0][1]
+
+
+def test_selftest_inline_read_all_and_empty_mapping_pass() -> None:
+    assert _WorkflowDoc(_fixture_with_permissions("permissions: read-all"), "f").permissions_violations() == []
+    assert _WorkflowDoc(_fixture_with_permissions("permissions: {}"), "f").permissions_violations() == []
+    # A read-only inline mapping is also fine.
+    assert (
+        _WorkflowDoc(_fixture_with_permissions("permissions: {contents: read}"), "f").permissions_violations()
+        == []
+    )
+
+
+def test_selftest_unknown_inline_permissions_fails_closed() -> None:
+    # An unrecognised inline scalar must fail closed, not silently pass.
+    doc = _WorkflowDoc(_fixture_with_permissions("permissions: banana"), "fixture.yml")
+    violations = doc.permissions_violations()
+    assert len(violations) == 1
+    assert "fail closed" in violations[0][1]
+    # An inline mapping with an unknown scope value also fails closed.
+    doc2 = _WorkflowDoc(_fixture_with_permissions("permissions: {contents: banana}"), "fixture.yml")
+    v2 = doc2.permissions_violations()
+    assert len(v2) == 1
+    assert "fail closed" in v2[0][1]
+
+
+def test_selftest_types_flow_list_quotes_are_stripped() -> None:
+    broken = _FIXTURE_OK.replace(
+        "  pull_request:\n",
+        "  pull_request:\n    types: ['opened', \"synchronize\", reopened]\n",
+    )
+    doc = _WorkflowDoc(broken, "fixture.yml")
+    # Mixed single/double/unquoted all normalise; core set is complete.
+    assert doc.pull_request_types() == {"opened", "synchronize", "reopened"}
+    assert not (CORE_PR_TYPES - (doc.pull_request_types() or set()))
+
+
+def test_selftest_types_block_list_quotes_are_stripped() -> None:
+    broken = _FIXTURE_OK.replace(
+        "  pull_request:\n",
+        "  pull_request:\n    types:\n      - 'opened'\n      - \"synchronize\"\n      - reopened\n",
+    )
+    doc = _WorkflowDoc(broken, "fixture.yml")
+    assert doc.pull_request_types() == {"opened", "synchronize", "reopened"}
 
 
 def test_selftest_block_scalar_content_is_not_read_as_structure() -> None:
@@ -537,6 +650,6 @@ def test_selftest_block_scalar_content_is_not_read_as_structure() -> None:
     # The decoy `uses: evil/action@v1` inside the script is NOT a uses ref.
     assert all("evil" not in ref for _, ref in doc.uses_refs())
     # The decoy `contents: write` inside the script is NOT a permission grant.
-    assert doc.permissions_write_grants() == []
+    assert doc.permissions_violations() == []
     # The decoy pull_request_target mention inside the script is NOT a trigger.
     assert doc.structural_hits("pull_request_target") == []
