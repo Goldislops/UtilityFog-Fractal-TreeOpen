@@ -1,0 +1,534 @@
+"""Deterministic evidence packet over recorded Nextness artifacts (NP8).
+
+Builds one compact, offline AUDIT MANIFEST over up to eight recorded
+artifacts from the Nextness stack — NP1 reports, NP2 receipt series,
+NP5 evaluations, NP6 lab reports/protocols and the underlying JSONL
+log — recording for each its schema, byte length and SHA-256, and
+verifying the provenance links the schemas themselves record (an NP5
+evaluation carries the sha256 of the report/receipts it evaluated; an
+NP6 lab report carries the sha256 of its protocol bytes and of the
+accepted dominant-token sequence).
+
+This is packaging and provenance verification — NOT a new prediction
+metric. Nothing here scores, ranks, recommends, tunes, acts, invokes a
+model or contacts a service, and no consciousness, awareness,
+phenomenology or biological-equivalence claim is made or implied.
+
+Honesty contract:
+
+- Artifacts are validated through the EXISTING validators where one
+  exists (NP5's ``validate_report`` / ``validate_receipt_series``,
+  NP6's ``load_protocol``); the evaluation and lab-report roles have no
+  public validator, so they are checked to their schema identifier and
+  the exact fields the packet consumes — and each manifest entry
+  records its ``validation`` depth (``full`` vs
+  ``schema_identifier_only``) rather than implying more than was
+  checked.
+- A provenance link whose counterpart artifact was not provided is a
+  typed ``not_computable`` result, never a failure and never invented.
+- A link that IS checkable is reported ``verified`` or ``broken`` by
+  byte-level hash comparison (the sequence link recomputes the
+  dominant-token sequence from the log through NP1's own bounded
+  reader).
+
+Safety contract (Lane B, mirrors NP5/NP6):
+
+- Offline only; reads only the artifact files named on the command
+  line, each through a hard pre-parse size bound; duplicate JSON keys
+  and hostile container subclasses are rejected fail-closed.
+- At most ``MAX_PACKET_ARTIFACTS`` artifacts; output checked against a
+  64 KiB fail-closed ceiling.
+- ``--output`` is confined to the primary input's directory, never the
+  repository ``data/`` tree, and never a path aliasing ANY input (by
+  resolved path and by file identity — hard links included; the same
+  validation-time semantics and documented residual race as NP6).
+- Deterministic: sorted keys, fixed schema, no timestamps, no random
+  identifiers, no absolute paths; byte-identical across repeated runs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import sys
+from collections.abc import Mapping
+from typing import Any, Final
+
+from scripts.nextness_evaluator import (
+    EVALUATION_SCHEMA,
+    MAX_INPUT_BYTES,
+    EvaluatorInputError,
+    validate_receipt_series,
+    validate_report,
+)
+from scripts.nextness_monitor import RECEIPT_SCHEMA
+from scripts.nextness_observer import WriteOutsideLogDirError
+from scripts.nextness_predictor import REPORT_SCHEMA, read_dominant_sequence
+from scripts.nextness_replay_lab import (
+    LAB_SCHEMA,
+    PROTOCOL_SCHEMA,
+    LabInputError,
+    load_protocol,
+)
+
+# ---------------------------------------------------------------------------
+# Fixed contract constants
+# ---------------------------------------------------------------------------
+
+PACKET_SCHEMA: Final[str] = "nextness-evidence-packet-v1"
+
+#: One artifact per role, fixed role order (also the manifest order).
+ROLES: Final[tuple[str, ...]] = (
+    "report", "receipts", "evaluation", "lab", "protocol", "log",
+)
+
+#: Hard bound on artifacts per packet (the role set caps this at six
+#: today; the bound is the documented contract either way).
+MAX_PACKET_ARTIFACTS: Final[int] = 8
+
+#: Output ceiling — fail closed (same convention as the whole stack).
+MAX_PACKET_BYTES: Final[int] = 64 * 1024
+
+#: Provenance links the v1 schemas record (fixed vocabulary).
+LINK_KINDS: Final[tuple[str, ...]] = (
+    "evaluation_report_sha256",    # evaluation.artifacts.report.sha256   -> report bytes
+    "evaluation_receipts_sha256",  # evaluation.artifacts.receipts.sha256 -> receipts bytes
+    "lab_protocol_sha256",         # lab.input.protocol_sha256            -> protocol bytes
+    "lab_sequence_sha256",         # lab.input.sequence_sha256            -> log's accepted sequence
+)
+
+#: Typed not-computable vocabulary for links.
+LINK_NOT_COMPUTABLE_REASONS: Final[tuple[str, ...]] = (
+    "counterpart_absent",   # the artifact on one end was not provided
+    "link_not_recorded",    # the recording artifact did not embed the hash
+)
+
+NON_CLAIMS: Final[tuple[str, ...]] = (
+    "Packaging and provenance verification only: nothing here scores, "
+    "ranks, recommends, tunes, acts, invokes a model or contacts a "
+    "service.",
+    "A not_computable link is a statement about which artifacts were "
+    "provided, not about the artifacts' integrity.",
+    "No awareness, consciousness, phenomenology or biological-equivalence "
+    "claim is made or implied.",
+)
+
+_SCHEMA_BY_ROLE: Final[dict[str, str]] = {
+    "report": REPORT_SCHEMA,
+    "receipts": RECEIPT_SCHEMA,
+    "evaluation": EVALUATION_SCHEMA,
+    "lab": LAB_SCHEMA,
+    "protocol": PROTOCOL_SCHEMA,
+}
+
+_HEX64: Final[frozenset[str]] = frozenset("0123456789abcdef")
+
+
+class PacketInputError(ValueError):
+    """A malformed, hostile or unknown-variant packet input (fail closed)."""
+
+
+class PacketTooLargeError(RuntimeError):
+    """Serialized packet exceeded MAX_PACKET_BYTES (fail closed)."""
+
+
+# ---------------------------------------------------------------------------
+# Bounded loading (duplicate keys rejected; exact types on touched fields)
+# ---------------------------------------------------------------------------
+
+
+def _load_bounded_json(path: pathlib.Path) -> tuple[Any, str, int]:
+    """Bounded read + duplicate-key-rejecting parse.
+
+    Returns ``(parsed, sha256_hex, byte_count)``; at most
+    ``MAX_INPUT_BYTES + 1`` bytes are ever materialized.
+    """
+    with path.open("rb") as f:
+        raw = f.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raise PacketInputError(f"artifact exceeds {MAX_INPUT_BYTES} bytes; refusing to parse")
+
+    def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in out:
+                raise PacketInputError(f"artifact: duplicate JSON key {key!r}")
+            out[key] = value
+        return out
+
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="strict"), object_pairs_hook=_no_duplicate_keys)
+    except PacketInputError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+        raise PacketInputError(f"artifact is not valid UTF-8 JSON: {e}") from e
+    except RecursionError as e:
+        raise PacketInputError("artifact nesting exceeds the parser's depth limit") from e
+    return parsed, hashlib.sha256(raw).hexdigest(), len(raw)
+
+
+def _exact_dict_field(container: Any, field: str, context: str) -> Any:
+    if type(container) is not dict:
+        raise PacketInputError(f"{context}: expected builtin dict, got {type(container).__name__}")
+    if field not in container:
+        raise PacketInputError(f"{context}: missing field {field!r}")
+    return container[field]
+
+
+def _exact_sha256(value: Any, context: str) -> str:
+    if type(value) is not str or len(value) != 64 or not set(value) <= _HEX64:
+        raise PacketInputError(f"{context}: expected a 64-char lowercase hex sha256")
+    return value
+
+
+def _schema_of(parsed: Any, role: str) -> str:
+    schema = _exact_dict_field(parsed, "schema", role)
+    if type(schema) is not str:
+        raise PacketInputError(f"{role}.schema: expected builtin str")
+    expected = _SCHEMA_BY_ROLE[role]
+    if schema != expected:
+        raise PacketInputError(
+            f"{role}.schema: unknown variant {schema!r} (expected {expected!r})"
+        )
+    return schema
+
+
+# ---------------------------------------------------------------------------
+# Per-role validation (existing validators where they exist)
+# ---------------------------------------------------------------------------
+
+
+def _validate_role(role: str, path: pathlib.Path) -> dict[str, Any]:
+    """One manifest entry. ``validation`` records the honest depth."""
+    if role == "log":
+        # The log is not JSON; it enters the stack only through NP1's
+        # bounded reader. Hash the accepted dominant-token sequence the
+        # same way NP6 does (that is the identity the lab records), and
+        # the raw bytes for completeness.
+        with path.open("rb") as f:
+            raw = f.read(MAX_INPUT_BYTES + 1)
+        if len(raw) > MAX_INPUT_BYTES:
+            raise PacketInputError(f"log exceeds {MAX_INPUT_BYTES} bytes; refusing to parse")
+        sequence, _rejections, _rows = read_dominant_sequence(path)
+        return {
+            "role": "log",
+            "schema": "jsonl-nextness-runs",
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "sequence_sha256": hashlib.sha256("\n".join(sequence).encode("utf-8")).hexdigest(),
+            "rows_accepted": len(sequence),
+            "validation": "sequence_reader",
+        }
+
+    parsed, digest, size = _load_bounded_json(path)
+    entry: dict[str, Any] = {
+        "role": role,
+        "bytes": size,
+        "sha256": digest,
+    }
+    try:
+        if role == "report":
+            entry["schema"] = _schema_of(parsed, role)
+            validate_report(parsed)
+            entry["validation"] = "full"
+        elif role == "receipts":
+            # A receipts artifact may be one receipt or a JSON array of
+            # receipts; an array has no top-level schema field, so the
+            # schema check is the series validator's own per-receipt
+            # check, not _schema_of.
+            series = validate_receipt_series(parsed)
+            entry["schema"] = RECEIPT_SCHEMA
+            entry["receipt_count"] = len(series)
+            entry["validation"] = "full"
+        elif role == "protocol":
+            entry["schema"] = _schema_of(parsed, role)
+            load_protocol(path)  # bounded re-read through NP6's own loader
+            entry["validation"] = "full"
+        else:
+            # evaluation / lab: no public validator exists; only the
+            # schema identifier and the link fields consumed below are
+            # checked. Saying "full" here would be a lie.
+            entry["schema"] = _schema_of(parsed, role)
+            entry["validation"] = "schema_identifier_only"
+    except (EvaluatorInputError, LabInputError) as e:
+        raise PacketInputError(f"{role}: {e}") from e
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# Provenance links (verified / broken / typed not-computable)
+# ---------------------------------------------------------------------------
+
+
+def _link(status: str, **extra: Any) -> dict[str, Any]:
+    return {"status": status, **extra}
+
+
+def _not_computable_link(reason: str, requires: str) -> dict[str, Any]:
+    if reason not in LINK_NOT_COMPUTABLE_REASONS:  # internal invariant
+        raise ValueError(f"unknown link reason: {reason!r}")
+    return {"status": "not_computable", "reason": reason, "requires": requires}
+
+
+def _evaluation_link(
+    evaluation: Mapping[str, Any] | None,
+    counterpart_role: str,
+    counterpart_entry: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if evaluation is None:
+        return _not_computable_link("counterpart_absent", "an evaluation artifact")
+    artifacts = _exact_dict_field(evaluation, "artifacts", "evaluation")
+    slot = _exact_dict_field(artifacts, counterpart_role, "evaluation.artifacts")
+    provided = _exact_dict_field(slot, "provided", f"evaluation.artifacts.{counterpart_role}")
+    if provided is not True:
+        return _not_computable_link(
+            "link_not_recorded",
+            f"an evaluation produced WITH a {counterpart_role} artifact "
+            f"(this one records provided: false)",
+        )
+    recorded = _exact_sha256(
+        _exact_dict_field(slot, "sha256", f"evaluation.artifacts.{counterpart_role}"),
+        f"evaluation.artifacts.{counterpart_role}.sha256",
+    )
+    if counterpart_entry is None:
+        return _not_computable_link("counterpart_absent", f"the {counterpart_role} artifact itself")
+    actual = counterpart_entry["sha256"]
+    return _link(
+        "verified" if recorded == actual else "broken",
+        recorded_sha256=recorded,
+        actual_sha256=actual,
+    )
+
+
+def _lab_link(
+    lab: Mapping[str, Any] | None,
+    field: str,
+    counterpart_entry: Mapping[str, Any] | None,
+    counterpart_name: str,
+    counterpart_key: str,
+) -> dict[str, Any]:
+    if lab is None:
+        return _not_computable_link("counterpart_absent", "a lab-report artifact")
+    inp = _exact_dict_field(lab, "input", "lab")
+    recorded = _exact_sha256(_exact_dict_field(inp, field, "lab.input"), f"lab.input.{field}")
+    if counterpart_entry is None:
+        return _not_computable_link("counterpart_absent", counterpart_name)
+    actual = counterpart_entry[counterpart_key]
+    return _link(
+        "verified" if recorded == actual else "broken",
+        recorded_sha256=recorded,
+        actual_sha256=actual,
+    )
+
+
+# ---------------------------------------------------------------------------
+# End-to-end packet
+# ---------------------------------------------------------------------------
+
+
+def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
+    """One deterministic ``nextness-evidence-packet-v1`` manifest.
+
+    ``paths`` maps roles (subset of ROLES, at least one) to files.
+    Manifest order is the fixed ROLES order regardless of invocation
+    order — determinism over convenience.
+    """
+    unknown = sorted(set(paths) - set(ROLES))
+    if unknown:
+        raise PacketInputError(f"unknown artifact roles: {unknown}")
+    if not paths:
+        raise PacketInputError("no artifacts provided: nothing to package")
+    if len(paths) > MAX_PACKET_ARTIFACTS:
+        raise PacketInputError(
+            f"{len(paths)} artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+        )
+
+    entries: dict[str, dict[str, Any]] = {}
+    parsed_evaluation: Mapping[str, Any] | None = None
+    parsed_lab: Mapping[str, Any] | None = None
+    for role in ROLES:
+        if role not in paths:
+            continue
+        entries[role] = _validate_role(role, paths[role])
+        if role == "evaluation":
+            parsed_evaluation, _, _ = _load_bounded_json(paths[role])
+        elif role == "lab":
+            parsed_lab, _, _ = _load_bounded_json(paths[role])
+
+    links = {
+        "evaluation_report_sha256": _evaluation_link(
+            parsed_evaluation, "report", entries.get("report")
+        ),
+        "evaluation_receipts_sha256": _evaluation_link(
+            parsed_evaluation, "receipts", entries.get("receipts")
+        ),
+        "lab_protocol_sha256": _lab_link(
+            parsed_lab, "protocol_sha256", entries.get("protocol"),
+            "the protocol artifact", "sha256",
+        ),
+        "lab_sequence_sha256": _lab_link(
+            parsed_lab, "sequence_sha256", entries.get("log"),
+            "the log artifact", "sequence_sha256",
+        ),
+    }
+
+    packet: dict[str, Any] = {
+        "schema": PACKET_SCHEMA,
+        "config": {
+            "max_packet_artifacts": MAX_PACKET_ARTIFACTS,
+            "max_input_bytes": MAX_INPUT_BYTES,
+            "max_packet_bytes": MAX_PACKET_BYTES,
+        },
+        "artifacts": [entries[role] for role in ROLES if role in entries],
+        "links": links,
+        "non_claims": list(NON_CLAIMS),
+    }
+    serialized = serialize_packet(packet)
+    if len(serialized.encode("utf-8")) > MAX_PACKET_BYTES:
+        raise PacketTooLargeError(
+            f"packet would exceed {MAX_PACKET_BYTES} bytes; refusing to emit"
+        )
+    return packet
+
+
+def serialize_packet(packet: Mapping[str, Any]) -> str:
+    """Canonical serialization: sorted keys, fixed separators, newline."""
+    return json.dumps(packet, sort_keys=True, separators=(",", ": "), indent=1) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Write boundary (corrected-NP6 semantics: identity-aware, race documented)
+# ---------------------------------------------------------------------------
+
+
+def _repo_data_dir() -> pathlib.Path:
+    return (pathlib.Path(__file__).resolve().parent.parent / "data").resolve()
+
+
+def validate_output_path(
+    out_path: pathlib.Path, inputs: Mapping[str, pathlib.Path]
+) -> None:
+    """--output must resolve inside the primary input's directory (first
+    provided role in ROLES order), never inside the repository data/
+    tree, and never on a path aliasing ANY input — by resolved path or
+    by file identity (hard links included). Identity is verified at
+    validation time only; the same residual filesystem race as the NP6
+    lab applies and no stronger claim is made."""
+    primary = next(inputs[role] for role in ROLES if role in inputs)
+    primary_dir = primary.resolve().parent
+    out_resolved = out_path.resolve()
+    try:
+        out_resolved.relative_to(primary_dir)
+    except ValueError as e:
+        raise WriteOutsideLogDirError(
+            f"refusing to write packet outside the primary input's directory: "
+            f"{out_resolved} is not inside {primary_dir}"
+        ) from e
+    for role in ROLES:
+        if role not in inputs:
+            continue
+        input_path = inputs[role]
+        if out_resolved == input_path.resolve():
+            raise WriteOutsideLogDirError(
+                f"refusing to overwrite the input {role} file: {out_resolved}"
+            )
+        if out_resolved.exists():
+            try:
+                same = os.path.samefile(out_resolved, input_path)
+            except OSError as e:
+                raise WriteOutsideLogDirError(
+                    f"cannot verify output file identity against the input "
+                    f"{role} file: {out_resolved}"
+                ) from e
+            if same:
+                raise WriteOutsideLogDirError(
+                    f"refusing to overwrite the input {role} file (shared "
+                    f"file identity): {out_resolved}"
+                )
+    data_dir = _repo_data_dir()
+    if out_resolved == data_dir or data_dir in out_resolved.parents:
+        raise WriteOutsideLogDirError(
+            f"refusing to write packet inside the repository data/ tree: {out_resolved}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Deterministic evidence packet over recorded Nextness artifacts "
+            "(packaging and provenance verification only; see module "
+            "docstring for the full contract)."
+        )
+    )
+    for role in ROLES:
+        parser.add_argument(
+            f"--{role}", type=pathlib.Path, default=None,
+            help=f"path to a recorded {role} artifact",
+        )
+    parser.add_argument(
+        "--output", type=pathlib.Path, default=None,
+        help=(
+            "optional packet path; must resolve inside the primary input's "
+            "directory, outside the repository data/ tree, and must not "
+            "alias any input (default: stdout)"
+        ),
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Exit-code contract (mirrors NP5): ``0`` success · ``2`` validation
+    failure (missing/oversized/malformed/unknown-variant artifact, or
+    none provided) · ``4`` output-path failure · ``5`` packet over the
+    ceiling. One concise ``error:`` line per expected failure — never a
+    traceback; unexpected programming errors propagate loudly.
+    """
+    args = _build_parser().parse_args(argv)
+    paths = {
+        role: getattr(args, role) for role in ROLES if getattr(args, role) is not None
+    }
+    if not paths:
+        print("error: provide at least one artifact (--report/--receipts/"
+              "--evaluation/--lab/--protocol/--log)", file=sys.stderr)
+        return 2
+    for role, path in paths.items():
+        if not path.is_file():
+            print(f"error: {role} artifact not found: {path}", file=sys.stderr)
+            return 2
+    try:
+        if args.output is not None:
+            validate_output_path(args.output, paths)
+        packet = build_packet(paths)
+    except WriteOutsideLogDirError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 4
+    except PacketTooLargeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 5
+    except ValueError as e:  # includes PacketInputError and wrapped validators
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    serialized = serialize_packet(packet)
+    if args.output is not None:
+        try:
+            args.output.write_bytes(serialized.encode("utf-8"))
+        except OSError as e:
+            print(f"error: cannot write packet to {args.output}: {e}", file=sys.stderr)
+            return 4
+    else:
+        sys.stdout.write(serialized)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
