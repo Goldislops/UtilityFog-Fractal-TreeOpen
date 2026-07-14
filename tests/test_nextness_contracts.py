@@ -447,6 +447,13 @@ GOLDEN_EVALUATION = '''{
    "requires": "per-observation surprise values (receipts record cumulative means only; recovery is resolvable at receipt granularity, never at observation granularity)",
    "status": "not_computable"
   },
+  "series_comparability": {
+   "status": "computed",
+   "value": {
+    "config_stable": true,
+    "model_stable": true
+   }
+  },
   "surprise_blocks": {
    "reason": "series_too_short",
    "requires": "at least two chronologically witnessed receipts",
@@ -696,6 +703,7 @@ def test_rejection_and_result_vocabularies_frozen() -> None:
     assert evaluator.NOT_COMPUTABLE_REASONS == (
         "artifact_absent", "field_not_recorded", "series_too_short",
         "order_not_witnessed", "no_covering_receipt",
+        "model_not_stable", "config_not_stable",
     )
     assert evaluator.VERDICTS == ("consistent", "contradicted", "unverifiable")
     assert evaluator.CONSISTENCY_CHECKS == (
@@ -719,6 +727,10 @@ def test_numeric_bounds_and_mirrors_frozen() -> None:
     assert lab.MAX_REPLAY_STEPS == 2_000
     assert evaluator.MAX_SERIES_RECEIPTS == 256
     assert evaluator.MAX_INPUT_BYTES == 1_048_576
+    assert evaluator.MAX_DETAIL_ITEMS == 128
+    assert lab.MAX_PROTOCOL_BYTES == 64 * 1024
+    assert lab.MAX_DETAIL_ITEMS == 128
+    assert lab.MAX_LABEL_CHARS == 64
     # The evaluator mirrors the monitor's private surprise cap: this is
     # the lock that keeps the "kept manually in sync" comment true.
     assert evaluator.SURPRISE_BITS_MAX == monitor._MAX_SURPRISE_BITS == 1_000.0
@@ -837,3 +849,72 @@ def test_mutated_golden_protocol_rejected_fail_closed(tmp_path, mutate) -> None:
     path = _write(tmp_path, "protocol.json", json.dumps(artifact))
     with pytest.raises(lab.LabInputError):
         lab.load_protocol(path)
+
+# ---------------------------------------------------------------------------
+# 5. Correction-semantics locks (Jack HOLD delta, 2026-07-15): the
+# corrected behaviors must not silently regress to their pre-correction
+# forms.
+# ---------------------------------------------------------------------------
+
+
+def _two_receipt_series(second_overrides: dict) -> list[dict]:
+    base = json.loads(GOLDEN_RECEIPT)
+    first = dict(base)
+    second = dict(base)
+    second["observation_count"] = base["observation_count"] + 10
+    for key, value in second_overrides.items():
+        if key == "config":
+            second["config"] = {**base["config"], **value}
+        else:
+            second[key] = value
+    return [evaluator.validate_receipt(first, "r0"), evaluator.validate_receipt(second, "r1")]
+
+
+def test_mixed_model_recovery_cannot_silently_compute() -> None:
+    other = next(m for m in monitor.MODEL_ALLOWLIST if m != json.loads(GOLDEN_RECEIPT)["model"])
+    ev = evaluator.evaluate(receipts=_two_receipt_series({"model": other}))
+    for key in ("surprise_blocks", "confidence_blocks", "abstention_transitions"):
+        assert ev["recovery"][key]["status"] == "not_computable"
+        assert ev["recovery"][key]["reason"] == "model_not_stable"
+
+
+def test_changed_config_transitions_cannot_silently_compute() -> None:
+    ev = evaluator.evaluate(
+        receipts=_two_receipt_series({"config": {"min_history": 31}})
+    )
+    assert ev["recovery"]["abstention_transitions"]["status"] == "not_computable"
+    assert ev["recovery"]["abstention_transitions"]["reason"] == "config_not_stable"
+    assert ev["recovery"]["surprise_blocks"]["status"] == "computed"
+
+
+def test_oversized_holdout_never_allocates_observations(tmp_path, monkeypatch) -> None:
+    lines = [
+        json.dumps({"generation": i, "token_counts": {"void_static": 1}})
+        for i in range(2 * lab.MAX_REPLAY_STEPS + 2)
+    ]
+    log = _write(tmp_path, "big.jsonl", chr(10).join(lines) + chr(10))
+    protocol_obj = json.loads(GOLDEN_PROTOCOL)
+    protocol_obj["holdout_fraction"] = 0.5
+    protocol = _write(tmp_path, "protocol.json", json.dumps(protocol_obj))
+    invocations: list[int] = []
+    real = lab.replay_observations
+    monkeypatch.setattr(
+        lab, "replay_observations", lambda *a, **k: invocations.append(1) or real(*a, **k)
+    )
+    with pytest.raises(lab.LabInputError, match="replay bound"):
+        lab.build_lab_report(log, protocol)
+    assert invocations == []
+
+
+def test_hard_link_output_alias_refused_by_the_stack(tmp_path) -> None:
+    import os
+
+    log = _write(tmp_path, "log.jsonl", GOLDEN_LOG)
+    protocol = _write(tmp_path, "protocol.json", GOLDEN_PROTOCOL)
+    alias = tmp_path / "alias.json"
+    os.link(log, alias)
+    before = log.read_bytes()
+    with pytest.raises(Exception, match="identity|overwrite"):
+        lab.validate_output_path(alias, log, protocol)
+    assert log.read_bytes() == before
+

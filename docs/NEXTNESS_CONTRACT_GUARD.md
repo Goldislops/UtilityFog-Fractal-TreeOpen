@@ -41,6 +41,14 @@ mechanisms:
    that unknown variants — schema bumps, extra keys, missing sections,
    out-of-bound values, bool-as-int — stay **fail-closed** at the NP5
    and NP6 input boundaries.
+5. **Correction-semantics locks** (added with the 2026-07-15 Jack
+   delta): mixed-model series can never silently compute block
+   recovery (`model_not_stable`), changed-config series can never
+   silently compute abstention transitions (`config_not_stable`), an
+   oversized holdout can never reach observation allocation
+   (spy-verified non-invocation of `replay_observations`), and a
+   hard-link output alias to an input is refused with the input
+   byte-intact.
 
 ## Drift-detection receipts (failing-first)
 
@@ -68,6 +76,20 @@ failed, then the original was restored and the guard passed (29/29):
   made or needed.**
 - No consciousness, awareness, phenomenology or biological-equivalence
   claim; the guard is bookkeeping about schemas.
+
+## Regeneration record
+
+- **2026-07-15 (Jack HOLD delta)**: `GOLDEN_EVALUATION` regenerated
+  after the NP5 corrections. Sole delta (7 lines): the new
+  `recovery.series_comparability` field, `computed` with
+  `{config_stable: true, model_stable: true}` for the single-receipt
+  golden series. Every other golden literal byte-unchanged (verified:
+  the NP1/NP2 emitters were untouched and the NP6 corrections do not
+  alter report content for valid inputs). Frozen vocabularies extended
+  in step: `NOT_COMPUTABLE_REASONS` + `model_not_stable` /
+  `config_not_stable`; numeric freezes + `evaluator.MAX_DETAIL_ITEMS`,
+  `lab.MAX_PROTOCOL_BYTES`, `lab.MAX_DETAIL_ITEMS`,
+  `lab.MAX_LABEL_CHARS`.
 
 ## Deliberate contract changes (regeneration procedure)
 
