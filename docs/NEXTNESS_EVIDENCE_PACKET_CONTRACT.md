@@ -60,10 +60,14 @@ verification.
   and the accepted-sequence hash (`validation: "sequence_reader"`).
 
 **Self-check**: the emitted packet is validated against NP9's
-`validate_evidence_packet` before serialization — a failure there is a
-programming error and propagates loudly. Provenance links remain
-independently recomputed by this module; structural validation never
-converts a broken link into success.
+`validate_evidence_packet` before serialization. A failure there is an
+**internal programming/contract failure, not user input**: it is
+re-raised as a plain `RuntimeError` at the boundary (never the
+documented exit-2 input lane, which `ArtifactValidationError`'s
+`ValueError` ancestry would otherwise trigger) and propagates loudly.
+Malformed **external** artifacts keep the concise exit-2 contract.
+Provenance links remain independently recomputed by this module;
+structural validation never converts a broken link into success.
 
 Unknown schema variants, malformed link fields, duplicate JSON keys and
 artifacts failing their validators are all rejected **fail-closed**.

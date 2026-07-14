@@ -522,9 +522,19 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
         "non_claims": list(NON_CLAIMS),
     }
     # Self-check: the emitted packet must satisfy its own public
-    # structural validator before serialization. A failure here is a
-    # programming error, not an input error — it propagates loudly.
-    _np9().validate_evidence_packet(packet)
+    # structural validator before serialization. A failure here is an
+    # internal programming/contract failure, NOT malformed user input —
+    # and ArtifactValidationError inherits ValueError, which the CLI
+    # catches as the documented exit-2 input lane. Re-raise as a plain
+    # RuntimeError at this boundary so the internal failure propagates
+    # loudly instead of masquerading as a concise input error.
+    validation = _np9()
+    try:
+        validation.validate_evidence_packet(packet)
+    except validation.ArtifactValidationError as e:
+        raise RuntimeError(
+            f"internal: emitted packet failed self-validation: {e}"
+        ) from e
     serialized = serialize_packet(packet)
     if len(serialized.encode("utf-8")) > MAX_PACKET_BYTES:
         raise PacketTooLargeError(

@@ -667,6 +667,32 @@ def test_emitted_packet_is_self_validated(chain, monkeypatch) -> None:
     assert calls == [1]  # exactly one self-validation before serialization
 
 
+def test_self_validation_failure_is_internal_not_input_error(chain, monkeypatch, capsys) -> None:
+    # A failure while validating the packet NP8 JUST EMITTED is an
+    # internal programming/contract failure — it must propagate loudly,
+    # never masquerade as the documented exit-2 "malformed user input"
+    # lane (ArtifactValidationError inherits ValueError, which main
+    # catches for external artifacts).
+    import scripts.nextness_artifact_validation as validation_module
+    from scripts.nextness_artifact_validation import ArtifactValidationError
+
+    def _boom(obj):
+        raise ArtifactValidationError("injected internal contract failure")
+
+    monkeypatch.setattr(validation_module, "validate_evidence_packet", _boom)
+    with pytest.raises(RuntimeError, match="internal"):
+        main(["--log", str(chain["log"])])
+    # And a genuinely malformed EXTERNAL artifact still takes the
+    # documented concise exit-2 lane (validator untouched for inputs).
+    monkeypatch.undo()
+    bad = chain["log"].parent / "bad_eval.json"
+    bad.write_bytes(b'{"schema": "nextness-evaluation-v2"}')
+    assert main(["--evaluation", str(bad)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "Traceback" not in err
+
+
 # ---------------------------------------------------------------------------
 # No ranking/scoring structure anywhere
 # ---------------------------------------------------------------------------
