@@ -34,7 +34,7 @@ only part that can be tested.
 | `mean_confidence` | float | mean top-1 probability |
 | `mean_surprise_bits` | float | mean −log₂ P(actual), bounded ≤1000 (underflow guard) |
 | `rolling_calibration_error` | float | fixed-bin ECE over the last `window` observations (same 10-bin scheme as NP1) |
-| `distribution_drift_bits` | float | Jensen-Shannon divergence (bits), recent window vs training reference — **reuses `nextness_metrics.js_divergence`**, no new divergence code |
+| `distribution_drift_bits` | float | Jensen-Shannon divergence (bits), recent window vs training reference — **reuses `nextness_metrics.js_divergence`**, no new divergence code. The bridge's recent counts cover **exactly the latest `window` holdout observations** (never the whole holdout, so an older stable prefix cannot dilute a late regime change) |
 | `sufficiency` | enum | `sufficient` / `insufficient` |
 | `abstain` | bool | see decision procedure |
 | `abstain_reason` | enum | fixed vocabulary below |
@@ -69,13 +69,30 @@ float thresholds ∈ (0, 1)).
 - Observations must be built-in dicts with exactly the allowlisted
   fields `confidence`, `hit`, `p_actual`, `prev_seen`; unknown fields
   are discarded and honestly counted (`input_reduced`); missing or
-  invalid required fields **fail closed** with a typed error.
+  invalid required fields **fail closed** with a typed error. All four
+  fields are required — a missing `prev_seen` is **never defaulted to
+  `True`** (that would mask `unseen_state` abstention).
+- Numbers must be **exact builtin `int`/`float`**: bools, non-finite
+  values and custom numeric subclasses are rejected through
+  `MonitorInputError` *before* any conversion hook
+  (`__float__`/`__index__`) can run.
 - Container guards: dict subclasses, hostile `__str__`/`__float__`
   objects, bools-as-numbers, NaN/inf, out-of-range probabilities and
   astronomically large integers are all rejected *before* any
   stringification or arithmetic can touch them.
 - Reference/recent token counts: built-in dicts, known vocabulary only,
   non-negative built-in ints.
+- Configuration: `min_history` and `window` must be **exact builtin
+  ints** within their documented ranges (bool/float/subclasses rejected);
+  the bridge's inherited NP1 options (`smoothing`, `holdout_fraction`)
+  keep NP1's exact bounds and fail closed on violation.
+
+## CLI expected-failure contract (inherited from NP1)
+
+`0` success · `2` validation failure (missing log file or out-of-bounds
+options) · `3` insufficient history. Every expected failure prints one
+concise `error:` line to stderr — never a traceback. The monitor writes
+no files on any path, success or failure.
 
 ## A finding worth keeping (from the test suite)
 

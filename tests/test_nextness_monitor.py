@@ -336,3 +336,273 @@ def test_cli_exit_codes(tmp_path) -> None:
     assert main([str(tmp_path / "absent.jsonl")]) == 2
     log = _write_log(tmp_path, [A])
     assert main([str(log)]) == 3
+
+
+# ---------------------------------------------------------------------------
+# NP2 corrections (delta audit): exact-type guards, required prev_seen,
+# windowed drift, canonical tie-break equivalence, gated ECE simplification,
+# inherited NP1 reader behavior, abstention-only outcomes.
+# ---------------------------------------------------------------------------
+
+
+class _IntSubclass(int):
+    pass
+
+
+def test_config_min_history_and_window_must_be_exact_builtin_ints() -> None:
+    # Correction A: bool, float and numeric subclasses are rejected even
+    # when their numeric value sits inside the documented range.
+    for bad in (True, 30.0, _IntSubclass(30)):
+        with pytest.raises(ValueError):
+            MonitorConfig(min_history=bad).validate()
+    for bad in (True, 50.0, _IntSubclass(50)):
+        with pytest.raises(ValueError):
+            MonitorConfig(window=bad).validate()
+    MonitorConfig(min_history=30, window=50).validate()  # exact ints still fine
+
+
+def test_numeric_subclasses_rejected_without_invoking_conversion_hooks() -> None:
+    # Correction B: only exact builtin int/float are supported observation
+    # numbers; custom subclasses are rejected through MonitorInputError
+    # BEFORE any conversion hook (__float__/__index__) can run.
+    hook_calls: list[str] = []
+
+    class _HookedFloat(float):
+        def __float__(self) -> float:
+            hook_calls.append("float.__float__")
+            return 0.5
+
+    class _HookedInt(int):
+        def __float__(self) -> float:
+            hook_calls.append("int.__float__")
+            return 0.5
+
+        def __index__(self) -> int:
+            hook_calls.append("int.__index__")
+            return 0
+
+    for bad in (_HookedFloat(0.5), _HookedInt(0)):
+        for field in ("confidence", "p_actual"):
+            with pytest.raises(MonitorInputError):
+                validate_observations([{**_ob(0.5, True, 0.5), field: bad}])
+    assert hook_calls == []  # rejection happened before conversion
+
+
+def test_missing_prev_seen_fails_closed_and_never_defaults_to_true() -> None:
+    # Correction C: prev_seen is REQUIRED; a missing value must not be
+    # silently defaulted to True (that would mask unseen_state abstention).
+    record = {"confidence": 0.9, "hit": True, "p_actual": 0.9}  # no prev_seen
+    with pytest.raises(MonitorInputError):
+        validate_observations([record])
+    for bad in (None, 1, 0, "true"):
+        with pytest.raises(MonitorInputError):
+            validate_observations([{**_ob(0.9, True, 0.9), "prev_seen": bad}])
+
+
+def test_recent_counts_use_exactly_the_latest_window_observations(tmp_path) -> None:
+    # Correction D: 60 train + 20 holdout; the older half of the holdout
+    # continues the training regime, the last `window`=10 observations are
+    # a hard regime change to all-B. Whole-holdout counting dilutes the
+    # shift below the drift threshold; windowed counting must not.
+    tokens = [A, B] * 30 + [A, B] * 5 + [B] * 10
+    log = _write_log(tmp_path, tokens)
+    obs, reference, recent = observations_from_log(
+        log, "persistence", smoothing=0.01, window=10
+    )
+    assert reference == {A: 30, B: 30}
+    assert recent == {B: 10}  # exactly the latest window, not {A: 5, B: 15}
+
+    # Expected drift derived independently of the bridge: hand-built count
+    # dicts through the shared metric, cross-checked against the hand
+    # calculation JS((.5,.5),(0,1)) = 1 - 0.75*log2(3) + 0.5*log2(2) ~ 0.3113.
+    from scripts.nextness_metrics import js_divergence
+
+    expected_drift = js_divergence({A: 30, B: 30}, {B: 10})
+    diluted_drift = js_divergence({A: 30, B: 30}, {A: 5, B: 15})
+    assert expected_drift == pytest.approx(0.3113, abs=2e-3)
+    assert diluted_drift < 0.15 < expected_drift  # dilution hid the shift
+
+    receipt = build_receipt(
+        model="persistence",
+        observations=obs,
+        reference_counts=reference,
+        recent_counts=recent,
+        config=MonitorConfig(min_history=10, window=10),
+    )
+    assert receipt["distribution_drift_bits"] == round(expected_drift, 6)
+    assert receipt["abstain"] is True
+    assert receipt["abstain_reason"] == "distribution_shift"
+
+
+def test_default_window_bounds_recent_counts(tmp_path) -> None:
+    # Correction D at the default window: holdout 100 > window 50 must
+    # yield exactly 50 recent counts, not the entire holdout.
+    log = _write_log(tmp_path, [A, B] * 150 + [B] * 100)
+    _obs, reference, recent = observations_from_log(log, "persistence")
+    assert sum(reference.values()) == 300
+    assert recent == {B: 50}
+
+
+def test_bridge_window_must_be_exact_builtin_int_in_bounds(tmp_path) -> None:
+    log = _write_log(tmp_path, [A, B] * 8)
+    for bad in (True, 10.0, _IntSubclass(10), 4, 10_001):
+        with pytest.raises(ValueError):
+            observations_from_log(log, "persistence", window=bad)
+
+
+def test_canonical_top_matches_legacy_token_names_index_tie_break() -> None:
+    # Correction E equivalence proof: TOKEN_INDEX tie-breaking selects the
+    # same token as the legacy TOKEN_NAMES.index expression on uniform,
+    # pairwise-tied and coarsely-quantized (tie-rich) distributions.
+    from scripts.nextness_monitor import canonical_top
+
+    dists = [{t: 1.0 / len(TOKEN_NAMES) for t in TOKEN_NAMES}]
+    for i in range(len(TOKEN_NAMES)):
+        for j in range(i + 1, len(TOKEN_NAMES)):
+            d = {t: 0.01 for t in TOKEN_NAMES}
+            d[TOKEN_NAMES[i]] = 0.4
+            d[TOKEN_NAMES[j]] = 0.4
+            dists.append(d)
+    rng = random.Random(4242)
+    for _ in range(500):
+        dists.append({t: round(rng.random() * 5) / 5.0 for t in TOKEN_NAMES})
+    for d in dists:
+        legacy = max(TOKEN_NAMES, key=lambda t: (d[t], -TOKEN_NAMES.index(t)))
+        assert canonical_top(d) == legacy
+
+
+def _rolling_ece_reference(observations) -> float:
+    # The pre-simplification form, kept VERBATIM as the equivalence oracle
+    # for correction F: (count/n) * |conf/count - acc/count| per bin.
+    from scripts.nextness_predictor import ECE_BINS
+
+    if not observations:
+        return 0.0
+    n = len(observations)
+    bin_conf = [0.0] * ECE_BINS
+    bin_acc = [0.0] * ECE_BINS
+    bin_count = [0] * ECE_BINS
+    for ob in observations:
+        b = min(int(ob["confidence"] * ECE_BINS), ECE_BINS - 1)
+        bin_conf[b] += ob["confidence"]
+        bin_acc[b] += 1.0 if ob["hit"] else 0.0
+        bin_count[b] += 1
+    ece = 0.0
+    for b in range(ECE_BINS):
+        if bin_count[b]:
+            ece += (bin_count[b] / n) * abs(
+                bin_conf[b] / bin_count[b] - bin_acc[b] / bin_count[b]
+            )
+    return ece
+
+
+def test_ece_simplification_equivalent_on_boundary_and_seeded_fixtures() -> None:
+    # Correction F gate: exact bin-boundary confidences (0.0, 0.1, ..., 1.0),
+    # the recorded exact fixture, degenerate cases and seeded traces must
+    # agree with the pre-simplification form to 1e-12 AND serialize
+    # identically after the receipt's fixed 6-decimal rounding.
+    fixtures = [
+        [_ob(round(k * 0.1, 1), k % 2 == 0, 0.5) for k in range(11)],
+        [_ob(0.85, True, 0.85), _ob(0.85, False, 0.1)],
+        [],
+        [_ob(1.0, True, 1.0)] * 7,
+        [_ob(0.0, False, 0.0)] * 3,
+    ]
+    for seed in (7, 77, 777, 4242):
+        rng = random.Random(seed)
+        fixtures.append(
+            [_ob(rng.random(), rng.random() < 0.5, rng.random()) for _ in range(97)]
+        )
+    for obs in fixtures:
+        simplified = rolling_ece(obs)
+        reference = _rolling_ece_reference(obs)
+        assert simplified == pytest.approx(reference, abs=1e-12)
+        assert round(simplified, 6) == round(reference, 6)
+
+
+def test_blank_records_consume_raw_row_budget_through_the_bridge(tmp_path) -> None:
+    # Inherited NP1 reader contract: blank records are neither observations
+    # nor violations, but they consume max_rows budget (bounded raw work).
+    rows = [
+        json.dumps({"generation": i, "token_counts": {(A if i % 2 == 0 else B): 3}})
+        for i in range(40)
+    ]
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text("\n\n\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    obs, reference, recent = observations_from_log(log, "persistence", max_rows=40)
+    # 3 blanks + 37 data rows fit the budget: split floor(37*0.75)=27/10.
+    assert sum(reference.values()) == 27
+    assert len(obs) == 10
+
+
+def test_oversized_record_stops_ingestion_through_the_bridge(tmp_path) -> None:
+    # Inherited NP1 reader contract: the first oversized record is counted
+    # and TERMINATES ingestion with bounded reads (fail closed) — rows
+    # after it never become observations.
+    rows = [
+        json.dumps({"generation": i, "token_counts": {(A if i % 2 == 0 else B): 3}})
+        for i in range(30)
+    ]
+    big = json.dumps({"generation": 98, "token_counts": {A: 3}, "pad": "x" * 5000})
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text(
+        "\n".join(rows[:20]) + "\n" + big + "\n" + "\n".join(rows[20:]) + "\n",
+        encoding="utf-8",
+    )
+    obs, reference, recent = observations_from_log(
+        log, "persistence", max_line_bytes=256
+    )
+    # Exactly the 20 pre-oversize rows: split floor(20*0.75)=15/5.
+    assert sum(reference.values()) == 15
+    assert len(obs) == 5
+
+
+def test_invalid_inherited_predictor_options_fail_closed(tmp_path) -> None:
+    # Inherited NP1 option bounds must hold on the bridge too — never
+    # silently produce distributions from out-of-bounds smoothing or a
+    # degenerate holdout fraction.
+    log = _write_log(tmp_path, [A, B] * 30)
+    for kwargs in (
+        {"smoothing": -1.0},
+        {"smoothing": 0.0},
+        {"smoothing": 1e9},
+        {"holdout_fraction": 0.01},
+        {"holdout_fraction": 0.9},
+    ):
+        with pytest.raises(ValueError):
+            observations_from_log(log, "first_order", **kwargs)
+
+
+def test_cli_invalid_options_exit_concisely_and_write_nothing(tmp_path, capsys) -> None:
+    # Inherited expected-failure CLI contract: concise `error:` line on
+    # stderr, exit 2, no traceback, no files written.
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert main([str(log), "--smoothing", "-1"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "Traceback" not in err
+    assert main([str(log), "--holdout-fraction", "0.9"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "Traceback" not in err
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_rejected_evidence_yields_typed_failure_or_documented_abstention() -> None:
+    # Abstention contract: rejected predictor evidence is a typed input
+    # failure (no receipt at all); insufficient evidence is a documented
+    # abstention receipt whose fields stay inside the closed allowlist —
+    # never an action, tuning, orchestration or write signal.
+    with pytest.raises(MonitorInputError):
+        _receipt([{**_ob(0.5, True, 0.5), "p_actual": float("nan")}])
+    receipt = _receipt([_ob(0.9, True, 0.9)] * 3)
+    assert receipt["abstain"] is True
+    assert receipt["abstain_reason"] == "insufficient_history"
+    assert set(receipt) == {
+        "schema", "model", "observation_count", "mean_confidence",
+        "mean_surprise_bits", "rolling_calibration_error",
+        "distribution_drift_bits", "sufficiency", "abstain",
+        "abstain_reason", "input_reduced", "discarded_field_count",
+        "config", "non_claim",
+    }

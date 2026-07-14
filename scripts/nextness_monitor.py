@@ -26,7 +26,14 @@ Receipt contract (``nextness-monitor-v1``):
   is claimed to be universal.
 - Unknown observation fields are DISCARDED and honestly counted
   (``discarded_field_count`` + ``input_reduced``); malformed
-  observations fail closed with a typed error.
+  observations fail closed with a typed error. All four allowlisted
+  fields are REQUIRED (a missing ``prev_seen`` is never defaulted);
+  numbers must be exact builtin ``int``/``float`` (bools and custom
+  numeric subclasses are rejected before any conversion hook can run)
+  and ``min_history``/``window`` exact builtin ints.
+- Distribution drift compares the training reference against exactly
+  the LATEST ``window`` holdout observations — an older stable holdout
+  prefix cannot dilute a late regime change.
 
 Safety: no tuning, orchestration, engine, Swarm Hunter or Lane-A
 imports; offline; no network; writes nothing (receipt goes to the
@@ -45,13 +52,16 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from scripts.nextness_metrics import js_divergence
-from scripts.nextness_observer import TOKEN_NAMES
+from scripts.nextness_observer import TOKEN_INDEX, TOKEN_NAMES
 from scripts.nextness_predictor import (
     ECE_BINS,
     HOLDOUT_FRACTION_DEFAULT,
+    HOLDOUT_FRACTION_MAX,
+    HOLDOUT_FRACTION_MIN,
     MAX_LINE_BYTES_DEFAULT,
     MAX_ROWS_DEFAULT,
     SMOOTHING_DEFAULT,
+    SMOOTHING_MAX,
     InsufficientHistoryError,
     empirical_prior_distribution,
     first_order_distribution,
@@ -111,6 +121,8 @@ class MonitorConfig:
     drift_threshold_bits: float = 0.15          # JS divergence, [0, 1] bits
 
     def validate(self) -> None:
+        _require_exact_int("min_history", self.min_history)
+        _require_exact_int("window", self.window)
         if not 5 <= self.min_history <= 10_000:
             raise ValueError(f"min_history out of bounds [5, 10000]: {self.min_history}")
         if not 5 <= self.window <= 10_000:
@@ -129,12 +141,25 @@ class MonitorConfig:
 # ---------------------------------------------------------------------------
 
 
+def _require_exact_int(name: str, value: Any) -> None:
+    """Exact builtin ``int`` only — bool, float and int subclasses are
+    configuration errors, not values to coerce."""
+    if type(value) is not int:
+        raise ValueError(
+            f"{name} must be a builtin int, got {type(value).__name__}"
+        )
+
+
 def _bounded_float(value: Any, field: str, low: float, high: float) -> float:
-    """Accept real, finite numerics inside [low, high]; reject everything
-    else (bools, hostile objects with __float__/__str__, NaN/inf,
-    astronomically large ints) with a typed error."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise MonitorInputError(f"{field}: expected a real number, got {type(value).__name__}")
+    """Accept exact builtin ``int``/``float`` finite values inside
+    [low, high]; reject everything else (bools, custom numeric subclasses,
+    hostile objects with __float__/__str__, NaN/inf, astronomically large
+    ints) with a typed error. Exact-type checks run FIRST so no custom
+    conversion hook (__float__/__index__) is ever invoked."""
+    if type(value) is not int and type(value) is not float:
+        raise MonitorInputError(
+            f"{field}: expected a builtin real number, got {type(value).__name__}"
+        )
     try:
         as_float = float(value)
     except (OverflowError, ValueError) as e:  # e.g. int(10**400) -> inf
@@ -172,7 +197,11 @@ def validate_observations(
         hit = record.get("hit")
         if type(hit) is not bool:
             raise MonitorInputError(f"observation {i}: hit must be a builtin bool")
-        prev_seen = record.get("prev_seen", True)
+        if "prev_seen" not in record:
+            # Fail closed — defaulting a missing prev_seen to True would
+            # silently mask unseen_state abstention.
+            raise MonitorInputError(f"observation {i}: missing field 'prev_seen'")
+        prev_seen = record["prev_seen"]
         if type(prev_seen) is not bool:
             raise MonitorInputError(f"observation {i}: prev_seen must be a builtin bool")
         observations.append(
@@ -208,7 +237,11 @@ def rolling_ece(observations: Sequence[Mapping[str, Any]]) -> float:
     ece = 0.0
     for b in range(ECE_BINS):
         if bin_count[b]:
-            ece += (bin_count[b] / n) * abs(bin_conf[b] / bin_count[b] - bin_acc[b] / bin_count[b])
+            # Algebraically identical to the textbook
+            # (count/n)·|conf/count − acc/count| form — the bin count
+            # cancels; equivalence is locked by a boundary+seeded fixture
+            # test against the unsimplified reference.
+            ece += abs(bin_conf[b] - bin_acc[b]) / n
     return ece
 
 
@@ -217,6 +250,13 @@ def surprise_bits(p_actual: float) -> float:
     if p_actual <= 0.0:
         return _MAX_SURPRISE_BITS
     return min(-math.log2(p_actual), _MAX_SURPRISE_BITS)
+
+
+def canonical_top(dist: Mapping[str, float]) -> str:
+    """Argmax over the canonical vocabulary, ties broken by TOKEN_INDEX
+    (the token EARLIEST in TOKEN_NAMES order wins) — the same constant-time
+    lookup NP1's ``evaluate_predictions`` uses."""
+    return max(TOKEN_NAMES, key=lambda t: (dist[t], -TOKEN_INDEX[t]))
 
 
 # ---------------------------------------------------------------------------
@@ -349,16 +389,33 @@ def observations_from_log(
     holdout_fraction: float = HOLDOUT_FRACTION_DEFAULT,
     max_rows: int = MAX_ROWS_DEFAULT,
     max_line_bytes: int = MAX_LINE_BYTES_DEFAULT,
+    window: int = MonitorConfig.window,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
     """Replay NP1's chronological holdout as monitor observations.
 
     Returns ``(observations, reference_counts, recent_counts)`` where the
-    reference is the training prefix's dominant-token counts and the
-    recent window is the holdout's. Uses exactly NP1's split and model
-    definitions — this bridge adds no new prediction semantics.
+    reference is the training prefix's dominant-token counts and
+    ``recent_counts`` covers exactly the LATEST ``window`` holdout
+    observations (an older stable holdout prefix must not dilute a late
+    regime change; pass the same ``window`` the receipt's MonitorConfig
+    uses). Uses exactly NP1's split, option bounds and model definitions —
+    this bridge adds no new prediction semantics.
     """
     if model not in MODEL_ALLOWLIST:
         raise MonitorInputError(f"model {model!r} not in fixed allowlist {MODEL_ALLOWLIST}")
+    # Inherited NP1 option bounds (same messages as run_evaluation) —
+    # out-of-bounds options must fail closed here too, never reach the
+    # distribution builders as silent garbage.
+    if not 0.0 < smoothing <= SMOOTHING_MAX:
+        raise ValueError(f"smoothing must be in (0, {SMOOTHING_MAX}], got {smoothing}")
+    if not HOLDOUT_FRACTION_MIN <= holdout_fraction <= HOLDOUT_FRACTION_MAX:
+        raise ValueError(
+            f"holdout_fraction must be in [{HOLDOUT_FRACTION_MIN}, "
+            f"{HOLDOUT_FRACTION_MAX}], got {holdout_fraction}"
+        )
+    _require_exact_int("window", window)
+    if not 5 <= window <= 10_000:
+        raise ValueError(f"window out of bounds [5, 10000]: {window}")
     sequence, _rejections, _rows = read_dominant_sequence(
         log_path, max_rows=max_rows, max_line_bytes=max_line_bytes
     )
@@ -386,7 +443,7 @@ def observations_from_log(
         else:
             dist = first_order_distribution(prev, table, prior, smoothing)
             prev_seen = prev in table
-        top = max(TOKEN_NAMES, key=lambda t: (dist[t], -TOKEN_NAMES.index(t)))
+        top = canonical_top(dist)
         observations.append(
             {
                 "confidence": dist[top],
@@ -402,7 +459,7 @@ def observations_from_log(
             out[t] = out.get(t, 0) + 1
         return out
 
-    return observations, _counts(train), _counts(holdout)
+    return observations, _counts(train), _counts(holdout[-window:])
 
 
 # ---------------------------------------------------------------------------
@@ -426,26 +483,44 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Exit-code contract (inherited from NP1's expected-failure contract):
+
+    - ``0`` success
+    - ``2`` validation failure — missing log file or out-of-bounds
+      options (argparse's own usage errors also exit 2)
+    - ``3`` insufficient history for a train/holdout split
+
+    Every expected failure prints one concise ``error:`` line to stderr —
+    never a traceback. Unexpected programming errors propagate loudly.
+    """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
         print(f"error: log file not found: {args.log_path}", file=sys.stderr)
         return 2
+    config = MonitorConfig()
     try:
         observations, reference, recent = observations_from_log(
             args.log_path,
             args.model,
             smoothing=args.smoothing,
             holdout_fraction=args.holdout_fraction,
+            window=config.window,
         )
         receipt = build_receipt(
             model=args.model,
             observations=observations,
             reference_counts=reference,
             recent_counts=recent,
+            config=config,
         )
     except InsufficientHistoryError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
+    except ValueError as e:  # includes MonitorInputError (its subclass)
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     sys.stdout.write(serialize_receipt(receipt))
     return 0
 
