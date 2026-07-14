@@ -63,7 +63,34 @@ the artifact itself records:
   equal recorded hashes, `broken` requires unequal — validating the
   statement, never converting a broken link into success);
 - `proper_score_rankings_agree` must match the recorded rankings;
-  rankings must be permutations of the model allowlist.
+  rankings must be permutations of the model allowlist;
+- `nll_gap_to_uniform_bits` must equal `uniform_nll_bits − nll_bits`
+  **exactly** for every computed model result;
+- on a **flag-coherent** series (the artifact's own
+  `abstain_flag_matches_reason` witness records zero contradictions):
+  `abstention_rate` must equal
+  `(receipt_count − reason_counts["none"]) / receipt_count` exactly,
+  and — when transitions are computed and the run list untruncated —
+  completed run lengths plus any trailing run must sum to that
+  abstained count. The producer counts the rate from abstain FLAGS and
+  the histogram from REASONS; a series with contradictory flags (which
+  the evaluator legitimately reports rather than rejects) can make the
+  two disagree, so these identities are enforced only under the
+  recorded witness — never speculatively;
+- packet **link/endpoint coherence**: `verified`/`broken` require both
+  endpoint artifacts in the manifest; `counterpart_absent` with both
+  endpoints present is rejected; lab links may never be
+  `not_computable` when both endpoints exist (an evaluation link may
+  still be `link_not_recorded` — the evaluation itself recorded
+  `provided: false`).
+
+**Exact float identities, deliberately no tolerance**: JSON's
+shortest-repr floats round-trip exactly, and each identity is one IEEE
+double operation over the same recorded values the producer used — so
+a deviation of even one representable step is a recorded
+contradiction, not rounding. Generic advice to compare floats with
+tolerance does not apply to deterministic identities over round-trip
+values.
 
 **Cannot establish** (documented non-claims): prediction-metric
 correctness (needs the underlying report/receipts), provenance-hash

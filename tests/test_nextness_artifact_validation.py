@@ -410,6 +410,162 @@ def test_seeded_random_corruption_never_escapes_the_typed_error(live, seed) -> N
 
 
 # ---------------------------------------------------------------------------
+# Structural identities (Jack delta): NLL gap, abstention rate, run sums,
+# packet link/endpoint coherence
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def live_series(tmp_path_factory):
+    """An evaluation over a genuine TWO-receipt prefix-extension series,
+    so recovery transitions and blocks are computed."""
+    root = tmp_path_factory.mktemp("np9series")
+    rows = [
+        json.dumps({"generation": i, "token_counts": {(A if i % 2 == 0 else B): 3}})
+        for i in range(60)
+    ]
+    prefix_log = root / "prefix.jsonl"
+    prefix_log.write_bytes(("\n".join(rows[:40]) + "\n").encode())
+    full_log = root / "full.jsonl"
+    full_log.write_bytes(("\n".join(rows) + "\n").encode())
+    series = []
+    for log in (prefix_log, full_log):
+        observations, reference, recent = observations_from_log(log, "first_order")
+        series.append(
+            build_receipt(
+                model="first_order", observations=observations,
+                reference_counts=reference, recent_counts=recent,
+                config=MonitorConfig(),
+            )
+        )
+    receipts_file = root / "receipts.json"
+    receipts_file.write_bytes(
+        (json.dumps([json.loads(serialize_receipt(r)) for r in series]) + "\n").encode()
+    )
+    evaluation = json.loads(
+        serialize_evaluation(build_evaluation(receipts_path=receipts_file))
+    )
+    # Preconditions this fixture exists to provide:
+    assert evaluation["recovery"]["abstention_transitions"]["status"] == "computed"
+    assert evaluation["recovery"]["surprise_blocks"]["status"] == "computed"
+    return evaluation
+
+
+def test_live_series_evaluation_passes(live_series) -> None:
+    assert validate_evaluation_artifact(copy.deepcopy(live_series)) == live_series
+
+
+def test_nll_gap_identity_exact(live) -> None:
+    # gap must equal uniform_nll_bits - nll_bits EXACTLY: JSON's
+    # shortest-repr floats round-trip exactly and the producer computes
+    # the gap as one IEEE double subtraction, so the identity is
+    # deterministic — one representable step off is already a lie.
+    artifact = _eval(live)
+    entry = artifact["prediction"]["models"]["first_order"]
+    exact = entry["nll_gap_to_uniform_bits"]["value"]
+    entry["nll_gap_to_uniform_bits"]["value"] = math.nextafter(exact, math.inf)
+    with pytest.raises(ArtifactValidationError, match="nll_gap_to_uniform_bits"):
+        validate_evaluation_artifact(artifact)
+    artifact = _eval(live)
+    artifact["prediction"]["models"]["persistence"]["nll_gap_to_uniform_bits"]["value"] = 1.0
+    with pytest.raises(ArtifactValidationError, match="nll_gap_to_uniform_bits"):
+        validate_evaluation_artifact(artifact)
+    # One representable step below fails too.
+    artifact = _eval(live)
+    entry = artifact["prediction"]["models"]["empirical_prior"]["nll_gap_to_uniform_bits"]
+    entry["value"] = math.nextafter(entry["value"], -math.inf)
+    with pytest.raises(ArtifactValidationError, match="nll_gap_to_uniform_bits"):
+        validate_evaluation_artifact(artifact)
+
+
+def test_abstention_rate_identity_on_flag_coherent_series(live) -> None:
+    # The live series is flag-coherent (abstain_flag_matches_reason has
+    # zero contradictions), so the recorded rate must equal
+    # (receipt_count - reason_counts["none"]) / receipt_count exactly.
+    artifact = _eval(live)
+    artifact["abstention"]["abstention_rate"]["value"] = 0.123456
+    with pytest.raises(ArtifactValidationError, match="abstention_rate"):
+        validate_evaluation_artifact(artifact)
+
+
+def test_abstention_rate_not_gated_on_flag_incoherent_series(live) -> None:
+    # The producer counts the RATE from abstain flags and the HISTOGRAM
+    # from reasons; a receipt series with contradictory flags (which the
+    # evaluator legitimately reports rather than rejects) can make the
+    # two disagree. The identity is therefore enforced ONLY when the
+    # artifact's own abstain_flag_matches_reason witness shows zero
+    # contradictions — this genuine-shaped artifact must keep passing.
+    artifact = _eval(live)
+    check = artifact["abstention"]["consistency"]["value"]["abstain_flag_matches_reason"]
+    n = artifact["abstention"]["receipt_count"]["value"]
+    check["verdicts"] = {"consistent": n - 1, "contradicted": 1, "unverifiable": 0}
+    check["contradicted_indices"] = [0]
+    artifact["abstention"]["abstention_rate"]["value"] = 0.123456
+    validate_evaluation_artifact(artifact)  # must not raise
+
+
+def test_run_sum_identity_on_flag_coherent_series(live_series) -> None:
+    artifact = copy.deepcopy(live_series)
+    transitions = artifact["recovery"]["abstention_transitions"]["value"]
+    # Break the identity minimally while keeping every local bound valid.
+    if transitions["unresolved_trailing_abstention_receipts"] is not None:
+        transitions["unresolved_trailing_abstention_receipts"] += 1
+    else:
+        transitions["completed_abstention_run_lengths_receipts"] = [
+            r + 1 for r in transitions["completed_abstention_run_lengths_receipts"]
+        ] or [1]
+    with pytest.raises(ArtifactValidationError, match="abstained"):
+        validate_evaluation_artifact(artifact)
+
+
+def test_packet_link_endpoint_coherence(live) -> None:
+    # verified/broken without both endpoint artifacts must fail — a
+    # form-coherent verified statement cannot stand on a manifest that
+    # lacks an endpoint.
+    golden = copy.deepcopy(GOLDEN_INDEPENDENT_PACKET)
+    golden["links"]["lab_sequence_sha256"] = {
+        "status": "verified", "recorded_sha256": "b" * 64,
+        "actual_sha256": "b" * 64,
+        "reader_bounds": {"max_rows": 100, "max_line_bytes": 65536},
+    }
+    with pytest.raises(ArtifactValidationError, match="both endpoint"):
+        validate_evidence_packet(golden)
+    # counterpart_absent although both endpoints are present must fail.
+    packet = _packet(live)
+    packet["links"]["evaluation_report_sha256"] = {
+        "status": "not_computable", "reason": "counterpart_absent",
+        "requires": "the report artifact itself",
+    }
+    with pytest.raises(ArtifactValidationError, match="both endpoints are present"):
+        validate_evidence_packet(packet)
+    # A lab link may never be not_computable when both endpoints exist.
+    packet = _packet(live)
+    packet["links"]["lab_protocol_sha256"] = {
+        "status": "not_computable", "reason": "counterpart_absent",
+        "requires": "the protocol artifact",
+    }
+    with pytest.raises(ArtifactValidationError, match="both endpoints are present"):
+        validate_evidence_packet(packet)
+
+
+def test_packet_link_not_recorded_allowed_for_evaluation_links(live) -> None:
+    # An evaluation that records provided:false yields link_not_recorded
+    # even when the counterpart file is absent from the manifest — a
+    # genuine producer form that must keep validating.
+    golden = copy.deepcopy(GOLDEN_INDEPENDENT_PACKET)
+    golden["artifacts"].insert(0, {
+        "role": "evaluation", "schema": "nextness-evaluation-v1",
+        "bytes": 4096, "sha256": "c" * 64,
+        "validation": "schema_identifier_only",
+    })
+    golden["links"]["evaluation_report_sha256"] = {
+        "status": "not_computable", "reason": "link_not_recorded",
+        "requires": "an evaluation produced WITH a report artifact",
+    }
+    validate_evidence_packet(golden)  # must not raise
+
+
+# ---------------------------------------------------------------------------
 # Bounded file loaders
 # ---------------------------------------------------------------------------
 

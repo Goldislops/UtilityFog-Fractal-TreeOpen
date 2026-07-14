@@ -421,6 +421,16 @@ def _validate_eval_prediction(section: Any, report_provided: bool) -> dict[str, 
                 metrics[metric],
                 _exact_float(m_value, f"prediction.models.{name}.{metric}.value", low, high),
             )
+        # Deterministic identity, EXACT equality: the producer computes
+        # the gap as one IEEE double subtraction from the same recorded
+        # values, and JSON's shortest-repr floats round-trip exactly —
+        # so any deviation, even one representable step, is a recorded
+        # contradiction, not rounding.
+        if sane["nll_gap_to_uniform_bits"]["value"] != 4.0 - sane["nll_bits"]["value"]:
+            raise ArtifactValidationError(
+                f"prediction.models.{name}.nll_gap_to_uniform_bits: does not "
+                f"equal uniform_nll_bits - nll_bits"
+            )
         sane_models[name] = sane
     out["models"] = sane_models
 
@@ -528,7 +538,19 @@ def _validate_eval_calibration(section: Any, report_provided: bool, receipts_pro
     return out
 
 
-def _validate_eval_abstention(section: Any, receipts_provided: bool, receipt_count: int | None) -> dict[str, Any]:
+def _validate_eval_abstention(
+    section: Any, receipts_provided: bool, receipt_count: int | None
+) -> tuple[dict[str, Any], int | None]:
+    """Returns ``(sanitized_section, abstained_count_or_None)``.
+
+    ``abstained_count`` is receipt_count − reason_counts["none"], and is
+    returned ONLY when the artifact's own abstain_flag_matches_reason
+    witness records zero contradictions — the producer counts the RATE
+    from abstain flags but the HISTOGRAM from reasons, and a series with
+    contradictory flags (which the evaluator legitimately reports rather
+    than rejects) can make the two disagree. Enforcing the identity
+    unconditionally would falsely reject genuine artifacts.
+    """
     keys = ("receipt_count", "abstention_rate", "reason_counts",
             "configurations_identical", "consistency", "abstention_quality")
     outer = _exact_dict(section, "abstention", keys)
@@ -539,7 +561,7 @@ def _validate_eval_abstention(section: Any, receipts_provided: bool, receipt_cou
     if not receipts_provided:
         for key in keys[:-1]:
             out[key] = _require_not_computable(outer[key], f"abstention.{key}")
-        return out
+        return out, None
 
     c_status, c_value = _envelope(outer["receipt_count"], "abstention.receipt_count")
     if c_status != "computed":
@@ -633,7 +655,21 @@ def _validate_eval_abstention(section: Any, receipts_provided: bool, receipt_cou
             "contradicted_indices_truncated": truncated,
         }
     out["consistency"] = _sanitize_envelope(outer["consistency"], sane_checks)
-    return out
+
+    abstained = n - counts["none"]
+    flag_witness_clean = (
+        sane_checks["abstain_flag_matches_reason"]["verdicts"]["contradicted"] == 0
+    )
+    if flag_witness_clean:
+        # Exact identity — integer division of the same ints the
+        # producer divides; no tolerance (floats round-trip exactly).
+        if out["abstention_rate"]["value"] != abstained / n:
+            raise ArtifactValidationError(
+                "abstention.abstention_rate: contradicts the reason counts "
+                "on a flag-coherent series"
+            )
+        return out, abstained
+    return out, None
 
 
 def _validate_eval_blocks(value: Any, field: str, low: float, high: float) -> dict[str, Any]:
@@ -680,7 +716,9 @@ def _validate_eval_blocks(value: Any, field: str, low: float, high: float) -> di
     }
 
 
-def _validate_eval_recovery(section: Any, receipts_provided: bool) -> dict[str, Any]:
+def _validate_eval_recovery(
+    section: Any, receipts_provided: bool, abstained_count: int | None
+) -> dict[str, Any]:
     keys = ("chronology", "series_comparability", "abstention_transitions",
             "surprise_blocks", "confidence_blocks", "per_observation_recovery")
     outer = _exact_dict(section, "recovery", keys)
@@ -787,6 +825,17 @@ def _validate_eval_recovery(section: Any, receipts_provided: bool) -> dict[str, 
         trailing = transitions["unresolved_trailing_abstention_receipts"]
         if trailing is not None:
             trailing = _exact_int(trailing, "recovery.abstention_transitions.value.unresolved_trailing_abstention_receipts", 1, MAX_SERIES_RECEIPTS)
+        # Every abstained receipt lives in exactly one maximal run, so
+        # on a flag-coherent series (abstained_count witnessed by the
+        # abstention section) the completed runs plus any trailing run
+        # must sum to it — checkable only when the run list was not
+        # truncated (truncation hides the identity; honest limitation).
+        if not truncated and abstained_count is not None:
+            if sum(sane_runs) + (trailing or 0) != abstained_count:
+                raise ArtifactValidationError(
+                    "recovery.abstention_transitions.value: completed runs "
+                    "plus trailing do not equal the abstained receipts"
+                )
         out["abstention_transitions"] = _sanitize_envelope(outer["abstention_transitions"], {
             "abstention_onsets": onsets,
             "reorientations": reorientations,
@@ -908,11 +957,11 @@ def validate_evaluation_artifact(artifact: Any) -> dict[str, Any]:
 
     prediction = _validate_eval_prediction(outer["prediction"], report_provided)
     calibration = _validate_eval_calibration(outer["calibration"], report_provided, receipts_provided)
-    abstention = _validate_eval_abstention(
+    abstention, abstained_count = _validate_eval_abstention(
         outer["abstention"], receipts_provided,
         receipts_slot.get("receipt_count") if receipts_provided else None,
     )
-    recovery = _validate_eval_recovery(outer["recovery"], receipts_provided)
+    recovery = _validate_eval_recovery(outer["recovery"], receipts_provided, abstained_count)
     cross_check = _validate_eval_cross_check(outer["cross_check"], report_provided, receipts_provided)
 
     assumptions_raw = _exact_list(outer["assumptions"], "evaluation.assumptions", 2)
@@ -1155,6 +1204,14 @@ def validate_lab_artifact(artifact: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _PACKET_KEYS: Final[tuple[str, ...]] = ("schema", "config", "artifacts", "links", "non_claims")
+
+#: The two manifest roles each provenance link compares.
+_LINK_ENDPOINTS: Final[dict[str, tuple[str, str]]] = {
+    "evaluation_report_sha256": ("evaluation", "report"),
+    "evaluation_receipts_sha256": ("evaluation", "receipts"),
+    "lab_protocol_sha256": ("lab", "protocol"),
+    "lab_sequence_sha256": ("lab", "log"),
+}
 _PACKET_CONFIG: Final[dict[str, int]] = {
     "max_packet_artifacts": MAX_PACKET_ARTIFACTS,
     "max_input_bytes": MAX_INPUT_BYTES,
@@ -1286,6 +1343,33 @@ def validate_evidence_packet(artifact: Any) -> dict[str, Any]:
         )
         for kind in LINK_KINDS
     }
+
+    # Link/endpoint coherence: a hash comparison needs both artifacts.
+    # verified/broken without both endpoints in the manifest is a
+    # statement about evidence the packet does not carry; conversely,
+    # counterpart_absent with both endpoints present contradicts the
+    # manifest. (An evaluation link may still be link_not_recorded with
+    # both present — the evaluation itself recorded provided:false — and
+    # with an endpoint absent either not-computable reason is a genuine
+    # producer form for evaluation links; lab links only ever record
+    # counterpart_absent.)
+    for kind, (left, right) in _LINK_ENDPOINTS.items():
+        link = links[kind]
+        both = left in seen_roles and right in seen_roles
+        if link["status"] in ("verified", "broken"):
+            if not both:
+                raise ArtifactValidationError(
+                    f"packet.links.{kind}: {link['status']} requires both "
+                    f"endpoint artifacts ({left}, {right}) in the manifest"
+                )
+        else:  # not_computable — reason already vocabulary-checked
+            if both and (
+                kind.startswith("lab_") or link["reason"] == "counterpart_absent"
+            ):
+                raise ArtifactValidationError(
+                    f"packet.links.{kind}: not_computable/{link['reason']} "
+                    f"although both endpoints are present in the manifest"
+                )
 
     non_claims = _const_str_list(outer["non_claims"], "packet.non_claims", PACKET_NON_CLAIMS)
 
