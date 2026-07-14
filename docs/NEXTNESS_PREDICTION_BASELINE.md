@@ -1,0 +1,133 @@
+# Nextness Prediction Baseline (NP1)
+
+**Module**: `scripts/nextness_predictor.py` · **Tests**: `tests/test_nextness_predictor.py`
+**Schema**: `nextness-predictor-v1` · **Status**: baseline instrument, offline-only
+
+## What this is
+
+The first measurable capacity on the "functional self-awareness" ladder:
+**can the system anticipate what happens next?** — asked in the most
+honest way available: three transparent baselines over the existing
+Nextness Observer log, so that any future, cleverer predictor has
+something falsifiable to beat.
+
+It reads `nextness_runs.jsonl` rows (never raw snapshots, never live
+engine state), reduces each row to its **dominant vocabulary token**
+(maximal count; ties broken by canonical `TOKEN_NAMES` order), and
+evaluates next-token prediction on a **chronological holdout**.
+
+## Non-claims (load-bearing)
+
+- This measures **sequence regularity in observer logs**, nothing more.
+  No intelligence, awareness, understanding or performance-victory claim
+  is made or implied.
+- A simple baseline outperforming a complex model is an **expected,
+  fully-reported outcome** — that is what baselines are for.
+- Dominant-token reduction discards within-row distribution detail by
+  design; a future instrument may predict full distributions.
+
+## The three baselines
+
+All three emit a full-vocabulary probability distribution using the same
+additive (Laplace) smoothing `α` (default 1.0, bounded (0, 1000]), so
+their likelihoods are directly comparable.
+
+| Model | P(next = t) | Notes |
+|---|---|---|
+| `empirical_prior` | (train count of t + α) / (train rows + 16α) | ignores the previous token |
+| `persistence` | (1[t = prev] + α) / (1 + 16α) | "tomorrow equals today" |
+| `first_order` | (C[prev][t] + α) / (ΣC[prev] + 16α) | Markov transition counts from consecutive train pairs |
+
+**First-order fallback**: a previous token never seen as a transition
+*source* in training has no row to smooth. The model falls back to the
+`empirical_prior` distribution (never an invented uniform row), and the
+report carries `first_order_unseen_source_count` so the frequency of
+fallback is visible.
+
+## Evaluation protocol
+
+- **Chronological split only**: first `floor(N·(1−h))` accepted rows
+  train (`h` = holdout fraction, default 0.25, bounded [0.05, 0.5]); the
+  remainder is holdout. Nothing is shuffled; models never see a holdout
+  token before predicting it. The first holdout target's "previous
+  token" is the last training token (known at prediction time).
+- **Metrics** (all deterministic):
+  - `nll_bits` — mean −log₂ P(actual); base-2 to match the repository's
+    bits-everywhere convention.
+  - `brier` — mean multiclass Brier score Σ_t (p_t − 1[t=actual])².
+  - `top1_accuracy` — argmax prediction, canonical-order tie-break.
+  - `ece` — expected calibration error over **10 fixed equal-width
+    confidence bins** (final bin closed above), bin-size weighted.
+- Every exact-metric test fixture is calculated independently in the
+  test file from these formulas — the module is never asked to verify
+  itself.
+
+## Input contract (defensive by construction)
+
+- Built-in `dict` rows only; `generation` must be a non-bool `int`;
+  `token_counts` must be a built-in `dict`.
+- **Known vocabulary only** — any unknown key rejects the row.
+- Counts must be real, finite, non-negative numbers; `bool` is rejected
+  explicitly (schema violation, not a count of one).
+- **Strictly increasing generations** over accepted rows: duplicates and
+  out-of-order rows are rejected and counted, never silently reordered
+  (sorting could hide train/holdout leakage; refusing cannot).
+- Bounded raw work: `max_rows` (default 100 000, ceiling 1 000 000)
+  counts **every physical input record** — accepted, rejected and blank
+  alike — so a blank-line flood cannot buy unbounded reading. Blank
+  records are neither observations nor violations: they consume row
+  budget but appear in no rejection count, so `rows_read ≥
+  rows_accepted + rows_rejected`, with `rows_accepted` the
+  accepted-observation count.
+- Bounded line size (pre-allocation guard): records are `\n`-delimited
+  and read via bounded `readline` calls of at most `max_line_bytes + 2`
+  bytes (default `max_line_bytes` 65 536), so an oversized or
+  unterminated record is **never materialized in full**. A record whose
+  content (raw bytes; LF or CRLF terminator excluded) exceeds
+  `max_line_bytes` is counted `oversized_line` and **terminates
+  ingestion — fail closed**: skipping past it would require unbounded
+  scanning for the next record boundary. Total read work is bounded by
+  `max_rows × (max_line_bytes + 2)` bytes.
+- Every rejection is accounted by a fixed reason vocabulary; the report
+  carries **counts only** — row payloads are never copied anywhere.
+
+## Report contract
+
+Deterministic JSON: sorted keys, fixed separators, `schema` +
+configuration echo + row/rejection accounting + split boundary +
+per-model metrics + explicit non-claims. **No wall-clock timestamps.**
+Byte-identical across repeated runs on the same input. Serialized size
+is checked against a **64 KiB ceiling — fail closed** (`ReportTooLargeError`).
+
+## Write boundary
+
+- Default output is **stdout**.
+- `--output` must resolve **inside the input-log directory** (mirrors
+  `nextness_metrics`; `WriteOutsideLogDirError` otherwise) and must
+  **never** resolve inside the repository `data/` tree — even when the
+  input log itself lives there. Reports about `data/` logs go to stdout.
+- No network, HTTP, ZMQ, Ollama or model calls anywhere in the module
+  (statically auditable: the only imports are stdlib + `TOKEN_NAMES` /
+  `WriteOutsideLogDirError` from `scripts.nextness_observer`).
+
+## CLI exit codes
+
+Expected failures print one concise `error:` line to stderr — **never a
+traceback**. Only the expected error types are caught; unexpected
+programming errors propagate loudly rather than masquerade as clean
+exits.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 2 | validation failure: missing log file or out-of-bounds configuration (argparse usage errors also exit 2) |
+| 3 | insufficient history for a train/holdout split |
+| 4 | output-path failure: write-boundary violation or unwritable target |
+| 5 | serialized report exceeds the 64 KiB ceiling (fail closed) |
+
+## Relationship to what comes next
+
+NP2 (`nextness_monitor`) consumes this instrument's outputs to measure
+*when the predictor should not be trusted* (uncertainty, surprise,
+calibration drift, abstention). Neither package changes observer
+semantics, vocabulary, or the engine.
