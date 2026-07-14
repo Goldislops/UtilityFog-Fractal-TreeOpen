@@ -111,9 +111,9 @@ def test_full_chain_all_links_verified(chain) -> None:
     assert by_role["receipts"]["validation"] == "full"
     assert by_role["receipts"]["receipt_count"] == 1
     assert by_role["protocol"]["validation"] == "full"
-    # No public validator exists for these two — the depth says so.
-    assert by_role["evaluation"]["validation"] == "schema_identifier_only"
-    assert by_role["lab"]["validation"] == "schema_identifier_only"
+    # Full structural validation through the NP9 public validators.
+    assert by_role["evaluation"]["validation"] == "full"
+    assert by_role["lab"]["validation"] == "full"
     assert by_role["log"]["validation"] == "sequence_reader"
     assert len(by_role["log"]["sequence_sha256"]) == 64
 
@@ -332,9 +332,14 @@ def test_cli_data_tree_refused(chain, tmp_path, capsys, monkeypatch) -> None:
 
 
 def test_cli_oversized_packet_exit_5(chain, capsys, monkeypatch) -> None:
+    import scripts.nextness_artifact_validation as validation_module
     import scripts.nextness_evidence_packet as packet_module
 
     monkeypatch.setattr(packet_module, "MAX_PACKET_BYTES", 64)
+    # The self-validator pins the config echo to the v1 constant, so its
+    # expectation must move with the monkeypatched ceiling for the
+    # ceiling breach itself to be reachable.
+    monkeypatch.setitem(validation_module._PACKET_CONFIG, "max_packet_bytes", 64)
     assert main(_chain_args(chain)) == 5
     err = capsys.readouterr().err
     assert err.startswith("error:")
@@ -480,9 +485,18 @@ def test_provided_flag_truth_table(chain, tmp_path, value, expected) -> None:
     # a truthy/falsy non-bool through the provided flag: only builtin
     # True verifies, only builtin False is typed link_not_recorded, and
     # everything else is malformed input (fail closed).
-    payload = json.loads(chain["evaluation"].read_text(encoding="utf-8"))
-    payload["artifacts"]["report"]["provided"] = value
-    mutated = _write(tmp_path / "mutated_eval.json", json.dumps(payload))
+    if expected == "link_not_recorded":
+        # A GENUINE provided:false evaluation comes from the emitter
+        # itself (receipts-only) — full validation rejects a synthetic
+        # slot that keeps stale sha/bytes keys beside provided:false.
+        genuine = build_evaluation(receipts_path=chain["receipts"])
+        mutated = _write(
+            tmp_path / "receipts_only_eval.json", serialize_evaluation(genuine)
+        )
+    else:
+        payload = json.loads(chain["evaluation"].read_text(encoding="utf-8"))
+        payload["artifacts"]["report"]["provided"] = value
+        mutated = _write(tmp_path / "mutated_eval.json", json.dumps(payload))
     inputs = {"evaluation": mutated, "report": chain["report"]}
     if expected == "error":
         with pytest.raises(PacketInputError, match="provided"):
@@ -564,6 +578,93 @@ def test_each_json_artifact_parsed_exactly_once(chain, monkeypatch) -> None:
     build_packet(chain)
     assert calls, "loader never invoked"
     assert all(count == 1 for count in calls.values()), calls
+
+
+# ---------------------------------------------------------------------------
+# NP10 integration: full structural validation of evaluation/lab inputs
+# (failing-first corpus — pre-integration NP8 accepted every one of these)
+# ---------------------------------------------------------------------------
+
+
+def _mutated_artifact_file(tmp_path, source: pathlib.Path, name: str, mutate) -> pathlib.Path:
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    mutate(payload)
+    return _write(tmp_path / name, json.dumps(payload))
+
+
+EVALUATION_INPUT_MUTATIONS = [
+    ("unknown-extra-field", lambda a: a.__setitem__("surprise", 1)),
+    ("malformed-envelope", lambda a: a["prediction"]["uniform_nll_bits"].__setitem__("status", "maybe")),
+    ("invalid-chronology", lambda a: a["recovery"]["chronology"]["value"].__setitem__("first_violation_index", 1)),
+]
+
+
+@pytest.mark.parametrize("name,mutate", EVALUATION_INPUT_MUTATIONS,
+                         ids=[m[0] for m in EVALUATION_INPUT_MUTATIONS])
+def test_malformed_evaluation_inputs_rejected(chain, tmp_path, name, mutate) -> None:
+    bad = _mutated_artifact_file(tmp_path, chain["evaluation"], f"bad_eval_{name}.json", mutate)
+    with pytest.raises(PacketInputError, match="evaluation:"):
+        build_packet({"evaluation": bad, "report": chain["report"]})
+
+
+def _lab_counts_desync(a: dict) -> None:
+    a["configurations"][0]["trajectory"]["reason_step_counts"]["unseen_state"] += 1
+
+
+def _lab_duplicate_labels(a: dict) -> None:
+    a["configurations"].append(json.loads(json.dumps(a["configurations"][0])))
+
+
+def _lab_final_incoherent(a: dict) -> None:
+    trajectory = a["configurations"][0]["trajectory"]
+    trajectory["final_abstain"] = not trajectory["final_abstain"]
+
+
+def _lab_truncation_lie(a: dict) -> None:
+    a["configurations"][0]["trajectory"]["run_lengths_truncated"] = True
+
+
+LAB_INPUT_MUTATIONS = [
+    ("reason-counts-desync", _lab_counts_desync),
+    ("duplicate-labels", _lab_duplicate_labels),
+    ("final-incoherent", _lab_final_incoherent),
+    ("truncation-lie", _lab_truncation_lie),
+]
+
+
+@pytest.mark.parametrize("name,mutate", LAB_INPUT_MUTATIONS,
+                         ids=[m[0] for m in LAB_INPUT_MUTATIONS])
+def test_malformed_lab_inputs_rejected(chain, tmp_path, name, mutate) -> None:
+    bad = _mutated_artifact_file(tmp_path, chain["lab"], f"bad_lab_{name}.json", mutate)
+    with pytest.raises(PacketInputError, match="lab:"):
+        build_packet({"lab": bad, "protocol": chain["protocol"]})
+
+
+def test_manifest_depth_is_full_for_evaluation_and_lab(chain) -> None:
+    # With NP9 integrated, the honest depth label rises to "full" — the
+    # only deliberate output change of the integration.
+    packet = build_packet(chain)
+    by_role = {entry["role"]: entry for entry in packet["artifacts"]}
+    assert by_role["evaluation"]["validation"] == "full"
+    assert by_role["lab"]["validation"] == "full"
+    # Provenance results are unchanged by the integration.
+    for kind, link in packet["links"].items():
+        assert link["status"] == "verified", kind
+
+
+def test_emitted_packet_is_self_validated(chain, monkeypatch) -> None:
+    import scripts.nextness_artifact_validation as validation_module
+
+    calls: list[int] = []
+    real = validation_module.validate_evidence_packet
+
+    def _spy(obj):
+        calls.append(1)
+        return real(obj)
+
+    monkeypatch.setattr(validation_module, "validate_evidence_packet", _spy)
+    build_packet({"log": chain["log"]})
+    assert calls == [1]  # exactly one self-validation before serialization
 
 
 # ---------------------------------------------------------------------------

@@ -16,14 +16,16 @@ phenomenology or biological-equivalence claim is made or implied.
 
 Honesty contract:
 
-- Artifacts are validated through the EXISTING validators where one
-  exists (NP5's ``validate_report`` / ``validate_receipt_series``,
-  NP6's ``load_protocol``); the evaluation and lab-report roles have no
-  public validator, so they are checked to their schema identifier and
-  the exact fields the packet consumes — and each manifest entry
-  records its ``validation`` depth (``full`` vs
-  ``schema_identifier_only``) rather than implying more than was
-  checked.
+- Artifacts are validated through the EXISTING validators: NP5's
+  ``validate_report`` / ``validate_receipt_series``, NP6's
+  ``load_protocol``, and — for the evaluation and lab-report roles —
+  NP9's public structural validators
+  (``scripts.nextness_artifact_validation``), so every JSON role is
+  now fully structurally validated and its manifest entry records
+  ``validation: "full"`` honestly. The emitted packet is itself
+  checked against NP9's packet validator before serialization.
+  Structural validation is still not provenance verification: the
+  hash links below remain independently recomputed by this module.
 - A provenance link whose counterpart artifact was not provided is a
   typed ``not_computable`` result, never a failure and never invented.
 - A link that IS checkable is reported ``verified`` or ``broken`` by
@@ -306,14 +308,32 @@ def _validate_role(role: str, path: pathlib.Path) -> tuple[dict[str, Any], Any]:
             load_protocol(path)  # bounded re-read through NP6's own loader
             entry["validation"] = "full"
         else:
-            # evaluation / lab: no public validator exists; only the
-            # schema identifier and the link fields consumed below are
-            # checked. Saying "full" here would be a lie.
+            # evaluation / lab: full structural validation through the
+            # NP9 public validators (resolved lazily at call time — the
+            # NP9 module imports this module's constants, so a
+            # top-level import here would be a cycle).
+            validation = _np9()
             entry["schema"] = _schema_of(parsed, role)
-            entry["validation"] = "schema_identifier_only"
+            try:
+                if role == "evaluation":
+                    validation.validate_evaluation_artifact(parsed)
+                else:
+                    validation.validate_lab_artifact(parsed)
+            except validation.ArtifactValidationError as e:
+                raise PacketInputError(f"{role}: {e}") from e
+            entry["validation"] = "full"
     except (EvaluatorInputError, LabInputError) as e:
         raise PacketInputError(f"{role}: {e}") from e
     return entry, parsed
+
+
+def _np9():
+    """The NP9 validation module, imported lazily to avoid the import
+    cycle (NP9 imports this module's constants). Resolution happens at
+    call time so tests can monkeypatch the NP9 module's attributes."""
+    import scripts.nextness_artifact_validation as validation
+
+    return validation
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +521,10 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
         "links": links,
         "non_claims": list(NON_CLAIMS),
     }
+    # Self-check: the emitted packet must satisfy its own public
+    # structural validator before serialization. A failure here is a
+    # programming error, not an input error — it propagates loudly.
+    _np9().validate_evidence_packet(packet)
     serialized = serialize_packet(packet)
     if len(serialized.encode("utf-8")) > MAX_PACKET_BYTES:
         raise PacketTooLargeError(

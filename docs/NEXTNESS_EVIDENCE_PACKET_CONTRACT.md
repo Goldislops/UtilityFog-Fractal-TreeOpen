@@ -48,12 +48,22 @@ verification.
   validators (`nextness_evaluator.validate_report` /
   `validate_receipt_series`, `nextness_replay_lab.load_protocol`);
   manifest records `validation: "full"`. Nothing is duplicated.
-- `evaluation`, `lab` — no public validator exists; only the schema
-  identifier and the exact link fields consumed are checked, and the
-  manifest says so: `validation: "schema_identifier_only"`.
+- `evaluation`, `lab` — validated through NP9's **public structural
+  validators** (`nextness_artifact_validation`); the manifest now
+  records `validation: "full"` because the complete public structural
+  schema is actually covered. Each JSON artifact is still parsed
+  exactly once (the validators take the already-parsed object).
+  Malformed consumed fields therefore fail closed at validation and
+  can never suppress link verification.
 - `log` — not JSON; it enters the stack only through
   `read_dominant_sequence`; the manifest records both the raw-byte hash
   and the accepted-sequence hash (`validation: "sequence_reader"`).
+
+**Self-check**: the emitted packet is validated against NP9's
+`validate_evidence_packet` before serialization — a failure there is a
+programming error and propagates loudly. Provenance links remain
+independently recomputed by this module; structural validation never
+converts a broken link into success.
 
 Unknown schema variants, malformed link fields, duplicate JSON keys and
 artifacts failing their validators are all rejected **fail-closed**.
