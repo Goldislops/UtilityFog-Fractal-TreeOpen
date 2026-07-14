@@ -36,8 +36,11 @@ Safety contract (Lane B, mirrors NP1/NP2/NP5):
 
 - Offline only; reads exactly two files (log + protocol), both through
   hard bounds; READ-ONLY with respect to both (tested byte-for-byte,
-  including through the CLI — an ``--output`` naming either input file
-  is refused rather than overwritten).
+  including through the CLI). An ``--output`` aliasing either input is
+  refused by resolved path AND by file identity (samefile: covers
+  existing hard links and symlink targets). Residual race documented in
+  validate_output_path: identity is checked at validation time, not
+  re-checked at write time.
 - Bounded work: at most ``MAX_LAB_CONFIGS`` configurations and
   ``MAX_REPLAY_STEPS`` holdout steps (fail closed above — never a
   silent truncation of the trajectory); protocol files are bounded
@@ -59,6 +62,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import pathlib
 import sys
 from collections.abc import Mapping, Sequence
@@ -468,18 +472,30 @@ def build_lab_report(
     sequence, rejections, rows_read = read_dominant_sequence(
         log_path, max_rows=max_rows, max_line_bytes=max_line_bytes
     )
+    # Replay bound BEFORE any observation allocation: the holdout
+    # length is fully determined by the already-bounded sequence length
+    # and the protocol's holdout_fraction (the same floor arithmetic
+    # replay_observations uses — re-checked against its output below),
+    # so an oversized holdout is refused without ever constructing the
+    # observation list.
+    holdout_len = len(sequence) - math.floor(
+        len(sequence) * (1.0 - protocol["holdout_fraction"])
+    )
+    if holdout_len > MAX_REPLAY_STEPS:
+        raise LabInputError(
+            f"holdout has {holdout_len} steps, exceeding the {MAX_REPLAY_STEPS} "
+            f"replay bound (fail closed; re-record or adjust holdout_fraction "
+            f"rather than silently truncating a trajectory)"
+        )
     observations, train, holdout = replay_observations(
         sequence,
         protocol["model"],
         smoothing=protocol["smoothing"],
         holdout_fraction=protocol["holdout_fraction"],
     )
-    if len(holdout) > MAX_REPLAY_STEPS:
-        raise LabInputError(
-            f"holdout has {len(holdout)} steps, exceeding the {MAX_REPLAY_STEPS} "
-            f"replay bound (fail closed; re-record or adjust holdout_fraction "
-            f"rather than silently truncating a trajectory)"
-        )
+    # Split-arithmetic invariant: the early bound and the bridge must
+    # never disagree about the holdout length.
+    assert len(holdout) == holdout_len
 
     configurations: list[dict[str, Any]] = []
     for label, cfg in protocol["configs"]:
@@ -556,10 +572,19 @@ def validate_output_path(
     protocol_path: pathlib.Path,
 ) -> None:
     """--output may land ONLY inside the input log's directory, NEVER
-    inside the repository ``data/`` tree, and NEVER on top of either
-    input file (the recording and protocol are immutable inputs — an
-    in-directory output name that collides with them would silently
-    destroy the very artifact being replayed)."""
+    inside the repository ``data/`` tree, and NEVER on a path that IS
+    either input file — by resolved path (which also covers symlink
+    aliases, including dangling ones: resolution targets are compared,
+    not link names) or by file identity (``os.path.samefile``: device +
+    inode, which covers existing hard links whose paths differ).
+
+    Residual filesystem race, stated precisely: identity is verified at
+    validation time; the later write does not re-verify. A concurrent
+    actor replacing the output path between validation and write can
+    still redirect the write. The lab defends against aliases that
+    exist when it validates — it does not claim protection against
+    concurrent hostile filesystem manipulation.
+    """
     log_dir_resolved = log_path.resolve().parent
     out_resolved = out_path.resolve()
     try:
@@ -574,6 +599,23 @@ def validate_output_path(
             raise WriteOutsideLogDirError(
                 f"refusing to overwrite the input {label} file: {out_resolved}"
             )
+        # Hard links share identity while having distinct paths. Only an
+        # EXISTING output can alias an input; stat runs on the resolved
+        # path and any failure to verify is itself a refusal (fail
+        # closed), never a fall-through.
+        if out_resolved.exists():
+            try:
+                same = os.path.samefile(out_resolved, input_path)
+            except OSError as e:
+                raise WriteOutsideLogDirError(
+                    f"cannot verify output file identity against the input "
+                    f"{label} file: {out_resolved}"
+                ) from e
+            if same:
+                raise WriteOutsideLogDirError(
+                    f"refusing to overwrite the input {label} file (shared "
+                    f"file identity): {out_resolved}"
+                )
     data_dir = _repo_data_dir()
     if out_resolved == data_dir or data_dir in out_resolved.parents:
         raise WriteOutsideLogDirError(
@@ -658,9 +700,10 @@ def main(argv: list[str] | None = None) -> int:
     serialized = serialize_lab_report(report)
     if args.output is not None:
         try:
-            # newline="" keeps the recorded artifact LF-only on every
-            # platform (same rationale as the NP5 evaluator).
-            args.output.write_text(serialized, encoding="utf-8", newline="")
+            # Raw byte write: LF-only on every platform, with no
+            # dependence on Path.write_text's newline= parameter (same
+            # rationale as the NP5 evaluator).
+            args.output.write_bytes(serialized.encode("utf-8"))
         except OSError as e:
             print(f"error: cannot write lab report to {args.output}: {e}", file=sys.stderr)
             return 4

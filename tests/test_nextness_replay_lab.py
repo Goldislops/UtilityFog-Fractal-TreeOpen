@@ -634,6 +634,90 @@ def test_replay_step_bound_fails_closed_not_truncated(tmp_path) -> None:
         build_lab_report(log, protocol)
 
 
+def test_replay_bound_rejects_before_observations_allocation(tmp_path, monkeypatch) -> None:
+    # The bound must be enforced from the ALREADY-BOUNDED sequence
+    # length, before replay_observations is ever invoked — the oversized
+    # observation list must never be constructed.
+    import scripts.nextness_replay_lab as lab_module
+
+    tokens = [A, B] * (MAX_REPLAY_STEPS + 1)
+    log = _write_log(tmp_path, tokens)
+    protocol = _write_protocol(tmp_path, [_config_entry("a")], holdout_fraction=0.5)
+    invocations: list[int] = []
+    real = lab_module.replay_observations
+
+    def _spy(*args, **kwargs):
+        invocations.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(lab_module, "replay_observations", _spy)
+    with pytest.raises(LabInputError, match="replay bound"):
+        build_lab_report(log, protocol)
+    assert invocations == []  # never called; no observation list built
+
+
+@pytest.mark.parametrize(
+    "fraction,rows,expect_ok",
+    [
+        (0.5, 2 * MAX_REPLAY_STEPS, True),        # holdout exactly at the limit
+        (0.5, 2 * MAX_REPLAY_STEPS + 2, False),   # limit + 1
+        (0.25, 4 * MAX_REPLAY_STEPS + 4, False),  # limit + 1 at another fraction
+        (0.05, 20 * MAX_REPLAY_STEPS, True),      # max accepted sequence, holdout == limit
+        (0.05, 20 * MAX_REPLAY_STEPS + 20, False),
+    ],
+    ids=["limit@0.5", "limit+1@0.5", "limit+1@0.25", "limit@0.05", "limit+1@0.05"],
+)
+def test_replay_bound_boundary_across_fractions(tmp_path, fraction, rows, expect_ok) -> None:
+    tokens = [A if i % 2 == 0 else B for i in range(rows)]
+    log = _write_log(tmp_path, tokens)
+    protocol = _write_protocol(
+        tmp_path,
+        [_config_entry("a", min_history=5, window=5, **_LOOSE)],
+        holdout_fraction=fraction,
+    )
+    if expect_ok:
+        report = build_lab_report(log, protocol)
+        assert report["input"]["holdout_steps"] == MAX_REPLAY_STEPS
+    else:
+        with pytest.raises(LabInputError, match="replay bound"):
+            build_lab_report(log, protocol)
+
+
+def test_hard_link_output_alias_refused_and_inputs_intact(tmp_path, capsys) -> None:
+    # An --output that is an existing HARD LINK to an input shares its
+    # file identity while having a different path: writing through it
+    # would destroy the recording. It must be refused with the inputs
+    # byte-intact.
+    import os
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    for label, target in (("log", log), ("protocol", protocol)):
+        alias = tmp_path / f"alias_{label}.json"
+        os.link(target, alias)
+        before = target.read_bytes()
+        assert main([str(log), str(protocol), "--output", str(alias)]) == 4
+        assert target.read_bytes() == before
+        err = capsys.readouterr().err
+        assert "identity" in err or "overwrite" in err
+        alias.unlink()
+
+
+def test_symlink_output_alias_refused_and_inputs_intact(tmp_path, capsys) -> None:
+    import os
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    alias = tmp_path / "alias_symlink.json"
+    try:
+        os.symlink(log, alias)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this platform/user")
+    before = log.read_bytes()
+    assert main([str(log), str(protocol), "--output", str(alias)]) == 4
+    assert log.read_bytes() == before
+
+
 # ---------------------------------------------------------------------------
 # CLI: exit codes, write boundary, concise errors
 # ---------------------------------------------------------------------------

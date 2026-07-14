@@ -99,8 +99,12 @@ steps; run count equals reorientations).
 - ≤ `MAX_LAB_CONFIGS` (8) configurations; ≤ `MAX_REPLAY_STEPS` (2000)
   holdout steps — a longer holdout is **refused**, because dropping
   early steps would misstate `first_non_abstain_step` and every run
-  length. Per-step rolling statistics cost O(steps × window), so the
-  bound also caps total work.
+  length. The bound is enforced from the already-bounded sequence
+  length **before any observation list is allocated**
+  (`replay_observations` is provably never invoked for an oversized
+  holdout — spy-tested), and a split-arithmetic invariant re-checks the
+  early computation against the bridge's own holdout. Per-step rolling
+  statistics cost O(steps × window), so the bound also caps total work.
 - Log reading inherits NP1's `max_rows` / `max_line_bytes` bounds via
   `read_dominant_sequence`; protocol files are size-checked before
   parsing; output is checked against a **64 KiB ceiling — fail closed**.
@@ -114,9 +118,22 @@ Provenance: the SHA-256 of the protocol file's raw bytes, and the
 SHA-256 of the **accepted dominant-token sequence** — the log enters
 the computation only through that sequence, so together with the row
 accounting and the configuration echo this reproduces every
-calculation. The lab is read-only with respect to both inputs (tested
-byte-for-byte, including through the CLI), and an `--output` that names
-either input file is refused rather than overwriting it.
+calculation. `--output` files are written as raw UTF-8 bytes (LF-only,
+no dependence on newer `Path.write_text` parameters).
+
+**Input protection**: the lab is read-only with respect to both inputs
+(tested byte-for-byte, including through the CLI). An `--output` that
+aliases either input is refused: by resolved path (which covers
+symlink aliases, including dangling ones — resolution targets are
+compared, not link names) and by file identity via `os.path.samefile`
+(device + inode, which covers existing hard links whose paths differ);
+an identity check that cannot complete is itself a refusal.
+**Residual race, stated precisely**: identity is verified at validation
+time and the later write does not re-verify, so a concurrent actor
+replacing the output path between validation and write can still
+redirect the write. The lab defends against aliases that exist when it
+validates; it does not claim protection against concurrent hostile
+filesystem manipulation.
 
 ## Write boundary and CLI
 
