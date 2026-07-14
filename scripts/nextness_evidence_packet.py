@@ -27,9 +27,21 @@ Honesty contract:
 - A provenance link whose counterpart artifact was not provided is a
   typed ``not_computable`` result, never a failure and never invented.
 - A link that IS checkable is reported ``verified`` or ``broken`` by
-  byte-level hash comparison (the sequence link recomputes the
-  dominant-token sequence from the log through NP1's own bounded
-  reader).
+  byte-level hash comparison. The sequence link recomputes the
+  dominant-token sequence through NP1's own bounded reader using the
+  LAB'S OWN RECORDED ``max_rows`` / ``max_line_bytes`` (exact-type
+  validated against NP1/NP6's acceptance ranges and echoed in the link
+  as ``reader_bounds``) — never default bounds, which would report a
+  genuine non-default pair broken; when no lab is provided, no bounds
+  are invented.
+- ``evaluation.artifacts.<role>.provided`` is an EXACT builtin bool:
+  ``true`` requires and verifies the recorded sha256, ``false`` is
+  typed ``link_not_recorded``, and any other value is malformed input
+  (fail closed) — a truthy non-bool can never suppress verification.
+- Each JSON artifact is parsed exactly once (spy-tested); the log is
+  size-checked via stat BEFORE any read and hashed in fixed-size
+  chunks under its own ``MAX_LOG_BYTES`` ceiling — never materialized
+  whole.
 
 Safety contract (Lane B, mirrors NP5/NP6):
 
@@ -66,7 +78,13 @@ from scripts.nextness_evaluator import (
 )
 from scripts.nextness_monitor import RECEIPT_SCHEMA
 from scripts.nextness_observer import WriteOutsideLogDirError
-from scripts.nextness_predictor import REPORT_SCHEMA, read_dominant_sequence
+from scripts.nextness_predictor import (
+    MAX_LINE_BYTES_DEFAULT,
+    MAX_ROWS_CEILING,
+    MAX_ROWS_DEFAULT,
+    REPORT_SCHEMA,
+    read_dominant_sequence,
+)
 from scripts.nextness_replay_lab import (
     LAB_SCHEMA,
     PROTOCOL_SCHEMA,
@@ -91,6 +109,20 @@ MAX_PACKET_ARTIFACTS: Final[int] = 8
 
 #: Output ceiling — fail closed (same convention as the whole stack).
 MAX_PACKET_BYTES: Final[int] = 64 * 1024
+
+#: Role-specific ceiling for the raw log (JSON artifacts keep the 1 MiB
+#: MAX_INPUT_BYTES). Justified from the stack's own defaults: NP1
+#: ingests at most MAX_ROWS_DEFAULT = 100,000 physical records per run,
+#: and observer-emitted rows (single-line JSON: a generation plus at
+#: most 16 token-count keys) are well under 170 bytes each, so 16 MiB
+#: covers every default-bounds observer-emitted log. This is
+#: deliberately NOT a universal-compatibility claim: a log recorded
+#: under raised --max-rows / --max-line-bytes settings may exceed it
+#: and is refused fail-closed. The size is checked via stat BEFORE any
+#: read, re-enforced during the chunked read, and the log is hashed in
+#: fixed-size chunks — never materialized whole.
+MAX_LOG_BYTES: Final[int] = 16 * 1024 * 1024
+_HASH_CHUNK_BYTES: Final[int] = 64 * 1024
 
 #: Provenance links the v1 schemas record (fixed vocabulary).
 LINK_KINDS: Final[tuple[str, ...]] = (
@@ -201,27 +233,52 @@ def _schema_of(parsed: Any, role: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _validate_role(role: str, path: pathlib.Path) -> dict[str, Any]:
-    """One manifest entry. ``validation`` records the honest depth."""
+def _validate_role(role: str, path: pathlib.Path) -> tuple[dict[str, Any], Any]:
+    """One manifest entry plus the parsed object (``None`` for the log).
+
+    Each JSON artifact is parsed exactly ONCE — the parsed object is
+    returned so the link stage never re-reads the file. ``validation``
+    records the honest depth.
+    """
     if role == "log":
         # The log is not JSON; it enters the stack only through NP1's
-        # bounded reader. Hash the accepted dominant-token sequence the
-        # same way NP6 does (that is the identity the lab records), and
-        # the raw bytes for completeness.
+        # bounded reader. Size is checked BEFORE any read, re-enforced
+        # during the chunked hash (the file could grow in between), and
+        # the log is never materialized whole. The manifest records the
+        # raw-byte hash plus the accepted-sequence hash under NP1's
+        # DEFAULT reader bounds (echoed for reproducibility); the lab
+        # sequence LINK recomputes with the lab's own recorded bounds.
+        size = path.stat().st_size
+        if size > MAX_LOG_BYTES:
+            raise PacketInputError(f"log exceeds {MAX_LOG_BYTES} bytes; refusing to process")
+        digest = hashlib.sha256()
+        total = 0
         with path.open("rb") as f:
-            raw = f.read(MAX_INPUT_BYTES + 1)
-        if len(raw) > MAX_INPUT_BYTES:
-            raise PacketInputError(f"log exceeds {MAX_INPUT_BYTES} bytes; refusing to parse")
+            while True:
+                chunk = f.read(_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_LOG_BYTES:
+                    raise PacketInputError(
+                        f"log exceeds {MAX_LOG_BYTES} bytes; refusing to process"
+                    )
+                digest.update(chunk)
         sequence, _rejections, _rows = read_dominant_sequence(path)
-        return {
+        entry = {
             "role": "log",
             "schema": "jsonl-nextness-runs",
-            "bytes": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": total,
+            "sha256": digest.hexdigest(),
             "sequence_sha256": hashlib.sha256("\n".join(sequence).encode("utf-8")).hexdigest(),
+            "sequence_bounds": {
+                "max_rows": MAX_ROWS_DEFAULT,
+                "max_line_bytes": MAX_LINE_BYTES_DEFAULT,
+            },
             "rows_accepted": len(sequence),
             "validation": "sequence_reader",
         }
+        return entry, None
 
     parsed, digest, size = _load_bounded_json(path)
     entry: dict[str, Any] = {
@@ -255,7 +312,7 @@ def _validate_role(role: str, path: pathlib.Path) -> dict[str, Any]:
             entry["validation"] = "schema_identifier_only"
     except (EvaluatorInputError, LabInputError) as e:
         raise PacketInputError(f"{role}: {e}") from e
-    return entry
+    return entry, parsed
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +340,15 @@ def _evaluation_link(
     artifacts = _exact_dict_field(evaluation, "artifacts", "evaluation")
     slot = _exact_dict_field(artifacts, counterpart_role, "evaluation.artifacts")
     provided = _exact_dict_field(slot, "provided", f"evaluation.artifacts.{counterpart_role}")
-    if provided is not True:
+    # EXACT builtin bool only. A truthy or falsy non-bool (1, "true",
+    # [], ...) must never silently suppress verification by sliding into
+    # the not-recorded branch — it is malformed input, fail closed.
+    if type(provided) is not bool:
+        raise PacketInputError(
+            f"evaluation.artifacts.{counterpart_role}.provided: expected "
+            f"builtin bool, got {type(provided).__name__}"
+        )
+    if provided is False:
         return _not_computable_link(
             "link_not_recorded",
             f"an evaluation produced WITH a {counterpart_role} artifact "
@@ -303,24 +368,80 @@ def _evaluation_link(
     )
 
 
-def _lab_link(
+def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
+    """The lab's recorded ingestion bounds, exact-type validated against
+    the same acceptance ranges NP1/NP6 enforce (fail closed on bool,
+    float, string, negative, zero or out-of-range values)."""
+    cfg = _exact_dict_field(lab, "config", "lab")
+    max_rows = _exact_dict_field(cfg, "max_rows", "lab.config")
+    if type(max_rows) is not int:
+        raise PacketInputError(
+            f"lab.config.max_rows: expected builtin int, got {type(max_rows).__name__}"
+        )
+    if not 0 < max_rows <= MAX_ROWS_CEILING:
+        raise PacketInputError(
+            f"lab.config.max_rows: {max_rows} outside (0, {MAX_ROWS_CEILING}]"
+        )
+    max_line_bytes = _exact_dict_field(cfg, "max_line_bytes", "lab.config")
+    if type(max_line_bytes) is not int:
+        raise PacketInputError(
+            f"lab.config.max_line_bytes: expected builtin int, got {type(max_line_bytes).__name__}"
+        )
+    if max_line_bytes <= 0:
+        raise PacketInputError(
+            f"lab.config.max_line_bytes: {max_line_bytes} must be positive"
+        )
+    return max_rows, max_line_bytes
+
+
+def _lab_protocol_link(
     lab: Mapping[str, Any] | None,
-    field: str,
-    counterpart_entry: Mapping[str, Any] | None,
-    counterpart_name: str,
-    counterpart_key: str,
+    protocol_entry: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     if lab is None:
         return _not_computable_link("counterpart_absent", "a lab-report artifact")
     inp = _exact_dict_field(lab, "input", "lab")
-    recorded = _exact_sha256(_exact_dict_field(inp, field, "lab.input"), f"lab.input.{field}")
-    if counterpart_entry is None:
-        return _not_computable_link("counterpart_absent", counterpart_name)
-    actual = counterpart_entry[counterpart_key]
+    recorded = _exact_sha256(
+        _exact_dict_field(inp, "protocol_sha256", "lab.input"), "lab.input.protocol_sha256"
+    )
+    if protocol_entry is None:
+        return _not_computable_link("counterpart_absent", "the protocol artifact")
+    actual = protocol_entry["sha256"]
     return _link(
         "verified" if recorded == actual else "broken",
         recorded_sha256=recorded,
         actual_sha256=actual,
+    )
+
+
+def _lab_sequence_link(
+    lab: Mapping[str, Any] | None,
+    log_path: pathlib.Path | None,
+) -> dict[str, Any]:
+    """The sequence link recomputes the accepted dominant-token sequence
+    with the LAB'S OWN RECORDED reader bounds — a lab produced under
+    non-default ``max_rows`` / ``max_line_bytes`` accepted a different
+    sequence than the defaults would, and comparing against a
+    default-bounds recomputation would report a genuine pair broken.
+    When no lab is provided, no bounds are invented."""
+    if lab is None:
+        return _not_computable_link("counterpart_absent", "a lab-report artifact")
+    max_rows, max_line_bytes = _recorded_reader_bounds(lab)
+    inp = _exact_dict_field(lab, "input", "lab")
+    recorded = _exact_sha256(
+        _exact_dict_field(inp, "sequence_sha256", "lab.input"), "lab.input.sequence_sha256"
+    )
+    if log_path is None:
+        return _not_computable_link("counterpart_absent", "the log artifact")
+    sequence, _rejections, _rows = read_dominant_sequence(
+        log_path, max_rows=max_rows, max_line_bytes=max_line_bytes
+    )
+    actual = hashlib.sha256("\n".join(sequence).encode("utf-8")).hexdigest()
+    return _link(
+        "verified" if recorded == actual else "broken",
+        recorded_sha256=recorded,
+        actual_sha256=actual,
+        reader_bounds={"max_rows": max_rows, "max_line_bytes": max_line_bytes},
     )
 
 
@@ -347,16 +468,15 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
         )
 
     entries: dict[str, dict[str, Any]] = {}
-    parsed_evaluation: Mapping[str, Any] | None = None
-    parsed_lab: Mapping[str, Any] | None = None
+    parsed_by_role: dict[str, Any] = {}
     for role in ROLES:
         if role not in paths:
             continue
-        entries[role] = _validate_role(role, paths[role])
-        if role == "evaluation":
-            parsed_evaluation, _, _ = _load_bounded_json(paths[role])
-        elif role == "lab":
-            parsed_lab, _, _ = _load_bounded_json(paths[role])
+        # Exactly one parse per JSON artifact: the parsed object comes
+        # back with the manifest entry and is reused for the links.
+        entries[role], parsed_by_role[role] = _validate_role(role, paths[role])
+    parsed_evaluation = parsed_by_role.get("evaluation")
+    parsed_lab = parsed_by_role.get("lab")
 
     links = {
         "evaluation_report_sha256": _evaluation_link(
@@ -365,14 +485,8 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
         "evaluation_receipts_sha256": _evaluation_link(
             parsed_evaluation, "receipts", entries.get("receipts")
         ),
-        "lab_protocol_sha256": _lab_link(
-            parsed_lab, "protocol_sha256", entries.get("protocol"),
-            "the protocol artifact", "sha256",
-        ),
-        "lab_sequence_sha256": _lab_link(
-            parsed_lab, "sequence_sha256", entries.get("log"),
-            "the log artifact", "sequence_sha256",
-        ),
+        "lab_protocol_sha256": _lab_protocol_link(parsed_lab, entries.get("protocol")),
+        "lab_sequence_sha256": _lab_sequence_link(parsed_lab, paths.get("log")),
     }
 
     packet: dict[str, Any] = {
