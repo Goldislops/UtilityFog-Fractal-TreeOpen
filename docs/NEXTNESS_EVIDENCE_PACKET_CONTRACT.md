@@ -76,16 +76,18 @@ output checked against a **64 KiB fail-closed ceiling**.
 **Log size contract** (`MAX_LOG_BYTES`, 16 MiB): the raw log gets its
 own role-specific ceiling — size-checked via `stat` **before any
 read**, re-enforced during reading, and hashed in fixed-size 64 KiB
-chunks (the log is never materialized whole). Justification: NP1
-ingests at most `MAX_ROWS_DEFAULT` = 100,000 physical records per run
-and observer-emitted rows (single-line JSON, one generation plus at
-most 16 token-count keys) are well under 170 bytes, so 16 MiB covers
-every default-bounds observer-emitted log. **This is deliberately not
-a universal-compatibility claim**: a log recorded under raised
-`--max-rows`/`--max-line-bytes` settings may exceed the ceiling and is
-refused fail-closed — NP8 packages a documented subset of what NP1/NP6
-can, in the extreme, ingest. Tested at the exact limit, limit+1, and
-with a valid >1 MiB log whose sequence link verifies.
+chunks (the log is never materialized whole). **16 MiB is NP8's own
+explicit packaging/work ceiling** — it keeps the hash and the bounded
+sequence read cheap and testable. It is **not derived as coverage of
+NP1's defaults**: observer rows carry more than a generation and token
+counts (timestamps, filenames, lattice shape, sampling information,
+metrics, diagnostics, a nested budget block), so **no claim is made
+about what fraction of real or default-configuration logs fit** until
+that is measured. NP8 intentionally accepts raw logs no larger than
+16 MiB; otherwise-valid larger logs are refused fail-closed — a
+documented subset of what NP1/NP6 can ingest. Tested at the exact
+limit, limit+1, and with a valid >1 MiB log whose sequence link
+verifies.
 Deterministic sorted-key serialization, fixed vocabularies, no
 timestamps, no random identifiers, no absolute paths; byte-identical
 across repeated runs; manifest order is the fixed role order regardless

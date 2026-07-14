@@ -111,15 +111,16 @@ MAX_PACKET_ARTIFACTS: Final[int] = 8
 MAX_PACKET_BYTES: Final[int] = 64 * 1024
 
 #: Role-specific ceiling for the raw log (JSON artifacts keep the 1 MiB
-#: MAX_INPUT_BYTES). Justified from the stack's own defaults: NP1
-#: ingests at most MAX_ROWS_DEFAULT = 100,000 physical records per run,
-#: and observer-emitted rows (single-line JSON: a generation plus at
-#: most 16 token-count keys) are well under 170 bytes each, so 16 MiB
-#: covers every default-bounds observer-emitted log. This is
-#: deliberately NOT a universal-compatibility claim: a log recorded
-#: under raised --max-rows / --max-line-bytes settings may exceed it
-#: and is refused fail-closed. The size is checked via stat BEFORE any
-#: read, re-enforced during the chunked read, and the log is hashed in
+#: MAX_INPUT_BYTES). This is NP8's OWN explicit packaging/work ceiling,
+#: chosen so the chunked hash and the bounded sequence read stay cheap
+#: and testable. It is NOT derived as coverage of NP1's defaults:
+#: observer rows carry more than a generation and token counts
+#: (timestamps, filenames, lattice shape, sampling information,
+#: metrics, diagnostics, a nested budget block), so no claim is made
+#: about what fraction of real or default-configuration logs fit until
+#: that is measured. An otherwise-valid larger log is refused
+#: fail-closed. The size is checked via stat BEFORE any read,
+#: re-enforced during the chunked read, and the log is hashed in
 #: fixed-size chunks — never materialized whole.
 MAX_LOG_BYTES: Final[int] = 16 * 1024 * 1024
 _HASH_CHUNK_BYTES: Final[int] = 64 * 1024
