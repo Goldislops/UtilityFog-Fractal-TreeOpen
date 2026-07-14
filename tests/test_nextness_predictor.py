@@ -14,10 +14,12 @@ import pathlib
 
 import pytest
 
+import scripts.nextness_predictor as nextness_predictor
 from scripts.nextness_observer import TOKEN_NAMES, WriteOutsideLogDirError
 from scripts.nextness_predictor import (
     ECE_BINS,
     InsufficientHistoryError,
+    MAX_LINE_BYTES_DEFAULT,
     MAX_REPORT_BYTES,
     REJECT_REASONS,
     REPORT_SCHEMA,
@@ -51,6 +53,22 @@ def _write_log(tmp_path: pathlib.Path, lines: list[str]) -> pathlib.Path:
 
 def _dominant_rows(tokens: list[str]) -> list[str]:
     return [_row(i, {tok: 3}) for i, tok in enumerate(tokens)]
+
+
+def _padded_row(generation: int, counts: dict[str, int], content_bytes: int) -> str:
+    """A valid row padded to EXACTLY content_bytes bytes (terminator excluded).
+
+    json.dumps here is pure ASCII, so byte length == character length and
+    each pad character grows the record by exactly one byte.
+    """
+    base = json.dumps({"generation": generation, "token_counts": counts, "pad": ""})
+    deficit = content_bytes - len(base)
+    assert deficit >= 0, "content_bytes too small for the base row"
+    padded = json.dumps(
+        {"generation": generation, "token_counts": counts, "pad": "x" * deficit}
+    )
+    assert len(padded.encode("utf-8")) == content_bytes
+    return padded
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +134,90 @@ def test_rejections_are_counted_by_reason_and_never_crash(tmp_path) -> None:
     assert set(rej) == set(REJECT_REASONS)
 
 
-def test_huge_line_is_rejected_not_parsed(tmp_path) -> None:
+def test_huge_line_is_rejected_and_terminates_ingestion(tmp_path) -> None:
+    # Fail-closed contract: the first oversized record is counted and ends
+    # ingestion — skipping past it would require unbounded scanning for
+    # the next record boundary, so the row after it is never read.
     huge = json.dumps({"generation": 1, "token_counts": {A: 1}, "pad": "x" * 70_000})
     log = _write_log(tmp_path, [huge, _row(2, {A: 1})])
-    seq, rej, _ = read_dominant_sequence(log)
+    seq, rej, rows_read = read_dominant_sequence(log)
     assert rej["oversized_line"] == 1
-    assert seq == [A]
+    assert seq == []
+    assert rows_read == 1
+
+
+def test_line_content_exactly_at_byte_bound_is_accepted(tmp_path) -> None:
+    # The bound is on record CONTENT (LF or CRLF terminator excluded): a
+    # record of exactly max_line_bytes bytes is still a valid observation.
+    for terminator in (b"\n", b"\r\n"):
+        log = tmp_path / "nextness_runs.jsonl"
+        log.write_bytes(
+            _padded_row(1, {A: 3}, 200).encode("utf-8") + terminator
+            + _row(2, {B: 2}).encode("utf-8") + terminator
+        )
+        seq, rej, rows_read = read_dominant_sequence(log, max_line_bytes=200)
+        assert rej["oversized_line"] == 0, terminator
+        assert seq == [A, B], terminator
+        assert rows_read == 2, terminator
+
+
+def test_line_one_byte_over_bound_is_oversized_and_terminal(tmp_path) -> None:
+    for terminator in (b"\n", b"\r\n"):
+        log = tmp_path / "nextness_runs.jsonl"
+        log.write_bytes(
+            _padded_row(1, {A: 3}, 201).encode("utf-8") + terminator
+            + _row(2, {B: 2}).encode("utf-8") + terminator
+        )
+        seq, rej, rows_read = read_dominant_sequence(log, max_line_bytes=200)
+        assert rej["oversized_line"] == 1, terminator
+        assert seq == [], terminator  # fail closed: nothing after it is read
+        assert rows_read == 1, terminator
+
+
+def test_unterminated_giant_record_reads_bounded_bytes(tmp_path, monkeypatch) -> None:
+    # Pre-allocation guard: a 4 MB unterminated record must be DETECTED as
+    # oversized without ever being materialized in full. The counting
+    # wrapper measures the bytes actually pulled from the file.
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_bytes(b"x" * 4_000_000)  # one physical record, no terminator
+    counted = {"bytes": 0}
+    real_open = pathlib.Path.open
+
+    class _CountingFile:
+        def __init__(self, raw):
+            self._raw = raw
+
+        def readline(self, limit=-1):
+            chunk = self._raw.readline(limit)
+            counted["bytes"] += len(chunk)
+            return chunk
+
+        def __iter__(self):
+            for line in self._raw:
+                counted["bytes"] += len(line)
+                yield line
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._raw.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._raw, name)
+
+    def counting_open(self, *args, **kwargs):
+        raw = real_open(self, *args, **kwargs)
+        return _CountingFile(raw) if self == log else raw
+
+    monkeypatch.setattr(pathlib.Path, "open", counting_open)
+    seq, rej, rows_read = read_dominant_sequence(log)
+    assert rej["oversized_line"] == 1
+    assert seq == []
+    assert rows_read == 1
+    # Bounded read: at most one max_line_bytes-sized probe plus slack —
+    # never the full 4 MB record.
+    assert counted["bytes"] <= MAX_LINE_BYTES_DEFAULT + 4096
 
 
 def test_max_rows_bounds_work(tmp_path) -> None:
@@ -129,6 +225,43 @@ def test_max_rows_bounds_work(tmp_path) -> None:
     seq, _, rows_read = read_dominant_sequence(log, max_rows=10)
     assert rows_read == 10
     assert len(seq) == 10
+
+
+def test_max_rows_exact_limit_and_one_over(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows([A] * 10))
+    seq, _, rows_read = read_dominant_sequence(log, max_rows=10)
+    assert (len(seq), rows_read) == (10, 10)   # exact limit: everything read
+    log11 = _write_log(tmp_path, _dominant_rows([A] * 11))
+    seq11, _, rows_read11 = read_dominant_sequence(log11, max_rows=10)
+    assert (len(seq11), rows_read11) == (10, 10)  # limit+1: the 11th is untouched
+
+
+def test_max_rows_counts_blank_physical_records(tmp_path) -> None:
+    # max_rows is a RAW-work bound: blank physical records consume budget
+    # even though they are neither observations nor violations.
+    log = _write_log(tmp_path, ["", "", ""] + _dominant_rows([A, B, A]))
+    seq, rej, rows_read = read_dominant_sequence(log, max_rows=5)
+    assert rows_read == 5
+    assert seq == [A, B]      # 3 blanks + 2 rows exhaust the budget of 5
+    assert sum(rej.values()) == 0
+
+
+def test_blank_line_flood_terminates_within_budget(tmp_path) -> None:
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text("\n" * 10_000, encoding="utf-8")
+    seq, rej, rows_read = read_dominant_sequence(log, max_rows=50)
+    assert rows_read == 50    # bounded raw work, NOT 10,000 refunded reads
+    assert seq == []
+    assert sum(rej.values()) == 0
+
+
+def test_report_rows_read_counts_blank_records(tmp_path) -> None:
+    rows = _dominant_rows(_FIXTURE_SEQUENCE)
+    log = _write_log(tmp_path, rows[:3] + [""] + rows[3:7] + [""] + rows[7:])
+    report = build_report(log)
+    assert report["input"]["rows_read"] == len(_FIXTURE_SEQUENCE) + 2
+    assert report["input"]["rows_accepted"] == len(_FIXTURE_SEQUENCE)
+    assert report["input"]["rows_rejected"] == 0
 
 
 def test_out_of_order_rows_never_reorder_silently(tmp_path) -> None:
@@ -371,13 +504,64 @@ def test_cli_writes_deterministic_report_inside_log_dir(tmp_path, capsys) -> Non
     assert json.loads(text_one)["schema"] == REPORT_SCHEMA
 
 
-def test_cli_refuses_output_escape(tmp_path) -> None:
-    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
-    with pytest.raises(WriteOutsideLogDirError):
-        main([str(log), "--output", str(tmp_path.parent / "escape.json")])
+# Expected-failure contract: documented nonzero exit + one concise
+# ``error:`` stderr line, never a traceback; unexpected programming
+# errors are NOT converted into clean exits.
 
 
-def test_cli_missing_file_and_insufficient_history_exit_codes(tmp_path) -> None:
-    assert main([str(tmp_path / "absent.jsonl")]) == 2
+def _expect_cli_failure(capsys, argv: list[str], code: int) -> str:
+    assert main(argv) == code, argv
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error:"), argv
+    assert "Traceback" not in captured.err, argv
+    return captured.err
+
+
+def test_cli_missing_file_and_insufficient_history_exit_codes(tmp_path, capsys) -> None:
+    _expect_cli_failure(capsys, [str(tmp_path / "absent.jsonl")], 2)
     log = _write_log(tmp_path, _dominant_rows([A]))
-    assert main([str(log)]) == 3
+    _expect_cli_failure(capsys, [str(log)], 3)
+
+
+def test_cli_validation_errors_are_concise_exit_2(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    for extra in (
+        ["--smoothing", "0"],
+        ["--smoothing", "1001"],
+        ["--holdout-fraction", "0.9"],
+        ["--max-rows", "0"],
+        ["--max-rows", "2000000"],
+        ["--max-line-bytes", "0"],
+    ):
+        _expect_cli_failure(capsys, [str(log), *extra], 2)
+
+
+def test_cli_output_escape_is_concise_exit_4(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    escape = tmp_path.parent / "escape.json"
+    _expect_cli_failure(capsys, [str(log), "--output", str(escape)], 4)
+    assert not escape.exists()
+
+
+def test_cli_unwritable_output_is_concise_exit_4(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    # The log's own directory passes the boundary check but cannot be
+    # opened for writing on any platform.
+    _expect_cli_failure(capsys, [str(log), "--output", str(tmp_path)], 4)
+
+
+def test_cli_report_too_large_is_concise_exit_5(tmp_path, capsys, monkeypatch) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    monkeypatch.setattr(nextness_predictor, "MAX_REPORT_BYTES", 10)
+    _expect_cli_failure(capsys, [str(log)], 5)
+
+
+def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("unexpected programming error")
+
+    monkeypatch.setattr(nextness_predictor, "build_report", boom)
+    with pytest.raises(RuntimeError, match="unexpected programming error"):
+        main([str(log)])

@@ -31,9 +31,16 @@ Safety contract (Lane B, mirrors nextness_observer/nextness_metrics):
   rejected and counted, never silently reordered (sorting could hide
   leakage; refusing cannot).
 - Defensive parsing: built-in ``dict`` rows only, known vocabulary only,
-  finite non-negative numeric counts only (bools rejected explicitly),
-  bounded row count and line length; every rejection is counted by
-  reason. Row payloads are never copied into the report — only counts.
+  finite non-negative numeric counts only (bools rejected explicitly);
+  every rejection is counted by reason. Row payloads are never copied
+  into the report — only counts.
+- Bounded raw work: ``max_rows`` counts every physical input record
+  (blank, rejected and accepted alike) and records are read with bounded
+  ``readline`` calls so no more than ``max_line_bytes + 2`` bytes of a
+  record are ever materialized; the first oversized record is counted
+  and terminates ingestion (fail closed). CLI failures for expected
+  invalid input exit with documented nonzero codes and concise stderr —
+  never a traceback.
 - Deterministic output: sorted keys, fixed schema/version, no wall-clock
   timestamps, canonical-order tie-breaking, fixed ECE bins; the same
   input file always produces byte-identical reports.
@@ -157,8 +164,24 @@ def read_dominant_sequence(
     """Parse the JSONL log into a chronological dominant-token sequence.
 
     Returns ``(sequence, rejections, rows_read)`` where ``rejections``
-    maps every reason in REJECT_REASONS to a count. Rows beyond
-    ``max_rows`` raw lines are not read at all (bounded work).
+    maps every reason in REJECT_REASONS to a count.
+
+    Raw-work bound: ``rows_read`` counts every PHYSICAL input record
+    consumed — accepted, rejected and blank alike — so ``max_rows``
+    bounds raw input work, not just observations. Blank records are
+    neither observations nor violations: they consume row budget without
+    appearing in ``rejections``. The accepted-observation count is
+    ``len(sequence)`` (reported as ``rows_accepted``).
+
+    Pre-allocation line-size bound: records are ``\\n``-delimited and read
+    with bounded ``readline`` calls of at most ``max_line_bytes + 2``
+    bytes, so an oversized or unterminated record is never materialized
+    in full. A record whose content (raw bytes; LF or CRLF terminator
+    excluded) exceeds ``max_line_bytes`` is counted ``oversized_line``
+    and TERMINATES ingestion (fail closed): skipping past it would
+    require unbounded scanning for the next record boundary. Total read
+    work is therefore bounded by ``max_rows * (max_line_bytes + 2)``
+    bytes.
 
     Chronology contract: ``generation`` must be strictly increasing over
     ACCEPTED rows. A row whose generation equals the last accepted one is
@@ -175,18 +198,30 @@ def read_dominant_sequence(
     rows_read = 0
     last_generation: int | None = None
 
-    with log_path.open("r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if rows_read >= max_rows:
-                break
+    with log_path.open("rb") as f:
+        while rows_read < max_rows:
+            chunk = f.readline(max_line_bytes + 2)
+            if not chunk:
+                break  # EOF
             rows_read += 1
-            if len(line.encode("utf-8", errors="replace")) > max_line_bytes:
+            if chunk.endswith(b"\n"):
+                # LF or CRLF terminator — excluded from the content bound
+                # (a record of exactly max_line_bytes content plus either
+                # terminator fits in the max_line_bytes + 2 probe).
+                content = chunk[:-2] if chunk.endswith(b"\r\n") else chunk[:-1]
+            else:
+                # EOF-unterminated record, or a probe that hit the read
+                # limit mid-record (already past the bound either way).
+                content = chunk
+            if len(content) > max_line_bytes:
+                # Fail closed: count and stop — never drain or
+                # resynchronize past an oversized record.
                 rejections["oversized_line"] += 1
-                continue
-            stripped = line.strip()
+                break
+            stripped = content.decode("utf-8", errors="replace").strip()
             if not stripped:
-                # Blank lines are not observations and not violations.
-                rows_read -= 1
+                # Blank records are not observations and not violations,
+                # but they still consume raw-row budget (bounded work).
                 continue
             try:
                 row = json.loads(stripped)
@@ -541,13 +576,30 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Exit-code contract (documented, tested):
+
+    - ``0`` success
+    - ``2`` validation failure — missing log file or out-of-bounds
+      configuration (argparse's own usage errors also exit 2)
+    - ``3`` insufficient history for a train/holdout split
+    - ``4`` output-path failure — write-boundary violation or an
+      unwritable target
+    - ``5`` report exceeds MAX_REPORT_BYTES (fail closed)
+
+    Every expected failure prints one concise ``error:`` line to stderr —
+    never a traceback. Only the expected error types above are caught;
+    unexpected programming errors propagate loudly rather than
+    masquerade as clean exits.
+    """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
         print(f"error: log file not found: {args.log_path}", file=sys.stderr)
         return 2
-    if args.output is not None:
-        validate_output_path(args.output, args.log_path)
     try:
+        if args.output is not None:
+            validate_output_path(args.output, args.log_path)
         report = build_report(
             args.log_path,
             smoothing=args.smoothing,
@@ -555,12 +607,25 @@ def main(argv: list[str] | None = None) -> int:
             max_rows=args.max_rows,
             max_line_bytes=args.max_line_bytes,
         )
+    except WriteOutsideLogDirError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 4
     except InsufficientHistoryError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
+    except ReportTooLargeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 5
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     serialized = serialize_report(report)
     if args.output is not None:
-        args.output.write_text(serialized, encoding="utf-8")
+        try:
+            args.output.write_text(serialized, encoding="utf-8")
+        except OSError as e:
+            print(f"error: cannot write report to {args.output}: {e}", file=sys.stderr)
+            return 4
     else:
         sys.stdout.write(serialized)
     return 0

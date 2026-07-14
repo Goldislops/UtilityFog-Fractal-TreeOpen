@@ -72,9 +72,22 @@ fallback is visible.
 - **Strictly increasing generations** over accepted rows: duplicates and
   out-of-order rows are rejected and counted, never silently reordered
   (sorting could hide train/holdout leakage; refusing cannot).
-- Bounded work: `max_rows` (default 100 000, ceiling 1 000 000) and
-  `max_line_bytes` (default 65 536); oversized lines are rejected and
-  counted.
+- Bounded raw work: `max_rows` (default 100 000, ceiling 1 000 000)
+  counts **every physical input record** — accepted, rejected and blank
+  alike — so a blank-line flood cannot buy unbounded reading. Blank
+  records are neither observations nor violations: they consume row
+  budget but appear in no rejection count, so `rows_read ≥
+  rows_accepted + rows_rejected`, with `rows_accepted` the
+  accepted-observation count.
+- Bounded line size (pre-allocation guard): records are `\n`-delimited
+  and read via bounded `readline` calls of at most `max_line_bytes + 2`
+  bytes (default `max_line_bytes` 65 536), so an oversized or
+  unterminated record is **never materialized in full**. A record whose
+  content (raw bytes; LF or CRLF terminator excluded) exceeds
+  `max_line_bytes` is counted `oversized_line` and **terminates
+  ingestion — fail closed**: skipping past it would require unbounded
+  scanning for the next record boundary. Total read work is bounded by
+  `max_rows × (max_line_bytes + 2)` bytes.
 - Every rejection is accounted by a fixed reason vocabulary; the report
   carries **counts only** — row payloads are never copied anywhere.
 
@@ -96,6 +109,21 @@ is checked against a **64 KiB ceiling — fail closed** (`ReportTooLargeError`).
 - No network, HTTP, ZMQ, Ollama or model calls anywhere in the module
   (statically auditable: the only imports are stdlib + `TOKEN_NAMES` /
   `WriteOutsideLogDirError` from `scripts.nextness_observer`).
+
+## CLI exit codes
+
+Expected failures print one concise `error:` line to stderr — **never a
+traceback**. Only the expected error types are caught; unexpected
+programming errors propagate loudly rather than masquerade as clean
+exits.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 2 | validation failure: missing log file or out-of-bounds configuration (argparse usage errors also exit 2) |
+| 3 | insufficient history for a train/holdout split |
+| 4 | output-path failure: write-boundary violation or unwritable target |
+| 5 | serialized report exceeds the 64 KiB ceiling (fail closed) |
 
 ## Relationship to what comes next
 
