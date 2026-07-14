@@ -39,7 +39,8 @@ Every metric is exactly one of:
 ```
 
 Fixed reason vocabulary: `artifact_absent` · `field_not_recorded` ·
-`series_too_short` · `order_not_witnessed` · `no_covering_receipt`.
+`series_too_short` · `order_not_witnessed` · `no_covering_receipt` ·
+`model_not_stable` · `config_not_stable`.
 Uncomputability is typed and first-class — absent evidence is never
 guessed around.
 
@@ -85,6 +86,26 @@ Four fixed checks per receipt: `abstain_flag_matches_reason`,
 `unverifiable`, aggregated per check with bounded contradiction-index
 lists (explicit `truncated` flag, never silent).
 
+**Higher-precedence truth table.** The decision precedence is
+`insufficient_history > unseen_state > low_confidence >
+calibration_drift > distribution_shift > none`, but the v1 receipt
+records neither the latest observation's `prev_seen` (the
+`unseen_state` trigger) nor its `confidence` (the `low_confidence`
+trigger). A recorded earlier trigger firing yields `contradicted`;
+otherwise, if an unrecorded earlier trigger *could* have fired, the
+verdict is `unverifiable` — never `consistent`:
+
+| Stated reason | Recorded earlier clauses (checked) | If a recorded clause fired | Otherwise |
+|---|---|---|---|
+| `insufficient_history` | none (nothing precedes it) | — | `consistent` |
+| `unseen_state` | history sufficiency | `contradicted` | `consistent` |
+| `low_confidence` | history sufficiency | `contradicted` | `unverifiable` (unseen_state unrecorded) |
+| `calibration_drift` | history sufficiency | `contradicted` | `unverifiable` (unseen_state, low_confidence unrecorded) |
+| `distribution_shift` | history sufficiency, calibration ≤ threshold | `contradicted` | `unverifiable` (unseen_state, low_confidence unrecorded) |
+| `none` | history sufficiency, calibration ≤ threshold, drift ≤ threshold | `contradicted` | `unverifiable` (unseen_state, low_confidence unrecorded) |
+
+All recorded-value comparisons carry the rounding tolerance below.
+
 **Tolerance derivation**: NP2 rounds receipt floats to 6 decimal
 places, so a recorded value is within 5e-7 of the true value. Comparing
 two recorded values ⇒ worst-case combined error 1e-6 ⇒
@@ -93,7 +114,7 @@ value against an unrounded report value ⇒ worst case 5e-7 ⇒
 `CROSS_CHECK_TOLERANCE = 1e-6`. A declared contradiction can therefore
 never be a rounding artifact.
 
-## Chronology witness
+## Chronology witness and series comparability (separate contracts)
 
 Receipts carry no timestamps (by emitter design). Series order is
 trusted **iff `observation_count` strictly increases** — each receipt
@@ -102,6 +123,25 @@ saw more observations than its predecessor. Equal counts are ambiguous
 inputs, so an equal-count neighbour adds no ordering evidence) and fail
 the witness. A failed witness degrades order-dependent metrics to
 `order_not_witnessed`; order-free metrics still compute.
+
+**Comparability is deliberately not conflated with chronology**: a
+well-ordered series can still mix regimes. Both stability facts are
+recorded per receipt, so they are checked, never assumed, and reported
+as `series_comparability` (`model_stable` / `config_stable`):
+
+- **Cumulative surprise/confidence blocks** additionally require one
+  stable predictor `model` — means from different models cannot be
+  combined into inter-receipt blocks (`model_not_stable` otherwise).
+  The monitor configuration does *not* gate blocks: the recorded means
+  aggregate the model's own observations and are config-independent.
+- **Abstention transitions** additionally require one stable monitor
+  `config` — decisions under different thresholds are not one monitor's
+  trajectory (`config_not_stable` otherwise; a mixed-model series
+  already fails at `model_not_stable`).
+
+Gate precedence (the typed reason names the first failed gate):
+`order_not_witnessed` > `series_too_short` > `model_not_stable` >
+`config_not_stable`.
 
 ## Stated assumptions (emitted only when used)
 
@@ -112,7 +152,10 @@ the witness. A failed witness degrades order-dependent metrics to
   n1)` reported beside every value (it grows without bound as blocks
   shrink). A block mean outside the field's possible range by more than
   its bound **falsifies the assumption** — reported per block and rolled
-  up as `all_within_bounds`.
+  up as `all_within_bounds`. The assumption is appended to the output's
+  `assumptions` list **only when block recovery actually ran**, i.e.
+  when its complete preconditions held: witnessed chronology, at least
+  two receipts, and a stable model.
 - **same-source** — cross-checks assume the receipts came from the same
   log and NP1 options as the report; neither artifact records this, so
   cross-check verdicts are explicitly conditional. A receipt "covers"
@@ -155,9 +198,10 @@ the same canonical serialization as NP1/NP2. **No wall-clock
 timestamps, no random identifiers, no absolute paths**; provenance is
 the SHA-256 and byte count of each input artifact's raw bytes, which is
 sufficient to reproduce every calculation. Byte-identical across
-repeated runs, and `--output` files are written LF-only on every
-platform (no newline translation), so a recorded evaluation's own
-sha256 does not depend on the producing operating system. Every
+repeated runs, and `--output` files are written as raw UTF-8 bytes
+(LF-only, no newline translation, no dependence on newer
+`Path.write_text` parameters), so a recorded evaluation's own bytes and
+sha256 do not depend on the producing interpreter or operating system. Every
 per-item detail list — contradiction indices, block means, run lengths,
 cross-check results — is capped at `MAX_DETAIL_ITEMS` (128) with
 explicit `truncated` flags and full counts, never silently. Serialized

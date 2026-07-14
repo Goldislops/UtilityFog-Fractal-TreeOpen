@@ -147,6 +147,8 @@ NOT_COMPUTABLE_REASONS: Final[tuple[str, ...]] = (
     "series_too_short",       # the computation needs more receipts than exist
     "order_not_witnessed",    # observation_count is not strictly increasing
     "no_covering_receipt",    # no receipt satisfies the cross-check precondition
+    "model_not_stable",       # the series mixes predictor models
+    "config_not_stable",      # the series mixes monitor configurations
 )
 
 #: Tri-state consistency verdicts (fixed vocabulary).
@@ -571,6 +573,24 @@ def chronology_witness(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {"witnessed": True, "first_violation_index": None}
 
 
+def series_comparability(receipts: Sequence[Mapping[str, Any]]) -> dict[str, bool]:
+    """Order-free stability facts, deliberately SEPARATE from chronology.
+
+    A strictly increasing observation_count says the receipts are
+    ordered — it does not say they describe one regime. Cumulative
+    block recovery is only meaningful over one predictor model
+    (the recorded means are model-derived), and abstention transitions
+    are only meaningful when both the model and the monitor
+    configuration (the thresholds the decisions were made under) held
+    still. Both facts ARE recorded per receipt, so they are checked,
+    never assumed.
+    """
+    return {
+        "model_stable": all(r["model"] == receipts[0]["model"] for r in receipts),
+        "config_stable": all(r["config"] == receipts[0]["config"] for r in receipts),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Section: prediction (NP1 report evidence)
 # ---------------------------------------------------------------------------
@@ -743,18 +763,37 @@ def check_receipt_consistency(receipt: Mapping[str, Any]) -> dict[str, str]:
         else "contradicted"
     )
 
-    # Higher-precedence exclusion: every VERIFIABLE reason above the
-    # stated one must not have fired (decision precedence is fixed:
-    # insufficient_history > unseen_state > low_confidence >
-    # calibration_drift > distribution_shift > none).
-    excluded = "consistent"
-    if reason != "insufficient_history" and not history_ok:
-        excluded = "contradicted"
-    if reason == "distribution_shift" and _cmp_recorded(ece, cal_thr) > 0:
-        excluded = "contradicted"  # calibration_drift should have fired first
-    if reason == "none":
-        if _cmp_recorded(ece, cal_thr) > 0 or _cmp_recorded(drift, drift_thr) > 0:
-            excluded = "contradicted"
+    # Higher-precedence exclusion, honest truth table. Decision
+    # precedence is fixed (insufficient_history > unseen_state >
+    # low_confidence > calibration_drift > distribution_shift > none),
+    # but the v1 receipt records neither the latest observation's
+    # prev_seen (unseen_state trigger) nor its confidence
+    # (low_confidence trigger). So:
+    #   - a RECORDED earlier trigger firing => contradicted;
+    #   - otherwise, if an UNRECORDED earlier trigger could have fired,
+    #     the verdict is unverifiable — never consistent;
+    #   - "consistent" survives only where every earlier clause is
+    #     recorded and shown not to fire (insufficient_history, which
+    #     has no earlier clause, and unseen_state, whose only earlier
+    #     clause is the recorded history check).
+    if reason == "insufficient_history":
+        excluded = "consistent"
+    elif not history_ok:
+        excluded = "contradicted"  # recorded higher trigger fired
+    elif reason == "unseen_state":
+        excluded = "consistent"
+    elif reason == "distribution_shift" and _cmp_recorded(ece, cal_thr) > 0:
+        excluded = "contradicted"  # recorded calibration_drift should have fired
+    elif reason == "none" and (
+        _cmp_recorded(ece, cal_thr) > 0 or _cmp_recorded(drift, drift_thr) > 0
+    ):
+        excluded = "contradicted"  # recorded drift/calibration should have fired
+    else:
+        # low_confidence / calibration_drift / distribution_shift / none
+        # with no recorded contradiction: unseen_state (and, below
+        # low_confidence, the confidence trigger) is unrecorded and
+        # could have fired.
+        excluded = "unverifiable"
     verdicts["higher_precedence_excluded"] = excluded
 
     # The stated reason's own trigger, where the receipt records it.
@@ -881,6 +920,7 @@ def _recovery_section(
         absent = _not_computable("artifact_absent", _REQUIRES_RECEIPTS)
         return {
             "chronology": absent,
+            "series_comparability": absent,
             "abstention_transitions": absent,
             "surprise_blocks": absent,
             "confidence_blocks": absent,
@@ -889,8 +929,17 @@ def _recovery_section(
             ),
         }
     assert order is not None
-    section: dict[str, Any] = {"chronology": _computed(dict(order))}
+    comparability = series_comparability(receipts)
+    section: dict[str, Any] = {
+        "chronology": _computed(dict(order)),
+        "series_comparability": _computed(dict(comparability)),
+    }
 
+    # Gate precedence (first failed gate names the typed reason):
+    # order_not_witnessed > series_too_short > model_not_stable >
+    # config_not_stable. Chronology and comparability are separate
+    # contracts — a well-ordered series over mixed regimes is still
+    # incomparable, and vice versa.
     if not order["witnessed"]:
         blocked = _not_computable(
             "order_not_witnessed",
@@ -906,6 +955,32 @@ def _recovery_section(
         section["abstention_transitions"] = short
         section["surprise_blocks"] = short
         section["confidence_blocks"] = short
+    elif not comparability["model_stable"]:
+        mixed = _not_computable(
+            "model_not_stable",
+            "a single predictor model across the series (cumulative means "
+            "from different models cannot be combined into blocks, and "
+            "their abstention decisions describe different predictors)",
+        )
+        section["abstention_transitions"] = mixed
+        section["surprise_blocks"] = mixed
+        section["confidence_blocks"] = mixed
+    elif not comparability["config_stable"]:
+        # Cumulative means are config-independent (they aggregate the
+        # model's own observations), so blocks stay computable; the
+        # abstention decisions were made under different thresholds, so
+        # transitions between them are not one monitor reorienting.
+        section["abstention_transitions"] = _not_computable(
+            "config_not_stable",
+            "a single monitor configuration across the series (decisions "
+            "under different thresholds are not one monitor's trajectory)",
+        )
+        section["surprise_blocks"] = _computed(
+            _block_means(receipts, "mean_surprise_bits", 0.0, SURPRISE_BITS_MAX)
+        )
+        section["confidence_blocks"] = _computed(
+            _block_means(receipts, "mean_confidence", 0.0, 1.0)
+        )
     else:
         onsets = 0          # abstain False -> True between neighbours
         reorientations = 0  # abstain True -> False between neighbours
@@ -1078,9 +1153,11 @@ def evaluate(
     cross = _cross_check_section(report, receipts)
 
     # Assumptions are listed IFF a computed value in this evaluation
-    # depends on them (deterministic function of the inputs).
+    # depends on them (deterministic function of the inputs). The
+    # prefix-extension assumption is used exactly when block recovery
+    # actually ran — i.e. when its complete preconditions held.
     assumptions: list[str] = []
-    if receipts is not None and order is not None and order["witnessed"] and len(receipts) >= 2:
+    if recovery["surprise_blocks"]["status"] == "computed":
         assumptions.append(ASSUMPTION_PREFIX_EXTENSION)
     if cross["ece_match"]["status"] == "computed":
         assumptions.append(ASSUMPTION_SAME_SOURCE)
@@ -1265,11 +1342,12 @@ def main(argv: list[str] | None = None) -> int:
     serialized = serialize_evaluation(evaluation)
     if args.output is not None:
         try:
-            # newline="" disables platform newline translation so the
-            # recorded artifact is byte-identical (LF-only) on every
-            # platform — a written evaluation's sha256 must not depend
-            # on the operating system that produced it.
-            args.output.write_text(serialized, encoding="utf-8", newline="")
+            # Raw byte write: no platform newline translation, no
+            # dependence on Path.write_text's newline= parameter (which
+            # only exists on newer Pythons) — a recorded evaluation's
+            # bytes and sha256 must not depend on the producing
+            # interpreter or operating system.
+            args.output.write_bytes(serialized.encode("utf-8"))
         except OSError as e:
             print(f"error: cannot write evaluation to {args.output}: {e}", file=sys.stderr)
             return 4

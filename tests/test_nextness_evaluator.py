@@ -201,15 +201,17 @@ def test_report_absent_prediction_is_typed_not_computable() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_reason_none_is_consistent_but_trigger_unverifiable() -> None:
+def test_reason_none_flag_and_sufficiency_consistent_rest_unverifiable() -> None:
     verdicts = check_receipt_consistency(
         validate_receipt(_make_receipt(reason="none"), "r")
     )
     assert verdicts["abstain_flag_matches_reason"] == "consistent"
     assert verdicts["sufficiency_matches_history"] == "consistent"
-    assert verdicts["higher_precedence_excluded"] == "consistent"
-    # The "none" claim also asserts confidence and prev_seen non-triggers,
-    # neither of which the receipt records.
+    # "none" asserts that NO reason fired — but the unseen_state and
+    # low_confidence triggers are unrecorded, so with no recorded
+    # contradiction the exclusion verdict is honestly unverifiable,
+    # and so is the stated-reason trigger.
+    assert verdicts["higher_precedence_excluded"] == "unverifiable"
     assert verdicts["stated_reason_trigger"] == "unverifiable"
 
 
@@ -303,6 +305,142 @@ def test_insufficient_history_trigger_verifiable() -> None:
         "r",
     )
     assert check_receipt_consistency(lying)["stated_reason_trigger"] == "contradicted"
+
+
+# ---------------------------------------------------------------------------
+# Higher-precedence truth table (exhaustive, table-driven)
+# ---------------------------------------------------------------------------
+#
+# The v1 receipt does not record the latest observation's prev_seen or
+# confidence, so unseen_state and low_confidence triggers are invisible.
+# The exclusion check may only say "consistent" when EVERY higher-
+# precedence trigger is recorded and shown not to fire; when an
+# unrecorded higher trigger could have fired, the honest verdict is
+# "unverifiable". A recorded earlier trigger always yields
+# "contradicted".
+
+
+@pytest.mark.parametrize(
+    "reason,history_ok,ece_fired,drift_fired,expected",
+    [
+        # insufficient_history: nothing above it — verify normally.
+        ("insufficient_history", False, False, False, "consistent"),
+        ("insufficient_history", True, False, False, "consistent"),
+        # unseen_state: the only higher clause (history) is recorded.
+        ("unseen_state", True, False, False, "consistent"),
+        ("unseen_state", False, False, False, "contradicted"),
+        # low_confidence: unseen_state is unrecorded above it.
+        ("low_confidence", True, False, False, "unverifiable"),
+        ("low_confidence", False, False, False, "contradicted"),
+        # calibration_drift: unseen_state + low_confidence unrecorded.
+        ("calibration_drift", True, False, False, "unverifiable"),
+        ("calibration_drift", False, False, False, "contradicted"),
+        # distribution_shift: calibration IS recorded (checkable), the
+        # two unrecorded clauses still cap the verdict at unverifiable.
+        ("distribution_shift", True, False, False, "unverifiable"),
+        ("distribution_shift", True, True, False, "contradicted"),
+        ("distribution_shift", False, False, False, "contradicted"),
+        # none: calibration + drift recorded, two clauses unrecorded.
+        ("none", True, False, False, "unverifiable"),
+        ("none", True, True, False, "contradicted"),
+        ("none", True, False, True, "contradicted"),
+        ("none", False, False, False, "contradicted"),
+    ],
+)
+def test_higher_precedence_truth_table(
+    reason, history_ok, ece_fired, drift_fired, expected
+) -> None:
+    receipt = validate_receipt(
+        _make_receipt(
+            reason=reason,
+            observation_count=40 if history_ok else 10,
+            min_history=30,
+            sufficiency="sufficient" if history_ok else "insufficient",
+            ece=0.25 if ece_fired else 0.1,
+            cal_threshold=0.2,
+            drift=0.2 if drift_fired else 0.05,
+            drift_threshold=0.15,
+        ),
+        "r",
+    )
+    assert check_receipt_consistency(receipt)["higher_precedence_excluded"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Series comparability (model/config stability gates for recovery)
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_model_series_blocks_and_transitions_not_computable() -> None:
+    # Jack's canonical case: first_order n=10 then empirical_prior n=20.
+    # Cumulative block recovery across two different predictors is
+    # meaningless; it must degrade to a typed result, never a number.
+    receipts = _series(
+        [
+            _make_receipt(observation_count=10, min_history=5, model="first_order"),
+            _make_receipt(observation_count=20, min_history=5, model="empirical_prior"),
+        ]
+    )
+    ev = evaluate(receipts=receipts)
+    comparability = ev["recovery"]["series_comparability"]["value"]
+    assert comparability["model_stable"] is False
+    for key in ("surprise_blocks", "confidence_blocks", "abstention_transitions"):
+        assert ev["recovery"][key]["status"] == "not_computable"
+        assert ev["recovery"][key]["reason"] == "model_not_stable"
+    # The prefix-extension assumption's preconditions do NOT hold.
+    assert ASSUMPTION_PREFIX_EXTENSION not in ev["assumptions"]
+    # Order itself was fine — chronology is a separate, unconflated fact.
+    assert ev["recovery"]["chronology"]["value"]["witnessed"] is True
+
+
+def test_changed_config_blocks_computable_transitions_not() -> None:
+    # Stable model, changed monitor configuration: cumulative means are
+    # config-independent so blocks stay computable, but abstention
+    # transitions compare decisions made under different thresholds.
+    receipts = _series(
+        [
+            _make_receipt(observation_count=10, min_history=5),
+            _make_receipt(observation_count=20, min_history=6),
+        ]
+    )
+    ev = evaluate(receipts=receipts)
+    comparability = ev["recovery"]["series_comparability"]["value"]
+    assert comparability["model_stable"] is True
+    assert comparability["config_stable"] is False
+    assert ev["recovery"]["surprise_blocks"]["status"] == "computed"
+    assert ev["recovery"]["confidence_blocks"]["status"] == "computed"
+    assert ev["recovery"]["abstention_transitions"]["status"] == "not_computable"
+    assert ev["recovery"]["abstention_transitions"]["reason"] == "config_not_stable"
+    assert ASSUMPTION_PREFIX_EXTENSION in ev["assumptions"]  # blocks used it
+
+
+def test_stable_series_remains_fully_computable() -> None:
+    receipts = _series(
+        [
+            _make_receipt(observation_count=10, min_history=5),
+            _make_receipt(observation_count=20, min_history=5),
+        ]
+    )
+    ev = evaluate(receipts=receipts)
+    comparability = ev["recovery"]["series_comparability"]["value"]
+    assert comparability == {"model_stable": True, "config_stable": True}
+    assert ev["recovery"]["surprise_blocks"]["status"] == "computed"
+    assert ev["recovery"]["abstention_transitions"]["status"] == "computed"
+
+
+def test_order_violation_still_wins_over_comparability() -> None:
+    # Decreasing counts: order_not_witnessed keeps precedence over the
+    # comparability reasons — chronology and comparability are separate
+    # contracts and the typed reason must name the first failed gate.
+    receipts = _series(
+        [
+            _make_receipt(observation_count=20, model="first_order"),
+            _make_receipt(observation_count=10, model="empirical_prior"),
+        ]
+    )
+    ev = evaluate(receipts=receipts)
+    for key in ("surprise_blocks", "confidence_blocks", "abstention_transitions"):
+        assert ev["recovery"][key]["reason"] == "order_not_witnessed"
 
 
 # ---------------------------------------------------------------------------
