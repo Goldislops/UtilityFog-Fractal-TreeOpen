@@ -22,8 +22,12 @@ software is aware. Everything below is written to keep those two allowances —
 
 This note is the S0 rung (documentation + source audit) of a deliberately
 slow ladder (§8). It exists so that a later, cleverer instrument has an
-honest, bounded frame to grow inside — the same discipline NP1/NP2 already
-apply to prediction and metacognition.
+honest, bounded frame to grow inside — the same discipline NP1
+([PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354))
+and NP2
+([PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355))
+**propose**, as open, unmerged, test-verified pull requests, for prediction
+and metacognition. (Neither NP1 nor NP2 is on `main`; see §6.)
 
 ## 1. Four evidence classes — kept strictly separate
 
@@ -36,7 +40,7 @@ never in the fourth.
 | **First-person human reports** | A practitioner's own account of their experience | The trained self-report that lets an experimenter time a meditative state | Be read directly off a brain scan or a log |
 | **Behavioral observations** | Third-party observable performance | Reaction times, task accuracy, attentional-blink hit rates | Establish *what it was like* to perform the task |
 | **Neural measurements** | Physical signals from a body | EEG gamma-band activity; fMRI BOLD contrast | Be equated with the report or the behavior it correlates with |
-| **Software telemetry** | Numbers Medusa's own instruments emit | NP1 prediction receipts; NP2 abstention receipts | Be equated with *any* of the human classes above |
+| **Software telemetry** | Numbers Medusa's own instruments emit | Nextness Observer logs (on `main`); the prediction/abstention receipts **proposed** by NP1 (#354) and NP2 (#355), both open/unmerged PRs | Be equated with *any* of the human classes above |
 
 The load-bearing rule: a correlation observed *within* one class, or *between*
 two human classes, is never automatically a fact about a fourth, silicon
@@ -52,12 +56,14 @@ structure — individually or together — **do not establish subjective
 experience, sentience, or self-awareness.** A system can do all of them and
 be no one home.
 
-Where this note (and NP2) use the word **"metacognition"**, it means exactly
-one thing: **bounded, mechanical monitoring of a model's own predictions and
-confidence** — the functional shadow of "knowing you might be wrong", which
-is the only part that can be tested. It is *not* a claim of phenomenal
-consciousness, introspective access, or an inner life. NP2 already embeds
-this non-claim in every receipt; NP4 inherits it wholesale.
+Where this note (and NP2, the open/unmerged PR #355) use the word
+**"metacognition"**, it means exactly one thing: **bounded, mechanical
+monitoring of a model's own predictions and confidence** — the functional
+shadow of "knowing you might be wrong", which is the only part that can be
+tested. It is *not* a claim of phenomenal consciousness, introspective
+access, or an inner life. NP2 **proposes** to embed this non-claim in every
+receipt it would emit (behavior test-verified on its PR branch, not yet on
+`main`); NP4 states the same non-claim here in its own right.
 
 Prediction monitoring and self-report-style receipts are **bookkeeping about
 error statistics**. They can be complete, accurate, and useful without
@@ -93,8 +99,8 @@ computational hypothesis stated in Medusa's own terms; deterministic
 fixtures; ablation against a baseline that omits the parameter; and evidence
 that beats that baseline. Inspiration may point at a *question*; only the
 repository's own falsifiable machinery may set a *value*. (This is the same
-bar NP1 sets for its baselines and NP2 sets for its thresholds — "thresholds
-are configuration, not constants of nature".)
+bar the open NP1 and NP2 PRs (#354/#355) **propose** for their baselines and
+thresholds — "thresholds are configuration, not constants of nature".)
 
 ## 4. Legitimate design inspirations (metaphors, clearly labelled)
 
@@ -108,7 +114,7 @@ software experiences, or is a model of, any Buddhist mental state.
 |---|---|
 | Sustained attention | Stable allocation of a **bounded** observation effort over time without drift or starvation |
 | Reorientation | **Measured recovery** after a prediction error — returning to a good regime, quantifiably |
-| Meta-awareness | **Detection that confidence and outcome disagree** (NP2's abstention is exactly this shape) |
+| Meta-awareness | **Detection that confidence and outcome disagree** (the abstention **proposed** by NP2 in PR #355 is exactly this shape) |
 | Equanimity | **Bounded response** to surprise — no uncontrolled oscillation or overcorrection |
 | Compassion / non-harm | **Governance constraints** that protect operators, concurrent workloads, and data |
 | Sympathetic joy | **Positive-sum, cooperative credit** — no winner-take-all suppression of peer instruments |
@@ -128,24 +134,27 @@ unit · input evidence · failure interpretation · what it does not prove.*
 
 1. **Prediction error** — divergence between a predicted next-event
    distribution and the realised event.
-   *Unit*: bits (mean −log₂ P(actual), matching NP1). *Input*: NP1-style
-   prediction receipts. *Failure*: high/rising error ⇒ the predictor is a
-   poor fit for the current regime. *Does not prove*: anything about
-   understanding — a lookup table can score well.
+   *Unit*: bits (mean −log₂ P(actual), matching the NP1 proposal, PR #354).
+   *Input*: prediction receipts of the kind NP1 **proposes** (available only
+   if #354 is merged and audited). *Failure*: high/rising error ⇒ the
+   predictor is a poor fit for the current regime. *Does not prove*: anything
+   about understanding — a lookup table can score well.
 
 2. **Calibration error** — gap between stated confidence and observed
    correctness.
-   *Unit*: dimensionless ECE ∈ [0,1] (NP1's fixed 10-bin scheme). *Input*:
-   confidence/outcome pairs. *Failure*: large ECE ⇒ confidence is
-   untrustworthy as a quantity. *Does not prove*: that the system "knows"
-   it is calibrated; it is a property of the numbers, not a self.
+   *Unit*: dimensionless ECE ∈ [0,1] (the fixed 10-bin scheme **proposed**
+   by NP1 in PR #354). *Input*: confidence/outcome pairs. *Failure*: large
+   ECE ⇒ confidence is untrustworthy as a quantity. *Does not prove*: that
+   the system "knows" it is calibrated; it is a property of the numbers, not
+   a self.
 
 3. **Abstention accuracy** — how well "abstain vs act-as-evidence" decisions
    track whether the prediction would have been right.
    *Unit*: dimensionless (precision/recall of abstention against realised
-   error). *Input*: NP2 receipts + realised outcomes. *Failure*: abstaining
-   when right / trusting when wrong ⇒ the guard is miscalibrated. *Does not
-   prove*: prudence or intent — it is a threshold's hit rate.
+   error). *Input*: receipts of the kind NP2 **proposes** (PR #355, open) +
+   realised outcomes. *Failure*: abstaining when right / trusting when wrong
+   ⇒ the guard is miscalibrated. *Does not prove*: prudence or intent — it
+   is a threshold's hit rate.
 
 4. **Reorientation latency** — time (or event count) from a detected error
    to return within a good-regime band.
@@ -192,27 +201,44 @@ unit · input evidence · failure interpretation · what it does not prove.*
     state transitions. *Failure*: escalation/lockout loops ⇒ punitive
     dynamics. *Does not prove*: forgiveness; it is a state-machine property.
 
-Every metric above is telemetry describing Medusa's instruments. None is a
-measurement of a human, and none crosses back into evidence classes 1–3.
+Every metric above is telemetry that would describe Medusa's instruments.
+None is a measurement of a human, and none crosses back into evidence
+classes 1–3.
 
 ## 6. Glass-Wall relationship to NP1 (#354) and NP2 (#355)
 
-NP1 and NP2 were read for this note and **not modified** (they are fenced;
-see the header and §10). They already produce exactly the kind of immutable,
-bounded artifact a future trained-attention evaluator would consume:
+**Status precision — where NP1 and NP2 actually live.** NP1 and NP2 are
+**open, unmerged pull requests**, not files on `main`. The base this note is
+written against (`main = 8e45d3f9`) contains the Nextness **Observer**
+(`scripts/nextness_observer.py`) and its log format, but **none** of the
+NP1/NP2 artifacts:
 
-- **NP1** (`scripts/nextness_predictor.py`, schema `nextness-predictor-v1`):
-  deterministic next-event baselines over the Nextness Observer log; emits
-  sorted-key JSON with no wall-clock timestamps, byte-identical across runs,
-  under a 64 KiB fail-closed ceiling; reads observer-log rows only (never raw
+- **NP1** —
+  [PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354)
+  (amended head `f519256b`), proposing `scripts/nextness_predictor.py`
+  (schema `nextness-predictor-v1`);
+- **NP2** —
+  [PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355)
+  (amended head `54440cf2`), proposing `scripts/nextness_monitor.py`
+  (schema `nextness-monitor-v1`).
+
+For this note, those two open PR branches were **inspected read-only and not
+modified** (they are fenced; see the header and §10). As **proposed and
+test-verified on those PR branches**, their artifacts would be exactly the
+kind of immutable, bounded input a future trained-attention evaluator could
+consume — *if and only if the PRs are first merged and audited*:
+
+- **NP1 (proposed, PR #354)**: deterministic next-event baselines over the
+  existing Nextness Observer log; would emit sorted-key JSON with no
+  wall-clock timestamps, byte-identical across runs, under a 64 KiB
+  fail-closed ceiling; would read observer-log rows only (never raw
   snapshots or live engine state); no network/model imports.
-- **NP2** (`scripts/nextness_monitor.py`, schema `nextness-monitor-v1`):
-  a metacognition receipt over NP1's outputs; its `abstain` field means
-  *exactly* "do not treat this prediction as evidence" — it **triggers no
-  action, tuning, or orchestration**; closed-allowlist fields; writes no
-  files; offline.
+- **NP2 (proposed, PR #355)**: a metacognition receipt over NP1's outputs;
+  its `abstain` field would mean *exactly* "do not treat this prediction as
+  evidence" — it would **trigger no action, tuning, or orchestration**;
+  closed-allowlist fields; would write no files; offline.
 
-A future evaluator sits **behind a one-way glass wall**: it may *read* these
+A future evaluator sits **behind a one-way glass wall**: it may *read* such
 recorded artifacts offline and compute metrics (§5) over them, and that is
 **all**. By construction it must remain unable to:
 
@@ -224,11 +250,12 @@ recorded artifacts offline and compute metrics (§5) over them, and that is
 - pause, stop, throttle, or reprioritise Folding@home or BOINC;
 - communicate with another machine.
 
-**There is no reverse control path.** Evidence flows *out* of NP1/NP2 into the
-evaluator; nothing flows *back* from the evaluator into the engine, the
-network, or the co-tenant workloads. This is the same Glass-Wall shape the
-repository already uses for Swarm Hunter's preflight
-([`docs/swarm-hunter-v1-preflight`](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)):
+**There is no reverse control path.** Evidence would flow *out* of
+merged-and-audited NP1/NP2-style artifacts into the evaluator; nothing flows
+*back* from the evaluator into the engine, the network, or the co-tenant
+workloads. This is the same Glass-Wall shape **proposed** by the Swarm
+Hunter v1 preflight — itself an open, unmerged PR
+([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)):
 observe-only, no activation, no write-back.
 
 ## 7. Research ethics (hard gate for anything human)
@@ -267,15 +294,18 @@ and S4 is still observation-only.
 
 ## 9. What each cited source actually measured (kept separate from analogy)
 
-Accessed 2026-07-14. Findings paraphrased; no extended quotation. Each is a
-**cohort- and task-specific correlate**, reported as such by its authors —
-none offers a universal consciousness frequency, geometric ratio, or CA rule.
+Accessed 2026-07-14. Findings paraphrased; no extended quotation. All three
+PNAS papers have stable open full text via PubMed Central (linked below)
+alongside their DOI landing pages. Each is a **cohort- and task-specific
+correlate**, reported as such by its authors — none offers a universal
+consciousness frequency, geometric ratio, or CA rule.
 
 - **Lutz, Greischar, Rawlings, Ricard & Davidson (2004)** — *Long-term
   meditators self-induce high-amplitude gamma synchrony during mental
   practice*, PNAS 101(46):16369–16373.
   <https://www.pnas.org/doi/10.1073/pnas.0407401101> ·
-  DOI 10.1073/pnas.0407401101.
+  DOI 10.1073/pnas.0407401101 · full text (PubMed Central):
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC526201/>.
   **Measured** (neural + first-person timing): EEG in a small cohort of
   long-term Buddhist practitioners versus controls during a *specific*
   meditative task; reported self-induced high-amplitude gamma-band
@@ -288,7 +318,8 @@ none offers a universal consciousness frequency, geometric ratio, or CA rule.
   correlates of attentional expertise in long-term meditation practitioners*,
   PNAS 104:11483–11488.
   <https://www.pnas.org/doi/10.1073/pnas.0606552104> ·
-  DOI 10.1073/pnas.0606552104.
+  DOI 10.1073/pnas.0606552104 · full text (PubMed Central):
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC1903340/>.
   **Measured** (neural + behavioral): fMRI during focused-attention
   meditation; activation in sustained-attention regions traced an inverted-U
   against practice hours (more in experts than novices, then *less* in the
@@ -299,7 +330,8 @@ none offers a universal consciousness frequency, geometric ratio, or CA rule.
   experience is associated with differences in default mode network activity
   and connectivity*, PNAS 108(50):20254–20259.
   <https://www.pnas.org/doi/10.1073/pnas.1112029108> ·
-  DOI 10.1073/pnas.1112029108.
+  DOI 10.1073/pnas.1112029108 · full text (PubMed Central):
+  <https://pmc.ncbi.nlm.nih.gov/articles/PMC3250176/>.
   **Measured** (neural): fMRI in experienced meditators versus naive controls
   across three meditations; main default-mode-network nodes (medial
   prefrontal and posterior cingulate cortices) relatively deactivated in the
@@ -320,12 +352,14 @@ none offers a universal consciousness frequency, geometric ratio, or CA rule.
 
 A bounded future coding package, offered only as a target for audit:
 
-- **Offline evaluator only.** Consumes immutable NP1/NP2-style artifacts from
-  disk; computes a subset of §5 metrics.
-- **Emits** one small, deterministic JSON report (sorted keys, no wall-clock,
-  fail-closed size ceiling — the NP1/NP2 house style).
+- **Offline evaluator only.** Would consume immutable artifacts of the kind
+  NP1/NP2 **propose** (PRs #354/#355) from disk — available as inputs only
+  after those PRs are merged and audited; computes a subset of §5 metrics.
+- **Would emit** one small, deterministic JSON report (sorted keys, no
+  wall-clock, fail-closed size ceiling — the house style the NP1/NP2 PRs
+  propose).
 - **No** network, model, engine, or orchestrator access — statically
-  auditable imports, like NP1/NP2.
+  auditable imports, like the NP1/NP2 proposals.
 - **Explicit schemas and size limits**; **fail-closed validation** on every
   input field.
 - **Fixture-derived tests**: every expected metric computed independently in
@@ -342,10 +376,13 @@ a start.
 
 | Class | Contents |
 |---|---|
-| **Exists in repo** | NP1 (#354) + NP2 (#355) bounded artifacts and their contracts; the Glass-Wall pattern (Swarm Hunter preflight); this note |
-| **Tested** | Nothing new here — NP4 is documentation; the cited human studies are external, not repository evidence |
-| **Proposed** | The four evidence-class discipline (§1); neutral metrics (§5); the Glass-Wall evaluator relationship (§6); the S0–S4 ladder (§8); the NP5 candidate (§10) |
-| **Requires later action** | Any code (Jack audit + Kev word); any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
+| **Exists on main** (`8e45d3f9`) | The Nextness Observer and its log format (`scripts/nextness_observer.py`, with its calibration/metrics companions and tests); the canonical Theory Intake Ledger (untouched by this note). **No NP1/NP2 artifact is on `main`.** |
+| **Open/unmerged, test-verified proposals** | NP1 ([PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354), amended head `f519256b`); NP2 ([PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355), amended head `54440cf2`); the Swarm Hunter v1 preflight ([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)); this note itself (PR #357) |
+| **Proposed by NP4** | The four evidence-class discipline (§1); neutral metrics (§5); the Glass-Wall evaluator relationship (§6); the S0–S4 ladder (§8); the NP5 candidate (§10) |
+| **Requires later authorization/action** | Merge + audit of NP1/NP2 before any evaluator may consume their artifacts; any code (Jack audit + Kev implementation word); any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
+
+The cited human studies (§9) are external literature, not repository
+evidence; they sit in no row above.
 
 ## 12. Non-claims (load-bearing summary)
 
