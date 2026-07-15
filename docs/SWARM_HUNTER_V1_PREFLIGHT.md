@@ -6,15 +6,36 @@
 >
 > **Material correction (amendment, Jack audit):** this document originally claimed "no
 > Swarm Hunter code path exists in this repository." **That claim is withdrawn as
-> false.** `scripts/orchestrator.py:1` describes itself as *"the Swarm Hunter's
-> brain"*; it is a tracked, importable, tuning-capable Phase 18 orchestrator whose
-> default tool surface includes `propose_tuning` **and** `commit_tuning`, and whose
-> single library call (`create_orchestrator()` → `run_one_iteration()`) executes one
-> observe→decide→act cycle with no runner required. §2b maps it in full. What remains
-> true, stated narrowly: **no offline candidate-structure detector of the kind this
-> preflight proposes exists**, and this document does not create one. The original
-> error came from an evidence sweep truncated by a `head -20` pipe — recorded here so
-> the failure mode stays visible.
+> false.** At the original audit base, `scripts/orchestrator.py:1` described itself as
+> *"the Swarm Hunter's brain"*; it was a tracked, importable, tuning-capable Phase 18
+> orchestrator whose default tool surface included `propose_tuning` **and**
+> `commit_tuning`, and whose single library call (`create_orchestrator()` →
+> `run_one_iteration()`) executes one observe→decide→act cycle with no runner
+> required. §2b maps it in full. What remains true, stated narrowly: **no offline
+> candidate-structure detector of the kind this preflight proposes exists**, and this
+> document does not create one. The original error came from an evidence sweep
+> truncated by a `head -20` pipe — recorded here so the failure mode stays visible.
+> *(Post-R/S/T: the orchestrator is now renamed and quarantined — see the supersession
+> note below. The evidentiary failure record above is retained unchanged.)*
+>
+> **Post-R/S/T supersession note (Amendment 2, 2026-07-15, main
+> `3dcc38f9a88c1c009ae41b6a7f5c0d2157bba675`):** the tuning orchestrator this document
+> audits has since been **dispositioned** by the merged quarantine stack
+> R = PR #328 (squash `6a762b998e6e6d4db2aa11568b9cc5a53f5e3e3e`) ·
+> S = PR #333 (squash `d5e9c3c76b4e60303238d09f1a3319a4ae31f478`) ·
+> T = PR #334 (squash `3dcc38f9a88c1c009ae41b6a7f5c0d2157bba675`). Live boundaries are
+> recorded in
+> [`docs/LEGACY_ORCHESTRATOR_QUARANTINE.md`](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/blob/3dcc38f9a88c1c009ae41b6a7f5c0d2157bba675/docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)
+> (commit-pinned). Integration receipt: at T head
+> `ad76327701240a3d97928ddf241d03c0e365936f` and on post-merge main `3dcc38f`, the
+> `verify-python` gate concluded **1384 passed / 10 skipped** with the applicable gates
+> (agent-safety, verify-python, frontend-quality, CodeQL) green. Present-tense
+> orchestrator descriptions below (preamble, §2, §2b, §2d, §3) are preserved as the
+> **pre-disposition audit record** — accurate at the original audit base — with
+> adjacent *Post-R/S/T:* annotations; every *Post-R/S/T:* statement is
+> source-established (`[SRC]`) against main `3dcc38f`. Nothing in this amendment
+> authorizes S1, any closed loop, or Lane A activity, and it makes **no general
+> API-security claim** — only the quarantined paths named in the annotations.
 >
 > **Origin:** Kev-authorized overnight preflight runway (2026-07-12, Ian's-lounge seat,
 > resumable under its recorded continuity protocol). Every claim below carries an
@@ -54,12 +75,12 @@ constrains it in the same direction (observe/surface: yes; control: no). `[SRC]`
 
 | Term | Classification | Evidence |
 |---|---|---|
-| `Swarm Hunter` / `swarm-hunter` | repository-defined — **two distinct referents that must not be conflated**: (a) the governance constraint set for a future gated capability (provenance map above); (b) the tracked Phase 18 tuning orchestrator that names itself "the Swarm Hunter's brain" (§2b) | ledger + `scripts/orchestrator.py:1`, `scripts/orchestrator_config.py:74`; label exists; no dedicated issue |
+| `Swarm Hunter` / `swarm-hunter` | repository-defined — **two distinct referents that must not be conflated**: (a) the governance constraint set for a future gated capability (provenance map above); (b) the tracked Phase 18 tuning orchestrator that, at the original audit base, named itself "the Swarm Hunter's brain" (§2b). *Post-R/S/T: referent (b) is renamed "legacy tuning orchestrator (quarantined)"; the historical name survives in code only as a historical reference, and the system prompt no longer uses it* | ledger + `scripts/orchestrator.py:1`, `scripts/orchestrator_config.py:74` (original base); post-R/S/T: `scripts/orchestrator.py:3` (historical mention), `scripts/orchestrator_config.py:89` at main `3dcc38f`; label exists; no dedicated issue |
 | `Lane A` | repository-defined (engine-consumer + intervention lane), PARKED | PHASE_19 §1; LANE_A_READINESS_REVIEW |
 | `observer` / `nextness` | repository-defined operational mechanism (Lane B, built & calibrated) | `scripts/nextness_observer.py` vocabulary + PHASE_19 docs |
 | `promotion gate` / `theory-to-architecture` | repository-defined process (ledger graduation §; tripwire labels) | ledger tail; tripwire workflow |
 | `shadow grid` | **[ABSENT]** — AURA metaphor; no tracked occurrence | repo-wide search |
-| `LeanCTX` | **[ABSENT]** — AURA metaphor; engineering contract proposed in §8 | repo-wide search |
+| `LeanCTX` | **[ABSENT] at the original audit base** — AURA metaphor; engineering contract proposed in §8. *Post-R/S/T (separate fact): T introduced a tracked `leanctx-orchestrator-v1` audit receipt for the **orchestrator** (`scripts/orchestrator.py`, quarantine doc) — a distinct artifact from §8's proposed **detector** packet; the two must not be conflated* | repo-wide search (original base); main `3dcc38f` (post-R/S/T) |
 | `self-label` / self-labeling | **[ABSENT]** | repo-wide search |
 | `proprioception` | defined only in `crates/vanguard-mcp/src/proprioception.rs` (Vanguard subsystem, unverified-cluster lineage) — **not** a CA-engine mechanism | `[SRC]` |
 | `closed loop` | appears **only as an explicit non-goal** | `PHASE_19_PR3_METRICS_PIPELINE.md:25,291` |
@@ -69,12 +90,17 @@ constrains it in the same direction (observe/surface: yes; control: no). `[SRC]`
 vocabulary):**
 
 1. **Legacy Phase 18 tuning orchestrator** (`scripts/orchestrator.py` +
-   `scripts/orchestrator_config.py`) — tracked, importable, write-capable within
-   server-side rails; self-described "Swarm Hunter's brain." Mapped in §2b. `[SRC]`
+   `scripts/orchestrator_config.py`) — tracked, importable, and at the original
+   audit base write-capable within server-side rails; self-described "Swarm
+   Hunter's brain." Mapped in §2b. *Post-R/S/T: renamed and quarantined —
+   observe-by-default, propose mode is forced dry-run, no LLM-facing commit tool
+   in any supported mode; the low-level non-LLM client primitives remain for
+   direct human/reviewed use.* `[SRC]`
 2. **Proposed offline candidate-structure detector** (this preflight) — reads
    immutable evidence, surfaces candidates for human review (ledger entry 7's
    wording); entry-14 "grid spectroscopy" family; Maturin §3 shape. **Does not
-   exist**; nothing here creates it. `[PROP]`
+   exist**; nothing here creates it. *(Re-verified absent at main `3dcc38f`,
+   2026-07-15: still merely proposed.)* `[PROP]`
 3. **Lane A** — the parked engine-consumer/intervention lane. `[SRC]`
 4. **Nextness Observer** — Lane B, built and calibrated, read-only, its own
    non-goals. `[SRC]`
@@ -90,7 +116,12 @@ whether the detector should be a *new instrument beside* the Nextness Observer o
 *extension of* it (owner: AURA + Jack + Kev at S4), and which mechanism ultimately
 owns the name (naming analysis, §2c). `[SRC/PROP]`
 
-## 2b. Legacy Phase 18 orchestrator — reachability map and safety audit `[SRC]`
+## 2b. Legacy Phase 18 orchestrator — reachability map and safety audit `[SRC]` (pre-disposition record)
+
+**This section is the pre-disposition audit record** — accurate at the original
+audit base and preserved as the evidence that motivated the R/S/T disposition.
+*Post-R/S/T:* annotations (2026-07-15, `[SRC]` at main `3dcc38f`) state the
+current truth next to each superseded row; the historical rows are not rewritten.
 
 **Reachability map** (every row source-established; "proven absent" means an
 exhaustive tracked-text search, not inference):
@@ -103,21 +134,21 @@ exhaustive tracked-text search, not inference):
 | Executable directly? | Yes as a library: `create_orchestrator()` (env-driven) then `run_one_iteration()` — one iteration, **no runner required** |
 | Default configuration | `MEDUSA_API_BASE_URL=http://127.0.0.1:8080` · `MEDUSA_AGENT_BACKEND=**mock**` (benign default) · `MEDUSA_MAX_TOOL_DEPTH=8` · `MEDUSA_MAX_TOKENS=2048`; real backends are one env var away (`anthropic`, `openai-compat` + provider vars incl. `MEDUSA_OPENAI_BASE_URL/MODEL/API_KEY/EXTRA_HEADERS`, `ANTHROPIC_API_KEY`, `MEDUSA_ANTHROPIC_MODEL`) |
 | Network access | HTTP via stdlib urllib to the configured base URL only; endpoint paths are fixed. GETs: `/api/{census,equanimity,acoustic,params,params/schema,status}`. POSTs: `/api/tuning/{propose,commit,rollback}` |
-| Default LLM tool surface | `observation_tools() + tuning_tools()` (`orchestrator.py:406`) — **`propose_tuning` and `commit_tuning` are default-on**; rollback is client-only, **not** exposed to the LLM |
-| Approval identity | Hard-coded `approver="policy:auto"` (`:272`, `:348`); the LLM cannot supply an approver |
-| AUTO / HUMAN_APPROVAL / LOCKED | Enforced **server-side** (`tuning_api.py`): LOCKED rejected at propose; HUMAN_APPROVAL commit under `policy:auto` → 403 `human_approval_required` (`:223`); per-param rate limit 1000 generations → 429 (`:44`, `:234`); modes validated (`dry-run`/`commit-pending`) |
-| Tests | `tests/test_tuning_api.py` (19 tests, **real blueprint** — proves 403/LOCKED/rate-limit rails); `tests/test_orchestrator.py` (34 tests, MockBackend + injected fake HTTP — proves loop logic, not transport); `tests/test_provider_parity.py` (drives the real tuning API through both real backend adapters) |
+| Default LLM tool surface | At the original audit base: `observation_tools() + tuning_tools()` (`orchestrator.py:406`) — **`propose_tuning` and `commit_tuning` were default-on**; rollback client-only, **not** exposed to the LLM. *Post-R/S/T: **observe-by-default** — the default surface is observation-only; explicit `propose` mode (`MEDUSA_ORCHESTRATOR_MODE=propose`) adds one proposal tool with **forced dry-run** (`commit-pending` refused); `commit_tuning` is registered in **no** supported mode; mode resolution fails closed to `observe`* |
+| Approval identity | At the original audit base: hard-coded `approver="policy:auto"` (`:272`, `:348`); the LLM cannot supply an approver. *Post-R/S/T: the LLM still supplies no approver; the dead LLM-path `commit_approver` plumbing was removed (S), and the server refuses the normalized autonomous identity outright (R, next row)* |
+| AUTO / HUMAN_APPROVAL / LOCKED | Enforced **server-side** (`tuning_api.py`): LOCKED rejected at propose; HUMAN_APPROVAL commit under `policy:auto` → 403 `human_approval_required` (`:223`); per-param rate limit 1000 generations → 429 (`:44`, `:234`); modes validated (`dry-run`/`commit-pending`). *Post-R/S/T: additionally, any commit whose normalized approver is `policy:auto` → **`403 auto_commit_disabled`** for **every** category, checked before the human-approval branch, with no env flag, header, or alternate route to re-enable it (`tuning_api.py:267` at main `3dcc38f`)* |
+| Tests | `tests/test_tuning_api.py` (19 tests, **real blueprint** — proves 403/LOCKED/rate-limit rails); `tests/test_orchestrator.py` (34 tests, MockBackend + injected fake HTTP — proves loop logic, not transport); `tests/test_provider_parity.py` (drives the real tuning API through both real backend adapters). *(Counts are as of the original audit base — historical; the post-R/S/T integration receipt lives in the supersession note above.)* |
 | Status | **Library-only: no committed runner; one-call-executable; documented invocation recipes exist; execution unverified.** "Dormant" is *not* claimed — absence of a committed runner does not prove absence of out-of-repo invocation |
 
 **Safety audit** (14 questions; every answer labeled):
 
-1. *Can a supplied backend request `commit_tuning`?* **Yes** — default tool surface. `[SRC :406]`
-2. *Is `commit_tuning` included by default?* **Yes.** `[SRC :196–254]`
-3. *Can AUTO parameters change without a human identity?* **Yes, by design** — `policy:auto` commits AUTO-category params; the server accepts. `[SRC]`
+1. *Can a supplied backend request `commit_tuning`?* **Yes** — default tool surface. `[SRC :406]` *Post-R/S/T: **No** — `commit_tuning` exists in no supported mode's tool registry.*
+2. *Is `commit_tuning` included by default?* **Yes.** `[SRC :196–254]` *Post-R/S/T: **No** — the tool is never registered; only `propose_tuning` (forced dry-run) exists, and only in explicit `propose` mode.*
+3. *Can AUTO parameters change without a human identity?* **Yes, by design** — `policy:auto` commits AUTO-category params; the server accepts. `[SRC]` *Post-R/S/T: **not via the orchestrator's autonomous identity** — normalized `policy:auto` commits receive `403 auto_commit_disabled` for every category. The direct API remains unauthenticated (unchanged non-claim), so this is deliberately **not** a general-security claim.*
 4. *Failed HUMAN_APPROVAL commit behavior?* Server 403 (test-proven); router returns the body with `_status: 403` and `is_error=false`; the commit is not counted (requires `status=="committed"`). `[SRC]`
-5. *Multiple AUTO proposals/commits per iteration?* **Yes — no per-iteration cap in code.** The one-proposal rule exists only as prompt prose (`orchestrator_config.py:95`). `[SRC]`
-6. *Does `max_tool_depth` bound calls or turns?* **Turns** (LLM `complete()` calls, `:422`); tool calls **per turn** are unbounded by the cap. `[SRC]`
-7. *Are tool-handler application errors flagged?* Handler exceptions and unknown tools → `is_error=true` (`:287–303`); **HTTP 4xx/5xx are returned as non-error payloads carrying `_status`** — policy refusals are content, not error flags. Note: the system prompt tells the model errors "begin with `[ERROR]`", which does not match the actual JSON error shape — a wording mismatch, behavioral impact unassessed. `[SRC; last point inferred]`
+5. *Multiple AUTO proposals/commits per iteration?* **Yes — no per-iteration cap in code.** The one-proposal rule exists only as prompt prose (`orchestrator_config.py:95`). `[SRC]` *Post-R/S/T: **one proposal attempt per iteration is enforced in code** (`proposal_limit` category), and no supported mode exposes an LLM-facing commit (Q1/Q2).*
+6. *Does `max_tool_depth` bound calls or turns?* **Turns** (LLM `complete()` calls, `:422`); tool calls **per turn** are unbounded by the cap. `[SRC]` *Post-R/S/T: a validated total budget (`max_total_tool_calls`) now bounds tool executions across the whole iteration — only the permitted prefix of a turn executes, the remainder receives explicit `budget_rejection` results, and the cap is never exceeded.*
+7. *Are tool-handler application errors flagged?* Handler exceptions and unknown tools → `is_error=true` (`:287–303`); **HTTP 4xx/5xx are returned as non-error payloads carrying `_status`** — policy refusals are content, not error flags. Note: the system prompt tells the model errors "begin with `[ERROR]`", which does not match the actual JSON error shape — a wording mismatch, behavioral impact unassessed. `[SRC; last point inferred]` *Post-R/S/T: **HTTP ≥ 400 is a genuine tool error** (`is_error=true`, category `http_rejection`, never counted as a created proposal or applied commit), and the prompt's error guidance was reconciled with the real shape (native `is_error` flag; OpenAI-compat `[ERROR]` marker parity).*
 8. *Rollback exposed to the LLM?* **No** — client method only (`:136–141`); absent from tools and router. `[SRC]`
 9. *Dry-run / commit-pending enforced server-side?* **Yes** — modes validated at propose; category/rate/validation gates at commit regardless of client claims. `[SRC]`
 10. *Proposal IDs and commit results validated?* IDs are server-generated (`secrets.token_hex`); commit looks up the proposal (unknown → typed error); the orchestrator counts commits only on `status=="committed"`. `[SRC]`
@@ -155,7 +186,21 @@ S1" could be misread against the wrong surface.
 disposition** alongside whichever quarantine option (§2d) is chosen — decided on
 safety and migration cost, not aesthetics.
 
-## 2d. Quarantine / disposition options for the legacy orchestrator `[PROP]` — none implemented
+*Post-R/S/T (2026-07-15): **Option B is implemented** — S renamed the module
+docstring to "Legacy tuning orchestrator (quarantined) … Historically described as
+'the Swarm Hunter's brain'" (`scripts/orchestrator.py:1–3`) and the system prompt to
+"the Medusa legacy tuning orchestrator" (`scripts/orchestrator_config.py:89`), both
+at main `3dcc38f`. Option C's mandatory qualifiers remain in force in prose.*
+
+## 2d. Quarantine / disposition options for the legacy orchestrator `[PROP]` — none implemented at the original audit
+
+*Post-R/S/T (2026-07-15): **the disposition is implemented and merged** —
+R (#328) ≈ option 5 but stronger (unconditional server-side refusal of the
+normalized autonomous identity; no opt-in flag, no re-enable switch) ·
+S (#333) ≈ option 2 but stronger (no LLM-facing commit tool in **any** mode;
+observe-by-default; fail-closed mode resolution) · plus T (#334): runtime
+budgets, honest error semantics, and bounded audit receipts, beyond this menu.
+The matrix below is preserved unchanged as the decision-time record.*
 
 | # | Option | Future files | Behavioral effect | Compat risk | Test changes | Rollback | Public behavior change? | Lane A / engine authority? | Kev word | Smallest falsifier |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -171,10 +216,14 @@ scheduled by this document.**
 
 ## 3. Glass-Wall information-flow contract (Pass 2, revised) `[PROP]`
 
-**The wall must acknowledge what already exists:** a write-capable actor — the Phase 18
-orchestrator (§2b) — already lives outside this wall, speaking to the tuning API
-(a parameter write-path whose engine-side consumer is a future, separately gated PR).
-The detector's wall therefore separates it not only from physics but from that actor.
+**The wall must acknowledge what already exists:** an actor — the Phase 18
+orchestrator (§2b), write-capable at the original audit base — already lives outside
+this wall, speaking to the tuning API (a parameter write-path whose engine-side
+consumer is a future, separately gated PR). The detector's wall therefore separates
+it not only from physics but from that actor. *Post-R/S/T: the actor is quarantined —
+no supported LLM-facing commit capability in any mode (direct non-LLM client
+primitives remain for human/reviewed use), so the standing surface this paragraph
+guarded against is materially narrowed; the wall's design is unchanged.*
 
 Six data classes, strictly ordered; information flows only rightward:
 
@@ -188,8 +237,9 @@ Six data classes, strictly ordered; information flows only rightward:
 
 physics/snapshot → offline analysis → findings artifact → human/Jack audit
 
-[Phase 18 orchestrator | tuning API]   ← a SEPARATE, rail-bounded write-capable
-                                          system; disposition pending (§2d);
+[Phase 18 orchestrator | tuning API]   ← a SEPARATE, rail-bounded system,
+                                          write-capable at the original audit;
+                                          disposition MERGED post-R/S/T (§2d);
                                           NO connection to the detector lane
 ```
 
@@ -199,7 +249,10 @@ must not import, or be imported by: `scripts.orchestrator` · `scripts.orchestra
 · the engine · the observer implementation. **Future static-import test (S1 acceptance
 criterion):** a lab-local test walks the detector package's AST/import table and fails
 on any quarantined module name; a companion test greps `scripts/` to assert no
-production module imports the lab. **Schema test:** the findings schema rejects any
+production module imports the lab. *Post-R/S/T: the reverse direction already exists
+in the maintained suite — `tests/test_orchestrator.py` statically asserts the
+orchestrator imports no detector/observer/engine module (one-directional boundary);
+the detector-side test above remains an S1 acceptance criterion.* **Schema test:** the findings schema rejects any
 field whose name or content encodes an action, endpoint, parameter name from
 `params_schema`, or approver string.
 
@@ -377,7 +430,7 @@ summaries that hide failures.
 |---|---|---|---|---|---|---|
 | **S0** | this preflight document | — | provenance map | n/a | close PR | Jack audit; Kev merge word; `swarm-hunter` label |
 | **S1** | toy offline detector in `experiments/swarm_hunter_lab/` (synthetic arrays only) | S0 sealed; Kev implementation word | §7 fixtures green; properties green; **static-import quarantine tests (§3) green in both directions** | full §7 suite + quarantine tests | delete lab dir | Jack audit; Kev word; label |
-| **S2** | immutable-snapshot analyser (reads real `data/` NPZ) | S1 sealed; **explicit Kev evidence-lane key (`data/` is a hard gate)**; hash-coverage question resolved; **a legacy-orchestrator disposition option (§2d) chosen by Kev/Jack** — a snapshot-reading detector must not coexist with an undispositioned write-capable namesake | S1 evidence + real-snapshot dry runs with receipts | §7 + provenance/refusal tests on real headers | disable path; artifacts deleted | Jack audit; **Kev evidence-lane word**; label |
+| **S2** | immutable-snapshot analyser (reads real `data/` NPZ) | S1 sealed; **explicit Kev evidence-lane key (`data/` is a hard gate)**; hash-coverage question resolved; **a legacy-orchestrator disposition option (§2d) chosen by Kev/Jack** — a snapshot-reading detector must not coexist with an undispositioned write-capable namesake. *Post-R/S/T: the disposition prerequisite is **SATISFIED** (2026-07-15) — R #328 `6a762b9` · S #333 `d5e9c3c` · T #334 `3dcc38f` merged; namesake renamed and quarantined. The other S2 prerequisites remain open* | S1 evidence + real-snapshot dry runs with receipts | §7 + provenance/refusal tests on real headers | disable path; artifacts deleted | Jack audit; **Kev evidence-lane word**; label |
 | **S3** | comparison against observer outputs | S2 sealed; observer artifacts available | correlation report, evidence-classed | join determinism tests | drop join layer | Jack audit; Kev word; label |
 | **S4** | human-reviewed candidate architecture (instrument-vs-extension decision; entry-2 ratification proposal) | S3 sealed | LeanCTX packets from S1–S3 | n/a | archive | **AURA + Jack + Kev** |
 | Lane A / engine integration | **not part of this ladder's authorization** | separate future decision | — | — | — | separate keys entirely |
@@ -418,7 +471,10 @@ prerequisites:
    criteria, and adopts the §2c Option-C naming qualifiers in all of its prose.
 9. **(New)** Before S2 — not S1 — a §2d disposition option for the legacy
    orchestrator must be chosen and keyed by Kev/Jack (also encoded as an S2
-   prerequisite in §10).
+   prerequisite in §10). *Post-R/S/T: **SATISFIED** (2026-07-15) — the disposition
+   merged as R #328 (`6a762b9`) · S #333 (`d5e9c3c`) · T #334 (`3dcc38f`); receipts
+   in the supersession note. All other prerequisites, including the separate Kev
+   implementation word for S1 (prerequisite 2), remain open.*
 
 **Rejected alternatives:** SH-as-controller (prohibited by ledger 2/11/13, Maturin
 §4); rule-search-first (separately governed; parked instrument); moving-front tracking
