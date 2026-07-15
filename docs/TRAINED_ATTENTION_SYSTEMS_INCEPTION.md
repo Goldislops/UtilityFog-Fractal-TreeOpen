@@ -9,7 +9,9 @@
 > bounded research-and-architecture inception note. Drafted by Agent 84.
 > **It does not update the canonical Theory Intake Ledger**
 > ([`docs/MEDUSA_THEORY_INTAKE_LEDGER.md`](MEDUSA_THEORY_INTAKE_LEDGER.md)) —
-> this remains an inception note pending AURA, Jack, and Kev.
+> it is an inception note, and any Ledger update is a separately gated
+> decision (AURA, Jack, and Kev), whatever this document's own
+> disposition.
 
 ## 0. Purpose and the one-sentence thesis
 
@@ -130,8 +132,8 @@ teachings they borrow from.
 
 These are the quantities a trained-attention instrument can compute
 **from software telemetry alone** (evidence class 4). Each is stated in
-Medusa's own terms. None is implemented in this PR — this PR remains one
-Markdown file. Since first drafting, however, the merged NP5 evaluator and
+Medusa's own terms. None is implemented in this PR — this PR consists of
+one Markdown file. Since first drafting, however, the merged NP5 evaluator and
 NP6 replay laboratory (§6) compute tested counterparts of a subset of these
 (prediction-error gap, calibration echoes, abstention behaviour, and
 recovery/reorientation at receipt and per-step granularity respectively),
@@ -256,9 +258,13 @@ audited packages, each landed through the ordinary merge lane:
   (merged, `deb028cd`), wiring NP9's full structural validation into the
   NP8 evidence packet.
 
-(NP3 and NP4 are the two *documentation* inception notes — PR #356 and this
-note, PR #357 — both still open and unmerged. The NP1–NP10 numbering
-therefore covers eight merged code packages plus these two open notes.)
+(NP3 and NP4 are the two *documentation* packages; PR #356 and PR #357 —
+this note — are their review vehicles. At the 2026-07-15 reconciliation
+that produced this revision, #356, #357 and #322 were open pull requests;
+that sentence records the reconciliation moment and does not predict any
+PR's later disposition, which is repository history. The NP1–NP10
+numbering therefore covers eight merged code packages plus these two
+documentation packages.)
 
 As **merged, test-verified packages on `main`**, NP1's and NP2's artifacts
 are exactly the kind of immutable, bounded input a trained-attention
@@ -294,9 +300,10 @@ audits exercised — it must remain unable to:
 merged-and-audited NP1/NP2 artifacts into the evaluation layers; nothing flows
 *back* from any evaluator into the engine, the network, or the co-tenant
 workloads. This is the same Glass-Wall shape **proposed** by the Swarm
-Hunter v1 preflight — itself still an open, unmerged PR
-([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)):
-observe-only, no activation, no write-back.
+Hunter v1 preflight
+([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322),
+open at the 2026-07-15 reconciliation; its disposition is repository
+history): observe-only, no activation, no write-back.
 
 Merging this instrumentation changes none of §2: a merged, tested,
 audited prediction/evaluation stack is still bookkeeping about error
@@ -447,7 +454,7 @@ package (PR #358), exactly as the gate above required.
 | **Exists on main** (`deb028cd`) | The Nextness Observer and its log format (`scripts/nextness_observer.py`, with its calibration/metrics companions); the merged Nextness stack — NP1 predictor (#354), NP2 monitor (#355), NP5 evaluator (#358), NP6 replay laboratory (#359), NP7 contract guard (#360), NP8 evidence packet (#361), NP9 public structural validators (#362), NP10 full-validation integration (#363), with their contract documents; the canonical Theory Intake Ledger (untouched by this note) |
 | **Tested evidence** | The deterministic test suites merged alongside each package (`tests/test_nextness_*.py`, including the NP7 cross-package contract guard with embedded golden pins), green on `main` through the ordinary audited merge lane. This is evidence about *software behavior only* — telemetry about telemetry (§1). It establishes nothing about awareness or human experience |
 | **Proposals in this document** | The four evidence-class discipline (§1); the §5 metric candidates not yet computed by the merged stack (reorientation latency beyond what NP5/NP6 report, overshoot, oscillation count, resource-budget compliance, workload preservation, provenance completeness, non-punitive recovery); the Glass-Wall rule (§6) as a standing design constraint on any future instrument; the S0–S4 ladder (§8). (The §10 NP5 candidate has graduated out of this row — it is now code on `main`.) |
-| **Requires later operator-authorized action** | Any new trained-attention instrument beyond the merged stack (Jack audit + Kev implementation word); any decision on the still-open notes (#356, and this note #357) and on the Swarm Hunter v1 preflight (#322, open/unmerged); any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
+| **Requires later operator-authorized action** | Any new trained-attention instrument beyond the merged stack (Jack audit + Kev implementation word); any adoption or activation decision on the local-model federation note (PR #356) or the Swarm Hunter v1 preflight (PR #322) — both open at the 2026-07-15 reconciliation, dispositions being repository history; any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
 
 The cited human studies (§9) are external literature, not repository
 evidence; they sit in no row above.
@@ -469,5 +476,8 @@ evidence; they sit in no row above.
 
 — drafted 2026-07-14 by Agent 84 (PACKAGE NP4), per Kevin's on-seat
   authorisation; temporally reconciled 2026-07-15 after the Nextness code
-  stack (NP1/NP2, NP5–NP10) merged to `main` (`deb028cd`); this note itself
-  (PR #357) remains open, pending AURA, Jack, and Kev; unmerged.
+  stack (NP1/NP2, NP5–NP10) merged to `main` (`deb028cd`). This note was
+  carried for review through
+  [PR #357](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/357);
+  its eventual disposition is repository history, not a status claim
+  inside this document.
