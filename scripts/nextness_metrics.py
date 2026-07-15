@@ -15,6 +15,18 @@ Scope guarantees (carried forward from PR #138 / PR #140):
       JSONL log. Enforced via :class:`WriteOutsideLogDirError` reused
       from ``scripts.nextness_observer``; the safety vocabulary is
       unified across modules.
+    - **No writes onto the input log itself** — an ``--out`` that names or
+      aliases ``log_path`` (direct path, lexical variant, symlink, hard
+      link) is refused by resolved path and by file identity
+      (``os.path.samefile`` on resolved paths), failing closed when an
+      existing output's identity cannot be verified. Identity is checked
+      at validation time, before the log is read or any metric computed;
+      the later write does not re-verify (documented residual race, same
+      statement as the Nextness NP6/NP8 guards).
+    - **Byte-exact output** — the derived JSONL is written in binary mode:
+      each row is its canonical ``json.dumps(..., sort_keys=True,
+      default=str)`` serialization encoded as UTF-8 plus a single LF
+      byte, streamed row by row, immune to platform newline translation.
     - No HTTP, ZMQ, or network of any kind.
     - CPU-only.
     - allow_pickle=False (no .npz reads here; JSONL only).
@@ -40,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pathlib
 import sys
 from collections.abc import Mapping, Sequence
@@ -79,8 +92,26 @@ def _validate_metrics_output_path(
     :class:`WriteOutsideLogDirError` (reused from
     ``scripts.nextness_observer``) so the safety vocabulary stays
     unified across both modules.
+
+    Input-identity guard (Nextness NP6/NP8 convention): the output may
+    also never BE the input log — refused by resolved path (which
+    covers the direct path, lexical variants like ``sub/../log.jsonl``
+    and symlink aliases: resolution targets are compared, not link or
+    segment names) and by file identity (``os.path.samefile`` on the
+    RESOLVED paths: device + inode / file ID, covering existing hard
+    links whose paths differ). Any failure to verify an existing
+    output's identity is itself a refusal — fail closed, never a
+    fall-through.
+
+    Residual filesystem race, stated precisely: identity is verified at
+    validation time; the later write does not re-verify. A concurrent
+    actor replacing the output path between validation and write can
+    still redirect the write. This guard defends against aliases that
+    exist when it validates — it does not claim to eliminate the
+    validation-to-write (TOCTOU) interval.
     """
-    log_dir_resolved = log_path.resolve().parent
+    log_resolved = log_path.resolve()
+    log_dir_resolved = log_resolved.parent
     out_resolved = out_path.resolve()
     try:
         out_resolved.relative_to(log_dir_resolved)
@@ -89,6 +120,27 @@ def _validate_metrics_output_path(
             f"refusing to write metrics output outside log_path's directory: "
             f"{out_resolved} is not inside {log_dir_resolved}"
         ) from e
+    if out_resolved == log_resolved:
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file: {out_resolved}"
+        )
+    # Hard links share identity while having distinct paths. Only an
+    # EXISTING output can alias the input; stat runs on the resolved
+    # paths and any failure to verify is itself a refusal (fail closed),
+    # never a fall-through.
+    if out_resolved.exists():
+        try:
+            same = os.path.samefile(out_resolved, log_resolved)
+        except OSError as e:
+            raise WriteOutsideLogDirError(
+                f"cannot verify output file identity against the input log "
+                f"file: {out_resolved}"
+            ) from e
+        if same:
+            raise WriteOutsideLogDirError(
+                f"refusing to overwrite the input log file (shared file "
+                f"identity): {out_resolved}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -434,11 +486,14 @@ def compute_run_metrics(
 
     # Write output deterministically. Note: NO ``generated_at`` field.
     # ``sort_keys=True`` makes the JSON field order deterministic too.
+    # Binary mode, streamed row by row: each line is the canonical
+    # serialization encoded as UTF-8 plus a single LF byte, so the
+    # derived file's bytes never depend on platform newline translation.
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
+    with out_path.open("wb") as f:
         for row in pair_rows:
-            f.write(json.dumps(row, sort_keys=True, default=str) + "\n")
-        f.write(json.dumps(aggregate, sort_keys=True, default=str) + "\n")
+            f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
+        f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
 
     return aggregate
 

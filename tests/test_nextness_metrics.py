@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
 
 import pytest
@@ -612,3 +613,154 @@ def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
     assert "outside log_path" in captured.err.lower()
     # No side effects: the outside-of-boundary parent dir must not exist
     assert not (tmp_path / "elsewhere").exists()
+
+
+# ---------------------------------------------------------------------------
+# Input-identity guard: --out must never name or alias the input log —
+# by resolved path and by file identity (os.path.samefile on resolved
+# paths; fail closed when identity cannot be verified). Refusals keep
+# the existing metrics boundary-failure convention: exit code 3, one
+# "safety error:" line, WriteOutsideLogDirError vocabulary, no
+# traceback — and happen BEFORE any metrics computation, output-parent
+# creation or derived-output write.
+# ---------------------------------------------------------------------------
+
+
+def _two_entry_log(tmp_path: pathlib.Path) -> pathlib.Path:
+    log_path = tmp_path / "nextness_runs.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+    return log_path
+
+
+def _make_hardlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hard links unsupported on this filesystem")
+
+
+def _make_symlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+
+
+def _expect_alias_refusal(capsys, tmp_path, log_path, out_arg) -> None:
+    """Full refusal contract: exit 3 · one safety-error line · no
+    traceback · input byte-identical · no derived output or new entry."""
+    input_before = log_path.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    rc = main(["--log", str(log_path), "--out", str(out_arg)])
+    assert rc == 3
+    captured = capsys.readouterr()
+    assert captured.err.count("safety error:") == 1
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == input_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_out_naming_input_log_is_refused(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    _expect_alias_refusal(capsys, tmp_path, log_path, log_path)
+
+
+def test_cli_out_lexical_alias_of_log_is_refused(tmp_path, capsys):
+    # Distinct lexically, identical once resolved; 'sub' does not exist
+    # and must not be created (refusal precedes any parent mkdir).
+    log_path = _two_entry_log(tmp_path)
+    alias = tmp_path / "sub" / ".." / "nextness_runs.jsonl"
+    assert str(alias) != str(log_path)
+    _expect_alias_refusal(capsys, tmp_path, log_path, alias)
+    assert not (tmp_path / "sub").exists()
+
+
+def test_cli_out_symlink_alias_of_log_is_refused(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    link = tmp_path / "out.jsonl"
+    _make_symlink_or_skip(log_path, link)
+    _expect_alias_refusal(capsys, tmp_path, log_path, link)
+
+
+def test_cli_out_hardlink_alias_of_log_is_refused(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    link = tmp_path / "out.jsonl"
+    _make_hardlink_or_skip(log_path, link)
+    input_before = log_path.read_bytes()
+    rc = main(["--log", str(log_path), "--out", str(link)])
+    assert rc == 3
+    captured = capsys.readouterr()
+    assert captured.err.count("safety error:") == 1
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == input_before
+    assert link.read_bytes() == input_before  # shared identity: still the log
+
+
+def test_compute_run_metrics_refuses_alias_directly(tmp_path):
+    log_path = _two_entry_log(tmp_path)
+    with pytest.raises(WriteOutsideLogDirError):
+        compute_run_metrics(log_path, log_path)
+    with pytest.raises(WriteOutsideLogDirError):
+        compute_run_metrics(log_path, tmp_path / "sub" / ".." / "nextness_runs.jsonl")
+
+
+def test_alias_refusal_precedes_metrics_computation(tmp_path, capsys, monkeypatch):
+    import scripts.nextness_metrics as metrics_module
+
+    log_path = _two_entry_log(tmp_path)
+
+    def spy(*args, **kwargs):
+        raise AssertionError("metrics computation ran despite alias refusal")
+
+    # kl_divergence is on the per-pair computation path for this
+    # two-entry log; a refused invocation must never reach it.
+    monkeypatch.setattr(metrics_module, "kl_divergence", spy)
+    assert main(["--log", str(log_path), "--out", str(log_path)]) == 3
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+
+
+def test_cli_out_ordinary_siblings_remain_allowed(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    input_before = log_path.read_bytes()
+
+    fresh = tmp_path / "out.jsonl"                 # nonexistent sibling
+    assert main(["--log", str(log_path), "--out", str(fresh)]) == 0
+    assert fresh.is_file()
+
+    stale = tmp_path / "stale.jsonl"               # existing non-alias sibling
+    stale.write_text("previous content\n", encoding="utf-8")
+    assert main(["--log", str(log_path), "--out", str(stale)]) == 0
+    assert stale.read_bytes() == fresh.read_bytes()
+
+    assert log_path.read_bytes() == input_before
+    capsys.readouterr()  # drain summaries
+
+
+# ---------------------------------------------------------------------------
+# Output byte contract: canonical per-row JSON, UTF-8, LF bytes only —
+# no platform newline translation, byte-identical rewrite.
+# ---------------------------------------------------------------------------
+
+
+def test_output_bytes_are_canonical_utf8_lf_only(tmp_path):
+    log_path = _two_entry_log(tmp_path)
+    out_path = tmp_path / "out.jsonl"
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 0
+    raw = out_path.read_bytes()
+    assert b"\r" not in raw                        # no CRLF translation
+    assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
+    # Every line is exactly its canonical serialization re-encoded.
+    lines = raw.split(b"\n")[:-1]
+    rebuilt = b"".join(
+        json.dumps(json.loads(line), sort_keys=True, default=str).encode("utf-8")
+        + b"\n"
+        for line in lines
+    )
+    assert raw == rebuilt
+    # Byte-identical idempotent rewrite.
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 0
+    assert out_path.read_bytes() == raw
