@@ -301,6 +301,46 @@ Deliberately deferred to **Lane A** (engine track, separately scoped, currently 
 - ✅ `allow_pickle=False` preserved in any new snapshot reads (the metrics module reads JSONL, not `.npz`, so this is N/A for the new module, but is preserved in `process_snapshot()` extensions).
 - ✅ Bounded compute (the metrics module is $O(N \cdot K)$ where $N$ is number of snapshots and $K$ is vocabulary size; both are small).
 
+### 9.1 Output-boundary hardening (2026-07-15 reliability amendment)
+
+Two gaps in the original write lane were repaired after the Nextness
+NP-stack established the house convention for derived-output safety
+(`os.path.samefile` identity guards in NP6/NP8; explicit byte output
+in NP5/NP6/NP8, later NP1):
+
+- **Input-identity guard**: `--out` may never name or alias the input
+  log — refused by resolved-path equality (direct path, lexical
+  variants like `sub/../log.jsonl`, symlink aliases) and by file
+  identity (`os.path.samefile` on resolved paths, catching hard
+  links), failing closed when an existing output's identity cannot be
+  verified. The refusal keeps the existing boundary convention (exit
+  code 3, one `safety error:` line, `WriteOutsideLogDirError`) and
+  happens before the log is read, any metric computed, or any output
+  parent created. Ordinary sibling outputs — nonexistent or existing
+  non-alias — remain allowed.
+- **Byte-exact streamed output**: the derived JSONL is written in
+  binary mode, one row at a time — each line is its canonical
+  `json.dumps(..., sort_keys=True, default=str)` serialization encoded
+  as UTF-8 plus a single LF byte. Windows text-mode newline
+  translation can no longer alter the derived file's bytes, so
+  re-runs are byte-identical across platforms. Streaming is
+  preserved: the output is never materialized in full.
+- **Directory-target refusal**: an `--out` that resolves to an existing
+  directory (including through a symlink) is refused in the same exit-3
+  boundary lane, before the log is read or any metric computed — the
+  binary open would otherwise escape as an uncaught
+  `IsADirectoryError`/`PermissionError` traceback after computation.
+  Ordinary non-alias *file* targets are unaffected.
+- **Residual race, stated precisely**: identity is verified at
+  validation time; the write does not re-verify. A concurrent actor
+  replacing the output path between validation and write can still
+  redirect the write. The guard defends against aliases that exist at
+  validation time; it does not claim to eliminate the
+  validation-to-write (TOCTOU) interval.
+
+All metric formulas, row ordering, JSON field ordering, the stdout
+summary and every exit code are unchanged by this amendment.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.
