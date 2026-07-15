@@ -94,8 +94,10 @@ vocabulary):**
    audit base write-capable within server-side rails; self-described "Swarm
    Hunter's brain." Mapped in §2b. *Post-R/S/T: renamed and quarantined —
    observe-by-default, propose mode is forced dry-run, no LLM-facing commit tool
-   in any supported mode; the low-level non-LLM client primitives remain for
-   direct human/reviewed use.* `[SRC]`
+   in any supported mode; the low-level client primitives remain for direct
+   non-LLM callers — their retention is not proof of human identity or review,
+   and `human:<name>` is an unauthenticated caller-supplied label, required
+   only for HUMAN_APPROVAL-category parameters.* `[SRC]`
 2. **Proposed offline candidate-structure detector** (this preflight) — reads
    immutable evidence, surfaces candidates for human review (ledger entry 7's
    wording); entry-14 "grid spectroscopy" family; Maturin §3 shape. **Does not
@@ -222,8 +224,10 @@ this wall, speaking to the tuning API (a parameter write-path whose engine-side
 consumer is a future, separately gated PR). The detector's wall therefore separates
 it not only from physics but from that actor. *Post-R/S/T: the actor is quarantined —
 no supported LLM-facing commit capability in any mode (direct non-LLM client
-primitives remain for human/reviewed use), so the standing surface this paragraph
-guarded against is materially narrowed; the wall's design is unchanged.*
+primitives remain; their use is unauthenticated — `human:<name>` is a
+caller-supplied label, not verified identity or review), so the standing surface
+this paragraph guarded against is materially narrowed; the wall's design is
+unchanged.*
 
 Six data classes, strictly ordered; information flows only rightward:
 
@@ -249,10 +253,11 @@ must not import, or be imported by: `scripts.orchestrator` · `scripts.orchestra
 · the engine · the observer implementation. **Future static-import test (S1 acceptance
 criterion):** a lab-local test walks the detector package's AST/import table and fails
 on any quarantined module name; a companion test greps `scripts/` to assert no
-production module imports the lab. *Post-R/S/T: the reverse direction already exists
-in the maintained suite — `tests/test_orchestrator.py` statically asserts the
-orchestrator imports no detector/observer/engine module (one-directional boundary);
-the detector-side test above remains an S1 acceptance criterion.* **Schema test:** the findings schema rejects any
+production module imports the lab. *Post-R/S/T: a maintained test scans
+`scripts.orchestrator`'s source text and fails on any reference to the engine,
+observer, calibration, or a `swarm_hunter` module (`orchestrator_config` and the
+backend adapters are outside its scope); the detector-side import test above
+remains an S1 acceptance criterion.* **Schema test:** the findings schema rejects any
 field whose name or content encodes an action, endpoint, parameter name from
 `params_schema`, or approver string.
 
