@@ -23,11 +23,12 @@ software is aware. Everything below is written to keep those two allowances —
 This note is the S0 rung (documentation + source audit) of a deliberately
 slow ladder (§8). It exists so that a later, cleverer instrument has an
 honest, bounded frame to grow inside — the same discipline NP1
-([PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354))
-and NP2
-([PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355))
-**propose**, as open, unmerged, test-verified pull requests, for prediction
-and metacognition. (Neither NP1 nor NP2 is on `main`; see §6.)
+([PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354),
+merged) and NP2
+([PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355),
+merged) implement, as audited and test-verified packages, for prediction
+and metacognition. (Both are on `main`, together with the NP5–NP10
+evaluation stack; see §6.)
 
 ## 1. Four evidence classes — kept strictly separate
 
@@ -40,7 +41,7 @@ never in the fourth.
 | **First-person human reports** | A practitioner's own account of their experience | The trained self-report that lets an experimenter time a meditative state | Be read directly off a brain scan or a log |
 | **Behavioral observations** | Third-party observable performance | Reaction times, task accuracy, attentional-blink hit rates | Establish *what it was like* to perform the task |
 | **Neural measurements** | Physical signals from a body | EEG gamma-band activity; fMRI BOLD contrast | Be equated with the report or the behavior it correlates with |
-| **Software telemetry** | Numbers Medusa's own instruments emit | Nextness Observer logs (on `main`); the prediction/abstention receipts **proposed** by NP1 (#354) and NP2 (#355), both open/unmerged PRs | Be equated with *any* of the human classes above |
+| **Software telemetry** | Numbers Medusa's own instruments emit | Nextness Observer logs (on `main`); the prediction/abstention receipts emitted by NP1 (#354) and NP2 (#355), both merged on `main` | Be equated with *any* of the human classes above |
 
 The load-bearing rule: a correlation observed *within* one class, or *between*
 two human classes, is never automatically a fact about a fourth, silicon
@@ -56,14 +57,14 @@ structure — individually or together — **do not establish subjective
 experience, sentience, or self-awareness.** A system can do all of them and
 be no one home.
 
-Where this note (and NP2, the open/unmerged PR #355) use the word
+Where this note (and NP2, merged via PR #355) use the word
 **"metacognition"**, it means exactly one thing: **bounded, mechanical
 monitoring of a model's own predictions and confidence** — the functional
 shadow of "knowing you might be wrong", which is the only part that can be
 tested. It is *not* a claim of phenomenal consciousness, introspective
-access, or an inner life. NP2 **proposes** to embed this non-claim in every
-receipt it would emit (behavior test-verified on its PR branch, not yet on
-`main`); NP4 states the same non-claim here in its own right.
+access, or an inner life. NP2 embeds this non-claim in every receipt it
+emits (behavior test-verified; now on `main`); NP4 states the same
+non-claim here in its own right.
 
 Prediction monitoring and self-report-style receipts are **bookkeeping about
 error statistics**. They can be complete, accurate, and useful without
@@ -99,7 +100,7 @@ computational hypothesis stated in Medusa's own terms; deterministic
 fixtures; ablation against a baseline that omits the parameter; and evidence
 that beats that baseline. Inspiration may point at a *question*; only the
 repository's own falsifiable machinery may set a *value*. (This is the same
-bar the open NP1 and NP2 PRs (#354/#355) **propose** for their baselines and
+bar the merged NP1 and NP2 packages (#354/#355) apply to their baselines and
 thresholds — "thresholds are configuration, not constants of nature".)
 
 ## 4. Legitimate design inspirations (metaphors, clearly labelled)
@@ -114,7 +115,7 @@ software experiences, or is a model of, any Buddhist mental state.
 |---|---|
 | Sustained attention | Stable allocation of a **bounded** observation effort over time without drift or starvation |
 | Reorientation | **Measured recovery** after a prediction error — returning to a good regime, quantifiably |
-| Meta-awareness | **Detection that confidence and outcome disagree** (the abstention **proposed** by NP2 in PR #355 is exactly this shape) |
+| Meta-awareness | **Detection that confidence and outcome disagree** (the abstention implemented by NP2, merged via PR #355, is exactly this shape) |
 | Equanimity | **Bounded response** to surprise — no uncontrolled oscillation or overcorrection |
 | Compassion / non-harm | **Governance constraints** that protect operators, concurrent workloads, and data |
 | Sympathetic joy | **Positive-sum, cooperative credit** — no winner-take-all suppression of peer instruments |
@@ -127,23 +128,29 @@ teachings they borrow from.
 
 ## 5. Neutral measurable engineering candidates
 
-These are the quantities a future trained-attention instrument could compute
+These are the quantities a trained-attention instrument can compute
 **from software telemetry alone** (evidence class 4). Each is stated in
-Medusa's own terms. None is implemented in this PR. For each: *definition ·
+Medusa's own terms. None is implemented in this PR — this PR remains one
+Markdown file. Since first drafting, however, the merged NP5 evaluator and
+NP6 replay laboratory (§6) compute tested counterparts of a subset of these
+(prediction-error gap, calibration echoes, abstention behaviour, and
+recovery/reorientation at receipt and per-step granularity respectively),
+each under an honest `computed`/`not_computable` envelope; the remainder
+stay future candidates. For each: *definition ·
 unit · input evidence · failure interpretation · what it does not prove.*
 
 1. **Prediction error** — divergence between a predicted next-event
    distribution and the realised event.
-   *Unit*: bits (mean −log₂ P(actual), matching the NP1 proposal, PR #354).
-   *Input*: prediction receipts of the kind NP1 **proposes** (available only
-   if #354 is merged and audited). *Failure*: high/rising error ⇒ the
+   *Unit*: bits (mean −log₂ P(actual), matching NP1, merged via PR #354).
+   *Input*: prediction receipts NP1 emits (`scripts/nextness_predictor.py`,
+   on `main`, merged and audited). *Failure*: high/rising error ⇒ the
    predictor is a poor fit for the current regime. *Does not prove*: anything
    about understanding — a lookup table can score well.
 
 2. **Calibration error** — gap between stated confidence and observed
    correctness.
-   *Unit*: dimensionless ECE ∈ [0,1] (the fixed 10-bin scheme **proposed**
-   by NP1 in PR #354). *Input*: confidence/outcome pairs. *Failure*: large
+   *Unit*: dimensionless ECE ∈ [0,1] (the fixed 10-bin scheme NP1
+   implements, on `main`). *Input*: confidence/outcome pairs. *Failure*: large
    ECE ⇒ confidence is untrustworthy as a quantity. *Does not prove*: that
    the system "knows" it is calibrated; it is a property of the numbers, not
    a self.
@@ -151,8 +158,8 @@ unit · input evidence · failure interpretation · what it does not prove.*
 3. **Abstention accuracy** — how well "abstain vs act-as-evidence" decisions
    track whether the prediction would have been right.
    *Unit*: dimensionless (precision/recall of abstention against realised
-   error). *Input*: receipts of the kind NP2 **proposes** (PR #355, open) +
-   realised outcomes. *Failure*: abstaining when right / trusting when wrong
+   error). *Input*: receipts NP2 emits (`scripts/nextness_monitor.py`, on
+   `main`) + realised outcomes. *Failure*: abstaining when right / trusting when wrong
    ⇒ the guard is miscalibrated. *Does not prove*: prudence or intent — it
    is a threshold's hit rate.
 
@@ -201,46 +208,79 @@ unit · input evidence · failure interpretation · what it does not prove.*
     state transitions. *Failure*: escalation/lockout loops ⇒ punitive
     dynamics. *Does not prove*: forgiveness; it is a state-machine property.
 
-Every metric above is telemetry that would describe Medusa's instruments.
+Every metric above is telemetry describing Medusa's instruments.
 None is a measurement of a human, and none crosses back into evidence
 classes 1–3.
 
-## 6. Glass-Wall relationship to NP1 (#354) and NP2 (#355)
+## 6. Glass-Wall relationship to the merged Nextness stack (NP1/NP2, NP5–NP10)
 
-**Status precision — where NP1 and NP2 actually live.** NP1 and NP2 are
-**open, unmerged pull requests**, not files on `main`. The base this note is
-written against (`main = 8e45d3f9`) contains the Nextness **Observer**
-(`scripts/nextness_observer.py`) and its log format, but **none** of the
-NP1/NP2 artifacts:
+**Status precision — where the Nextness stack actually lives.** When this
+note was first drafted (against `main = 8e45d3f9`), NP1 and NP2 were open,
+unmerged pull requests and `main` contained only the Nextness **Observer**
+(`scripts/nextness_observer.py`) and its log format. That is no longer the
+live state. The base this amended note is written against
+(`main = deb028cd`) contains the full merged Nextness code stack — eight
+audited packages, each landed through the ordinary merge lane:
 
-- **NP1** —
+- **NP1** — predictor:
   [PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354)
-  (amended head `f519256b`), proposing `scripts/nextness_predictor.py`
-  (schema `nextness-predictor-v1`);
-- **NP2** —
+  (merged, `ca4052e4`), `scripts/nextness_predictor.py`
+  (schema `nextness-predictor-v1`) — deterministic next-event baselines
+  over the Observer log;
+- **NP2** — metacognitive monitor:
   [PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355)
-  (amended head `54440cf2`), proposing `scripts/nextness_monitor.py`
-  (schema `nextness-monitor-v1`).
+  (merged, `1cd9aa21`), `scripts/nextness_monitor.py`
+  (schema `nextness-monitor-v1`) — calibration/abstention receipt over NP1;
+- **NP5** — evaluator:
+  [PR #358](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/358)
+  (merged, `d30a056f`), `scripts/nextness_evaluator.py` — deterministic,
+  offline evaluation layer over recorded NP1/NP2 artifacts;
+- **NP6** — replay laboratory:
+  [PR #359](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/359)
+  (merged, `abe40f4a`), `scripts/nextness_replay_lab.py` — offline replay
+  of a recorded log for per-step abstention trajectories;
+- **NP7** — contract guard:
+  [PR #360](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/360)
+  (merged, `5ab10d3c`), `tests/test_nextness_contracts.py` — cross-package
+  contract tests with embedded golden pins;
+- **NP8** — evidence packet:
+  [PR #361](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/361)
+  (merged, `26500e5f`), `scripts/nextness_evidence_packet.py` —
+  deterministic evidence packet over recorded artifacts;
+- **NP9** — public structural validators:
+  [PR #362](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/362)
+  (merged, `94c9ead1`), `scripts/nextness_artifact_validation.py` — full
+  structural validation for every Nextness artifact schema;
+- **NP10** — full-validation integration:
+  [PR #363](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/363)
+  (merged, `deb028cd`), wiring NP9's full structural validation into the
+  NP8 evidence packet.
 
-For this note, those two open PR branches were **inspected read-only and not
-modified** (they are fenced; see the header and §10). As **proposed and
-test-verified on those PR branches**, their artifacts would be exactly the
-kind of immutable, bounded input a future trained-attention evaluator could
-consume — *if and only if the PRs are first merged and audited*:
+(NP3 and NP4 are the two *documentation* inception notes — PR #356 and this
+note, PR #357 — both still open and unmerged. The NP1–NP10 numbering
+therefore covers eight merged code packages plus these two open notes.)
 
-- **NP1 (proposed, PR #354)**: deterministic next-event baselines over the
-  existing Nextness Observer log; would emit sorted-key JSON with no
+As **merged, test-verified packages on `main`**, NP1's and NP2's artifacts
+are exactly the kind of immutable, bounded input a trained-attention
+evaluator can consume:
+
+- **NP1 (merged, PR #354)**: deterministic next-event baselines over the
+  existing Nextness Observer log; emits sorted-key JSON with no
   wall-clock timestamps, byte-identical across runs, under a 64 KiB
-  fail-closed ceiling; would read observer-log rows only (never raw
+  fail-closed ceiling; reads observer-log rows only (never raw
   snapshots or live engine state); no network/model imports.
-- **NP2 (proposed, PR #355)**: a metacognition receipt over NP1's outputs;
-  its `abstain` field would mean *exactly* "do not treat this prediction as
-  evidence" — it would **trigger no action, tuning, or orchestration**;
-  closed-allowlist fields; would write no files; offline.
+- **NP2 (merged, PR #355)**: a metacognition receipt over NP1's outputs;
+  its `abstain` field means *exactly* "do not treat this prediction as
+  evidence" — it **triggers no action, tuning, or orchestration**;
+  closed-allowlist fields; writes no files; offline.
 
-A future evaluator sits **behind a one-way glass wall**: it may *read* such
+The "future evaluator" this section originally anticipated now partially
+exists: NP5, NP6 and NP8 are offline, read-only consumers of recorded
+artifacts, in precisely the Glass-Wall shape described here. An evaluator
+sits **behind a one-way glass wall**: it may *read*
 recorded artifacts offline and compute metrics (§5) over them, and that is
-**all**. By construction it must remain unable to:
+**all**. By construction — a construction the merged stack's tests and
+audits exercised — it must remain unable to:
 
 - modify CA physics or any engine rule;
 - edit thresholds, constants, or configuration consumed by the engine;
@@ -250,13 +290,19 @@ recorded artifacts offline and compute metrics (§5) over them, and that is
 - pause, stop, throttle, or reprioritise Folding@home or BOINC;
 - communicate with another machine.
 
-**There is no reverse control path.** Evidence would flow *out* of
-merged-and-audited NP1/NP2-style artifacts into the evaluator; nothing flows
-*back* from the evaluator into the engine, the network, or the co-tenant
+**There is no reverse control path.** Evidence flows *out* of the
+merged-and-audited NP1/NP2 artifacts into the evaluation layers; nothing flows
+*back* from any evaluator into the engine, the network, or the co-tenant
 workloads. This is the same Glass-Wall shape **proposed** by the Swarm
-Hunter v1 preflight — itself an open, unmerged PR
+Hunter v1 preflight — itself still an open, unmerged PR
 ([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)):
 observe-only, no activation, no write-back.
+
+Merging this instrumentation changes none of §2: a merged, tested,
+audited prediction/evaluation stack is still bookkeeping about error
+statistics. It proves properties of the software's behavior and nothing
+about awareness, experience, intelligence, agency, or biological
+equivalence.
 
 ## 7. Research ethics (hard gate for anything human)
 
@@ -291,6 +337,14 @@ Each rung is separately gated; reaching one never authorises the next.
 **No stage authorises engine control, model networking, human-data
 collection, or a consciousness claim.** S4 is as far as this ladder reaches,
 and S4 is still observation-only.
+
+*Status note (2026-07-15)*: S2-shaped machinery now exists on `main` as
+merged, tested packages — the NP5 evaluator, NP6 replay laboratory and NP8
+evidence packet, each Jack-audited and operator-authorized through the
+ordinary merge lane. That does not advance this note's own ladder: any
+*new* trained-attention instrument beyond the merged stack still starts at
+its own gate, S3/S4 remain separately gated, and the sentence above stands
+unchanged.
 
 ## 9. What each cited source actually measured (kept separate from analogy)
 
@@ -348,9 +402,22 @@ consciousness frequency, geometric ratio, or CA rule.
   methodological reason §1 keeps the evidence classes separate: mutual
   constraint requires that they stay distinct enough to constrain one another.
 
-## 10. NP5 candidate specification (for Jack's consideration — NOT implemented here)
+## 10. NP5 candidate specification (historical — since implemented and merged)
 
-A bounded future coding package, offered only as a target for audit:
+**Disposition (2026-07-15)**: this specification was subsequently
+implemented as PACKAGE NP5
+([PR #358](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/358),
+merged as `d30a056f`): `scripts/nextness_evaluator.py`, with
+`tests/test_nextness_evaluator.py` and
+`docs/NEXTNESS_EVALUATOR_CONTRACT.md`, then extended by NP6–NP10. The gate
+this section demanded — Jack's audit and a separate Kev implementation
+word — was satisfied before any code was written. The original
+specification is preserved below **as drafted**, as the audit target it
+was; its conditional "would" phrasing is historical, and the conditions it
+named (merge and audit of NP1/NP2) have since been met.
+
+A bounded coding package, offered at drafting time only as a target for
+audit:
 
 - **Offline evaluator only.** Would consume immutable artifacts of the kind
   NP1/NP2 **propose** (PRs #354/#355) from disk — available as inputs only
@@ -369,17 +436,18 @@ A bounded future coding package, offered only as a target for audit:
 - **Gated**: it must wait for **Jack's audit** and a **separate Kev
   implementation word** before any code is written.
 
-**NP5 is not implemented in this runway.** This section is a specification, not
-a start.
+**NP5 was not implemented in the runway that drafted this note.** It was
+implemented later, in its own separately audited and operator-authorized
+package (PR #358), exactly as the gate above required.
 
 ## 11. The four-way ledger (what is what)
 
 | Class | Contents |
 |---|---|
-| **Exists on main** (`8e45d3f9`) | The Nextness Observer and its log format (`scripts/nextness_observer.py`, with its calibration/metrics companions and tests); the canonical Theory Intake Ledger (untouched by this note). **No NP1/NP2 artifact is on `main`.** |
-| **Open/unmerged, test-verified proposals** | NP1 ([PR #354](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/354), amended head `f519256b`); NP2 ([PR #355](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/355), amended head `54440cf2`); the Swarm Hunter v1 preflight ([PR #322](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/322)); this note itself (PR #357) |
-| **Proposed by NP4** | The four evidence-class discipline (§1); neutral metrics (§5); the Glass-Wall evaluator relationship (§6); the S0–S4 ladder (§8); the NP5 candidate (§10) |
-| **Requires later authorization/action** | Merge + audit of NP1/NP2 before any evaluator may consume their artifacts; any code (Jack audit + Kev implementation word); any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
+| **Exists on main** (`deb028cd`) | The Nextness Observer and its log format (`scripts/nextness_observer.py`, with its calibration/metrics companions); the merged Nextness stack — NP1 predictor (#354), NP2 monitor (#355), NP5 evaluator (#358), NP6 replay laboratory (#359), NP7 contract guard (#360), NP8 evidence packet (#361), NP9 public structural validators (#362), NP10 full-validation integration (#363), with their contract documents; the canonical Theory Intake Ledger (untouched by this note) |
+| **Tested evidence** | The deterministic test suites merged alongside each package (`tests/test_nextness_*.py`, including the NP7 cross-package contract guard with embedded golden pins), green on `main` through the ordinary audited merge lane. This is evidence about *software behavior only* — telemetry about telemetry (§1). It establishes nothing about awareness or human experience |
+| **Proposals in this document** | The four evidence-class discipline (§1); the §5 metric candidates not yet computed by the merged stack (reorientation latency beyond what NP5/NP6 report, overshoot, oscillation count, resource-budget compliance, workload preservation, provenance completeness, non-punitive recovery); the Glass-Wall rule (§6) as a standing design constraint on any future instrument; the S0–S4 ladder (§8). (The §10 NP5 candidate has graduated out of this row — it is now code on `main`.) |
+| **Requires later operator-authorized action** | Any new trained-attention instrument beyond the merged stack (Jack audit + Kev implementation word); any decision on the still-open notes (#356, and this note #357) and on the Swarm Hunter v1 preflight (#322, open/unmerged); any human/neuro study (ethics, consent, privacy, collaborators — §7); any Theory Intake Ledger update (AURA + Jack + Kev) |
 
 The cited human studies (§9) are external literature, not repository
 evidence; they sit in no row above.
@@ -400,4 +468,6 @@ evidence; they sit in no row above.
 ---
 
 — drafted 2026-07-14 by Agent 84 (PACKAGE NP4), per Kevin's on-seat
-  authorisation; pending AURA, Jack, and Kev; unmerged.
+  authorisation; temporally reconciled 2026-07-15 after the Nextness code
+  stack (NP1/NP2, NP5–NP10) merged to `main` (`deb028cd`); this note itself
+  (PR #357) remains open, pending AURA, Jack, and Kev; unmerged.
