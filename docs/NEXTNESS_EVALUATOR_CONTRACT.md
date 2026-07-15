@@ -217,13 +217,42 @@ primary input artifact's directory (the `--report` file when provided,
 else the `--receipts` file) and **never** inside the repository `data/`
 tree — the same convention as `nextness_predictor`.
 
+**Explicit primary selection**: the primary input is chosen by fixed
+role order — `report` when provided, otherwise `receipts` — never by
+mapping construction or insertion order, and identity checks iterate
+the recognized roles in that same fixed order. Validating with no
+input at all is a descriptive validation error (never a bare
+`StopIteration`).
+
+**Input-identity guard** (NP6/NP8 convention): `--output` may never
+name or alias **any** supplied input artifact — report or receipts,
+primary or not. Aliases are refused by **resolved path** (covering the
+direct path, lexical variants like `sub/../report.json`, and symlink
+aliases — resolution targets are compared, not link or segment names)
+and by **file identity** (`os.path.samefile` on the resolved paths:
+device + inode / file ID, catching existing hard links whose paths
+differ). Any failure to verify an existing output's identity is itself
+a refusal — **fail closed**, never a fall-through. Refusal exits 4 with
+one concise `error:` line, no traceback; every supplied input is left
+byte-identical and no evaluation is written. The guard runs **before
+any artifact is parsed or any evaluation computed** — a refused
+invocation never reads the artifacts at all. Ordinary sibling outputs —
+nonexistent, or existing non-alias files — remain allowed.
+
+**Residual race, stated precisely**: identity is verified at validation
+time; the later write does not re-verify. A concurrent actor replacing
+the output path between validation and write can still redirect the
+write. The guard defends against aliases that exist when it validates —
+it does not claim to eliminate the validation-to-write (TOCTOU)
+interval.
+
 ## CLI exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
 | 2 | validation failure: missing/oversized/malformed artifact, unknown variant, or no artifact provided (argparse usage errors also exit 2) |
-| 4 | output-path failure: write-boundary violation or unwritable target |
+| 4 | output-path failure: write-boundary violation, input-artifact alias (direct path / lexical / symlink / hard link / unverifiable identity), or unwritable target |
 | 5 | serialized evaluation exceeds the 64 KiB ceiling (fail closed) |
 
 There is deliberately no exit-3: "not enough evidence" is never a CLI
@@ -254,4 +283,8 @@ requires touching NP1): `nextness_predictor`'s own `--output` writes
 with platform newline translation, so an NP1 report file's sha256
 differs between Windows and Linux even when its content is identical;
 this evaluator hashes whatever bytes it is given and is unaffected, but
-cross-platform golden-fixture work should account for it.
+cross-platform golden-fixture work should account for it. (A repair
+switching NP1 to explicit UTF-8 byte output was subsequently carried
+for review in
+[PR #364](https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen/pull/364);
+its disposition is repository history.)

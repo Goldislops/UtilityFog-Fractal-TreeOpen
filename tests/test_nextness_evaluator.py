@@ -8,6 +8,7 @@ itself.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import random
 
@@ -31,10 +32,12 @@ from scripts.nextness_evaluator import (
     load_json_artifact,
     main,
     serialize_evaluation,
+    validate_output_path,
     validate_receipt,
     validate_receipt_series,
     validate_report,
 )
+from scripts.nextness_observer import WriteOutsideLogDirError
 from scripts.nextness_monitor import (
     MonitorConfig,
     build_receipt,
@@ -1088,6 +1091,278 @@ def test_cli_oversized_evaluation_exit_5(tmp_path, capsys, monkeypatch) -> None:
     err = capsys.readouterr().err
     assert err.startswith("error:")
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# Output identity guard: --output must never name or alias ANY supplied
+# input artifact (report OR receipts, primary or not) — by resolved path
+# and by file identity (os.path.samefile on resolved inputs; fail closed
+# when identity cannot be verified). Refusal contract: exit 4, ONE
+# concise ``error:`` line, no traceback, every supplied input
+# byte-identical, no replacement artifact written, and the refusal
+# happens BEFORE any evaluation computation.
+# ---------------------------------------------------------------------------
+
+
+def _make_hardlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hard links unsupported on this filesystem")
+
+
+def _make_symlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+
+
+def _expect_alias_refusal(
+    capsys,
+    tmp_path: pathlib.Path,
+    argv: list[str],
+    inputs: list[pathlib.Path],
+) -> None:
+    """Full refusal contract for one CLI invocation."""
+    before = {p: p.read_bytes() for p in inputs}
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    assert main(argv) == 4, argv
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error:"), argv
+    assert captured.err.count("error:") == 1, argv
+    assert "Traceback" not in captured.err, argv
+    for p, b in before.items():
+        assert p.read_bytes() == b, f"input mutated: {p}"
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+# --- report-only: all four alias identities --------------------------------
+
+
+def test_cli_report_only_direct_output_alias_is_refused(tmp_path, capsys) -> None:
+    report_file, _ = _write_artifacts(tmp_path)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--output", str(report_file)],
+        [report_file],
+    )
+
+
+def test_cli_report_only_lexical_output_alias_is_refused(tmp_path, capsys) -> None:
+    report_file, _ = _write_artifacts(tmp_path)
+    alias = tmp_path / "sub" / ".." / "report.json"
+    assert str(alias) != str(report_file)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--output", str(alias)],
+        [report_file],
+    )
+
+
+def test_cli_report_only_symlink_output_alias_is_refused(tmp_path, capsys) -> None:
+    report_file, _ = _write_artifacts(tmp_path)
+    link = tmp_path / "evaluation.json"
+    _make_symlink_or_skip(report_file, link)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--output", str(link)],
+        [report_file],
+    )
+
+
+def test_cli_report_only_hardlink_output_alias_is_refused(tmp_path, capsys) -> None:
+    report_file, _ = _write_artifacts(tmp_path)
+    link = tmp_path / "evaluation.json"
+    _make_hardlink_or_skip(report_file, link)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--output", str(link)],
+        [report_file, link],
+    )
+
+
+# --- receipts-only: the same four identities --------------------------------
+
+
+def test_cli_receipts_only_direct_output_alias_is_refused(tmp_path, capsys) -> None:
+    _, receipts_file = _write_artifacts(tmp_path)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--receipts", str(receipts_file), "--output", str(receipts_file)],
+        [receipts_file],
+    )
+
+
+def test_cli_receipts_only_lexical_output_alias_is_refused(tmp_path, capsys) -> None:
+    _, receipts_file = _write_artifacts(tmp_path)
+    alias = tmp_path / "sub" / ".." / "receipts.json"
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--receipts", str(receipts_file), "--output", str(alias)],
+        [receipts_file],
+    )
+
+
+def test_cli_receipts_only_symlink_output_alias_is_refused(tmp_path, capsys) -> None:
+    _, receipts_file = _write_artifacts(tmp_path)
+    link = tmp_path / "evaluation.json"
+    _make_symlink_or_skip(receipts_file, link)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--receipts", str(receipts_file), "--output", str(link)],
+        [receipts_file],
+    )
+
+
+def test_cli_receipts_only_hardlink_output_alias_is_refused(tmp_path, capsys) -> None:
+    _, receipts_file = _write_artifacts(tmp_path)
+    link = tmp_path / "evaluation.json"
+    _make_hardlink_or_skip(receipts_file, link)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--receipts", str(receipts_file), "--output", str(link)],
+        [receipts_file, link],
+    )
+
+
+# --- both supplied: output aliasing EITHER input is refused -----------------
+
+
+def test_cli_both_supplied_output_aliasing_report_is_refused(tmp_path, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(report_file)],
+        [report_file, receipts_file],
+    )
+
+
+def test_cli_both_supplied_output_aliasing_receipts_is_refused(tmp_path, capsys) -> None:
+    # The non-primary input: report is primary, receipts sits in the same
+    # directory — only an every-supplied-input identity check catches this.
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(receipts_file)],
+        [report_file, receipts_file],
+    )
+
+
+def test_cli_both_supplied_hardlink_of_receipts_is_refused(tmp_path, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    link = tmp_path / "evaluation.json"
+    _make_hardlink_or_skip(receipts_file, link)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(link)],
+        [report_file, receipts_file, link],
+    )
+
+
+# --- refusal precedes evaluation computation --------------------------------
+
+
+def test_alias_refusal_precedes_evaluation_computation(tmp_path, capsys, monkeypatch) -> None:
+    import scripts.nextness_evaluator as evaluator_module
+
+    report_file, receipts_file = _write_artifacts(tmp_path)
+
+    def spy(*args, **kwargs):
+        raise AssertionError("build_evaluation invoked despite alias refusal")
+
+    monkeypatch.setattr(evaluator_module, "build_evaluation", spy)
+    assert main(
+        ["--report", str(report_file), "--output", str(report_file)]
+    ) == 4
+    assert main(
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(receipts_file)]
+    ) == 4
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+
+
+# --- ordinary sibling outputs remain allowed ---------------------------------
+
+
+def _artifacts_in_two_dirs(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """A report and a receipts artifact in two DIFFERENT directories, so
+    primary selection visibly decides which directory confines --output."""
+    report_dir = tmp_path / "report_dir"
+    receipts_dir = tmp_path / "receipts_dir"
+    report_dir.mkdir()
+    receipts_dir.mkdir()
+    report_file = report_dir / "report.json"
+    report_file.write_text(json.dumps(_make_report()), encoding="utf-8")
+    receipts_file = receipts_dir / "receipts.json"
+    receipts_file.write_text(
+        json.dumps([_make_receipt(observation_count=n) for n in (10, 20)]),
+        encoding="utf-8",
+    )
+    return report_file, receipts_file
+
+
+def test_primary_is_report_regardless_of_mapping_insertion_order(tmp_path) -> None:
+    # Receipts inserted FIRST: the report must still be primary — an
+    # output beside the report is allowed under the normal lane rules.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    assert list(inputs) == ["receipts", "report"]  # hostile insertion order
+    validate_output_path(report_file.parent / "evaluation.json", inputs)  # no raise
+
+
+def test_output_beside_receipts_refused_when_report_present(tmp_path) -> None:
+    # Same hostile insertion order: an output beside the RECEIPTS but
+    # outside the report's directory violates primary confinement.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(receipts_file.parent / "evaluation.json", inputs)
+
+
+def test_receipts_only_mapping_uses_receipts_as_primary(tmp_path) -> None:
+    _, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    validate_output_path(
+        receipts_file.parent / "evaluation.json", {"receipts": receipts_file}
+    )  # no raise: receipts is the primary when it is the only input
+
+
+def test_empty_inputs_mapping_is_descriptive_error_never_stopiteration(tmp_path) -> None:
+    with pytest.raises(EvaluatorInputError, match="no input artifact"):
+        validate_output_path(tmp_path / "evaluation.json", {})
+
+
+def test_identity_checks_hold_under_hostile_insertion_order(tmp_path) -> None:
+    # Aliases of EITHER artifact stay refused regardless of mapping order.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(report_file, inputs)
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(receipts_file, inputs)
+
+
+def test_cli_sibling_outputs_remain_allowed(tmp_path, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    report_before = report_file.read_bytes()
+    receipts_before = receipts_file.read_bytes()
+
+    fresh = tmp_path / "evaluation.json"          # nonexistent sibling
+    assert main(["--report", str(report_file), "--receipts",
+                 str(receipts_file), "--output", str(fresh)]) == 0
+    assert json.loads(fresh.read_bytes())["schema"] == EVALUATION_SCHEMA
+
+    stale = tmp_path / "stale.json"               # existing non-alias sibling
+    stale.write_text("previous content\n", encoding="utf-8")
+    assert main(["--report", str(report_file), "--output", str(stale)]) == 0
+    assert json.loads(stale.read_bytes())["schema"] == EVALUATION_SCHEMA
+
+    assert report_file.read_bytes() == report_before
+    assert receipts_file.read_bytes() == receipts_before
 
 
 # ---------------------------------------------------------------------------
