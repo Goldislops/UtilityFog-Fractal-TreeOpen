@@ -101,11 +101,35 @@ is checked against a **64 KiB ceiling — fail closed** (`ReportTooLargeError`).
 
 ## Write boundary
 
-- Default output is **stdout**.
+- Default output is **stdout** (unchanged: `sys.stdout.write` of the
+  canonical serialization).
 - `--output` must resolve **inside the input-log directory** (mirrors
   `nextness_metrics`; `WriteOutsideLogDirError` otherwise) and must
   **never** resolve inside the repository `data/` tree — even when the
   input log itself lives there. Reports about `data/` logs go to stdout.
+- **Input-identity guard** (same convention as NP6/NP8): `--output` may
+  never name or alias the input log itself. Refused by **resolved path**
+  (covers the direct path, lexical variants like `sub/../log.jsonl`, and
+  symlink aliases — resolution targets are compared, not link or segment
+  names) and by **file identity** (`os.path.samefile`: device + inode /
+  file ID, which catches existing hard links whose paths differ). Any
+  failure to verify identity is itself a refusal — **fail closed**,
+  never a fall-through. Refusal exits 4 with one concise `error:` line,
+  no traceback; the input log is left byte-identical and no report is
+  written. Ordinary sibling outputs — nonexistent or existing non-alias
+  files — remain allowed.
+- **Residual race, stated precisely**: identity is verified at
+  validation time; the later write does not re-verify. A concurrent
+  actor replacing the output path between validation and write can still
+  redirect the write. The guard defends against aliases that exist when
+  it validates; it does not claim to eliminate the validation-to-write
+  (TOCTOU) interval.
+- **File-output byte contract**: the report file is written as explicit
+  UTF-8 **bytes** — exactly `serialize_report(report).encode("utf-8")`,
+  with a single trailing LF — on every platform. Windows newline
+  translation (`\n` → `\r\n`, the old `write_text` behavior) can never
+  alter the canonical bytes, so file reports are byte-identical across
+  platforms and match the documented byte-identity guarantee.
 - No network, HTTP, ZMQ, Ollama or model calls anywhere in the module
   (statically auditable: the only imports are stdlib + `TOKEN_NAMES` /
   `WriteOutsideLogDirError` from `scripts.nextness_observer`).
@@ -122,7 +146,7 @@ exits.
 | 0 | success |
 | 2 | validation failure: missing log file or out-of-bounds configuration (argparse usage errors also exit 2) |
 | 3 | insufficient history for a train/holdout split |
-| 4 | output-path failure: write-boundary violation or unwritable target |
+| 4 | output-path failure: write-boundary violation, input-log alias (direct path / lexical / symlink / hard link / unverifiable identity), or unwritable target |
 | 5 | serialized report exceeds the 64 KiB ceiling (fail closed) |
 
 ## Relationship to what comes next
