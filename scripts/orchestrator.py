@@ -1,31 +1,37 @@
-"""Phase 18 PR 6 — Orchestrator: the Swarm Hunter's brain.
+"""Phase 18 PR 6 — Legacy tuning orchestrator (quarantined).
 
-Ties the three halves of the Phase 18 bus into one propose→commit loop:
+Historically described as "the Swarm Hunter's brain," this module is the
+Phase 18 tuning orchestrator. It is distinct from the offline
+candidate-structure detector proposed in `docs/SWARM_HUNTER_V1_PREFLIGHT.md`
+(PR #322) — do not conflate the two.
+
+It ties the Phase 18 bus into one observe→decide loop:
 
   1. Observation (Phase 16 REST GET endpoints + Phase 18 PR 2 /api/params):
      read Medusa's current state via HTTP.
-  2. Decision (Phase 18 PR 4 AgentBackend, e.g. PR 5 AnthropicBackend):
-     hand the LLM the current state + a bounded tool set, let it propose.
-  3. Action (Phase 18 PR 2 tuning API + PR 3 event bus):
-     execute approved tool calls by POSTing to /api/tuning/*.
+  2. Decision (Phase 18 PR 4 AgentBackend): hand the LLM the current state +
+     a bounded tool set, let it observe and (in `propose` mode only) validate a
+     dry-run proposal.
 
 This module is **pure library code** — no threading, no long-running loop.
-One call to `Orchestrator.run_one_iteration()` does the full observe-decide-
-act cycle once and returns an `IterationResult`. A separate runner script
-(future PR or simple cron) is responsible for cadence. That split keeps the
-unit tests deterministic: we run one iteration with scripted `MockBackend`
-responses and assert on the effects.
+One call to `Orchestrator.run_one_iteration()` does one cycle and returns an
+`IterationResult`.
 
-Safety philosophy (defense in depth, layered on top of the API's own rails):
-  - `Orchestrator` only ever commits with `approver="policy:auto"`. If the
-    proposal touches a HUMAN_APPROVAL parameter, the API returns 403, the
-    tool_result carries that error back to the LLM on the next turn, and
-    the LLM can choose to escalate or back off — the orchestrator never
-    tries to bypass the gate.
-  - Per-iteration `max_tool_depth` cap prevents a confused LLM from looping
-    forever.
-  - Every LLM call's usage is returned in `IterationResult.usage_total` so
-    operators can audit token spend.
+Capability quarantine (Package S):
+  - The LLM-facing surface is **observe by default**. There is **no supported
+    LLM-facing commit tool**: `commit_tuning` is never registered in the tool
+    router, so no model turn can commit a parameter.
+  - Capability modes (`OrchestratorMode`): `observe` (observation tools only)
+    and `propose` (observation + a proposal tool that is **forced to
+    `mode="dry-run"`** at the router boundary; `commit-pending` is rejected,
+    not silently downgraded).
+  - The low-level `OrchestratorClient.commit_tuning` / `rollback_tuning`
+    methods are retained as **non-LLM-facing** primitives for existing direct
+    callers (e.g. provider-parity tests); they cannot enter the tool registry.
+  - Defense in depth: even if a proposal were somehow committed, the server
+    boundary (Package R) refuses the orchestrator's `policy:auto` approver.
+  - Per-iteration `max_tool_depth` caps a confused LLM; usage is returned in
+    `IterationResult.usage_total` for cost audit.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from scripts.agent_backends import (
     AgentBackend,
@@ -44,6 +50,31 @@ from scripts.agent_backends import (
     ToolResultBlock,
     ToolSpec,
 )
+
+
+# -- capability modes --------------------------------------------------------
+
+OrchestratorMode = Literal["observe", "propose"]
+"""LLM-facing capability level. `observe` = observation tools only (default);
+`propose` = observation + a dry-run-forced proposal tool. There is deliberately
+no `commit` mode: committing is not an LLM-facing capability."""
+
+MODE_OBSERVE: OrchestratorMode = "observe"
+MODE_PROPOSE: OrchestratorMode = "propose"
+VALID_MODES: tuple[OrchestratorMode, ...] = (MODE_OBSERVE, MODE_PROPOSE)
+
+
+def resolve_mode(raw: Optional[str]) -> OrchestratorMode:
+    """Fail-closed mode resolution. Absent, malformed, or unknown values all
+    resolve to the safe `observe` mode; only the exact tokens "observe" and
+    "propose" (case-insensitive, trimmed) are honored. `propose` — the only
+    mode that exposes any write-adjacent tool — must be opted into explicitly."""
+    # Only a normalized "propose" enables proposal mode; absent, malformed,
+    # unknown, or any other value fails closed to observe. Returning the
+    # module-level Literal constants keeps this typed with no cast/ignore.
+    if isinstance(raw, str) and raw.strip().lower() == MODE_PROPOSE:
+        return MODE_PROPOSE
+    return MODE_OBSERVE
 
 
 # -- HTTP wrapper ------------------------------------------------------------
@@ -193,17 +224,21 @@ def observation_tools() -> list[ToolSpec]:
     ]
 
 
-def tuning_tools() -> list[ToolSpec]:
-    """Write tools exposed to the LLM. Every proposal requires a justification."""
+def proposal_tools() -> list[ToolSpec]:
+    """The single write-adjacent tool exposed to the LLM in `propose` mode.
+
+    Only `propose_tuning` is offered, and the router forces it to dry-run.
+    There is deliberately **no** `commit_tuning` tool — committing is not an
+    LLM-facing capability."""
     return [
         ToolSpec(
             name="propose_tuning",
             description=(
-                "Propose a parameter tuning. Validates against the schema. "
-                "Pass mode='dry-run' to test without committing; mode='commit-pending' "
-                "to flag for a follow-up commit. REQUIRES a justification explaining "
-                "why this change is being proposed — proposals without justification "
-                "will be rejected."
+                "Validate a parameter tuning as a DRY RUN. The tuning is checked "
+                "against the schema but never committed — this orchestrator has no "
+                "commit capability. REQUIRES a justification explaining why this "
+                "change is being proposed; proposals without justification are "
+                "rejected."
             ),
             input_schema={
                 "type": "object",
@@ -223,35 +258,21 @@ def tuning_tools() -> list[ToolSpec]:
                             "Human-readable rationale for this tuning. Required."
                         ),
                     },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["dry-run", "commit-pending"],
-                        "description": "dry-run for validation only; commit-pending to mark as ready for commit.",
-                    },
                 },
                 "required": ["params", "justification"],
             },
         ),
-        ToolSpec(
-            name="commit_tuning",
-            description=(
-                "Commit a previously-proposed tuning. This orchestrator commits "
-                "with approver='policy:auto', which only works for AUTO-category "
-                "proposals. HUMAN_APPROVAL proposals will return 403; don't attempt "
-                "to commit them — explain what you'd want a human to approve instead."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "proposal_id": {
-                        "type": "string",
-                        "description": "The prop-XXXXXXXX id returned by a prior propose_tuning call.",
-                    },
-                },
-                "required": ["proposal_id"],
-            },
-        ),
     ]
+
+
+def tools_for_mode(mode: OrchestratorMode) -> list[ToolSpec]:
+    """The LLM-facing tool set for a capability mode. `observe` → observation
+    only; `propose` → observation + the dry-run proposal tool. No mode exposes
+    a commit tool."""
+    tools = observation_tools()
+    if mode == MODE_PROPOSE:
+        tools = tools + proposal_tools()
+    return tools
 
 
 # -- tool router -------------------------------------------------------------
@@ -262,27 +283,38 @@ ToolHandler = Callable[[dict], dict]
 
 class ToolRouter:
     """Maps tool-call names to handler functions. One place that knows the
-    connection between the LLM's tool vocabulary and the HTTP client."""
+    connection between the LLM's tool vocabulary and the HTTP client.
+
+    Capability-gated (Package S): observation handlers are always registered;
+    `propose_tuning` is registered ONLY in `propose` mode (and forced to
+    dry-run). `commit_tuning` is **never** registered as an LLM-facing handler,
+    so no model turn can reach the commit endpoint through the router."""
 
     def __init__(
         self,
         client: OrchestratorClient,
         *,
+        mode: OrchestratorMode = MODE_OBSERVE,
         orchestrator_source: str = "agent:orchestrator",
-        commit_approver: str = "policy:auto",
     ) -> None:
         self.client = client
+        self.mode = mode
         self.source = orchestrator_source
-        self.approver = commit_approver
-        self._handlers: dict[str, ToolHandler] = {
+        # The router holds no commit approver: committing is not an LLM-facing
+        # capability, so it never calls commit on the model's behalf. The
+        # low-level `client.commit_tuning` primitive takes its approver as an
+        # explicit argument and needs no router state.
+        handlers: dict[str, ToolHandler] = {
             "get_medusa_census": self._h_census,
             "get_medusa_equanimity": self._h_equanimity,
             "get_acoustic_map": self._h_acoustic,
             "get_params": self._h_params,
             "get_params_schema": self._h_schema,
-            "propose_tuning": self._h_propose,
-            "commit_tuning": self._h_commit,
         }
+        if mode == MODE_PROPOSE:
+            handlers["propose_tuning"] = self._h_propose
+        # commit_tuning is intentionally absent from every mode's registry.
+        self._handlers: dict[str, ToolHandler] = handlers
 
     def execute(self, name: str, arguments: dict) -> tuple[dict, bool]:
         """Run a tool call. Returns `(result_payload, is_error)`."""
@@ -328,25 +360,27 @@ class ToolRouter:
     def _h_propose(self, args: dict) -> dict:
         params = args.get("params") or {}
         justification = args.get("justification") or ""
-        mode = args.get("mode", "dry-run")
+        requested_mode = args.get("mode", "dry-run")
         if not justification.strip():
             return {"error": "bad_request",
                     "message": "justification is required and must be non-empty"}
+        # commit-pending is rejected outright (not silently downgraded) so the
+        # caller sees that only dry-run is available in this quarantined path.
+        if requested_mode == "commit-pending":
+            return {"error": "commit_pending_forbidden",
+                    "message": "This orchestrator validates dry-run only; "
+                               "commit-pending is not permitted."}
+        # Any other requested mode is forced to dry-run at the boundary.
         return self._unwrap(self.client.propose_tuning(
             params=params,
             source=self.source,
             justification=justification,
-            mode=mode,
+            mode="dry-run",
         ))
 
-    def _h_commit(self, args: dict) -> dict:
-        proposal_id = args.get("proposal_id")
-        if not proposal_id:
-            return {"error": "bad_request", "message": "proposal_id is required"}
-        return self._unwrap(self.client.commit_tuning(
-            proposal_id=proposal_id,
-            approver=self.approver,  # "policy:auto" — never a human prefix from the orchestrator
-        ))
+    # NOTE: there is deliberately no _h_commit handler. Committing is not an
+    # LLM-facing capability; the low-level client.commit_tuning primitive is
+    # retained for direct non-LLM callers but never wired into the router.
 
 
 # -- orchestrator ------------------------------------------------------------
@@ -394,6 +428,7 @@ class Orchestrator:
         client: OrchestratorClient,
         *,
         system_prompt: str,
+        mode: OrchestratorMode = MODE_OBSERVE,
         tools: Optional[list[ToolSpec]] = None,
         router: Optional[ToolRouter] = None,
         max_tool_depth: int = 8,
@@ -403,8 +438,12 @@ class Orchestrator:
         self.backend = backend
         self.client = client
         self.system_prompt = system_prompt
-        self.tools = tools or (observation_tools() + tuning_tools())
-        self.router = router or ToolRouter(client)
+        self.mode = mode
+        # Fail-safe defaults: the tool set and router both derive from `mode`,
+        # which defaults to observe. An explicit `tools`/`router` overrides,
+        # but a bare Orchestrator is observation-only.
+        self.tools = tools if tools is not None else tools_for_mode(mode)
+        self.router = router or ToolRouter(client, mode=mode)
         self.max_tool_depth = max_tool_depth
         self.max_tokens_per_call = max_tokens_per_call
         self.temperature = temperature
@@ -492,6 +531,12 @@ __all__ = [
     "ToolRouter",
     "Orchestrator",
     "IterationResult",
+    "OrchestratorMode",
+    "MODE_OBSERVE",
+    "MODE_PROPOSE",
+    "VALID_MODES",
+    "resolve_mode",
     "observation_tools",
-    "tuning_tools",
+    "proposal_tools",
+    "tools_for_mode",
 ]
