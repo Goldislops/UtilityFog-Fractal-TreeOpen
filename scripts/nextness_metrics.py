@@ -93,6 +93,12 @@ def _validate_metrics_output_path(
     ``scripts.nextness_observer``) so the safety vocabulary stays
     unified across both modules.
 
+    Directory-target guard: an ``out_path`` that resolves to an existing
+    directory (including through a symlink) is refused here in the same
+    boundary lane — the binary open would otherwise raise
+    ``IsADirectoryError``/``PermissionError`` as an uncaught traceback
+    only after the log had been read and every metric computed.
+
     Input-identity guard (Nextness NP6/NP8 convention): the output may
     also never BE the input log — refused by resolved path (which
     covers the direct path, lexical variants like ``sub/../log.jsonl``
@@ -120,6 +126,14 @@ def _validate_metrics_output_path(
             f"refusing to write metrics output outside log_path's directory: "
             f"{out_resolved} is not inside {log_dir_resolved}"
         ) from e
+    # An existing directory (or a symlink resolving to one) can never be
+    # a metrics output file. Refuse here, in the established boundary
+    # lane, rather than letting the later binary open escape as an
+    # IsADirectoryError/PermissionError traceback after computation.
+    if out_resolved.is_dir():
+        raise WriteOutsideLogDirError(
+            f"refusing to write metrics output onto a directory: {out_resolved}"
+        )
     if out_resolved == log_resolved:
         raise WriteOutsideLogDirError(
             f"refusing to overwrite the input log file: {out_resolved}"

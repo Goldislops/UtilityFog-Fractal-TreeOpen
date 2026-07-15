@@ -325,6 +325,12 @@ in NP5/NP6/NP8, later NP1):
   translation can no longer alter the derived file's bytes, so
   re-runs are byte-identical across platforms. Streaming is
   preserved: the output is never materialized in full.
+- **Directory-target refusal**: an `--out` that resolves to an existing
+  directory (including through a symlink) is refused in the same exit-3
+  boundary lane, before the log is read or any metric computed — the
+  binary open would otherwise escape as an uncaught
+  `IsADirectoryError`/`PermissionError` traceback after computation.
+  Ordinary non-alias *file* targets are unaffected.
 - **Residual race, stated precisely**: identity is verified at
   validation time; the write does not re-verify. A concurrent actor
   replacing the output path between validation and write can still

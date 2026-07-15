@@ -741,6 +741,73 @@ def test_cli_out_ordinary_siblings_remain_allowed(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# Directory-target failure lane: an existing directory inside the log
+# directory must be refused in the established exit-3 boundary lane —
+# never escape as an IsADirectoryError/PermissionError traceback from
+# the binary open.
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_tree(root: pathlib.Path) -> list[tuple[str, bytes | None]]:
+    out = []
+    for p in sorted(root.rglob("*")):
+        out.append((str(p.relative_to(root)), p.read_bytes() if p.is_file() else None))
+    return out
+
+
+def test_cli_out_naming_existing_directory_is_refused_exit_3(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    input_before = log_path.read_bytes()
+    tree_before = _snapshot_tree(tmp_path)
+
+    rc = main(["--log", str(log_path), "--out", str(target_dir)])
+
+    assert rc == 3
+    captured = capsys.readouterr()
+    assert captured.err.count("safety error:") == 1
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == input_before
+    assert _snapshot_tree(tmp_path) == tree_before  # dir + contents unchanged
+
+
+def test_directory_refusal_precedes_metrics_computation(tmp_path, capsys, monkeypatch):
+    import scripts.nextness_metrics as metrics_module
+
+    log_path = _two_entry_log(tmp_path)
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+
+    def spy(*args, **kwargs):
+        raise AssertionError("metrics computation ran despite directory refusal")
+
+    monkeypatch.setattr(metrics_module, "kl_divergence", spy)
+    assert main(["--log", str(log_path), "--out", str(target_dir)]) == 3
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_out_symlink_to_directory_is_refused_exit_3(tmp_path, capsys):
+    log_path = _two_entry_log(tmp_path)
+    target_dir = tmp_path / "real_dir"
+    target_dir.mkdir()
+    link = tmp_path / "out.jsonl"
+    try:
+        link.symlink_to(target_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    input_before = log_path.read_bytes()
+    rc = main(["--log", str(log_path), "--out", str(link)])
+    assert rc == 3
+    captured = capsys.readouterr()
+    assert captured.err.count("safety error:") == 1
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == input_before
+    assert target_dir.is_dir()
+
+
+# ---------------------------------------------------------------------------
 # Output byte contract: canonical per-row JSON, UTF-8, LF bytes only —
 # no platform newline translation, byte-identical rewrite.
 # ---------------------------------------------------------------------------
