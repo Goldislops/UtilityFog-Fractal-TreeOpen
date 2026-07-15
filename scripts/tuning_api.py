@@ -266,8 +266,9 @@ class TuningState:
                 raise TuningError(
                     403, "auto_commit_disabled",
                     "Autonomous commits (approver='policy:auto') are disabled at "
-                    "the server boundary. A deliberate human approver "
-                    "(approver='human:<name>') is required to commit.",
+                    "the server boundary. HUMAN_APPROVAL-category parameters "
+                    "additionally require approver='human:<name>' (an "
+                    "unauthenticated label).",
                 )
 
             # Approver policy.
