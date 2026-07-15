@@ -217,6 +217,13 @@ primary input artifact's directory (the `--report` file when provided,
 else the `--receipts` file) and **never** inside the repository `data/`
 tree — the same convention as `nextness_predictor`.
 
+**Explicit primary selection**: the primary input is chosen by fixed
+role order — `report` when provided, otherwise `receipts` — never by
+mapping construction or insertion order, and identity checks iterate
+the recognized roles in that same fixed order. Validating with no
+input at all is a descriptive validation error (never a bare
+`StopIteration`).
+
 **Input-identity guard** (NP6/NP8 convention): `--output` may never
 name or alias **any** supplied input artifact — report or receipts,
 primary or not. Aliases are refused by **resolved path** (covering the

@@ -32,10 +32,12 @@ from scripts.nextness_evaluator import (
     load_json_artifact,
     main,
     serialize_evaluation,
+    validate_output_path,
     validate_receipt,
     validate_receipt_series,
     validate_report,
 )
+from scripts.nextness_observer import WriteOutsideLogDirError
 from scripts.nextness_monitor import (
     MonitorConfig,
     build_receipt,
@@ -1285,6 +1287,63 @@ def test_alias_refusal_precedes_evaluation_computation(tmp_path, capsys, monkeyp
 
 
 # --- ordinary sibling outputs remain allowed ---------------------------------
+
+
+def _artifacts_in_two_dirs(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """A report and a receipts artifact in two DIFFERENT directories, so
+    primary selection visibly decides which directory confines --output."""
+    report_dir = tmp_path / "report_dir"
+    receipts_dir = tmp_path / "receipts_dir"
+    report_dir.mkdir()
+    receipts_dir.mkdir()
+    report_file = report_dir / "report.json"
+    report_file.write_text(json.dumps(_make_report()), encoding="utf-8")
+    receipts_file = receipts_dir / "receipts.json"
+    receipts_file.write_text(
+        json.dumps([_make_receipt(observation_count=n) for n in (10, 20)]),
+        encoding="utf-8",
+    )
+    return report_file, receipts_file
+
+
+def test_primary_is_report_regardless_of_mapping_insertion_order(tmp_path) -> None:
+    # Receipts inserted FIRST: the report must still be primary — an
+    # output beside the report is allowed under the normal lane rules.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    assert list(inputs) == ["receipts", "report"]  # hostile insertion order
+    validate_output_path(report_file.parent / "evaluation.json", inputs)  # no raise
+
+
+def test_output_beside_receipts_refused_when_report_present(tmp_path) -> None:
+    # Same hostile insertion order: an output beside the RECEIPTS but
+    # outside the report's directory violates primary confinement.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(receipts_file.parent / "evaluation.json", inputs)
+
+
+def test_receipts_only_mapping_uses_receipts_as_primary(tmp_path) -> None:
+    _, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    validate_output_path(
+        receipts_file.parent / "evaluation.json", {"receipts": receipts_file}
+    )  # no raise: receipts is the primary when it is the only input
+
+
+def test_empty_inputs_mapping_is_descriptive_error_never_stopiteration(tmp_path) -> None:
+    with pytest.raises(EvaluatorInputError, match="no input artifact"):
+        validate_output_path(tmp_path / "evaluation.json", {})
+
+
+def test_identity_checks_hold_under_hostile_insertion_order(tmp_path) -> None:
+    # Aliases of EITHER artifact stay refused regardless of mapping order.
+    report_file, receipts_file = _artifacts_in_two_dirs(tmp_path)
+    inputs = {"receipts": receipts_file, "report": report_file}
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(report_file, inputs)
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(receipts_file, inputs)
 
 
 def test_cli_sibling_outputs_remain_allowed(tmp_path, capsys) -> None:

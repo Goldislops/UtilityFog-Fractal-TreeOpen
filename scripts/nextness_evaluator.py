@@ -1262,8 +1262,12 @@ def validate_output_path(
     ID, which covers existing hard links whose paths differ).
 
     ``inputs`` maps role name (``"report"`` / ``"receipts"``) to the
-    supplied path, in primary-first order; identity is checked against
-    EVERY entry, not merely the primary.
+    supplied path. The primary is selected EXPLICITLY by fixed role
+    order — ``report`` when present, else ``receipts`` — never by the
+    mapping's insertion order, and identity is checked against EVERY
+    recognized entry in that same fixed order, not merely the primary.
+    An empty mapping is a descriptive ``EvaluatorInputError``, never a
+    bare ``StopIteration``.
 
     Residual filesystem race, stated precisely (same as NP6/NP8):
     identity is verified at validation time; the later write does not
@@ -1272,7 +1276,15 @@ def validate_output_path(
     defends against aliases that exist when it validates — it does not
     claim protection against concurrent hostile filesystem manipulation.
     """
-    primary = next(iter(inputs.values()))
+    # Fixed, explicit role order (report first) — primary selection and
+    # identity iteration are independent of how the mapping was built.
+    ordered = [(role, inputs[role]) for role in ("report", "receipts") if role in inputs]
+    if not ordered:
+        raise EvaluatorInputError(
+            "no input artifact supplied for output validation: provide "
+            "report and/or receipts"
+        )
+    primary = ordered[0][1]
     input_dir_resolved = primary.resolve().parent
     out_resolved = out_path.resolve()
     try:
@@ -1282,7 +1294,7 @@ def validate_output_path(
             f"refusing to write evaluation outside the primary input "
             f"artifact's directory: {out_resolved} is not inside {input_dir_resolved}"
         ) from e
-    for role, input_path in inputs.items():
+    for role, input_path in ordered:
         input_resolved = input_path.resolve()
         if out_resolved == input_resolved:
             raise WriteOutsideLogDirError(
