@@ -59,6 +59,7 @@ from scripts.orchestrator import (
     ToolRouter,
 )
 from scripts.tuning_api import TuningState, create_blueprint as create_tuning_blueprint
+from scripts.params_schema import PARAMS
 
 
 if AnthropicBackend is None or OpenAICompatBackend is None:
@@ -392,34 +393,45 @@ def test_anthropic_and_openai_compat_produce_equivalent_ledger_entries(tmp_path:
     o_result = o_orch.run_one_iteration("Observe Medusa; tune if needed.")
 
     # ---- Parity assertions ----
+    #
+    # Post-quarantine (Package R): the orchestrator's commit identity
+    # (approver="policy:auto") is refused at the server boundary, so the commit
+    # tool call attempted by both scripts is rejected identically. Provider
+    # parity is preserved — both backends behave the same — but now at the
+    # *rejected* outcome: one dry-run proposal each, zero commits, state
+    # unchanged. This proves backend-equivalence of the quarantined path.
 
     # 1. Both stopped naturally.
     assert a_result.stopped_because == o_result.stopped_because == "end_turn"
 
-    # 2. Both made the same number of tool calls (propose + commit = 2).
+    # 2. Both made the same number of tool calls (propose + commit-attempt = 2).
     assert a_result.tool_calls_executed == o_result.tool_calls_executed == 2
 
-    # 3. Both proposed exactly one and committed exactly one.
+    # 3. Both proposed exactly one; neither committed (server refused policy:auto).
     assert len(a_result.proposals_created) == len(o_result.proposals_created) == 1
-    assert len(a_result.commits_applied) == len(o_result.commits_applied) == 1
+    assert len(a_result.commits_applied) == len(o_result.commits_applied) == 0
+    assert a_result.commits_applied == o_result.commits_applied
 
-    # 4. Both backends pushed the same effective param into the live state.
-    assert state_a.effective_params()["signal_interval"] == 14
-    assert state_o.effective_params()["signal_interval"] == 14
+    # 4. No mutation reached the live state; both remain at the registry default.
+    default_si = PARAMS["signal_interval"].default
+    assert state_a.effective_params()["signal_interval"] == default_si
+    assert state_o.effective_params()["signal_interval"] == default_si
 
-    # 5. Both ledgers have a propose + commit entry for the same param value.
+    # 5. Both ledgers hold only the propose entry (the refused commit is not
+    #    recorded as a commit).
     a_lines = [json.loads(ln) for ln in
                (tmp_path / "a" / "tuning_ledger.jsonl").read_text().splitlines() if ln.strip()]
     o_lines = [json.loads(ln) for ln in
                (tmp_path / "o" / "tuning_ledger.jsonl").read_text().splitlines() if ln.strip()]
-    assert len(a_lines) == len(o_lines) == 2
-    assert [e["type"] for e in a_lines] == ["propose", "commit"]
-    assert [e["type"] for e in o_lines] == ["propose", "commit"]
+    assert len(a_lines) == len(o_lines) == 1
+    assert [e["type"] for e in a_lines] == ["propose"]
+    assert [e["type"] for e in o_lines] == ["propose"]
     # Parameters and source match modulo backend-specific proposal_ids
     assert a_lines[0]["params"] == o_lines[0]["params"] == PROPOSAL_PARAMS
     assert a_lines[0]["source"] == o_lines[0]["source"] == SOURCE
     assert a_lines[0]["justification"] == o_lines[0]["justification"] == JUSTIFICATION
-    assert a_lines[1]["approver"] == o_lines[1]["approver"] == "policy:auto"
+    # No commit ledger entry exists on either side — the policy:auto commit was
+    # refused at the server boundary (Package R), so both ledgers stop at propose.
 
 
 def test_parity_at_response_translation_layer():
