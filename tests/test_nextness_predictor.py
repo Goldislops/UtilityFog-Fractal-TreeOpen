@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
 
 import pytest
@@ -486,6 +487,162 @@ def test_output_inside_repo_data_tree_is_refused() -> None:
     with pytest.raises(WriteOutsideLogDirError):
         validate_output_path(data_log.parent / "report.json", data_log)
     # Pure path logic: nothing was created or written.
+
+
+# ---------------------------------------------------------------------------
+# Output identity guard: --output must never name or alias the input log
+# (same convention as NP6/NP8: resolved path + os.path.samefile, fail
+# closed when identity cannot be verified). Refusal contract at the CLI:
+# exit 4, ONE concise ``error:`` line, no traceback, input byte-identical,
+# no report written anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_output_direct_same_path_is_refused(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(log, log)
+
+
+def test_validate_output_lexical_alias_is_refused(tmp_path) -> None:
+    # A path that names the log through a redundant component: distinct
+    # lexically, identical once resolved. 'sub' need not exist — the
+    # comparison is between resolution targets, not link/segment names.
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    alias = tmp_path / "sub" / ".." / "nextness_runs.jsonl"
+    assert str(alias) != str(log)
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(alias, log)
+
+
+def _make_hardlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hard links unsupported on this filesystem")
+
+
+def _make_symlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+
+
+def test_validate_output_hardlink_alias_is_refused(tmp_path) -> None:
+    # A hard link has a distinct path (resolution does NOT unify it) but
+    # shares file identity — only os.path.samefile can catch it.
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    link = tmp_path / "report.json"
+    _make_hardlink_or_skip(log, link)
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(link, log)
+
+
+def test_validate_output_symlink_alias_is_refused(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    link = tmp_path / "report.json"
+    _make_symlink_or_skip(log, link)
+    with pytest.raises(WriteOutsideLogDirError):
+        validate_output_path(link, log)
+
+
+def test_validate_output_ordinary_siblings_still_allowed(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    validate_output_path(tmp_path / "report.json", log)  # nonexistent: allowed
+    existing = tmp_path / "existing.json"
+    existing.write_text("old content\n", encoding="utf-8")
+    validate_output_path(existing, log)  # existing non-alias: allowed
+
+
+def _cli_alias_refusal_receipt(
+    capsys, tmp_path: pathlib.Path, log: pathlib.Path, out_arg: pathlib.Path
+) -> None:
+    """Full refusal contract: exit 4 · one error: line · no traceback ·
+    input byte-identical · no report written (no new filesystem entry)."""
+    input_before = log.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    err = _expect_cli_failure(capsys, [str(log), "--output", str(out_arg)], 4)
+    assert err.count("error:") == 1
+    assert log.read_bytes() == input_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_output_naming_input_log_is_refused(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    _cli_alias_refusal_receipt(capsys, tmp_path, log, log)
+
+
+def test_cli_output_lexical_alias_is_refused(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    alias = tmp_path / "sub" / ".." / "nextness_runs.jsonl"
+    _cli_alias_refusal_receipt(capsys, tmp_path, log, alias)
+
+
+def test_cli_output_hardlink_alias_is_refused(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    link = tmp_path / "report.json"
+    _make_hardlink_or_skip(log, link)
+    input_before = log.read_bytes()
+    err = _expect_cli_failure(capsys, [str(log), "--output", str(link)], 4)
+    assert err.count("error:") == 1
+    assert log.read_bytes() == input_before
+    assert link.read_bytes() == input_before  # shared identity: still the log
+
+
+def test_cli_output_symlink_alias_is_refused(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    link = tmp_path / "report.json"
+    _make_symlink_or_skip(log, link)
+    input_before = log.read_bytes()
+    err = _expect_cli_failure(capsys, [str(log), "--output", str(link)], 4)
+    assert err.count("error:") == 1
+    assert log.read_bytes() == input_before
+
+
+def test_cli_nonexistent_sibling_output_remains_allowed(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    input_before = log.read_bytes()
+    out = tmp_path / "report.json"
+    assert main([str(log), "--output", str(out)]) == 0
+    assert out.is_file()
+    assert log.read_bytes() == input_before
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == REPORT_SCHEMA
+
+
+def test_cli_existing_non_alias_sibling_output_remains_allowed(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    out = tmp_path / "report.json"
+    out.write_text("stale previous content\n", encoding="utf-8")
+    assert main([str(log), "--output", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["schema"] == REPORT_SCHEMA
+
+
+# ---------------------------------------------------------------------------
+# File-output byte contract: exactly serialize_report(...).encode("utf-8"),
+# LF only, independent of platform newline translation.
+# ---------------------------------------------------------------------------
+
+
+def test_file_output_bytes_are_exact_canonical_utf8(tmp_path) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    out = tmp_path / "report.json"
+    assert main([str(log), "--output", str(out)]) == 0
+    expected = serialize_report(build_report(log)).encode("utf-8")
+    data = out.read_bytes()
+    assert data == expected
+    assert b"\r" not in data                    # no platform CRLF translation
+    assert data.endswith(b"\n")                 # exactly one trailing LF byte
+    assert not data.endswith(b"\n\n")
+
+
+def test_stdout_report_matches_canonical_serialization(tmp_path, capsys) -> None:
+    # Established stdout contract, asserted character-exactly: stdout is
+    # sys.stdout.write(serialize_report(report)) — unchanged by the file
+    # byte-output repair.
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    assert main([str(log)]) == 0
+    assert capsys.readouterr().out == serialize_report(build_report(log))
 
 
 # ---------------------------------------------------------------------------

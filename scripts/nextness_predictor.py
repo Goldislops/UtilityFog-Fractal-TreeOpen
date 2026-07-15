@@ -24,8 +24,16 @@ Safety contract (Lane B, mirrors nextness_observer/nextness_metrics):
   I/O is reading one JSONL file and (optionally) writing one report next
   to it.
 - Writes are permitted ONLY inside the resolved input-log directory
-  (``WriteOutsideLogDirError`` otherwise) and NEVER inside the
-  repository ``data/`` tree — reports about ``data/`` logs go to stdout.
+  (``WriteOutsideLogDirError`` otherwise), NEVER inside the repository
+  ``data/`` tree — reports about ``data/`` logs go to stdout — and NEVER
+  onto a path that IS the input log itself: aliases are refused by
+  resolved path and by file identity (``os.path.samefile``; hard links
+  included), failing closed when identity cannot be verified. Identity
+  is checked at validation time; the later write does not re-verify
+  (documented residual race, same as NP6/NP8).
+- File output is written as explicit UTF-8 BYTES (single trailing LF,
+  never platform newline translation): the file always contains exactly
+  ``serialize_report(report).encode("utf-8")``.
 - Chronological evaluation only: rows must arrive in strictly increasing
   ``generation`` order; out-of-order and duplicate generations are
   rejected and counted, never silently reordered (sorting could hide
@@ -51,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pathlib
 import sys
 from collections.abc import Mapping, Sequence
@@ -522,11 +531,24 @@ def validate_output_path(out_path: pathlib.Path, log_path: pathlib.Path) -> None
     """Enforce the NP1 write contract for --output.
 
     The report may land ONLY inside the resolved input-log directory
-    (mirroring nextness_metrics), and NEVER inside the repository
-    ``data/`` tree — even when the input log itself lives there. Reports
-    about ``data/`` logs go to stdout instead.
+    (mirroring nextness_metrics), NEVER inside the repository ``data/``
+    tree — even when the input log itself lives there; reports about
+    ``data/`` logs go to stdout instead — and NEVER on a path that IS
+    the input log: by resolved path (which also covers lexical and
+    symlink aliases, dangling ones included — resolution targets are
+    compared, not link or segment names) or by file identity
+    (``os.path.samefile``: device + inode / file ID, which covers
+    existing hard links whose paths differ).
+
+    Residual filesystem race, stated precisely (same as NP6/NP8):
+    identity is verified at validation time; the later write does not
+    re-verify. A concurrent actor replacing the output path between
+    validation and write can still redirect the write. This guard
+    defends against aliases that exist when it validates — it does not
+    claim protection against concurrent hostile filesystem manipulation.
     """
-    log_dir_resolved = log_path.resolve().parent
+    log_resolved = log_path.resolve()
+    log_dir_resolved = log_resolved.parent
     out_resolved = out_path.resolve()
     try:
         out_resolved.relative_to(log_dir_resolved)
@@ -535,6 +557,27 @@ def validate_output_path(out_path: pathlib.Path, log_path: pathlib.Path) -> None
             f"refusing to write predictor report outside the input-log "
             f"directory: {out_resolved} is not inside {log_dir_resolved}"
         ) from e
+    if out_resolved == log_resolved:
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file: {out_resolved}"
+        )
+    # Hard links share identity while having distinct paths. Only an
+    # EXISTING output can alias the input; stat runs on the resolved
+    # path and any failure to verify is itself a refusal (fail closed),
+    # never a fall-through.
+    if out_resolved.exists():
+        try:
+            same = os.path.samefile(out_resolved, log_path)
+        except OSError as e:
+            raise WriteOutsideLogDirError(
+                f"cannot verify output file identity against the input log "
+                f"file: {out_resolved}"
+            ) from e
+        if same:
+            raise WriteOutsideLogDirError(
+                f"refusing to overwrite the input log file (shared file "
+                f"identity): {out_resolved}"
+            )
     data_dir = _repo_data_dir()
     if out_resolved == data_dir or data_dir in out_resolved.parents:
         raise WriteOutsideLogDirError(
@@ -563,7 +606,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "optional report path; must resolve inside the input log's "
-            "directory and outside the repository data/ tree (default: stdout)"
+            "directory, outside the repository data/ tree, and must not "
+            "name or alias the input log itself (default: stdout)"
         ),
     )
     parser.add_argument("--smoothing", type=float, default=SMOOTHING_DEFAULT)
@@ -622,7 +666,10 @@ def main(argv: list[str] | None = None) -> int:
     serialized = serialize_report(report)
     if args.output is not None:
         try:
-            args.output.write_text(serialized, encoding="utf-8")
+            # Explicit UTF-8 bytes (NP5/NP6/NP8 convention): the file is
+            # exactly serialize_report(report).encode("utf-8"), one
+            # trailing LF, immune to platform newline translation.
+            args.output.write_bytes(serialized.encode("utf-8"))
         except OSError as e:
             print(f"error: cannot write report to {args.output}: {e}", file=sys.stderr)
             return 4
