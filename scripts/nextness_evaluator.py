@@ -50,8 +50,14 @@ Safety contract (Lane B, mirrors nextness_predictor/nextness_monitor):
   before any arithmetic; unknown schemas, unknown keys and missing keys
   are all rejected (unknown variants never pass silently).
 - Writes are permitted ONLY inside the directory of the primary input
-  artifact (``WriteOutsideLogDirError`` otherwise) and NEVER inside the
-  repository ``data/`` tree — the same convention as nextness_predictor.
+  artifact (``WriteOutsideLogDirError`` otherwise), NEVER inside the
+  repository ``data/`` tree, and NEVER onto a path that IS any supplied
+  input artifact — report or receipts alike: aliases are refused by
+  resolved path and by file identity (``os.path.samefile`` on resolved
+  paths; hard links included), failing closed when identity cannot be
+  verified. Identity is checked at validation time, before any artifact
+  is parsed or any evaluation computed; the later write does not
+  re-verify (documented residual race, same as NP6/NP8).
 - Deterministic output: sorted keys, fixed schema, no wall-clock
   timestamps, no random identifiers, no absolute paths (provenance is
   the SHA-256 of each artifact's raw bytes); the same input bytes always
@@ -65,6 +71,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import pathlib
 import sys
 from collections.abc import Mapping, Sequence
@@ -1240,12 +1247,33 @@ def _repo_data_dir() -> pathlib.Path:
     return (pathlib.Path(__file__).resolve().parent.parent / "data").resolve()
 
 
-def validate_output_path(out_path: pathlib.Path, primary_input: pathlib.Path) -> None:
+def validate_output_path(
+    out_path: pathlib.Path, inputs: Mapping[str, pathlib.Path]
+) -> None:
     """--output may land ONLY inside the primary input artifact's
     directory (the --report file when provided, else the --receipts
-    file), and NEVER inside the repository ``data/`` tree — the same
-    rule nextness_predictor enforces for its own reports."""
-    input_dir_resolved = primary_input.resolve().parent
+    file), NEVER inside the repository ``data/`` tree — the same rule
+    nextness_predictor enforces for its own reports — and NEVER on a
+    path that IS any supplied input artifact (corrected-NP6/NP8
+    semantics): by resolved path (which also covers lexical and symlink
+    aliases, dangling ones included — resolution targets are compared,
+    not link or segment names) or by file identity
+    (``os.path.samefile`` on the RESOLVED paths: device + inode / file
+    ID, which covers existing hard links whose paths differ).
+
+    ``inputs`` maps role name (``"report"`` / ``"receipts"``) to the
+    supplied path, in primary-first order; identity is checked against
+    EVERY entry, not merely the primary.
+
+    Residual filesystem race, stated precisely (same as NP6/NP8):
+    identity is verified at validation time; the later write does not
+    re-verify. A concurrent actor replacing the output path between
+    validation and write can still redirect the write. This guard
+    defends against aliases that exist when it validates — it does not
+    claim protection against concurrent hostile filesystem manipulation.
+    """
+    primary = next(iter(inputs.values()))
+    input_dir_resolved = primary.resolve().parent
     out_resolved = out_path.resolve()
     try:
         out_resolved.relative_to(input_dir_resolved)
@@ -1254,6 +1282,29 @@ def validate_output_path(out_path: pathlib.Path, primary_input: pathlib.Path) ->
             f"refusing to write evaluation outside the primary input "
             f"artifact's directory: {out_resolved} is not inside {input_dir_resolved}"
         ) from e
+    for role, input_path in inputs.items():
+        input_resolved = input_path.resolve()
+        if out_resolved == input_resolved:
+            raise WriteOutsideLogDirError(
+                f"refusing to overwrite the input {role} artifact: {out_resolved}"
+            )
+        # Hard links share identity while having distinct paths. Only an
+        # EXISTING output can alias an input; stat runs on the resolved
+        # paths and any failure to verify is itself a refusal (fail
+        # closed), never a fall-through.
+        if out_resolved.exists():
+            try:
+                same = os.path.samefile(out_resolved, input_resolved)
+            except OSError as e:
+                raise WriteOutsideLogDirError(
+                    f"cannot verify output file identity against the input "
+                    f"{role} artifact: {out_resolved}"
+                ) from e
+            if same:
+                raise WriteOutsideLogDirError(
+                    f"refusing to overwrite the input {role} artifact "
+                    f"(shared file identity): {out_resolved}"
+                )
     data_dir = _repo_data_dir()
     if out_resolved == data_dir or data_dir in out_resolved.parents:
         raise WriteOutsideLogDirError(
@@ -1289,8 +1340,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", type=pathlib.Path, default=None,
         help=(
             "optional evaluation path; must resolve inside the primary "
-            "input artifact's directory and outside the repository data/ "
-            "tree (default: stdout)"
+            "input artifact's directory, outside the repository data/ "
+            "tree, and must not name or alias any supplied input "
+            "artifact (default: stdout)"
         ),
     )
     return parser
@@ -1323,10 +1375,17 @@ def main(argv: list[str] | None = None) -> int:
         if path is not None and not path.is_file():
             print(f"error: {label} artifact not found: {path}", file=sys.stderr)
             return 2
-    primary = args.report if args.report is not None else args.receipts
+    # Primary-first, fixed role order; identity is checked against every
+    # supplied input, and validation runs BEFORE any artifact is parsed
+    # or any evaluation computed.
+    inputs: dict[str, pathlib.Path] = {}
+    if args.report is not None:
+        inputs["report"] = args.report
+    if args.receipts is not None:
+        inputs["receipts"] = args.receipts
     try:
         if args.output is not None:
-            validate_output_path(args.output, primary)
+            validate_output_path(args.output, inputs)
         evaluation = build_evaluation(
             report_path=args.report, receipts_path=args.receipts
         )
