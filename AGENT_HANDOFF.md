@@ -117,9 +117,9 @@ Audit value comes from independence and rigor, not from holding the role badge. 
 ## Active Safety Rails (CA Engine + Tuning API)
 
 - **LOCKED parameters** (in `params_schema.py`): `structural_to_void_decay_prob`, `energy_to_void_decay_prob`. These cannot be tuned through any commit path. The CA engine's other invariants (memory-grid channel semantics, the `0.005` decay constant referenced in MEMORY.md "Critical Invariants") are also off-limits.
-- **HUMAN_APPROVAL gating**: parameters like `magnon_coupling`, `equanimity_p_max`, `ampere_coupling`, `compassion_beta` require an approver string starting with `human:` at commit. The orchestrator NEVER passes a human prefix; it commits with `policy:auto`, which only succeeds for AUTO-category params.
+- **HUMAN_APPROVAL gating**: parameters like `magnon_coupling`, `equanimity_p_max`, `ampere_coupling`, `compassion_beta` require an approver string starting with `human:` at commit — a syntactic, unauthenticated label (no identity verification). The orchestrator's LLM-facing surface exposes no commit tool in any mode (post-S), and its historical `policy:auto` identity is rejected at the server boundary for every otherwise-valid proposal (post-R, `403 auto_commit_disabled`). Commits of AUTO-category proposals are not generally restricted to authenticated humans — other caller-supplied approver strings currently pass the approver gate.
 - **Per-parameter rate limit**: 1000 generations between successive commits to the same parameter. Prevents an LLM in a tight loop from oscillating a tunable.
-- **Orchestrator approver is hard-coded**: even if an LLM hands `"approver": "human:evil"` as a tool call argument, the router ignores it and uses its configured value.
+- **Orchestrator commit approver (historical):** before Package S, the router hard-coded `policy:auto` and ignored caller-supplied approver arguments. Post-S, the router holds no commit approver and registers no commit handler; direct API callers are outside that LLM-facing guarantee.
 - **Defense in depth**: API enforces, router enforces, schema enforces. Three layers; bypassing one doesn't bypass the others.
 
 ## Budget Posture
