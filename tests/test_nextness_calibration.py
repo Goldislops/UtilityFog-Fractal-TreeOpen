@@ -434,6 +434,70 @@ def test_validate_output_ordinary_siblings_remain_allowed(tmp_path):
     _validate_calibration_output_path(stale, log_path)
 
 
+def test_validate_output_existing_sibling_allowed_when_log_missing(tmp_path):
+    """First-run compatibility: before the observer's first write the input
+    log does not exist yet. A missing log cannot share file identity with a
+    distinct existing sibling, so an ordinary stale sibling output must be
+    ALLOWED — the guard must not convert samefile's FileNotFoundError into
+    a refusal."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"          # absent: valid first run
+    stale = log_dir / "calibration_determinism.jsonl"
+    stale.write_text("stale previous output\n", encoding="utf-8")
+    assert not log_path.exists()
+    _validate_calibration_output_path(stale, log_path)  # must not raise
+
+
+def test_validate_output_direct_alias_refused_even_when_log_missing(tmp_path):
+    """Path equality with the input log stays refused even before the log
+    exists — resolved-path comparison needs no stat."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"          # absent
+    assert not log_path.exists()
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_calibration_output_path(log_path, log_path)
+    alias = log_dir / "sub" / ".." / "nextness_runs.jsonl"
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_calibration_output_path(alias, log_path)
+
+
+def test_validate_output_non_filenotfound_oserror_still_fails_closed(tmp_path, monkeypatch):
+    """Only CONFIRMED ABSENCE is exempt: any other identity-inspection
+    failure (permission, I/O) must still refuse — never fall through to
+    permission-to-write."""
+    log_path = _identity_setup(tmp_path)                # log EXISTS here
+    sibling = log_path.parent / "calibration_determinism.jsonl"
+    sibling.write_text("previous\n", encoding="utf-8")
+
+    def perm_boom(*args, **kwargs):
+        raise PermissionError("identity inspection denied")
+
+    monkeypatch.setattr(os.path, "samefile", perm_boom)
+    _expect_guard_refusal(sibling, log_path)
+
+
+def test_check_determinism_first_run_allows_existing_stale_sibling(tmp_path):
+    """End-to-end through the exported public entry point: with log_path
+    initially absent and an ordinary stale sibling out_path present, the
+    call must COMPLETE and write the permitted calibration output."""
+    snapshots_dir, log_path, config = _calibration_setup(tmp_path)
+    assert not log_path.exists()                        # first run: no log yet
+    out_path = log_path.parent / "calibration_determinism.jsonl"
+    out_path.write_text("stale previous output\n", encoding="utf-8")
+
+    aggregate = check_determinism(
+        [], out_path=out_path, log_path=log_path,
+        calibration_set="short", config=config, repeats=2,
+    )
+
+    assert isinstance(aggregate, dict)                  # completed normally
+    written = out_path.read_text(encoding="utf-8")
+    assert written != "stale previous output\n"         # permitted output written
+    assert '"experiment": "determinism"' in written
+
+
 def test_check_determinism_refuses_output_aliasing_log_before_computation(
     tmp_path, monkeypatch
 ):

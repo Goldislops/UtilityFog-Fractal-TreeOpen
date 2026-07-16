@@ -144,8 +144,15 @@ def _validate_calibration_output_path(
        symlink aliases resolving to the input log are covered.
     4. **File identity** — for an existing target, ``os.path.samefile``
        (device + inode / file ID) catches hard links whose paths differ.
-       If identity **cannot** be established the guard **fails closed** —
-       an unverifiable target is refused, never a fall-through.
+       ``samefile`` is called only when BOTH resolved targets are
+       confirmed to exist: a missing input log — valid before the
+       observer's first write — cannot share file identity with a
+       distinct existing sibling, so a genuine ``FileNotFoundError``
+       (confirmed absence, including one arising in the residual
+       interval between the existence checks and the stat) is treated
+       as "no shared identity". Every OTHER inspection failure
+       (permission, I/O) still **fails closed** — an unverifiable
+       target is refused, never a fall-through to permission-to-write.
 
     Ordinary sibling outputs — nonexistent, or existing non-alias files —
     remain permitted; overwriting a stale calibration output is allowed.
@@ -187,13 +194,19 @@ def _validate_calibration_output_path(
         raise WriteOutsideLogDirError(
             f"refusing to overwrite the input log file: {out_resolved}"
         )
-    # Hard links share identity while having distinct paths. Only an
-    # EXISTING output can alias the input; stat runs on the resolved
-    # paths and any failure to verify is itself a refusal (fail closed),
-    # never a fall-through.
-    if out_resolved.exists():
+    # Hard links share identity while having distinct paths. Identity
+    # comparison requires both endpoints to exist: a missing input log
+    # (valid before the observer's first write) cannot share identity
+    # with a distinct existing sibling, so samefile runs only when both
+    # resolved targets are confirmed to exist. A FileNotFoundError from
+    # the residual interval between those checks and the stat is the
+    # same confirmed absence. Every OTHER inspection failure is itself
+    # a refusal (fail closed), never a fall-through.
+    if out_resolved.exists() and log_resolved.exists():
         try:
             same = os.path.samefile(out_resolved, log_resolved)
+        except FileNotFoundError:
+            same = False  # confirmed absence: no shared identity possible
         except OSError as e:
             raise WriteOutsideLogDirError(
                 f"cannot verify output file identity against the input log "
