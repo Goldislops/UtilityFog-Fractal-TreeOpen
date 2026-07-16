@@ -1,31 +1,33 @@
 import { create } from 'zustand'
 import { NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
+import { applyNodeUpdate, sanitizeNodeList } from './nodeValidation'
+import { sanitizeEdgeList } from './edgeValidation'
 
 interface SceneStore {
   nodes: NetworkNode[]
   edges: NetworkEdge[]
-  updateNode: (node: NetworkNode) => void
+  updateNode: (node: unknown) => void
   updateEdge: (edge: NetworkEdge) => void
-  setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) => void
+  setNetwork: (nodes: unknown, edges: unknown) => void
   clearNetwork: () => void
 }
 
-export const useSceneStore = create<SceneStore>((set) => ({
+export const useSceneStore = create<SceneStore>((set, get) => ({
   nodes: [],
   edges: [],
 
-  updateNode: (node: NetworkNode) =>
-    set((state) => {
-      const existingIndex = state.nodes.findIndex(n => n.id === node.id)
-      
-      if (existingIndex >= 0) {
-        const newNodes = [...state.nodes]
-        newNodes[existingIndex] = node
-        return { nodes: newNodes }
-      } else {
-        return { nodes: [...state.nodes, node] }
-      }
-    }),
+  // No-op discipline: the validators return the PREVIOUS references for
+  // updates that change nothing, and these actions then skip set()
+  // entirely — zustand notifies subscribers on every set() (even an empty
+  // partial produces a fresh merged state object), so skipping is the only
+  // way an identical update reaches zero notifications.
+  updateNode: (node: unknown) => {
+    // Ingestion boundary: malformed positions never reach the renderers
+    // (see nodeValidation.ts for the reconcile contract).
+    const state = get()
+    const nodes = applyNodeUpdate(state.nodes, node)
+    if (nodes !== state.nodes) set({ nodes })
+  },
 
   updateEdge: (edge: NetworkEdge) =>
     set((state) => {
@@ -40,8 +42,20 @@ export const useSceneStore = create<SceneStore>((set) => ({
       }
     }),
 
-  setNetwork: (nodes: NetworkNode[], edges: NetworkEdge[]) =>
-    set({ nodes, edges }),
+  setNetwork: (nodes: unknown, edges: unknown) => {
+    // Per-side tolerance: a malformed side never discards the valid
+    // other side; explicit empty arrays remain meaningful and clear.
+    // Both sides go through their shared materializing validators —
+    // admitted records are plain owned objects (see nodeValidation.ts
+    // and edgeValidation.ts for the contracts). Dangling REFERENCES on
+    // well-formed edges stay tolerated (renderers skip unmatched ids).
+    const state = get()
+    const nextNodes = Array.isArray(nodes) ? sanitizeNodeList(nodes, state.nodes) : state.nodes
+    const nextEdges = sanitizeEdgeList(edges, state.edges)
+    if (nextNodes !== state.nodes || nextEdges !== state.edges) {
+      set({ nodes: nextNodes, edges: nextEdges })
+    }
+  },
 
   clearNetwork: () =>
     set({ nodes: [], edges: [] }),

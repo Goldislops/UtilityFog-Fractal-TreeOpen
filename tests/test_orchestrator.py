@@ -36,12 +36,23 @@ from scripts.agent_backends import (
     ToolUseBlock,
 )
 from scripts.orchestrator import (
+    CATEGORY_HANDLER_EXCEPTION,
+    CATEGORY_LOCAL_REJECTION,
+    DEFAULT_MAX_TOTAL_TOOL_CALLS,
     IterationResult,
+    MAX_LIMIT_CEILING,
+    MAX_RECEIPT_BYTES,
+    MODE_OBSERVE,
+    MODE_PROPOSE,
+    OUTCOME_OK,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
+    build_audit_receipt,
     observation_tools,
-    tuning_tools,
+    proposal_tools,
+    resolve_mode,
+    tools_for_mode,
 )
 from scripts.orchestrator_config import (
     DEFAULT_BASE_URL,
@@ -165,46 +176,48 @@ def test_router_routes_get_census_through_client():
 
 
 def test_router_propose_requires_nonempty_justification():
+    """A blank justification is a local rejection (Package T amendment): the
+    router refuses it before any HTTP call, flags is_error=True, and categorizes
+    it local_rejection. No `_local_rejection` marker leaks to the model."""
     client, _ = _client_with_fake()
-    router = ToolRouter(client)
+    router = ToolRouter(client, mode=MODE_PROPOSE)
     payload, is_error = router.execute(
         "propose_tuning",
         {"params": {"signal_interval": 12}, "justification": "   "},
     )
-    assert is_error is False  # the handler returns the error as a payload, not raises
+    assert is_error is True
     assert payload["error"] == "bad_request"
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
     assert "justification" in payload["message"]
+    assert "_local_rejection" not in payload
 
 
 def test_router_propose_calls_client_with_orchestrator_source():
     client, http = _client_with_fake()
     http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-x"})
-    router = ToolRouter(client, orchestrator_source="agent:swarm-hunter")
+    router = ToolRouter(client, mode=MODE_PROPOSE, orchestrator_source="agent:legacy-tuner")
     router.execute(
         "propose_tuning",
         {"params": {"signal_interval": 14}, "justification": "reason"},
     )
     sent = http.calls[0]["json"]
-    assert sent["source"] == "agent:swarm-hunter"
+    assert sent["source"] == "agent:legacy-tuner"
+    # Package S: the router forces dry-run at the boundary.
+    assert sent["mode"] == "dry-run"
 
 
-def test_router_commit_always_uses_configured_approver_never_human():
-    """Safety: the orchestrator's router hard-codes the approver. No
-    mechanism exists for the LLM to spoof a human approver."""
-    client, http = _client_with_fake()
-    http.set("POST", "/api/tuning/commit", 200, {"status": "committed"})
-    router = ToolRouter(client, commit_approver="policy:auto")
-    router.execute("commit_tuning", {"proposal_id": "prop-x", "approver": "human:evil"})
-    sent = http.calls[0]["json"]
-    # The human:evil from LLM input is IGNORED — router uses its configured value.
-    assert sent["approver"] == "policy:auto"
-
-
-def test_router_commit_empty_proposal_id_rejected_client_side():
-    client, _ = _client_with_fake()
-    router = ToolRouter(client)
-    payload, _ = router.execute("commit_tuning", {})
-    assert payload["error"] == "bad_request"
+def test_router_never_registers_commit_tool_in_any_mode():
+    """Package S: commit_tuning is not an LLM-facing tool in observe OR propose
+    mode. A call to it returns unknown_tool and makes no HTTP request — the LLM
+    has no path to the commit endpoint through the router."""
+    for mode in (MODE_OBSERVE, MODE_PROPOSE):
+        client, http = _client_with_fake()
+        router = ToolRouter(client, mode=mode)
+        payload, is_error = router.execute(
+            "commit_tuning", {"proposal_id": "prop-x", "approver": "human:evil"})
+        assert is_error is True
+        assert payload["error"] == "unknown_tool"
+        assert http.calls == []  # no POST attempted
 
 
 def test_router_handler_exception_becomes_error_payload():
@@ -222,15 +235,17 @@ def test_router_handler_exception_becomes_error_payload():
     assert payload["error"] == "tool_handler_exception"
 
 
-def test_router_http_error_status_propagates():
+def test_router_http_error_status_is_flagged_as_error():
+    """Package T: HTTP status >= 400 is a genuine tool error (is_error True),
+    categorized http_rejection, with bounded status/error metadata retained."""
     client, http = _client_with_fake()
     http.set("GET", "/api/census", 500, {"error": "server_broke"})
     router = ToolRouter(client)
     payload, is_error = router.execute("get_medusa_census", {})
-    # is_error is False at router level (handler succeeded), but _status is in payload.
-    assert is_error is False
+    assert is_error is True
     assert payload["_status"] == 500
     assert payload["error"] == "server_broke"
+    assert payload["category"] == "http_rejection"
 
 
 # -- Orchestrator ------------------------------------------------------------
@@ -262,13 +277,14 @@ def _tool_use_response(
     )
 
 
-def _make_orchestrator(backend: MockBackend) -> tuple[Orchestrator, FakeHttp]:
+def _make_orchestrator(backend: MockBackend, *, mode: str = MODE_OBSERVE) -> tuple[Orchestrator, FakeHttp]:
     http = FakeHttp()
     client = OrchestratorClient("http://test:8080", http_do=http)
     orch = Orchestrator(
         backend=backend,
         client=client,
         system_prompt="test system",
+        mode=mode,
         max_tool_depth=4,
     )
     return orch, http
@@ -295,7 +311,7 @@ def test_iteration_propose_then_end():
         }, text="I'll propose reducing signal_interval."),
         _text_response("proposal submitted"),
     ])
-    orch, http = _make_orchestrator(backend)
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
     http.set("POST", "/api/tuning/propose", 200,
              {"proposal_id": "prop-newid", "status": "accepted"})
     result = orch.run_one_iteration("observe")
@@ -309,23 +325,43 @@ def test_iteration_propose_then_end():
     assert result.usage_total["output_tokens"] == 25 + 20
 
 
-def test_iteration_propose_then_commit_then_end():
+def test_iteration_commit_tool_call_is_unknown_and_uncommitted():
+    """Package S: even if a model emits a commit_tuning tool call, there is no
+    such tool — it resolves to unknown_tool, no POST is made, and nothing is
+    committed. (No LLM-facing commit path exists in any mode.)"""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "commit_tuning", {"proposal_id": "prop-xyz"}),
+        _text_response("nothing to commit with"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    result = orch.run_one_iteration("observe")
+    assert result.stopped_because == "end_turn"
+    assert result.commits_applied == []
+    # The commit tool call was executed as unknown_tool; no commit POST made.
+    assert all(c["path"] != "/api/tuning/commit" for c in http.calls)
+
+
+def test_iteration_commit_pending_proposal_is_rejected():
+    """propose mode forces dry-run: a commit-pending request is refused with a
+    deterministic local rejection (Package T amendment), not silently
+    downgraded. It counts under local_rejection, never ok, never a proposal."""
     backend = MockBackend(responses=[
         _tool_use_response("tu_1", "propose_tuning", {
             "params": {"signal_interval": 12},
             "justification": "reduce overhead",
             "mode": "commit-pending",
         }),
-        _tool_use_response("tu_2", "commit_tuning", {"proposal_id": "prop-xyz"}),
-        _text_response("committed"),
+        _text_response("ok, dry-run only"),
     ])
-    orch, http = _make_orchestrator(backend)
-    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-xyz", "status": "accepted"})
-    http.set("POST", "/api/tuning/commit", 200, {"proposal_id": "prop-xyz", "status": "committed"})
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
     result = orch.run_one_iteration("observe")
     assert result.stopped_because == "end_turn"
-    assert result.proposals_created == ["prop-xyz"]
-    assert result.commits_applied == ["prop-xyz"]
+    # No proposal was created (the router refused commit-pending before POSTing).
+    assert result.proposals_created == []
+    assert http.calls == []  # no POST — rejected at the router boundary
+    # Accounting: counted as a local rejection, not a success.
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION) == 1
+    assert result.outcome_counts.get(OUTCOME_OK, 0) == 0
 
 
 def test_iteration_hits_max_depth():
@@ -393,33 +429,42 @@ def test_iteration_system_prompt_is_forwarded():
     assert backend.calls[0].system == "custom system"
 
 
-def test_iteration_tools_default_to_observation_plus_tuning():
+def test_iteration_tools_default_to_observation_only():
+    """Package S: a default (observe) orchestrator advertises observation tools
+    only — no propose, no commit."""
     backend = MockBackend(responses=[_text_response("ok")])
-    orch, _ = _make_orchestrator(backend)
+    orch, _ = _make_orchestrator(backend)  # default mode = observe
     orch.run_one_iteration("go")
     tool_names = [t.name for t in backend.calls[0].tools]
     for expected in (
         "get_medusa_census", "get_medusa_equanimity", "get_acoustic_map",
         "get_params", "get_params_schema",
-        "propose_tuning", "commit_tuning",
     ):
         assert expected in tool_names
+    assert "propose_tuning" not in tool_names
+    assert "commit_tuning" not in tool_names
+
+
+def test_iteration_propose_mode_adds_proposal_tool_only():
+    backend = MockBackend(responses=[_text_response("ok")])
+    orch, _ = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    orch.run_one_iteration("go")
+    tool_names = [t.name for t in backend.calls[0].tools]
+    assert "propose_tuning" in tool_names
+    assert "commit_tuning" not in tool_names
 
 
 # -- tool spec shape ---------------------------------------------------------
 
 
-def test_propose_tuning_tool_requires_justification():
-    specs = {t.name: t for t in tuning_tools()}
+def test_proposal_tool_requires_justification_and_has_no_commit_mode():
+    specs = {t.name: t for t in proposal_tools()}
+    assert "commit_tuning" not in specs  # no commit tool exists
     propose = specs["propose_tuning"]
     assert "justification" in propose.input_schema["required"]
     assert "params" in propose.input_schema["required"]
-
-
-def test_commit_tuning_tool_requires_proposal_id():
-    specs = {t.name: t for t in tuning_tools()}
-    commit = specs["commit_tuning"]
-    assert commit.input_schema["required"] == ["proposal_id"]
+    # The dry-run-only surface no longer advertises a mode enum toggle.
+    assert "mode" not in propose.input_schema["properties"]
 
 
 # -- orchestrator_config ----------------------------------------------------
@@ -429,7 +474,7 @@ def test_config_defaults_sensibly():
     cfg = OrchestratorConfig()
     assert cfg.base_url == DEFAULT_BASE_URL
     assert cfg.backend_name == "mock"
-    assert cfg.commit_approver == "policy:auto"  # never accidentally human:
+    assert cfg.mode == "observe"  # fail-closed default; no LLM-facing write surface
 
 
 def test_config_from_env(monkeypatch):
@@ -534,3 +579,567 @@ def test_create_orchestrator_smoke():
     assert orch.backend is backend
     assert orch.system_prompt == DEFAULT_SYSTEM_PROMPT
     assert orch.max_tool_depth == 8
+
+
+# -- Package S: observe-by-default capability model -------------------------
+
+
+def test_config_default_mode_is_observe():
+    assert OrchestratorConfig().mode == MODE_OBSERVE
+
+
+def test_resolve_mode_fail_closed_is_exhaustive():
+    """Absent, malformed, and unknown values all fail closed to observe; only
+    the exact tokens observe/propose (trimmed, case-insensitive) are honored;
+    only propose is a non-observe result."""
+    for raw in (None, "", "   ", "garbage", "commit", "COMMIT", "obserform",
+                "propose!", "0", "true", "observe ; propose"):
+        assert resolve_mode(raw) == MODE_OBSERVE
+    for raw in ("observe", "OBSERVE", " observe ", "Observe"):
+        assert resolve_mode(raw) == MODE_OBSERVE
+    for raw in ("propose", "PROPOSE", " propose ", "Propose"):
+        assert resolve_mode(raw) == MODE_PROPOSE
+
+
+def test_config_from_env_mode(monkeypatch):
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "propose")
+    assert OrchestratorConfig.from_env().mode == MODE_PROPOSE
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "observe")
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE
+    # Malformed → fail closed to observe.
+    monkeypatch.setenv("MEDUSA_ORCHESTRATOR_MODE", "commit-everything")
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE
+    monkeypatch.delenv("MEDUSA_ORCHESTRATOR_MODE", raising=False)
+    assert OrchestratorConfig.from_env().mode == MODE_OBSERVE  # absent → observe
+
+
+def test_tools_for_mode_inventories():
+    observe_names = {t.name for t in tools_for_mode(MODE_OBSERVE)}
+    propose_names = {t.name for t in tools_for_mode(MODE_PROPOSE)}
+    assert "propose_tuning" not in observe_names
+    assert "commit_tuning" not in observe_names
+    assert "propose_tuning" in propose_names
+    assert "commit_tuning" not in propose_names
+    # propose is a strict superset of observe by exactly the proposal tool.
+    assert propose_names - observe_names == {"propose_tuning"}
+
+
+def test_observe_mode_makes_zero_posts_even_if_model_tries_to_write():
+    """In observe mode, a model that emits propose/commit tool calls gets
+    unknown_tool for both and the client makes zero POST requests."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "propose_tuning",
+                           {"params": {"signal_interval": 12}, "justification": "x"}),
+        _tool_use_response("tu_2", "commit_tuning", {"proposal_id": "prop-x"}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_OBSERVE)
+    result = orch.run_one_iteration("observe")
+    assert result.proposals_created == []
+    assert result.commits_applied == []
+    post_calls = [c for c in http.calls if c["method"] == "POST"]
+    assert post_calls == []
+
+
+def test_create_orchestrator_propose_mode_wires_router_and_tools():
+    backend = MockBackend(responses=[_text_response("ok")])
+    orch = create_orchestrator(
+        config=OrchestratorConfig(mode=MODE_PROPOSE),
+        backend=backend,
+    )
+    assert orch.mode == MODE_PROPOSE
+    assert orch.router.mode == MODE_PROPOSE
+    tool_names = {t.name for t in orch.tools}
+    assert "propose_tuning" in tool_names
+    assert "commit_tuning" not in tool_names
+
+
+# -- Package T: hard limits, error semantics, bounded audit receipts ---------
+
+
+def _obs_call(i: int):
+    return _tool_use_response(f"tu_{i}", "get_medusa_census", {})
+
+
+def test_total_tool_call_budget_executes_prefix_then_stops():
+    """A single turn emitting more tool calls than the total budget executes
+    only the permitted prefix; the rest get budget_rejection error results and
+    the iteration stops with tool_budget_exhausted. The cap is never exceeded."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [ToolUseBlock(id=f"tu_{i}", name="get_medusa_census", input={}) for i in range(5)]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4, max_total_tool_calls=3)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "tool_budget_exhausted"
+    assert result.tool_calls_executed == 3          # never exceeds the cap
+    assert result.outcome_counts.get("ok") == 3
+    assert result.outcome_counts.get("budget_rejection") == 2
+    assert len([c for c in http.calls if c["path"] == "/api/census"]) == 3
+
+
+def test_budget_shared_across_turns():
+    """The total budget is shared across turns, independent of max_tool_depth."""
+    backend = MockBackend(responses=[_obs_call(i) for i in range(10)] + [_text_response("x")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=10, max_total_tool_calls=2)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "tool_budget_exhausted"
+    assert result.tool_calls_executed == 2
+
+
+def test_second_proposal_attempt_is_refused():
+    """At most one proposal attempt per iteration, enforced in code."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [
+        ToolUseBlock(id="p1", name="propose_tuning",
+                     input={"params": {"signal_interval": 12}, "justification": "a"}),
+        ToolUseBlock(id="p2", name="propose_tuning",
+                     input={"params": {"signal_interval": 13}, "justification": "b"}),
+    ]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-1", "status": "accepted"})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        mode=MODE_PROPOSE, max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.proposals_created == ["prop-1"]           # only the first
+    assert result.outcome_counts.get("proposal_limit") == 1
+    assert len([c for c in http.calls if c["path"] == "/api/tuning/propose"]) == 1
+
+
+def test_http_rejections_are_errors_and_not_counted():
+    """403/422/500 tool responses are is_error, categorized http_rejection, and
+    never counted as created proposals or applied commits."""
+    for status in (403, 422, 500):
+        resp = _tool_use_response("tu_p", "propose_tuning",
+                                  {"params": {"signal_interval": 12}, "justification": "x"})
+        backend = MockBackend(responses=[resp, _text_response("done")])
+        http = FakeHttp()
+        client = OrchestratorClient("http://test:8080", http_do=http)
+        http.set("POST", "/api/tuning/propose", status, {"error": "nope"})
+        orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                            mode=MODE_PROPOSE, max_tool_depth=4)
+        result = orch.run_one_iteration("go")
+        assert result.proposals_created == []
+        assert result.outcome_counts.get("http_rejection") == 1
+
+
+def test_transport_failure_is_categorized():
+    """A URLError from the transport surfaces as a transport_failure category,
+    is_error True, without raising up into the loop."""
+    import urllib.error
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise urllib.error.URLError("network down")
+
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    router = ToolRouter(client)
+    payload, is_error = router.execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == "transport_failure"
+
+
+def test_handler_exception_message_does_not_leak_into_receipt():
+    """A handler exception carrying a sensitive-looking string is surfaced to
+    the LLM as a tool error, but the audit receipt records only the category —
+    never the exception text."""
+    secret = "SECRET_API_KEY_sk-abc123"
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise ValueError(secret)
+
+    resp = _tool_use_response("tu_c", "get_medusa_census", {})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s", max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.outcome_counts.get("handler_exception") == 1
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert secret not in receipt_json
+
+
+def test_audit_receipt_is_deterministic_and_bounded():
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend)
+    http.set("GET", "/api/census", 200, {"generation": 1})
+    result = orch.run_one_iteration("go")
+    r1 = json.dumps(build_audit_receipt(result), sort_keys=True)
+    r2 = json.dumps(result.audit_receipt(), sort_keys=True)
+    assert r1 == r2                                   # deterministic
+    assert len(r1.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    receipt = build_audit_receipt(result)
+    assert receipt["schema"] == "leanctx-orchestrator-v1"
+    assert receipt["truncated"] is False
+    for banned in ("content", "payload", "system", "messages", "api_key", "headers"):
+        assert banned not in receipt
+
+
+def test_audit_receipt_excludes_large_tool_payloads():
+    """Even if a tool returns a huge body, the receipt stays bounded and holds
+    no payload text (it records only counts/ids)."""
+    huge = {"generation": 1, "blob": "z" * 200000}
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, http = _make_orchestrator(backend)
+    http.set("GET", "/api/census", 200, huge)
+    result = orch.run_one_iteration("go")
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "z" * 1000 not in receipt_json
+
+
+# -- Package T amendment (Jack audit): non-dict handlers, local rejections,
+#    and adversarial audit-receipt bounding -----------------------------------
+
+
+@pytest.mark.parametrize("bad_return", [None, [1, 2, 3], "scalar-string", True, 42])
+def test_non_dict_handler_return_becomes_handler_exception(bad_return):
+    """A handler that returns a non-dict (None, list, scalar, bool) is caught by
+    the defensive try boundary and surfaced as a bounded handler_exception —
+    router.execute returns normally, so the iteration loop can never crash."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client)
+    # Simulate a buggy handler returning a non-dict.
+    router._handlers["get_medusa_census"] = lambda _args: bad_return
+    payload, is_error = router.execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["error"] == "tool_handler_exception"
+
+
+@pytest.mark.parametrize("justification", ["", "   ", "\t\n "])
+def test_router_local_rejection_blank_justification(justification):
+    """Blank/whitespace-only justification is a local rejection: is_error, the
+    local_rejection category, no HTTP POST, and no internal marker leaked."""
+    client, http = _client_with_fake()
+    router = ToolRouter(client, mode=MODE_PROPOSE)
+    payload, is_error = router.execute(
+        "propose_tuning",
+        {"params": {"signal_interval": 12}, "justification": justification},
+    )
+    assert is_error is True
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert "_local_rejection" not in payload
+    assert http.calls == []  # refused before any POST
+
+
+def test_router_local_rejection_commit_pending():
+    """commit-pending is a local rejection, not a silent downgrade: is_error,
+    local_rejection category, no POST."""
+    client, http = _client_with_fake()
+    router = ToolRouter(client, mode=MODE_PROPOSE)
+    payload, is_error = router.execute(
+        "propose_tuning",
+        {"params": {"signal_interval": 12}, "justification": "ok", "mode": "commit-pending"},
+    )
+    assert is_error is True
+    assert payload["error"] == "commit_pending_forbidden"
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert "_local_rejection" not in payload
+    assert http.calls == []
+
+
+def test_iteration_blank_justification_accounting():
+    """Iteration-level accounting: a blank-justification proposal increments the
+    local_rejection category, never ok, and never enters proposals_created."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_1", "propose_tuning",
+                           {"params": {"signal_interval": 12}, "justification": "  "}),
+        _text_response("acknowledged"),
+    ])
+    orch, http = _make_orchestrator(backend, mode=MODE_PROPOSE)
+    result = orch.run_one_iteration("observe")
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION) == 1
+    assert result.outcome_counts.get(OUTCOME_OK, 0) == 0
+    assert result.proposals_created == []
+    assert http.calls == []
+
+
+_RECEIPT_SCHEMA_KEYS = {
+    "schema", "stopped_because", "turns", "tool_calls_executed",
+    "outcome_counts", "proposals_created", "commits_applied",
+    "usage_total", "truncated",
+}
+
+
+class _StrBoom:
+    """An object whose __str__/__repr__ raise — must never be invoked by the
+    receipt builder (allowlisting discards it without stringifying)."""
+    def __str__(self):  # pragma: no cover - must not be called
+        raise RuntimeError("__str__ must not be invoked")
+    def __repr__(self):  # pragma: no cover
+        raise RuntimeError("__repr__ must not be invoked")
+    def __hash__(self):
+        return 7
+    def __eq__(self, other):
+        return False
+
+
+def _adversarial_iteration_result() -> IterationResult:
+    return IterationResult(
+        stopped_because="sk-SECRET_" + "X" * 300_000,        # secret-looking, huge, unknown
+        turns=10 ** 10000,                                   # absurd magnitude
+        tool_calls_executed=-9,                              # negative
+        proposals_created=["prop-deadbeef", "sk-SECRET_TOKEN", "prop-ABCDEF01",
+                           "prop-abc", "y" * 400, None, _StrBoom(),
+                           "prop-0123abcd"],                 # canonical + secret + malformed + non-str
+        commits_applied=["prop-0123abcd", 42, "commit_9"],
+        outcome_counts={"K" * 20_000: 1, "ok": 3, "weird" * 100: 2,    # huge/unknown keys
+                        1: 9, "1": 11, "local_rejection": -3,          # colliding + negative
+                        "handler_exception": _StrBoom(), True: 1},     # __str__-boom value, bool key
+        usage_total={"U" * 20_000: 999, "input_tokens": 10 ** 10000,   # huge key + huge value
+                     "output_tokens": [1, 2, 3], _StrBoom(): 4},       # list value + boom key
+    )
+
+
+def test_receipt_bounded_against_adversarial_result():
+    """A manually/adversarially-constructed IterationResult cannot inflate the
+    receipt, is deterministic under PLAIN json.dumps (no default=str), flags
+    truncation, and survives with only allowlisted, JSON-primitive values."""
+    result = _adversarial_iteration_result()
+    receipt = build_audit_receipt(result)
+    blob = json.dumps(receipt, sort_keys=True)          # plain dumps — no default=str
+    assert blob == json.dumps(build_audit_receipt(result), sort_keys=True)  # deterministic
+    assert len(blob.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert receipt["truncated"] is True
+    assert set(receipt.keys()) == _RECEIPT_SCHEMA_KEYS
+    # Magnitude-clamped, non-negative ints.
+    assert receipt["turns"] == 10 ** 12
+    assert receipt["tool_calls_executed"] == 0
+    # Stop reason: unknown token, secret text gone entirely (incl. prefixes).
+    assert receipt["stopped_because"] == "unknown"
+    assert "SECRET" not in blob and "sk-" not in blob
+    # Outcome/usage: only allowlisted keys, all non-negative ints.
+    assert set(receipt["outcome_counts"]) <= {
+        "ok", "unknown_tool", "handler_exception", "transport_failure",
+        "http_rejection", "budget_rejection", "proposal_limit", "local_rejection"}
+    assert set(receipt["usage_total"]) <= {"input_tokens", "output_tokens"}
+    assert all(isinstance(v, int) and v >= 0 for v in receipt["outcome_counts"].values())
+    assert all(isinstance(v, int) and v >= 0 for v in receipt["usage_total"].values())
+    # Specific coercions.
+    assert receipt["outcome_counts"]["ok"] == 3                       # valid small int kept
+    assert receipt["usage_total"]["input_tokens"] == 10 ** 12         # huge value clamped
+    assert receipt["outcome_counts"].get("local_rejection", 0) == 0   # negative → 0
+    assert receipt["outcome_counts"]["handler_exception"] == 0        # boom value → 0
+    assert receipt["usage_total"]["output_tokens"] == 0              # list value → 0
+    # Unknown/secret keys removed entirely.
+    for banned in ("K" * 20_000, "weird", "U" * 20_000, "unknown_junk"):
+        assert banned not in blob
+    # Ids: only canonical prop-<8 hex> survive; secret/malformed/non-str omitted.
+    assert receipt["proposals_created"] == ["prop-deadbeef", "prop-0123abcd"]
+    assert receipt["commits_applied"] == ["prop-0123abcd"]
+    assert "SECRET_TOKEN" not in blob  # alphabet-valid secret-looking id dropped
+
+
+def test_receipt_colliding_int_and_str_keys_both_discarded():
+    """Integer 1 and string '1' are both outside the outcome allowlist and are
+    discarded — no coercion, no key collision, no exception."""
+    result = IterationResult(stopped_because="end_turn", turns=1, tool_calls_executed=0,
+                             outcome_counts={1: 5, "1": 7})
+    receipt = build_audit_receipt(result)
+    assert receipt["outcome_counts"] == {}
+    assert receipt["truncated"] is True
+    # Deterministic plain serialization round-trips.
+    assert json.dumps(receipt, sort_keys=True) == json.dumps(build_audit_receipt(result), sort_keys=True)
+
+
+@pytest.mark.parametrize("count", [
+    pytest.param(True, id="bool_true"),
+    pytest.param(False, id="bool_false"),
+    pytest.param(-1, id="negative"),
+    pytest.param(1.5, id="float"),
+    pytest.param("3", id="str"),
+    pytest.param(None, id="none"),
+    # Explicit id: a 10001-digit int must not be stringified for the test id
+    # (Python's int->str 4300-digit limit) — the builder clamps it by value.
+    pytest.param(10 ** 10000, id="ten_pow_10000"),
+])
+def test_receipt_rejects_non_uint_counts(count):
+    """bool / negative / non-integer / oversized counts are normalized to a
+    bounded non-negative int without raising, and flag truncation."""
+    result = IterationResult(stopped_because="end_turn", turns=count, tool_calls_executed=0,
+                             outcome_counts={"ok": count}, usage_total={"input_tokens": count})
+    receipt = build_audit_receipt(result)
+    assert isinstance(receipt["turns"], int) and receipt["turns"] >= 0
+    assert receipt["turns"] <= 10 ** 12
+    assert isinstance(receipt["outcome_counts"]["ok"], int) and receipt["outcome_counts"]["ok"] >= 0
+    assert isinstance(receipt["usage_total"]["input_tokens"], int)
+    assert receipt["truncated"] is True
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= MAX_RECEIPT_BYTES
+
+
+def test_receipt_str_boom_object_never_stringified():
+    """Objects whose __str__ raises appear as ids, keys, and values; the builder
+    discards them without invoking __str__ and never raises."""
+    result = IterationResult(
+        stopped_because=_StrBoom(), turns=1, tool_calls_executed=1,
+        proposals_created=[_StrBoom(), "prop-0000000a"],
+        outcome_counts={"ok": _StrBoom()},
+        usage_total={"input_tokens": _StrBoom()},
+    )
+    receipt = build_audit_receipt(result)   # must not raise
+    assert receipt["stopped_because"] == "unknown"
+    assert receipt["proposals_created"] == ["prop-0000000a"]
+    assert receipt["outcome_counts"]["ok"] == 0
+    assert receipt["usage_total"]["input_tokens"] == 0
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= MAX_RECEIPT_BYTES
+
+
+def test_receipt_keeps_only_canonical_proposal_ids():
+    """Only canonical production ids (``prop-`` + 8 lowercase hex) survive.
+    Secret-looking but alphabet-valid strings, arbitrary text, uppercase,
+    overlong, short, non-hex, and non-string entries are all dropped —
+    including their prefixes."""
+    result = IterationResult(
+        stopped_because="end_turn", turns=1, tool_calls_executed=1,
+        proposals_created=[
+            "prop-deadbeef", "prop-0123abcd",   # canonical → survive
+            "sk-SECRET_TOKEN",                  # secret-looking, alphabet-valid → drop
+            "arbitrary-valid-text",             # arbitrary → drop
+            "prop-DEADBEEF",                    # uppercase hex → drop
+            "prop-deadbeef00",                  # overlong → drop
+            "prop-abc",                         # too short → drop
+            "prop-ghijklmn",                    # non-hex letters → drop
+            None, 42,                           # non-string → drop
+        ],
+        commits_applied=["prop-0123abcd"],
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt["proposals_created"] == ["prop-deadbeef", "prop-0123abcd"]
+    assert receipt["commits_applied"] == ["prop-0123abcd"]
+    blob = json.dumps(receipt, sort_keys=True)
+    for banned in ("SECRET", "sk-", "arbitrary", "DEADBEEF", "ghij"):
+        assert banned not in blob
+    assert receipt["truncated"] is True
+
+
+class _HostileList(list):
+    def __iter__(self):  # pragma: no cover - must not be invoked
+        raise RuntimeError("__iter__ must not be invoked")
+
+
+class _HostileDict(dict):
+    def items(self):  # pragma: no cover
+        raise RuntimeError("items must not be invoked")
+
+    def __iter__(self):  # pragma: no cover
+        raise RuntimeError("__iter__ must not be invoked")
+
+
+def test_receipt_rejects_hostile_container_subclasses():
+    """A list/dict subclass whose iteration hooks raise is rejected by exact
+    type BEFORE any iteration — the receipt normalizes to empty with
+    truncated=True and never invokes the hostile __iter__/items."""
+    hostile_ids = _HostileList(["prop-deadbeef"])
+    hostile_map = _HostileDict({"ok": 1})
+    result = IterationResult(
+        stopped_because="end_turn", turns=1, tool_calls_executed=1,
+        proposals_created=hostile_ids, commits_applied=hostile_ids,
+        outcome_counts=hostile_map, usage_total=hostile_map,
+    )
+    receipt = build_audit_receipt(result)   # must not raise
+    assert receipt["proposals_created"] == []
+    assert receipt["commits_applied"] == []
+    assert receipt["outcome_counts"] == {}
+    assert receipt["usage_total"] == {}
+    assert receipt["truncated"] is True
+
+
+def test_receipt_normal_production_result_not_truncated():
+    """A realistic production IterationResult — canonical ids, known outcome
+    categories, token usage — passes through untouched with truncated=False and
+    serializes deterministically with plain json.dumps."""
+    result = IterationResult(
+        stopped_because="end_turn", turns=2, tool_calls_executed=3,
+        proposals_created=["prop-deadbeef"],
+        commits_applied=[],
+        outcome_counts={"ok": 3, "local_rejection": 1},
+        usage_total={"input_tokens": 120, "output_tokens": 340},
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt["truncated"] is False
+    assert receipt["proposals_created"] == ["prop-deadbeef"]
+    assert receipt["outcome_counts"] == {"local_rejection": 1, "ok": 3}
+    assert receipt["usage_total"] == {"input_tokens": 120, "output_tokens": 340}
+    assert json.dumps(receipt, sort_keys=True) == json.dumps(
+        build_audit_receipt(result), sort_keys=True)
+
+
+def test_receipt_minimal_fallback_is_within_limit(monkeypatch):
+    """Exercise the fixed minimal fallback directly: with the cap forced just
+    above the minimal receipt but below any populated one, the trim loop falls
+    through to the fixed minimal fallback, which is itself within the limit."""
+    import scripts.orchestrator as orch_mod
+    minimal = {"schema": "leanctx-orchestrator-v1",
+               "stopped_because": "unknown", "truncated": True}
+    minimal_size = len(json.dumps(minimal, sort_keys=True).encode("utf-8"))
+    monkeypatch.setattr(orch_mod, "MAX_RECEIPT_BYTES", minimal_size + 5)
+    result = IterationResult(
+        stopped_because="end_turn",
+        turns=1, tool_calls_executed=1,
+        proposals_created=[f"prop-{i:08x}" for i in range(500)],  # canonical ids
+        outcome_counts={"ok": 500},
+        usage_total={"input_tokens": 999_999},
+    )
+    receipt = build_audit_receipt(result)
+    assert receipt == minimal
+    assert receipt["truncated"] is True
+    assert len(json.dumps(receipt, sort_keys=True).encode("utf-8")) <= minimal_size + 5
+
+
+def test_no_post_after_budget_exhaustion():
+    """Once the total budget is spent, no further HTTP POST is attempted."""
+    from scripts.agent_backends import AgentResponse, ToolUseBlock
+    blocks = [ToolUseBlock(id=f"p_{i}", name="propose_tuning",
+                           input={"params": {"signal_interval": 12}, "justification": "j"})
+              for i in range(3)]
+    resp = AgentResponse.from_content(blocks, stop_reason="tool_use",
+                                      usage={"input_tokens": 1, "output_tokens": 1})
+    backend = MockBackend(responses=[resp, _text_response("done")])
+    http = FakeHttp()
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    http.set("POST", "/api/tuning/propose", 200, {"proposal_id": "prop-1", "status": "accepted"})
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        mode=MODE_PROPOSE, max_tool_depth=4, max_total_tool_calls=1)
+    result = orch.run_one_iteration("go")
+    assert result.tool_calls_executed == 1
+    assert len([c for c in http.calls if c["method"] == "POST"]) == 1
+
+
+def test_numeric_limits_are_validated():
+    backend = MockBackend(responses=[_text_response("x")])
+    client = OrchestratorClient("http://test:8080", http_do=FakeHttp())
+    for bad in (0, -1, MAX_LIMIT_CEILING + 1, True):
+        with pytest.raises(ValueError):
+            Orchestrator(backend=backend, client=client, system_prompt="s",
+                         max_total_tool_calls=bad)
+    with pytest.raises(ValueError):
+        Orchestrator(backend=backend, client=client, system_prompt="s", max_tool_depth=0)
+
+
+def test_orchestrator_has_no_reverse_dependency_on_observer_or_engine():
+    """The legacy orchestrator must not import the offline detector, observer,
+    engine, or physics modules — the quarantine is one-directional."""
+    import inspect
+    import scripts.orchestrator as orch_mod
+    src = inspect.getsource(orch_mod)
+    for banned in ("continuous_evolution_ca", "nextness_observer",
+                   "nextness_calibration", "swarm_hunter"):
+        assert banned not in src

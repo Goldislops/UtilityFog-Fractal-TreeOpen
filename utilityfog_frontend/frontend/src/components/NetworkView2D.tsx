@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { SimBridgeClient, NetworkNode, NetworkEdge } from '../ws/SimBridgeClient'
+import { applyNodeUpdate, sanitizeNodeList } from '../viz3d/nodeValidation'
+import { sanitizeEdgeList } from '../viz3d/edgeValidation'
 
 interface NetworkView2DProps {
   simClient: SimBridgeClient | null
@@ -13,21 +15,22 @@ export default function NetworkView2D({ simClient }: NetworkView2DProps) {
   useEffect(() => {
     if (!simClient) return
 
-    const handleNetworkUpdate = (data: any) => {
-      if (data.nodes) setNodes(data.nodes)
-      if (data.edges) setEdges(data.edges)
+    // Same ingestion boundary as the scene store (nodeValidation.ts): this
+    // view keeps its own subscription, so malformed positions must be
+    // reconciled here too before the draw effect indexes node.position.
+    const handleNetworkUpdate = (data?: unknown) => {
+      if (!data || typeof data !== 'object') return
+      const d = data as { nodes?: unknown; edges?: unknown }
+      // Per-side tolerance mirrors the store: malformed one side never
+      // discards the other; explicit [] clears its collection. Both sides
+      // use the shared materializing validators — well-formed dangling
+      // references stay tolerated (the draw effect skips unmatched ids).
+      if (Array.isArray(d.nodes)) setNodes(prev => sanitizeNodeList(d.nodes, prev))
+      if (Array.isArray(d.edges)) setEdges(prev => sanitizeEdgeList(d.edges, prev))
     }
 
-    const handleNodeUpdate = (node: NetworkNode) => {
-      setNodes(prev => {
-        const index = prev.findIndex(n => n.id === node.id)
-        if (index >= 0) {
-          const newNodes = [...prev]
-          newNodes[index] = node
-          return newNodes
-        }
-        return [...prev, node]
-      })
+    const handleNodeUpdate = (node?: unknown) => {
+      setNodes(prev => applyNodeUpdate(prev, node))
     }
 
     simClient.on('network_update', handleNetworkUpdate)

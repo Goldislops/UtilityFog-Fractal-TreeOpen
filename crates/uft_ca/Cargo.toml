@@ -43,3 +43,7 @@ wasm = []
 [[bench]]
 name = "stepping"
 harness = false
+
+[[bench]]
+name = "counter_rng"
+harness = false

@@ -7,32 +7,50 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview --port 4173",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0 && npm run check:lint-rules",
     "test:ui": "playwright test",
     "test:ui:headed": "playwright test --headed",
-    "test:ui:report": "npx playwright show-report"
+    "test:ui:report": "npx playwright show-report",
+    "test:budget": "node --test scripts/check-bundle-budget.test.mjs",
+    "check:budget": "node scripts/check-bundle-budget.mjs",
+    "test:unit": "vitest run",
+    "test:unit:coverage": "vitest run --coverage",
+    "check:unit-coverage": "node scripts/check-unit-coverage.mjs",
+    "test:coverage-gate": "node --test scripts/check-unit-coverage.test.mjs",
+    "check:lint-rules": "node scripts/check-lint-rules.mjs"
   },
   "dependencies": {
+    "@react-three/drei": "^9.92.0",
+    "@react-three/fiber": "^8.15.0",
+    "leva": "^0.10.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "three": "^0.160.0",
-    "@react-three/fiber": "^8.15.0",
-    "@react-three/drei": "^9.92.0",
-    "zustand": "^4.4.7",
-    "leva": "^0.10.0"
+    "zustand": "^4.4.7"
   },
   "devDependencies": {
+    "@eslint/js": "9.39.5",
     "@playwright/test": "^1.54.2",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/node": "^22.0.0",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
+    "@typescript-eslint/eslint-plugin": "8.63.0",
+    "@typescript-eslint/parser": "8.63.0",
     "@vitejs/plugin-react": "^4.7.0",
-    "eslint": "^8.57.0",
-    "eslint-plugin-react": "^7.34.1",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.6",
+    "@vitest/coverage-v8": "4.1.10",
+    "eslint": "9.39.5",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "eslint-plugin-react-refresh": "0.4.26",
+    "fast-check": "4.9.0",
+    "globals": "17.7.0",
+    "jsdom": "29.1.1",
     "typescript": "^5.2.2",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "vitest": "4.1.10"
   }
 }
-

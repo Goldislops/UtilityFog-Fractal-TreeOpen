@@ -27,3 +27,113 @@
 - Use browser DevTools Performance tab
 - Three.js Inspector extension
 - React DevTools Profiler
+
+---
+
+# Bundle budget (CI gate)
+
+## What is measured
+`scripts/check-bundle-budget.mjs` inventories the JavaScript and CSS assets
+of a **completed Vite production build** under `dist/assets`, and reports
+per-kind and total sizes two ways:
+
+- **raw bytes** — the on-disk asset size;
+- **gzip bytes** — `node:zlib` `gzipSync` at the fixed configuration
+  `{ level: 9 }` (a stable proxy for transfer size; not identical to any
+  particular CDN's encoder).
+
+Other extensions (`.map`, images, etc.) are ignored. The checker never
+modifies build artifacts, and it **fails closed**: missing `dist`, missing
+`dist/assets`, or a build with no JavaScript asset is a failure, not a pass.
+
+## Baseline (measured, not assumed)
+Measured on the build seat from the PR #316 build (`vite build`, 2026-07-11):
+
+| Asset | Raw bytes | Gzip bytes |
+|---|---|---|
+| `index-*.js` (single chunk) | **979,384** | **272,585** |
+| `index-*.css` | **912** | **483** |
+
+(The earlier displayed "979.38 kB / 273.21 kB" build-log values are Vite's
+decimal-rounded display, not exact bytes; the numbers above are exact.)
+
+## Limits and headroom policy
+**Policy: baseline + 25% headroom, rounded UP to the next 16 KiB (16,384 B)
+boundary, with 16 KiB as a floor for tiny assets** (so content-hash noise
+can never trip a near-zero budget).
+
+| Budget | Limit (bytes) | Headroom vs baseline |
+|---|---|---|
+| `js_raw` | 1,228,800 (75 × 16 KiB) | ≈ +25.5% |
+| `js_gzip` | 344,064 (21 × 16 KiB) | ≈ +26.2% |
+| `css_raw` | 16,384 (floor) | large (baseline is 912 B) |
+| `css_gzip` | 16,384 (floor) | large (baseline is 483 B) |
+
+The intent is to catch **meaningful regression** (a new heavyweight
+dependency, accidental duplication, an unminified artifact) while ignoring
+ordinary Vite hash changes and small feature growth.
+
+## What this is NOT
+A bundle budget is a **size** gate, not a runtime-performance measurement.
+It says nothing about frame rate, latency, memory, or WebSocket behavior.
+
+## Local commands
+From `utilityfog_frontend/frontend`:
+
+```
+npm run test:budget    # unit tests for the checker (node:test)
+npm run build          # produce dist/
+npm run check:budget   # evaluate dist/ against the budgets
+```
+
+## Interpreting a failure
+The checker prints per-asset sizes, per-kind totals against limits, one
+stable machine line (`BUNDLE_BUDGET v1 … status=PASS|FAIL`), and a
+`bundle budget FAIL: <kind> <actual> bytes exceeds budget <limit> bytes`
+line per exceeded budget. Exit codes: `1` = budget exceeded, `2` = missing
+build output (fail closed).
+
+First response to a failure is to find what grew (`ls -l dist/assets`,
+compare the machine line against this file's baseline), not to raise the
+limit.
+
+## Update protocol
+Budgets change **only with evidence**: a PR that (a) re-measures and records
+the new baseline in this file, (b) names the change that legitimately moved
+it (e.g. an approved dependency), and (c) re-derives the limits from the
+stated policy. Casually raising limits to silence the gate defeats it.
+
+## Bundle budget v2 — entry/chunk budgets (Package AH, 2026-07-12)
+
+Package AG split the build: the shell entry loads synchronously and the
+heavy views arrive as async chunks. v2 adds fail-closed budgets for the
+pieces while KEEPING the v1 totals unchanged — chunk splitting must never
+disguise total growth.
+
+Measured baseline (AG build, Node zlib gzip level 9):
+
+| dimension | measured | budget | derivation |
+|---|---|---|---|
+| entry raw | 155,478 | 196,608 | 12 x 16 KiB (~+26.5%) |
+| entry gzip | 50,240 | 65,536 | 4 x 16 KiB (~+30%) |
+| largest async raw (3D) | 826,250 | 1,048,576 | 64 x 16 KiB (~+26.9%) |
+| largest async gzip | 223,412 | 294,912 | 18 x 16 KiB (~+32%) |
+| total JS raw/gzip | 986,638 / 275,640 | 1,228,800 / 344,064 | **kept from v1** |
+| CSS raw/gzip | 912 / 483 | 16,384 / 16,384 | floor, kept |
+
+Mechanics: the entry set is every module `<script src="/assets/*.js">` in
+the BUILT `dist/index.html` (duplicates count once); every other JS asset
+is an async chunk; the largest is budgeted individually. Fail-closed exits:
+missing dist/assets, missing or script-less `index.html`, malformed script
+references, references to absent assets, and empty JS output all exit 2/1
+rather than passing silently. Machine line: `BUNDLE_BUDGET v2 ...` (the v1
+line is retired with this change).
+
+Non-claims: budgets bound BUILT sizes only — nothing here measures network
+transfer, caching behavior, or user-perceived latency.
+
+Budget-change protocol (unchanged from v1, restated): budgets move only in
+a dedicated commit that (1) states the measured trigger, (2) re-derives via
+baseline + 25% rounded up to the next 16 KiB (16 KiB floor), and (3) is
+reviewed like any contract change. Never widen a budget to absorb
+unexplained growth; find the growth first.

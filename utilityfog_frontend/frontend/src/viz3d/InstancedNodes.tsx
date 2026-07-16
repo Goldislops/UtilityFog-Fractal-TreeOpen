@@ -1,6 +1,5 @@
 import { useRef, useMemo, useEffect } from 'react'
-import { useFrame } from '@react-three/fiber'
-import { InstancedMesh, Matrix4, Color, Object3D } from 'three'
+import { InstancedMesh, Color, Object3D } from 'three'
 import { NetworkNode } from '../ws/SimBridgeClient'
 
 interface InstancedNodesProps {
@@ -18,7 +17,6 @@ export default function InstancedNodes({ nodes }: InstancedNodesProps) {
     if (!meshRef.current) return
 
     const mesh = meshRef.current
-    const matrix = new Matrix4()
 
     // Update instance matrices and colors
     nodes.forEach((node, index) => {
@@ -59,14 +57,6 @@ export default function InstancedNodes({ nodes }: InstancedNodesProps) {
       mesh.instanceColor.needsUpdate = true
     }
   }, [nodes, tempObject, tempColor, maxNodes])
-
-  useFrame((state) => {
-    if (!meshRef.current) return
-
-    // Optional: Add subtle animation
-    const time = state.clock.getElapsedTime()
-    // meshRef.current.rotation.y = time * 0.1
-  })
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, maxNodes]}>

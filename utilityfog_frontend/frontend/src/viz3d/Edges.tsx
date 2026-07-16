@@ -8,7 +8,7 @@ interface EdgesProps {
 }
 
 export default function Edges({ edges, nodes }: EdgesProps) {
-  const { geometry, colors } = useMemo(() => {
+  const geometry = useMemo(() => {
     const positions: number[] = []
     const colors: number[] = []
     
@@ -38,7 +38,7 @@ export default function Edges({ edges, nodes }: EdgesProps) {
     geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3))
     geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3))
 
-    return { geometry, colors }
+    return geometry
   }, [edges, nodes])
 
   if (edges.length === 0) {

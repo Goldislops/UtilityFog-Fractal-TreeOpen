@@ -5,7 +5,9 @@ on:
     branches: [ main, develop ]
     paths: [ 'utilityfog_frontend/frontend/**' ]
   pull_request:
-    branches: [ main ]
+    # No base-branch filter: stacked PRs (frontend children based on other
+    # frontend branches) must exercise this gate too, not only PRs to main.
+    # The path filter below still scopes the workflow to frontend changes.
     paths: [ 'utilityfog_frontend/frontend/**' ]
 
 permissions:
@@ -14,6 +16,14 @@ permissions:
 jobs:
   ui-smoke:
     runs-on: ubuntu-latest
+
+    # Cross-browser matrix (Package AJ, issue #2): the same semantic suite
+    # per engine. fail-fast off so one engine's failure still surfaces the
+    # other engines' results.
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
 
     defaults:
       run:
@@ -27,22 +37,47 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '20'
+          cache: npm
+          cache-dependency-path: utilityfog_frontend/frontend/package-lock.json
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install dependencies (reproducible)
+        run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      - name: Typecheck
+        run: npx tsc --noEmit
 
-      # No build step when using Vite dev server
+      - name: Bundle budget unit tests
+        run: npm run test:budget
 
-      - name: Run smoke tests
-        run: npm run test:ui
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Bundle budget check
+        run: npm run check:budget
+
+      - name: Install Playwright browser (matrix engine only)
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      # Playwright smoke tests still run against the Vite dev server (see
+      # playwright.config.ts); the production build above exists to feed the
+      # bundle-budget gate.
+
+      - name: Run smoke tests (${{ matrix.browser }})
+        # Headless Firefox cannot create a WebGL context (the three.js 3D
+        # view needs one; Chromium/WebKit headless ship software GL).
+        # Firefox therefore runs HEADED under xvfb — xvfb-run is part of
+        # the ubuntu runner image; no extra installation.
+        run: |
+          if [ "${{ matrix.browser }}" = "firefox" ]; then
+            xvfb-run --auto-servernum npx playwright test --project=firefox --headed
+          else
+            npx playwright test --project=${{ matrix.browser }}
+          fi
 
       - name: Upload test report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.browser }}
           path: utilityfog_frontend/frontend/playwright-report/
           retention-days: 7

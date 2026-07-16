@@ -1,4 +1,4 @@
-import { Vector3 } from 'three'
+import { NetworkNode } from '../ws/SimBridgeClient'
 
 export function calculateDistance(pos1: [number, number, number], pos2: [number, number, number]): number {
   const [x1, y1, z1] = pos1
@@ -29,8 +29,8 @@ export function clampPosition(
   ]
 }
 
-export function createSpatialGrid(nodes: any[], gridSize: number = 10) {
-  const grid: { [key: string]: any[] } = {}
+export function createSpatialGrid(nodes: NetworkNode[], gridSize: number = 10) {
+  const grid: { [key: string]: NetworkNode[] } = {}
   
   nodes.forEach(node => {
     const gridX = Math.floor(node.position[0] / gridSize)
@@ -49,9 +49,9 @@ export function createSpatialGrid(nodes: any[], gridSize: number = 10) {
 
 export function findNearbyNodes(
   targetPosition: [number, number, number],
-  nodes: any[],
+  nodes: NetworkNode[],
   radius: number
-): any[] {
+): NetworkNode[] {
   return nodes.filter(node => {
     return calculateDistance(targetPosition, node.position) <= radius
   })
@@ -90,7 +90,7 @@ export class PerformanceMonitor {
   }
 }
 
-export function throttle<T extends any[]>(
+export function throttle<T extends unknown[]>(
   func: (...args: T) => void,
   wait: number
 ): (...args: T) => void {
@@ -118,7 +118,7 @@ export function throttle<T extends any[]>(
   }
 }
 
-export function debounce<T extends any[]>(
+export function debounce<T extends unknown[]>(
   func: (...args: T) => void,
   wait: number
 ): (...args: T) => void {

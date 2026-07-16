@@ -8,67 +8,12 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Detect Node project
-        id: detect
-        run: |
-          if [ -f package.json ]; then echo "has_node=true" >> $GITHUB_OUTPUT; else echo "has_node=false" >> $GITHUB_OUTPUT; fi
-
-      - name: Setup Node
-        if: steps.detect.outputs.has_node == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install
-        if: steps.detect.outputs.has_node == 'true'
-        run: npm ci --no-audit --no-fund
-
-      - name: Typecheck
-        if: steps.detect.outputs.has_node == 'true'
-        run: |
-          if [ -f tsconfig.json ] || npx --yes tsc -v >/dev/null 2>&1; then
-            npx --yes tsc -noEmit
-          else
-            echo "No TypeScript config found; skipping"
-          fi
-
-      - name: Lint
-        if: steps.detect.outputs.has_node == 'true'
-        run: |
-          if npm run -s | grep -q "^  lint$"; then
-            npm run lint
-          else
-            echo "No lint script; skipping"
-          fi
-
-      - name: Build
-        if: steps.detect.outputs.has_node == 'true'
-        run: |
-          if npm run -s | grep -q "^  build$"; then
-            npm run build
-          else
-            echo "No build script; skipping"
-          fi
-
-      - name: Test
-        if: steps.detect.outputs.has_node == 'true'
-        run: |
-          if npm run -s | grep -q "^  test$"; then
-            npm test --silent -- --ci || npm test --silent
-          else
-            echo "No test script; skipping"
-          fi
-
-  # Python test gate (issue #165). The Node `verify` job above skips every
-  # step when no package.json is present, so for this Python repo it was
-  # auto-passing without running anything. This job runs the maintained
-  # Python suites so a real regression fails the build visibly.
+  # Python test gate (issue #165). Historical: a root-level Node `verify`
+  # job used to sit above this one; with no root package.json it skipped
+  # every step and auto-passed. It was removed from the required set
+  # (branch-protection Phase 2, 2026-07-12) and then deleted here. This
+  # job runs the maintained Python suites so a real regression fails the
+  # build visibly.
   #
   # Scope note: gates the full tests/ suite (pytest.ini scopes collection to
   # tests/ and keeps the root-level legacy *_test.py scripts out). The uft_ca
@@ -114,3 +59,59 @@ jobs:
           # 0 errors). pytest.ini scopes collection to tests/ and keeps
           # root-level legacy scripts out.
           python -m pytest tests/ -q
+
+  # Frontend quality gate (issue #6). The removed root Node `verify` job
+  # was inert for this repo layout (no root package.json), so frontend
+  # regressions never failed CI here. This job runs the real gates from
+  # the app directory on every push/PR — deliberately NO path filter, so the check
+  # is always present and branch protection can require it without wedging
+  # non-frontend PRs. Fork-compatible: read-only permissions, no secrets.
+  # The Playwright E2E suite is deliberately excluded (no browser
+  # downloads); ui-smoke.yml owns that.
+  frontend-quality:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: utilityfog_frontend/frontend
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: utilityfog_frontend/frontend/package-lock.json
+
+      - name: Install (deterministic, from committed lockfile)
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests + coverage contract (Vitest, jsdom — Playwright E2E stays in ui-smoke)
+        # Coverage thresholds gate only the explicitly unit-owned modules
+        # (see vitest.config.ts coverage block); measured stable across
+        # repeated runs, adds ~2s over the plain unit run.
+        run: npm run test:unit:coverage
+
+      - name: Coverage-gate self-tests
+        run: npm run test:coverage-gate
+
+      - name: Per-file coverage floors
+        # Enforceable per-module floors over the json-summary the previous
+        # step generated — a regression, a silently missing module row, or
+        # a malformed summary all fail (scripts/check-unit-coverage.mjs).
+        run: npm run check:unit-coverage
+
+      - name: Budget-script unit tests
+        run: npm run test:budget
+
+      - name: Build
+        run: npm run build
+
+      - name: Bundle budget
+        run: npm run check:budget
