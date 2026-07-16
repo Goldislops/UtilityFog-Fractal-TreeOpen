@@ -54,7 +54,7 @@ print(create_orchestrator().run_one_iteration('Observe Medusa; suggest one tunin
 Safety contract (enforced at three layers — schema, router, API):
 
 - **LOCKED** parameters (e.g. `structural_to_void_decay_prob`) cannot be changed via any commit path.
-- **HUMAN_APPROVAL** parameters require an `approver` string starting with `human:` — a syntactic, unauthenticated caller-supplied label (no identity verification). The legacy orchestrator's LLM-facing surface exposes no commit tool in any mode (post-S), and its historical autonomous identity `policy:auto` is rejected at the server boundary for every parameter category (post-R, `403 auto_commit_disabled`). AUTO-category proposals are not restricted to authenticated humans — other approver strings currently pass the gate.
+- **HUMAN_APPROVAL** parameters require an `approver` string starting with `human:` — a syntactic, unauthenticated caller-supplied label (no identity verification). The legacy orchestrator's LLM-facing surface exposes no commit tool in any mode (post-S), and its historical autonomous identity `policy:auto` is rejected at the server boundary for every otherwise-valid proposal (post-R, `403 auto_commit_disabled`). Commits of AUTO-category proposals are not restricted to authenticated humans — other approver strings currently pass the gate.
 - Per-parameter rate limit (1000 generations between successive commits to the same param).
 - Every proposal requires a non-empty justification string.
 - Append-only JSONL audit trail at `data/tuning_ledger.jsonl`.

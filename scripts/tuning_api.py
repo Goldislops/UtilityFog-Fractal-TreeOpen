@@ -265,10 +265,11 @@ class TuningState:
             if approver.strip().casefold() == AUTO_COMMIT_APPROVER:
                 raise TuningError(
                     403, "auto_commit_disabled",
-                    "Autonomous commits (approver='policy:auto') are disabled at "
-                    "the server boundary. HUMAN_APPROVAL-category parameters "
-                    "additionally require approver='human:<name>' (an "
-                    "unauthenticated label).",
+                    "approver='policy:auto' is disabled at the server boundary "
+                    "for otherwise-valid proposals. For AUTO-category "
+                    "parameters, other caller-supplied strings pass the "
+                    "approver gate; HUMAN_APPROVAL-category parameters require "
+                    "approver='human:<name>' (an unauthenticated label).",
                 )
 
             # Approver policy.
