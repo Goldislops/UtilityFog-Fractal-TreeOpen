@@ -719,6 +719,63 @@ def test_symlink_output_alias_refused_and_inputs_intact(tmp_path, capsys) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Output-boundary pins: directory and symlink-to-directory targets.
+#
+# Coverage pinning of ESTABLISHED behavior (not a defect): a directory
+# target passes path validation (inside the input-log directory, aliases
+# nothing) and is refused at write time by the documented OSError lane —
+# exit 4, one concise ``error:`` line, no traceback, both inputs
+# byte-identical, the directory and its contents untouched, no output
+# artifact (whole or partial) created.
+# ---------------------------------------------------------------------------
+
+
+def _pin_dir_target_refusal(capsys, tmp_path, out_target) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    log_before = log.read_bytes()
+    protocol_before = protocol.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+
+    assert main([str(log), str(protocol), "--output", str(out_target)]) == 4
+
+    captured = capsys.readouterr()
+    err_lines = [line for line in captured.err.strip().splitlines() if line]
+    assert len(err_lines) == 1 and err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == log_before
+    assert protocol.read_bytes() == protocol_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_existing_directory_output_target_pinned(tmp_path, capsys) -> None:
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    _pin_dir_target_refusal(capsys, tmp_path, target_dir)
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in target_dir.iterdir()) == ["keep.txt"]
+
+
+def test_cli_symlink_to_directory_output_target_pinned(tmp_path, capsys) -> None:
+    import os
+
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "lab.json"
+    try:
+        os.symlink(real_dir, link, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation not permitted on this platform/user")
+    _pin_dir_target_refusal(capsys, tmp_path, link)
+    assert real_dir.is_dir()
+    assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+
+
+# ---------------------------------------------------------------------------
 # CLI: exit codes, write boundary, concise errors
 # ---------------------------------------------------------------------------
 

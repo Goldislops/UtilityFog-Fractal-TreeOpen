@@ -321,6 +321,80 @@ def test_cli_write_boundary_and_alias_identity(chain, tmp_path, capsys) -> None:
     assert "identity" in err or "overwrite" in err
 
 
+# ---------------------------------------------------------------------------
+# Output-boundary pins: directory targets, symlink-to-directory targets,
+# and symlink output aliases against EVERY supplied input role.
+#
+# Coverage pinning of ESTABLISHED behavior (not a defect):
+# - a directory target passes path validation (inside the primary
+#   input's directory, aliases nothing) and is refused at write time by
+#   the documented OSError lane;
+# - a symlink whose resolution target IS a supplied input is refused by
+#   the identity guard before any packet is built.
+# Both refusals: exit 4, one concise ``error:`` line, no traceback,
+# every supplied input byte-identical, directory/sentinel contents
+# unchanged, no output artifact (whole or partial) created.
+# ---------------------------------------------------------------------------
+
+
+def _pin_packet_refusal(capsys, chain, tmp_path, out_target) -> None:
+    before = {role: path.read_bytes() for role, path in chain.items()}
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+
+    assert main(_chain_args(chain) + ["--output", str(out_target)]) == 4
+
+    captured = capsys.readouterr()
+    err_lines = [line for line in captured.err.strip().splitlines() if line]
+    assert len(err_lines) == 1 and err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    for role, path in chain.items():
+        assert path.read_bytes() == before[role], f"input mutated: {role}"
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_existing_directory_output_target_pinned(chain, tmp_path, capsys) -> None:
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    _pin_packet_refusal(capsys, chain, tmp_path, target_dir)
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in target_dir.iterdir()) == ["keep.txt"]
+
+
+def test_cli_symlink_to_directory_output_target_pinned(chain, tmp_path, capsys) -> None:
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "packet.json"
+    try:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    _pin_packet_refusal(capsys, chain, tmp_path, link)
+    assert real_dir.is_dir()
+    assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+
+
+@pytest.mark.parametrize("role", list(ROLES))
+def test_cli_symlink_output_alias_of_each_input_role_pinned(
+    chain, tmp_path, capsys, role
+) -> None:
+    """A symlink inside the primary input's directory whose resolution
+    target IS the supplied ``role`` artifact must be refused by the
+    identity guard — for every role the chain fixture exposes."""
+    link = tmp_path / f"alias_{role}.json"
+    try:
+        link.symlink_to(chain[role])
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    _pin_packet_refusal(capsys, chain, tmp_path, link)
+    # The link itself is untouched and still resolves to the intact input.
+    assert link.resolve() == chain[role].resolve()
+    assert link.read_bytes() == chain[role].read_bytes()
+
+
 def test_cli_data_tree_refused(chain, tmp_path, capsys, monkeypatch) -> None:
     import scripts.nextness_evidence_packet as packet_module
 
