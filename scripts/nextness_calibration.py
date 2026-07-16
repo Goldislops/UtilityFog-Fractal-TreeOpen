@@ -64,6 +64,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 import pathlib
 import re
 import tempfile
@@ -123,17 +124,53 @@ def _validate_calibration_output_path(
     out_path: pathlib.Path,
     log_path: pathlib.Path,
 ) -> None:
-    """Refuse output paths that resolve outside the input log's directory.
+    """Refuse output paths outside the log directory, or that ARE the input log.
 
-    Mirrors ``nextness_metrics._validate_metrics_output_path`` so the same
-    Lane B safety contract applies to calibration outputs. Resolves both
-    paths to canonical absolute form before comparing — symlink-aware.
+    Every caller runs this guard before any experiment computation, and
+    ``_write_calibration_jsonl`` opens its target with ``"w"`` — so a
+    fall-through here destroys the observer's recorded log, the one
+    artifact the Nextness stack cannot recompute. The enforced contract,
+    in evaluation order:
+
+    1. **Containment** — the output must resolve inside ``log_path``'s
+       directory. Catches literal mismatches (``/tmp/other.jsonl``) and
+       traversal/symlink escapes (``../elsewhere/out.jsonl``).
+    2. **Directory targets** — an output resolving to an existing
+       directory (including through a symlink) is refused; it can never
+       be an output file.
+    3. **Direct and resolved-path aliases** — an output resolving to the
+       input log itself is refused. Resolution targets are compared, not
+       path segments, so lexical variants (``sub/../log.jsonl``) and
+       symlink aliases resolving to the input log are covered.
+    4. **File identity** — for an existing target, ``os.path.samefile``
+       (device + inode / file ID) catches hard links whose paths differ.
+       If identity **cannot** be established the guard **fails closed** —
+       an unverifiable target is refused, never a fall-through.
+
+    Ordinary sibling outputs — nonexistent, or existing non-alias files —
+    remain permitted; overwriting a stale calibration output is allowed.
+
+    This matches the **identity and directory protections** of
+    ``nextness_metrics._validate_metrics_output_path`` (same rules, same
+    order, same fail-closed posture). It deliberately does **not** claim
+    parity with that module's *writer*: ``_write_calibration_jsonl``
+    still writes in text mode, so calibration output is not byte-identical
+    across platforms the way the metrics writer's is. That difference is
+    out of this guard's scope.
+
+    Residual race, stated precisely: identity is verified here, at
+    validation time; the later write does not re-verify. A concurrent
+    actor replacing the output path between validation and write can
+    still redirect the write. This guard defends against aliases that
+    exist when it validates — it does not claim to eliminate the
+    validation-to-write (TOCTOU) interval.
 
     Raises :class:`WriteOutsideLogDirError` (reused from
     ``scripts.nextness_observer``) so the safety vocabulary stays unified
     across all three Lane B modules (observer + metrics + calibration).
     """
-    log_dir_resolved = log_path.resolve().parent
+    log_resolved = log_path.resolve()
+    log_dir_resolved = log_resolved.parent
     out_resolved = out_path.resolve()
     try:
         out_resolved.relative_to(log_dir_resolved)
@@ -142,6 +179,31 @@ def _validate_calibration_output_path(
             f"refusing to write calibration output outside log_path's "
             f"directory: {out_resolved} is not inside {log_dir_resolved}"
         ) from e
+    if out_resolved.is_dir():
+        raise WriteOutsideLogDirError(
+            f"refusing to write calibration output onto a directory: {out_resolved}"
+        )
+    if out_resolved == log_resolved:
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file: {out_resolved}"
+        )
+    # Hard links share identity while having distinct paths. Only an
+    # EXISTING output can alias the input; stat runs on the resolved
+    # paths and any failure to verify is itself a refusal (fail closed),
+    # never a fall-through.
+    if out_resolved.exists():
+        try:
+            same = os.path.samefile(out_resolved, log_resolved)
+        except OSError as e:
+            raise WriteOutsideLogDirError(
+                f"cannot verify output file identity against the input log "
+                f"file: {out_resolved}"
+            ) from e
+        if same:
+            raise WriteOutsideLogDirError(
+                f"refusing to overwrite the input log file (shared file "
+                f"identity): {out_resolved}"
+            )
 
 
 def _validate_config_log_directory(

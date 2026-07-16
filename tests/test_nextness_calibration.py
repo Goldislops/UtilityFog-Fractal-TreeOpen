@@ -26,12 +26,16 @@ patch-radius coarse-graining).
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pathlib
 import time
 
 import numpy as np
 import pytest
+
+import scripts.nextness_calibration as calibration_module
 
 from scripts.nextness_observer import (
     MEMORY_CHANNEL_LAYOUT,
@@ -307,6 +311,165 @@ def test_validate_output_traversal_escape_rejected(tmp_path):
     out_path = log_dir / ".." / ".." / "escape.jsonl"
     with pytest.raises(WriteOutsideLogDirError):
         _validate_calibration_output_path(out_path, log_path)
+
+
+# ---------------------------------------------------------------------------
+# Output-identity guard: the calibration output may never BE the input log.
+#
+# Containment alone is not enough: an ``out_path`` inside the log directory
+# can still name, alias or shadow the log itself, and the writer opens its
+# target with ``"w"`` — so a guard fall-through destroys the observer's
+# recorded log, the one artifact in the Nextness stack that is not
+# recomputable from anything else.
+#
+# Refusal must happen BEFORE any experiment computation, must raise the
+# existing WriteOutsideLogDirError, and must leave the source bytes intact.
+# ---------------------------------------------------------------------------
+
+
+def _identity_setup(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A log directory containing a real, non-empty input log."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "nextness_runs.jsonl"
+    log_path.write_text('{"generation": 1}\n', encoding="utf-8")
+    return log_path
+
+
+def _expect_guard_refusal(out_path: pathlib.Path, log_path: pathlib.Path) -> None:
+    """The guard refuses AND the source log survives byte-identically."""
+    before = hashlib.sha256(log_path.read_bytes()).hexdigest()
+    with pytest.raises(WriteOutsideLogDirError):
+        _validate_calibration_output_path(out_path, log_path)
+    assert hashlib.sha256(log_path.read_bytes()).hexdigest() == before
+
+
+def _symlink_or_skip(target: pathlib.Path, link: pathlib.Path, is_dir: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows without privilege)")
+
+
+def _hardlink_or_skip(target: pathlib.Path, link: pathlib.Path) -> None:
+    try:
+        os.link(target, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hard links unsupported on this filesystem")
+
+
+def test_validate_output_direct_alias_of_log_is_refused(tmp_path):
+    log_path = _identity_setup(tmp_path)
+    _expect_guard_refusal(log_path, log_path)
+
+
+def test_validate_output_lexical_alias_of_log_is_refused(tmp_path):
+    # Distinct lexically, identical once resolved; 'sub' need not exist —
+    # resolution targets are compared, not path segments.
+    log_path = _identity_setup(tmp_path)
+    alias = log_path.parent / "sub" / ".." / "nextness_runs.jsonl"
+    assert str(alias) != str(log_path)
+    _expect_guard_refusal(alias, log_path)
+
+
+def test_validate_output_symlink_alias_of_log_is_refused(tmp_path):
+    log_path = _identity_setup(tmp_path)
+    link = log_path.parent / "calibration_determinism.jsonl"
+    _symlink_or_skip(log_path, link)
+    _expect_guard_refusal(link, log_path)
+
+
+def test_validate_output_hardlink_alias_of_log_is_refused(tmp_path):
+    # A hard link resolves to its own distinct path but shares file
+    # identity — only os.path.samefile can catch it.
+    log_path = _identity_setup(tmp_path)
+    link = log_path.parent / "calibration_determinism.jsonl"
+    _hardlink_or_skip(log_path, link)
+    _expect_guard_refusal(link, log_path)
+
+
+def test_validate_output_existing_directory_is_refused(tmp_path):
+    log_path = _identity_setup(tmp_path)
+    target_dir = log_path.parent / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _expect_guard_refusal(target_dir, log_path)
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_validate_output_symlink_to_directory_is_refused(tmp_path):
+    log_path = _identity_setup(tmp_path)
+    real_dir = log_path.parent / "real_dir"
+    real_dir.mkdir()
+    link = log_path.parent / "calibration_determinism.jsonl"
+    _symlink_or_skip(real_dir, link, is_dir=True)
+    _expect_guard_refusal(link, log_path)
+    assert real_dir.is_dir()
+
+
+def test_validate_output_unverifiable_identity_fails_closed(tmp_path, monkeypatch):
+    """If an existing target's identity cannot be established, the guard
+    must refuse — never fall through to the writer."""
+    log_path = _identity_setup(tmp_path)
+    sibling = log_path.parent / "calibration_determinism.jsonl"
+    sibling.write_text("previous\n", encoding="utf-8")
+
+    def boom(*args, **kwargs):
+        raise OSError("identity cannot be established")
+
+    monkeypatch.setattr(os.path, "samefile", boom)
+    _expect_guard_refusal(sibling, log_path)
+
+
+def test_validate_output_ordinary_siblings_remain_allowed(tmp_path):
+    """The repair must not narrow the permitted lane."""
+    log_path = _identity_setup(tmp_path)
+    # Nonexistent ordinary sibling.
+    _validate_calibration_output_path(
+        log_path.parent / "calibration_determinism.jsonl", log_path
+    )
+    # Existing non-alias sibling (overwriting a stale output is allowed).
+    stale = log_path.parent / "calibration_stale.jsonl"
+    stale.write_text("previous content\n", encoding="utf-8")
+    _validate_calibration_output_path(stale, log_path)
+
+
+def test_check_determinism_refuses_output_aliasing_log_before_computation(
+    tmp_path, monkeypatch
+):
+    """End-to-end through an exported public entry point.
+
+    Jack's reproduction: a valid public call with ``out_path == log_path``
+    returned normally reporting ``hypothesis_supported`` while replacing the
+    input log. The guard must refuse first: no computation, no write, no
+    success aggregate, source bytes intact.
+    """
+    snapshots_dir, log_path, config = _calibration_setup(tmp_path)
+    log_path.write_text('{"generation": 1}\n', encoding="utf-8")
+    before = hashlib.sha256(log_path.read_bytes()).hexdigest()
+
+    def computation_spy(*args, **kwargs):
+        raise AssertionError("computation ran despite an aliased output path")
+
+    def write_spy(*args, **kwargs):
+        raise AssertionError("writer ran despite an aliased output path")
+
+    # The first computation step after the guard, and the writer itself.
+    monkeypatch.setattr(calibration_module, "_sort_snapshots_by_generation", computation_spy)
+    monkeypatch.setattr(calibration_module, "_write_calibration_jsonl", write_spy)
+
+    with pytest.raises(WriteOutsideLogDirError):
+        check_determinism(
+            [],
+            out_path=log_path,
+            log_path=log_path,
+            calibration_set="short",
+            config=config,
+            repeats=2,
+        )
+
+    assert hashlib.sha256(log_path.read_bytes()).hexdigest() == before
+    assert log_path.read_text(encoding="utf-8") == '{"generation": 1}\n'
 
 
 # ---------------------------------------------------------------------------
