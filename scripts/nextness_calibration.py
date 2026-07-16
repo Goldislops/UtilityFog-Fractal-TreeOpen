@@ -67,6 +67,7 @@ import math
 import os
 import pathlib
 import re
+import stat as stat_module
 import tempfile
 from typing import Any
 
@@ -135,24 +136,35 @@ def _validate_calibration_output_path(
     1. **Containment** — the output must resolve inside ``log_path``'s
        directory. Catches literal mismatches (``/tmp/other.jsonl``) and
        traversal/symlink escapes (``../elsewhere/out.jsonl``).
-    2. **Directory targets** — an output resolving to an existing
+    2. **Output status probe** — the output's true state is established
+       with an explicit ``stat()``, because a boolean ``Path.exists()``
+       cannot distinguish confirmed absence from an inaccessible or
+       otherwise uninspectable path (it reports False for both; the
+       stdlib documents ``stat()`` as the way to tell those apart).
+       Only a genuine ``FileNotFoundError`` counts as confirmed
+       absence; every other probe failure (permission, I/O) **fails
+       closed** with ``WriteOutsideLogDirError``.
+    3. **Directory targets** — an output resolving to an existing
        directory (including through a symlink) is refused; it can never
-       be an output file.
-    3. **Direct and resolved-path aliases** — an output resolving to the
+       be an output file. Detected from the captured stat result, never
+       from a boolean status method.
+    4. **Direct and resolved-path aliases** — an output resolving to the
        input log itself is refused. Resolution targets are compared, not
        path segments, so lexical variants (``sub/../log.jsonl``) and
-       symlink aliases resolving to the input log are covered.
-    4. **File identity** — for an existing target, ``os.path.samefile``
-       (device + inode / file ID) catches hard links whose paths differ.
-       ``samefile`` is called only when BOTH resolved targets are
-       confirmed to exist: a missing input log — valid before the
-       observer's first write — cannot share file identity with a
-       distinct existing sibling, so a genuine ``FileNotFoundError``
-       (confirmed absence, including one arising in the residual
-       interval between the existence checks and the stat) is treated
-       as "no shared identity". Every OTHER inspection failure
-       (permission, I/O) still **fails closed** — an unverifiable
-       target is refused, never a fall-through to permission-to-write.
+       symlink aliases resolving to the input log are covered. This
+       comparison is stat-free and applies whether or not either file
+       exists yet.
+    5. **File identity** — a *distinct* output confirmed absent is
+       allowed (nothing can share identity with it). Otherwise the input
+       log is probed the same way: a log confirmed absent — valid before
+       the observer's first write — cannot share file identity with a
+       distinct existing sibling, so the output is allowed; any other
+       log-probe failure **fails closed**. When both endpoints exist,
+       their captured stat results are compared with
+       ``os.path.samestat`` (device + inode / file ID), which catches
+       hard links whose paths differ — and, unlike a boolean-gated
+       ``samefile`` call, cannot be bypassed by a suppressed or false
+       existence report for either endpoint.
 
     Ordinary sibling outputs — nonexistent, or existing non-alias files —
     remain permitted; overwriting a stale calibration output is allowed.
@@ -186,37 +198,55 @@ def _validate_calibration_output_path(
             f"refusing to write calibration output outside log_path's "
             f"directory: {out_resolved} is not inside {log_dir_resolved}"
         ) from e
-    if out_resolved.is_dir():
+    # Establish each endpoint's TRUE state with explicit stat() probes.
+    # A boolean Path.exists() cannot distinguish confirmed absence from
+    # an inaccessible/uninspectable path (it reports False for both), so
+    # gating identity comparison on it would let a suppressed or false
+    # status report skip the hard-link check entirely. Only a genuine
+    # FileNotFoundError counts as confirmed absence; every other probe
+    # failure is itself a refusal (fail closed), never a fall-through.
+    try:
+        out_stat = out_resolved.stat()
+    except FileNotFoundError:
+        out_stat = None  # confirmed absent
+    except OSError as e:
+        raise WriteOutsideLogDirError(
+            f"cannot inspect output path status: {out_resolved}"
+        ) from e
+    if out_stat is not None and stat_module.S_ISDIR(out_stat.st_mode):
         raise WriteOutsideLogDirError(
             f"refusing to write calibration output onto a directory: {out_resolved}"
         )
+    # Direct/resolved equality is stat-free and applies even when the
+    # file does not exist yet.
     if out_resolved == log_resolved:
         raise WriteOutsideLogDirError(
             f"refusing to overwrite the input log file: {out_resolved}"
         )
-    # Hard links share identity while having distinct paths. Identity
-    # comparison requires both endpoints to exist: a missing input log
-    # (valid before the observer's first write) cannot share identity
-    # with a distinct existing sibling, so samefile runs only when both
-    # resolved targets are confirmed to exist. A FileNotFoundError from
-    # the residual interval between those checks and the stat is the
-    # same confirmed absence. Every OTHER inspection failure is itself
-    # a refusal (fail closed), never a fall-through.
-    if out_resolved.exists() and log_resolved.exists():
-        try:
-            same = os.path.samefile(out_resolved, log_resolved)
-        except FileNotFoundError:
-            same = False  # confirmed absence: no shared identity possible
-        except OSError as e:
-            raise WriteOutsideLogDirError(
-                f"cannot verify output file identity against the input log "
-                f"file: {out_resolved}"
-            ) from e
-        if same:
-            raise WriteOutsideLogDirError(
-                f"refusing to overwrite the input log file (shared file "
-                f"identity): {out_resolved}"
-            )
+    if out_stat is None:
+        # A distinct output confirmed absent cannot share identity with
+        # anything: allowed.
+        return
+    try:
+        log_stat = log_resolved.stat()
+    except FileNotFoundError:
+        # The input log is confirmed absent (valid before the observer's
+        # first write): a distinct existing sibling cannot share file
+        # identity with it. Allowed.
+        return
+    except OSError as e:
+        raise WriteOutsideLogDirError(
+            f"cannot verify output file identity against the input log "
+            f"file: {out_resolved}"
+        ) from e
+    # Hard links share identity while having distinct paths; samestat on
+    # the captured probe results (device + inode / file ID) catches them
+    # and cannot be bypassed by a false existence report.
+    if os.path.samestat(out_stat, log_stat):
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file (shared file "
+            f"identity): {out_resolved}"
+        )
 
 
 def _validate_config_log_directory(

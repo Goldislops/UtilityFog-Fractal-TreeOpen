@@ -407,18 +407,56 @@ def test_validate_output_symlink_to_directory_is_refused(tmp_path):
     assert real_dir.is_dir()
 
 
+def _patch_stat_for(monkeypatch, victim: pathlib.Path, exc: OSError) -> None:
+    """Make ``Path.stat()`` raise ``exc`` for exactly one resolved path.
+
+    Boolean ``Path.exists()`` swallows such errors and reports False, so
+    these tests exercise the guard's REAL probes: only ``stat()`` can
+    distinguish confirmed absence from an uninspectable path.
+    """
+    real_stat = pathlib.Path.stat
+
+    def probed(self, **kwargs):
+        if self == victim:
+            raise exc
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", probed)
+
+
 def test_validate_output_unverifiable_identity_fails_closed(tmp_path, monkeypatch):
-    """If an existing target's identity cannot be established, the guard
-    must refuse — never fall through to the writer."""
+    """A non-FileNotFoundError from the LOG path's status probe must fail
+    closed — never fall through to the writer. (Tests the actual stat
+    probe; a boolean exists() would swallow this into False.)"""
     log_path = _identity_setup(tmp_path)
     sibling = log_path.parent / "calibration_determinism.jsonl"
     sibling.write_text("previous\n", encoding="utf-8")
-
-    def boom(*args, **kwargs):
-        raise OSError("identity cannot be established")
-
-    monkeypatch.setattr(os.path, "samefile", boom)
+    _patch_stat_for(monkeypatch, log_path.resolve(),
+                    OSError("identity cannot be established"))
     _expect_guard_refusal(sibling, log_path)
+
+
+def test_validate_output_hardlink_not_bypassed_by_suppressed_existence(
+    tmp_path, monkeypatch
+):
+    """Jack's reproduction: a REAL hard-link alias (both files genuinely
+    exist) must stay refused even when a boolean existence probe would
+    report false/suppressed status for the log — the guard must not gate
+    identity comparison on Path.exists()."""
+    log_path = _identity_setup(tmp_path)
+    link = log_path.parent / "calibration_determinism.jsonl"
+    _hardlink_or_skip(log_path, link)
+
+    log_resolved = log_path.resolve()
+    real_exists = pathlib.Path.exists
+
+    def suppressed(self, **kwargs):
+        if self == log_resolved:
+            return False
+        return real_exists(self, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "exists", suppressed)
+    _expect_guard_refusal(link, log_path)
 
 
 def test_validate_output_ordinary_siblings_remain_allowed(tmp_path):
@@ -464,17 +502,14 @@ def test_validate_output_direct_alias_refused_even_when_log_missing(tmp_path):
 
 
 def test_validate_output_non_filenotfound_oserror_still_fails_closed(tmp_path, monkeypatch):
-    """Only CONFIRMED ABSENCE is exempt: any other identity-inspection
-    failure (permission, I/O) must still refuse — never fall through to
-    permission-to-write."""
+    """Only CONFIRMED ABSENCE (FileNotFoundError) is exempt: a
+    PermissionError from the OUTPUT path's status probe must still refuse
+    — never fall through to permission-to-write."""
     log_path = _identity_setup(tmp_path)                # log EXISTS here
     sibling = log_path.parent / "calibration_determinism.jsonl"
     sibling.write_text("previous\n", encoding="utf-8")
-
-    def perm_boom(*args, **kwargs):
-        raise PermissionError("identity inspection denied")
-
-    monkeypatch.setattr(os.path, "samefile", perm_boom)
+    _patch_stat_for(monkeypatch, sibling.resolve(),
+                    PermissionError("status inspection denied"))
     _expect_guard_refusal(sibling, log_path)
 
 
