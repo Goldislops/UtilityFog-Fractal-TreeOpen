@@ -45,12 +45,22 @@ per module, not to be "fixed" into sameness.
 ## Bounded shared invariants (exercised lanes only)
 
 Across the **exercised ordinary expected-failure lanes** (the 2026-07-17 audit's
-public probe set plus the focused suites), every ordinary expected failure:
+public probe set plus the focused suites), every ordinary expected failure
+prints **exactly one concise stderr line** with the module's declared prefix
+and produces **no traceback**.
 
-- prints **exactly one concise stderr line** with the module's declared prefix;
-- produces **no traceback**;
-- leaves **every supplied input byte-identical**;
-- creates **no whole or partial output artifact**.
+Output and input preservation are **lane-specific**, not universal:
+
+- Exercised ordinary expected failures emit their documented concise error
+  form and leave supplied inputs unchanged **in the non-concurrent probes**
+  (the TOCTOU non-claim below governs concurrent interference).
+- **Pre-write refusals and at-or-before-open failures** create no output and
+  preserve an existing destination — nothing was truncated.
+- **Once a direct non-atomic output open has succeeded**, a later write or
+  close failure **may leave a truncated or partial destination**.
+- **Therefore no cross-module whole-or-partial-output prohibition is
+  claimed.** Each module's preservation boundary is exactly its own write
+  path's, per its own documentation.
 
 This statement is **bounded to those exercised lanes** — it is an observed and
 test-pinned property, not an unconditional theorem about unprobed branches.
@@ -91,8 +101,9 @@ calibration stat-probe idiom).
 - Metrics makes **no unconditional input-log guarantee** and **no
   destination-preservation guarantee after a successful binary open** (direct
   streamed non-atomic output; see PR #372's final wording).
-- Exit-5 ceilings are source-reachable and monkeypatch-tested; public
-  reachability with bounded inputs has not been established and is not claimed.
+- Exit-5 ceiling branches exist in source and are covered by focused
+  monkeypatched tests. Public reachability has not been established; no
+  plausibility claim is made.
 - Symlink-dependent lanes are skip-guarded on hosts without symlink privilege
   and exercised on Ubuntu CI.
 
