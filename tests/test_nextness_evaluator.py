@@ -1366,6 +1366,61 @@ def test_cli_sibling_outputs_remain_allowed(tmp_path, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Output-boundary pins: directory and symlink-to-directory targets.
+#
+# Coverage pinning of ESTABLISHED behavior (not a defect): a directory
+# target passes path validation (it is inside the primary input's
+# directory and aliases nothing) and is refused at write time by the
+# documented OSError lane — exit 4, one concise ``error:`` line, no
+# traceback, every input byte-identical, the directory and its contents
+# untouched, and no output artifact (whole or partial) created.
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_dir(tmp_path: pathlib.Path) -> pathlib.Path:
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    return target_dir
+
+
+def test_cli_existing_directory_output_target_pinned(tmp_path, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    target_dir = _sentinel_dir(tmp_path)
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(target_dir)],
+        [report_file, receipts_file],
+    )
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in target_dir.iterdir()) == ["keep.txt"]
+
+
+def test_cli_symlink_to_directory_output_target_pinned(tmp_path, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    real_dir = _sentinel_dir(tmp_path)
+    link = tmp_path / "evaluation.json"
+    try:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    _expect_alias_refusal(
+        capsys, tmp_path,
+        ["--report", str(report_file), "--receipts", str(receipts_file),
+         "--output", str(link)],
+        [report_file, receipts_file],
+    )
+    assert real_dir.is_dir()
+    assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+    # The output link itself was not replaced by a regular file.
+    assert link.is_symlink()
+    assert link.resolve() == real_dir.resolve()
+
+
+# ---------------------------------------------------------------------------
 # Live end-to-end: emitter files → CLI → evaluation
 # ---------------------------------------------------------------------------
 
