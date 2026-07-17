@@ -1010,3 +1010,51 @@ def test_output_bytes_are_canonical_utf8_lf_only(tmp_path):
     # Byte-identical idempotent rewrite.
     assert main(["--log", str(log_path), "--out", str(out_path)]) == 0
     assert out_path.read_bytes() == raw
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# identity-inspection failure fails closed (exit 3, safety error:)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main([])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_identity_inspection_failure_fails_closed_exit_3(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """A PermissionError from the guard's identity comparison must be a
+    safety refusal in metrics' own lane — exit 3, one 'safety error:'
+    line, no traceback, everything untouched."""
+    log_path = _two_entry_log(tmp_path)
+    out = tmp_path / "out.jsonl"
+    out.write_text("stale existing non-alias output\n", encoding="utf-8")
+    log_before, out_before = log_path.read_bytes(), out.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    out_resolved = out.resolve()
+    real_samefile = os.path.samefile
+
+    def probed(a, b):
+        if pathlib.Path(a).resolve() == out_resolved:
+            raise PermissionError(13, "identity probe denied")
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", probed)
+    assert main(["--log", str(log_path), "--out", str(out)]) == 3
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("safety error:")
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == log_before
+    assert out.read_bytes() == out_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
