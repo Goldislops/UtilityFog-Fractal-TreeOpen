@@ -341,6 +341,47 @@ in NP5/NP6/NP8, later NP1):
 All metric formulas, row ordering, JSON field ordering, the stdout
 summary and every exit code are unchanged by this amendment.
 
+### 9.2 Operational output-write failure lane (2026-07-17 reliability amendment)
+
+The 2026-07-17 CLI failure-contract audit reproduced (twice, public CLI)
+an escaped `PermissionError` traceback when `--out` named an existing
+**read-only file** inside the log directory: every pre-write safety
+check legitimately passed, and the binary `open("wb")` then failed with
+no handler — crashing at process exit 1, numerically colliding with the
+missing-log lane. Repaired by a **narrowly typed** lane, and recorded
+here as metrics-specific truth (this is not harmonisation with any
+other module's map):
+
+- `OSError` is caught **only around the output region — output-parent
+  creation plus the binary open/write/close** — inside
+  `compute_run_metrics`, where it becomes the typed
+  `MetricsOutputWriteError` with a concise path-specific message.
+  Read-side or computation errors are **never** reclassified as output
+  failures and continue to propagate loudly.
+- The CLI maps `MetricsOutputWriteError` to **exit 4** with one
+  `error:` line — deliberately distinct from **exit 3 + `safety
+  error:`** (pre-write containment/identity/directory safety refusal),
+  **exit 2** (data/validation), and **exit 1** (missing log, now also
+  documented). Complete map: 0 success · 1 missing log · 2
+  data/validation · 3 pre-write safety refusal (`safety error:`) · 4
+  operational output-write failure (`error:`).
+- **Destination-preservation contract, stated precisely**: a failure at
+  or before the binary open — a read-only destination, or a failed
+  output-parent mkdir — leaves any existing destination byte-identical
+  (nothing was truncated) and creates no output. Once the binary open
+  has succeeded, output is direct, streamed and **non-atomic**: a later
+  write or close failure may leave a truncated or partial destination,
+  and **no general destination-preservation guarantee is made or
+  implied**. In the exercised failure lanes, and absent the documented
+  validation-to-write replacement race (§9.1), the input log remains
+  unchanged. This repair adds no stronger input-log guarantee: a
+  concurrent actor may still redirect the later direct write, as the
+  existing TOCTOU non-claim states.
+- Streaming binary LF-only output, row order, field order, formulas,
+  aggregate values, ordinary sibling-overwrite behavior, and the
+  documented validation-to-write (TOCTOU) non-claim are all unchanged.
+  No atomic-write behavior was introduced.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.
