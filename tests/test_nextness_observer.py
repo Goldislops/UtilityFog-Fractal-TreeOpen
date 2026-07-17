@@ -639,6 +639,173 @@ def test_write_log_entry_refuses_missing_parent_directory(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Transactional log publication (§7 #5 — killable without partial writes)
+# ---------------------------------------------------------------------------
+
+
+class _HalfWriteProxy:
+    """Wraps a real file handle; the first write() delivers only a prefix
+    of its payload, then raises OSError. Later writes pass through."""
+
+    def __init__(self, fh):
+        self._fh = fh
+        self._tripped = False
+
+    def write(self, data):
+        if not self._tripped:
+            self._tripped = True
+            self._fh.write(data[: len(data) // 2])
+            self._fh.flush()
+            raise OSError("injected fault after partial write")
+        return self._fh.write(data)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+
+def _install_partial_write_fault(monkeypatch):
+    """Make any write-mode handle the observer opens on the canonical log or
+    on a staged ``.tmp`` file deliver half of its first write, then raise.
+
+    Patched at both seams (``pathlib.Path.open`` and ``os.fdopen``) so the
+    regression bites a direct-append implementation as well as a staged
+    one — this is the failing-first fence for the malformed-tail defect.
+    """
+    real_path_open = pathlib.Path.open
+    real_fdopen = os.fdopen
+
+    def faulty_path_open(self, mode="r", *args, **kwargs):
+        fh = real_path_open(self, mode, *args, **kwargs)
+        wanted = self.name == "nextness_runs.jsonl" or self.name.endswith(".tmp")
+        if wanted and any(c in mode for c in "wa+"):
+            return _HalfWriteProxy(fh)
+        return fh
+
+    def faulty_fdopen(fd, mode="r", *args, **kwargs):
+        fh = real_fdopen(fd, mode, *args, **kwargs)
+        if any(c in mode for c in "wa+"):
+            return _HalfWriteProxy(fh)
+        return fh
+
+    monkeypatch.setattr(pathlib.Path, "open", faulty_path_open)
+    monkeypatch.setattr(os, "fdopen", faulty_fdopen)
+
+
+def test_write_log_entry_partial_write_fault_leaves_no_malformed_tail(tmp_path, monkeypatch):
+    """A write fault that delivers only a prefix of the record bytes must
+    leave the canonical log exactly as it was — never a truncated,
+    unterminated JSON tail. (Direct append fails this: the prefix lands
+    in ``nextness_runs.jsonl`` itself.)"""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    _install_partial_write_fault(monkeypatch)
+    with pytest.raises(OSError, match="injected fault"):
+        write_log_entry(log_dir, {"payload": "x" * 64})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_partial_write_fault_on_absent_log_creates_nothing(tmp_path, monkeypatch):
+    """The same fault on the very first record must not create a partial
+    canonical log, and must clean its staging file."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    log_dir.mkdir()
+    _install_partial_write_fault(monkeypatch)
+    with pytest.raises(OSError, match="injected fault"):
+        write_log_entry(log_dir, {"x": 1})
+    monkeypatch.undo()
+    assert list(log_dir.iterdir()) == []
+
+
+class _RaisingStr:
+    def __str__(self):
+        raise RuntimeError("hostile __str__ during serialization")
+
+
+def test_write_log_entry_serialization_failure_touches_nothing(tmp_path):
+    """Pre-commit failure: ``json.dumps`` (via ``default=str``) raises
+    before any file is created or modified."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    with pytest.raises(RuntimeError, match="hostile __str__"):
+        write_log_entry(log_dir, {"bad": _RaisingStr()})
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_replace_failure_preserves_log_and_cleans_staging(tmp_path, monkeypatch):
+    """A failure of the final atomic swap leaves the previous log intact
+    and removes the staged file."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+
+    def refuse_replace(src, dst):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(os, "replace", refuse_replace)
+    with pytest.raises(OSError, match="injected replace failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_fsync_failure_preserves_log_and_cleans_staging(tmp_path, monkeypatch):
+    """A flush-to-disk failure before the swap leaves the previous log
+    intact and removes the staged file."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+
+    def refuse_fsync(fd):
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", refuse_fsync)
+    with pytest.raises(OSError, match="injected fsync failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_appends_preserve_prior_bytes_and_terminate_lines(tmp_path):
+    """Acceptance: repeat writes keep the prior bytes exactly, stay ordered,
+    every record is newline-terminated, and no staging files survive."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"n": 0})
+    log_path = log_dir / "nextness_runs.jsonl"
+    first = log_path.read_bytes()
+    write_log_entry(log_dir, {"n": 1})
+    second = log_path.read_bytes()
+    assert second.startswith(first)
+    assert second.endswith(b"\n")
+    records = [json.loads(line) for line in second.decode("utf-8").splitlines()]
+    assert records == [{"n": 0}, {"n": 1}]
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+# ---------------------------------------------------------------------------
 # §7 SAFETY CONTRACT — one explicit test per invariant
 # ---------------------------------------------------------------------------
 

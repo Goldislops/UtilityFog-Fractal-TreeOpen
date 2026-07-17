@@ -1101,12 +1101,15 @@ __all__ += [  # type: ignore[misc]
 #     Any attempt to write a path that doesn't resolve into log_directory
 #     raises ``WriteOutsideLogDirError`` (§7 invariant #1).
 #
-#   • No HTTP, no ZMQ, no shell. Only filesystem reads + a single JSONL
-#     append per processed snapshot.
+#   • No HTTP, no ZMQ, no shell. Only filesystem reads + one transactional
+#     JSONL record publication (same-directory staged copy + atomic
+#     ``os.replace``) per processed snapshot.
 
 import collections
 import json
 import pathlib
+import shutil
+import tempfile
 from datetime import datetime, timezone
 
 
@@ -1302,22 +1305,73 @@ def _ensure_log_dir(log_directory: str | pathlib.Path) -> pathlib.Path:
     return log_directory
 
 
+def _unlink_quietly(path: pathlib.Path) -> None:
+    """Best-effort removal of a staged file during failure cleanup.
+
+    Cleanup runs while the original exception is propagating; a secondary
+    OSError here (e.g. the handle still open after an fdopen failure on
+    Windows) must not mask it.
+    """
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def write_log_entry(
     log_directory: str | pathlib.Path,
     entry: dict[str, object],
 ) -> pathlib.Path:
-    """Append one JSON object as a line to ``<log_directory>/nextness_runs.jsonl``.
+    """Publish one JSON object as a line of ``<log_directory>/nextness_runs.jsonl``.
 
     Creates the log directory if needed (subject to ``_ensure_log_dir``'s
     parent-must-exist rule). Validates the resulting path is inside the
     log directory before writing — defence against config drift.
+
+    Publication is transactional (§7 invariant #5): the previous log bytes
+    plus the new newline-terminated record are staged to a same-directory
+    temporary file, flushed and fsynced, then swapped over the canonical
+    path with ``os.replace`` (atomic on POSIX and Windows for same-volume
+    paths, which same-directory staging guarantees). A failure at any
+    stage — serialization, staging, flush, or replace — propagates to the
+    caller with the canonical log untouched, and the staged file is
+    removed. The staged copy makes each publication O(current log size);
+    the one-record-per-snapshot cadence keeps that acceptable.
+
+    Scope of the guarantee: in-process failures and kills between
+    syscalls, single writer only. A hard kill mid-publication can at
+    worst leave a stray ``nextness_runs.jsonl.*.tmp`` staging file, which
+    is never read as log data. No power-loss or directory-durability
+    claim: the staged file's contents are fsynced before the swap, but
+    the directory entry is not synced.
     """
     log_dir = _ensure_log_dir(log_directory)
     log_path = log_dir / _LOG_FILE_NAME
     _validate_write_path(log_path, log_dir)
-    line = json.dumps(entry, sort_keys=True, default=str)
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    payload = (json.dumps(entry, sort_keys=True, default=str) + "\n").encode("utf-8")
+    fd, staged_name = tempfile.mkstemp(
+        prefix=_LOG_FILE_NAME + ".", suffix=".tmp", dir=log_dir
+    )
+    staged_path = pathlib.Path(staged_name)
+    try:
+        _validate_write_path(staged_path, log_dir)
+        staged = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        _unlink_quietly(staged_path)
+        raise
+    try:
+        with staged:
+            if log_path.exists():
+                with log_path.open("rb") as current:
+                    shutil.copyfileobj(current, staged)
+            staged.write(payload)
+            staged.flush()
+            os.fsync(staged.fileno())
+        os.replace(staged_path, log_path)
+    except BaseException:
+        _unlink_quietly(staged_path)
+        raise
     return log_path
 
 
