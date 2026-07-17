@@ -635,11 +635,16 @@ def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Operational output-write failure lane (exit 4): a write-side OSError is
-# an EXPECTED operational failure — one concise error: line, exit 4, no
-# traceback, inputs and any pre-existing destination byte-identical. It is
-# deliberately distinct from exit 3 (pre-write safety refusal) and from
-# exit 1 (missing log), and must never be produced by READ-side errors.
+# Operational output-write failure lane (exit 4): an OSError anywhere in
+# the OUTPUT region — parent-directory creation, binary open, streamed
+# writes, close — is an EXPECTED operational failure: one concise error:
+# line, exit 4, no traceback, input log byte-identical. Destination
+# preservation is guaranteed ONLY for failures at or before binary open
+# (a read-only destination is never truncated); once open succeeds,
+# direct streamed non-atomic output may be truncated or partial if a
+# later write/close fails. The lane must never be produced by READ-side
+# errors, and is distinct from exit 3 (pre-write safety refusal) and
+# exit 1 (missing log).
 # ---------------------------------------------------------------------------
 
 
@@ -647,27 +652,43 @@ def _patch_binary_write_open(monkeypatch, victim_resolved: pathlib.Path, exc: OS
     """Make Path.open raise ``exc`` only for the victim path's BINARY WRITE.
 
     Reads and every other path stay untouched, so the failure is pinned to
-    the output file's open/write region and nothing else."""
+    the output file's open and nothing else."""
     real_open = pathlib.Path.open
 
     def patched(self, mode="r", *args, **kwargs):
-        if "w" in mode and "b" in mode and pathlib.Path(self).resolve() == victim_resolved:
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
             raise exc
         return real_open(self, mode, *args, **kwargs)
 
     monkeypatch.setattr(pathlib.Path, "open", patched)
 
 
-def test_cli_write_side_permission_error_is_concise_exit_4(tmp_path, capsys, monkeypatch):
-    """Deterministic cross-platform pin of the repaired lane: a
-    PermissionError raised by the output file's binary open reaches
-    main() as the typed output-write failure — exit 4, one error: line,
-    no traceback, input log and pre-existing destination untouched."""
+def _write_two_row_log(tmp_path: pathlib.Path) -> pathlib.Path:
     log_path = tmp_path / "nextness_runs.jsonl"
     _write_log(log_path, [
         _make_entry(generation=1, snapshot_file="a.npz"),
         _make_entry(generation=2, snapshot_file="b.npz"),
     ])
+    return log_path
+
+
+def _expect_exit4_receipt(capsys) -> None:
+    captured = capsys.readouterr()
+    err_lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(err_lines) == 1
+    assert err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_permission_error_is_concise_exit_4(tmp_path, capsys, monkeypatch):
+    """OUTPUT-OPEN failure (deterministic, cross-platform): a
+    PermissionError raised by the output file's binary open — i.e.
+    BEFORE any truncation — reaches main() as the typed output-write
+    failure. Exit 4, one error: line, no traceback, input log untouched,
+    and the pre-existing destination byte-identical: destination
+    preservation IS guaranteed at open time, because open never
+    succeeded."""
+    log_path = _write_two_row_log(tmp_path)
     out_path = tmp_path / "out.jsonl"
     out_path.write_text("stale pre-existing content\n", encoding="utf-8")
     log_before = log_path.read_bytes()
@@ -676,32 +697,95 @@ def test_cli_write_side_permission_error_is_concise_exit_4(tmp_path, capsys, mon
     _patch_binary_write_open(monkeypatch, out_path.resolve(),
                              PermissionError(13, "write denied"))
 
-    rc = main(["--log", str(log_path), "--out", str(out_path)])
-
-    assert rc == 4
-    captured = capsys.readouterr()
-    err_lines = [l for l in captured.err.strip().splitlines() if l.strip()]
-    assert len(err_lines) == 1
-    assert err_lines[0].startswith("error:")
-    assert "Traceback" not in captured.err
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
     assert log_path.read_bytes() == log_before
     assert out_path.read_bytes() == dest_before
+
+
+def test_cli_output_parent_mkdir_permission_error_is_concise_exit_4(
+    tmp_path, capsys, monkeypatch
+):
+    """OUTPUT-PARENT-CREATION failure: parent mkdir is part of the output
+    region, so a PermissionError there must land in the same typed exit-4
+    lane — not escape as a traceback. Log untouched; no output created."""
+    log_path = _write_two_row_log(tmp_path)
+    out_path = tmp_path / "newsub" / "out.jsonl"  # inside containment; parent absent
+    victim = (tmp_path / "newsub").resolve()
+    log_before = log_path.read_bytes()
+    real_mkdir = pathlib.Path.mkdir
+
+    def patched(self, *args, **kwargs):
+        if self.resolve() == victim:
+            raise PermissionError(13, "mkdir denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", patched)
+
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
+    assert log_path.read_bytes() == log_before
+    assert not (tmp_path / "newsub").exists()  # no output, no partial scaffolding
+
+
+def test_cli_mid_write_oserror_is_concise_exit_4(tmp_path, capsys, monkeypatch):
+    """MID-WRITE failure: after binary open succeeds and one row has been
+    written, a later write raising OSError must still land in the typed
+    exit-4 lane — one error: line, no traceback, input log untouched.
+
+    Deliberately NO destination-integrity assertion: output is direct,
+    streamed and non-atomic, so a mid-write failure may leave a truncated
+    or partial destination. That is the documented contract."""
+    log_path = _write_two_row_log(tmp_path)  # 2 rows -> 1 pair row + aggregate
+    out_path = tmp_path / "out.jsonl"
+    log_before = log_path.read_bytes()
+    out_resolved = out_path.resolve()
+    real_open = pathlib.Path.open
+    writes = {"n": 0}
+
+    class _FailAfterFirstWrite:
+        def __init__(self, raw):
+            self._raw = raw
+
+        def write(self, data):
+            writes["n"] += 1
+            if writes["n"] > 1:
+                raise OSError(28, "device full mid-stream")
+            return self._raw.write(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._raw.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._raw, name)
+
+    def patched(self, mode="r", *args, **kwargs):
+        raw = real_open(self, mode, *args, **kwargs)
+        if "w" in mode and "b" in mode and self.resolve() == out_resolved:
+            return _FailAfterFirstWrite(raw)
+        return raw
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
+    assert writes["n"] > 1  # the failure genuinely occurred mid-stream
+    assert log_path.read_bytes() == log_before
 
 
 def test_read_side_unexpected_oserror_is_not_reclassified(tmp_path, monkeypatch):
     """Scope precision: an unexpected OSError on the LOG READ must not be
     converted into exit 4 by an over-broad handler — it stays loud."""
-    log_path = tmp_path / "nextness_runs.jsonl"
-    _write_log(log_path, [
-        _make_entry(generation=1, snapshot_file="a.npz"),
-        _make_entry(generation=2, snapshot_file="b.npz"),
-    ])
+    log_path = _write_two_row_log(tmp_path)
     out_path = tmp_path / "out.jsonl"
     victim = log_path.resolve()
     real_open = pathlib.Path.open
 
     def patched(self, mode="r", *args, **kwargs):
-        if "r" in mode and "b" not in mode and pathlib.Path(self).resolve() == victim:
+        if "r" in mode and "b" not in mode and self.resolve() == victim:
             raise PermissionError(13, "read denied")
         return real_open(self, mode, *args, **kwargs)
 

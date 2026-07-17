@@ -76,15 +76,24 @@ from scripts.nextness_observer import (
 
 
 class MetricsOutputWriteError(RuntimeError):
-    """Operational failure while writing the derived metrics output file.
+    """Operational failure in the derived output's write region.
 
-    Raised only from the output file's binary open/write region in
-    :func:`compute_run_metrics` — never for read-side or computation
-    errors, which stay loud. The CLI maps this to its own exit code (4)
-    so callers can distinguish "the write itself failed operationally"
-    (e.g. a read-only destination) from a pre-write safety refusal
+    Raised only from the OUTPUT region of :func:`compute_run_metrics` —
+    output-parent creation plus the binary open/write/close — never for
+    read-side or computation errors, which stay loud. The CLI maps this
+    to its own exit code (4) so callers can distinguish "the output
+    could not be produced operationally" from a pre-write safety refusal
     (exit 3, ``WriteOutsideLogDirError``), a data error (exit 2), and a
     missing input log (exit 1).
+
+    Destination-preservation contract, stated precisely: a failure at or
+    before the binary open (e.g. a read-only destination, or a failed
+    parent mkdir) leaves any existing destination byte-identical —
+    nothing was truncated. Once the binary open has succeeded, output is
+    direct, streamed and non-atomic, so a later write or close failure
+    may leave a truncated or partial destination. The input log is
+    unchanged in every case. No atomic-write behavior is provided or
+    claimed.
     """
 
 
@@ -524,13 +533,17 @@ def compute_run_metrics(
     # serialization encoded as UTF-8 plus a single LF byte, so the
     # derived file's bytes never depend on platform newline translation.
     #
-    # The OSError catch is deliberately confined to the output file's
-    # binary open/write/close region: an operational write failure (e.g.
-    # a read-only destination) becomes the typed MetricsOutputWriteError,
-    # while read-side or computation errors above are NEVER reclassified
-    # as output failures and stay loud.
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # The OSError catch is deliberately confined to the OUTPUT region —
+    # parent-directory creation plus the binary open/write/close: an
+    # operational failure anywhere in it (unwritable parent, read-only
+    # destination, mid-stream device error) becomes the typed
+    # MetricsOutputWriteError, while read-side or computation errors
+    # above are NEVER reclassified as output failures and stay loud.
+    # Failures at or before open leave an existing destination
+    # byte-identical; after a successful open, streamed non-atomic
+    # output may be truncated/partial if a later write or close fails.
     try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("wb") as f:
             for row in pair_rows:
                 f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
@@ -597,9 +610,13 @@ def main(argv: list[str] | None = None) -> int:
       (``safety error:``, ``WriteOutsideLogDirError``) — the guard runs
       before the log is read or any metric computed
     - ``4`` operational output-write failure (``error:``,
-      ``MetricsOutputWriteError``) — the write itself failed, e.g. a
-      read-only destination; inputs and any pre-existing destination
-      bytes are left untouched
+      ``MetricsOutputWriteError``) — an OSError in the output region:
+      parent creation, binary open, streamed writes, or close. The
+      input log is always unchanged. Destination preservation is
+      guaranteed only for failures at or before the binary open (a
+      read-only destination is never truncated); once open succeeds,
+      direct streamed non-atomic output may be truncated or partial if
+      a later write/close fails — no atomic-write claim is made.
 
     Unexpected programming errors (including read-side OSErrors)
     propagate loudly rather than being reclassified.

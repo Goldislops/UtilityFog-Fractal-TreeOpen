@@ -352,11 +352,12 @@ missing-log lane. Repaired by a **narrowly typed** lane, and recorded
 here as metrics-specific truth (this is not harmonisation with any
 other module's map):
 
-- `OSError` is caught **only around the output file's binary
-  open/write/close region** inside `compute_run_metrics`, where it
-  becomes the typed `MetricsOutputWriteError` with a concise
-  path-specific message. Read-side or computation errors are **never**
-  reclassified as output failures and continue to propagate loudly.
+- `OSError` is caught **only around the output region — output-parent
+  creation plus the binary open/write/close** — inside
+  `compute_run_metrics`, where it becomes the typed
+  `MetricsOutputWriteError` with a concise path-specific message.
+  Read-side or computation errors are **never** reclassified as output
+  failures and continue to propagate loudly.
 - The CLI maps `MetricsOutputWriteError` to **exit 4** with one
   `error:` line — deliberately distinct from **exit 3 + `safety
   error:`** (pre-write containment/identity/directory safety refusal),
@@ -364,8 +365,14 @@ other module's map):
   documented). Complete map: 0 success · 1 missing log · 2
   data/validation · 3 pre-write safety refusal (`safety error:`) · 4
   operational output-write failure (`error:`).
-- On the repaired lane the input log and any pre-existing destination
-  bytes are left untouched; no whole or partial output replaces them.
+- **Destination-preservation contract, stated precisely**: a failure at
+  or before the binary open — a read-only destination, or a failed
+  output-parent mkdir — leaves any existing destination byte-identical
+  (nothing was truncated) and creates no output. Once the binary open
+  has succeeded, output is direct, streamed and **non-atomic**: a later
+  write or close failure may leave a truncated or partial destination,
+  and **no general destination-preservation guarantee is made or
+  implied**. The input log is unchanged in every case.
 - Streaming binary LF-only output, row order, field order, formulas,
   aggregate values, ordinary sibling-overwrite behavior, and the
   documented validation-to-write (TOCTOU) non-claim are all unchanged.
