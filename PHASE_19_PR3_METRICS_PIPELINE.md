@@ -372,7 +372,11 @@ other module's map):
   has succeeded, output is direct, streamed and **non-atomic**: a later
   write or close failure may leave a truncated or partial destination,
   and **no general destination-preservation guarantee is made or
-  implied**. The input log is unchanged in every case.
+  implied**. In the exercised failure lanes, and absent the documented
+  validation-to-write replacement race (§9.1), the input log remains
+  unchanged. This repair adds no stronger input-log guarantee: a
+  concurrent actor may still redirect the later direct write, as the
+  existing TOCTOU non-claim states.
 - Streaming binary LF-only output, row order, field order, formulas,
   aggregate values, ordinary sibling-overwrite behavior, and the
   documented validation-to-write (TOCTOU) non-claim are all unchanged.

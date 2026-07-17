@@ -91,9 +91,12 @@ class MetricsOutputWriteError(RuntimeError):
     parent mkdir) leaves any existing destination byte-identical —
     nothing was truncated. Once the binary open has succeeded, output is
     direct, streamed and non-atomic, so a later write or close failure
-    may leave a truncated or partial destination. The input log is
-    unchanged in every case. No atomic-write behavior is provided or
-    claimed.
+    may leave a truncated or partial destination. In the exercised
+    failure lanes, and absent the documented validation-to-write
+    replacement race, the input log remains unchanged. This repair adds
+    no stronger input-log guarantee: a concurrent actor may still
+    redirect the later direct write, as the existing TOCTOU non-claim
+    states. No atomic-write behavior is provided or claimed.
     """
 
 
@@ -611,8 +614,12 @@ def main(argv: list[str] | None = None) -> int:
       before the log is read or any metric computed
     - ``4`` operational output-write failure (``error:``,
       ``MetricsOutputWriteError``) — an OSError in the output region:
-      parent creation, binary open, streamed writes, or close. The
-      input log is always unchanged. Destination preservation is
+      parent creation, binary open, streamed writes, or close. In the
+      exercised failure lanes, and absent the documented
+      validation-to-write replacement race, the input log remains
+      unchanged; this repair adds no stronger input-log guarantee — a
+      concurrent actor may still redirect the later direct write, as
+      the existing TOCTOU non-claim states. Destination preservation is
       guaranteed only for failures at or before the binary open (a
       read-only destination is never truncated); once open succeeds,
       direct streamed non-atomic output may be truncated or partial if
