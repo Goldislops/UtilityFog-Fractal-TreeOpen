@@ -17,9 +17,24 @@ import re
 SCHEMA_ID = "swarm-hunter-lab-findings-v1"
 LEANCTX_SCHEMA_ID = "leanctx-swarm-hunter-lab-v1"
 
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
-HEX16_RE = re.compile(r"^[0-9a-f]{16}$")
+# Unanchored bodies validated exclusively through fullmatch(): `$`-anchored
+# .match() accepts a trailing newline in Python, so anchors are banned here.
+_ID_BODY = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_HEX64_BODY = re.compile(r"[0-9a-f]{64}")
+_HEX16_BODY = re.compile(r"[0-9a-f]{16}")
+
+
+def is_safe_id(value) -> bool:
+    """Exact ``str`` + fullmatch — no coercion, trailing newline fails."""
+    return type(value) is str and _ID_BODY.fullmatch(value) is not None
+
+
+def is_hex64(value) -> bool:
+    return type(value) is str and _HEX64_BODY.fullmatch(value) is not None
+
+
+def is_hex16(value) -> bool:
+    return type(value) is str and _HEX16_BODY.fullmatch(value) is not None
 
 STATE_MAP = {"1": "structural", "2": "compute", "3": "energy", "4": "sensor"}
 STATE_KEYS = ("1", "2", "3", "4")
@@ -117,18 +132,18 @@ def _check_keys(errors, path, mapping, required, optional=frozenset()):
 def _validate_observation(errors, path, obs):
     if not _check_keys(errors, path, obs, OBSERVATION_KEYS):
         return
-    if not ID_RE.match(str(obs["snapshot_id"])):
+    if not is_safe_id(obs["snapshot_id"]):
         _fail(errors, path, "snapshot_id grammar")
     if not _is_uint(obs["generation"]):
         _fail(errors, path, "generation not uint")
-    if not ID_RE.match(str(obs["channel_layout_version"])):
+    if not is_safe_id(obs["channel_layout_version"]):
         _fail(errors, path, "channel_layout_version grammar")
     if obs["source"] != "synthetic":
         _fail(errors, path, "source must be 'synthetic' in S1")
     triple = obs["sha256_triple"]
     if _check_keys(errors, path + ".sha256_triple", triple, SHA256_TRIPLE_KEYS):
         for slot in sorted(SHA256_TRIPLE_KEYS):
-            if not HEX64_RE.match(str(triple[slot])):
+            if not is_hex64(triple[slot]):
                 _fail(errors, path, f"sha256_triple.{slot} not 64-hex")
 
 
@@ -138,14 +153,14 @@ def _validate_header(errors, rec):
         _fail(errors, "header", "bad schema id")
     det = rec.get("detector", {})
     if _check_keys(errors, "header.detector", det, DETECTOR_KEYS):
-        if not ID_RE.match(str(det["name"])) or not ID_RE.match(str(det["version"])):
+        if not is_safe_id(det["name"]) or not is_safe_id(det["version"]):
             _fail(errors, "header.detector", "name/version grammar")
     run = rec.get("run", {})
     if _check_keys(errors, "header.run", run, RUN_KEYS):
         if not _is_uint(run["snapshot_count"]):
             _fail(errors, "header.run", "snapshot_count not uint")
         for sid in run["snapshot_ids"]:
-            if not ID_RE.match(str(sid)):
+            if not is_safe_id(sid):
                 _fail(errors, "header.run", "snapshot id grammar")
         for gen in run["generations"]:
             if not _is_uint(gen):
@@ -171,9 +186,15 @@ def _validate_header(errors, rec):
         if not isinstance(trunc, dict) or trunc.get("kind") not in TRUNCATION_KINDS:
             _fail(errors, "header.truncation", "bad kind")
         elif trunc["kind"] == "component_cap":
-            _check_keys(errors, "header.truncation", trunc, TRUNCATION_CAP_KEYS)
+            if _check_keys(errors, "header.truncation", trunc, TRUNCATION_CAP_KEYS):
+                for key in ("components_after_filter", "component_cap"):
+                    if not _is_uint(trunc[key]):
+                        _fail(errors, "header.truncation", f"{key} not uint")
         else:
-            _check_keys(errors, "header.truncation", trunc, TRUNCATION_BUDGET_KEYS)
+            if _check_keys(errors, "header.truncation", trunc, TRUNCATION_BUDGET_KEYS):
+                for key in ("required_ops", "op_budget"):
+                    if not _is_uint(trunc[key]):
+                        _fail(errors, "header.truncation", f"{key} not uint")
         if rec.get("truncated") is not True:
             _fail(errors, "header", "truncation present but truncated is not true")
 
@@ -183,7 +204,7 @@ def _validate_finding(errors, idx, rec):
     if not _check_keys(errors, path, rec, FINDING_KEYS):
         return
     for key in ("finding_id", "chain_id", "component_id"):
-        if not HEX16_RE.match(str(rec[key])):
+        if not is_hex16(rec[key]):
             _fail(errors, path, f"{key} not 16-hex")
     if not _is_uint(rec["label"]):
         _fail(errors, path, "label not uint")
@@ -252,7 +273,7 @@ def _validate_refusal(errors, idx, rec):
         _fail(errors, path, "message must be the fixed table entry")
     if rec["evidence_class"] != "SRC":
         _fail(errors, path, "refusal evidence_class must be SRC")
-    if "snapshot_id" in rec and not ID_RE.match(str(rec["snapshot_id"])):
+    if "snapshot_id" in rec and not is_safe_id(rec["snapshot_id"]):
         _fail(errors, path, "snapshot_id grammar")
 
 
@@ -265,13 +286,20 @@ def validate_records(records):
     errors = []
     if not records:
         return ["artifact: empty (header required)"]
-    if records[0].get("kind") != "header":
+    first = records[0]
+    if not isinstance(first, dict):
+        _fail(errors, "artifact", "first record is not an object")
+        return errors
+    if first.get("kind") != "header":
         _fail(errors, "artifact", "first record must be the header")
         return errors
-    _validate_header(errors, records[0])
+    _validate_header(errors, first)
     finding_idx = refusal_count = 0
     seen_refusal = False
-    for rec in records[1:]:
+    for index, rec in enumerate(records[1:], start=1):
+        if not isinstance(rec, dict):
+            _fail(errors, "artifact", f"record[{index}] is not an object")
+            continue
         kind = rec.get("kind")
         if kind == "finding":
             if seen_refusal:

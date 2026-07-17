@@ -126,7 +126,9 @@ def _validate_config(config) -> None:
 
 
 def _validate_identifier(value) -> str:
-    if type(value) is not str or not schema.ID_RE.match(value):
+    # schema.is_safe_id: exact-str + fullmatch (trailing newline, non-str,
+    # and any grammar violation all yield the frozen structured refusal).
+    if not schema.is_safe_id(value):
         raise _Refusal("invalid_identifier")
     return value
 
@@ -199,8 +201,7 @@ def _validate_snapshot(item, ctx):
             or set(supplied.keys()) != schema.SHA256_TRIPLE_KEYS):
         raise _Refusal("invalid_sha256_format", sid)
     for slot in sorted(schema.SHA256_TRIPLE_KEYS):
-        value = supplied[slot]
-        if type(value) is not str or not schema.HEX64_RE.match(value):
+        if not schema.is_hex64(supplied[slot]):
             raise _Refusal("invalid_sha256_format", sid)
     computed = compute_sha256_triple(states, memory, inactivity)
     if {k: supplied[k] for k in computed} != computed:
@@ -509,9 +510,11 @@ def detect_structures(snapshots, config: DetectorConfig = DetectorConfig()) -> F
 # ---------------------------------------------------------------------------
 
 def leanctx_summary(artifact: FindingsArtifact, run_label: str) -> bytes:
-    if type(run_label) is not str or not schema.ID_RE.match(run_label):
+    if not schema.is_safe_id(run_label):
         raise ValueError("run_label must satisfy the safe identifier grammar")
     records = artifact.records()
+    if not records:
+        raise ValueError("artifact contains no records")
     header = records[0]
     rows = [{"kind": "leanctx-row", "finding_id": r["finding_id"],
              "label": r["label"], "cell_count": r["cell_count"],

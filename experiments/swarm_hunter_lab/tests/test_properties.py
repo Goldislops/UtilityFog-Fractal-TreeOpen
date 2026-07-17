@@ -209,7 +209,7 @@ def test_multi_snapshot_observation_completeness():
         assert set(obs.keys()) == schema.OBSERVATION_KEYS
         assert set(obs["sha256_triple"].keys()) == schema.SHA256_TRIPLE_KEYS
         for digest in obs["sha256_triple"].values():
-            assert schema.HEX64_RE.match(digest)
+            assert schema.is_hex64(digest)
 
 
 def test_inputs_never_mutated():
@@ -247,6 +247,93 @@ def test_leanctx_summary_bounds_and_determinism():
     assert len(lines) <= 200 and len(payload1) <= 64 * 1024
     with pytest.raises(ValueError):
         leanctx_summary(artifact, "Bad Label!")
+
+
+# ---- Amendment 1 regressions: fullmatch identifiers, robust validator ----------
+
+def test_trailing_newline_identifiers_refused():
+    for field, value in (("snapshot_id", "fx-nl\n"),
+                         ("channel_layout_version", "v1\n")):
+        snap = fixtures.fx_single()[0]
+        snap["provenance"][field] = value
+        _, refusal = refusal_of([snap])
+        assert refusal["reason"] == "invalid_identifier"
+
+
+def test_non_string_identifier_refused():
+    snap = fixtures.fx_single()[0]
+    snap["provenance"]["snapshot_id"] = 123
+    _, refusal = refusal_of([snap])
+    assert refusal["reason"] == "invalid_identifier"
+
+
+def test_trailing_newline_hex_refused():
+    snap = fixtures.fx_single()[0]
+    good = snap["provenance"]["sha256_triple"]["states"]
+    snap["provenance"]["sha256_triple"]["states"] = good + "\n"
+    _, refusal = refusal_of([snap])
+    assert refusal["reason"] == "invalid_sha256_format"
+
+
+def test_safe_string_helpers_are_fullmatch_and_exact_str():
+    assert schema.is_safe_id("run-1") and not schema.is_safe_id("run-1\n")
+    assert not schema.is_safe_id(123) and not schema.is_safe_id(None)
+    hex64 = "a" * 64
+    assert schema.is_hex64(hex64) and not schema.is_hex64(hex64 + "\n")
+    assert not schema.is_hex64(b"a" * 64)
+    hex16 = "b" * 16
+    assert schema.is_hex16(hex16) and not schema.is_hex16(hex16 + "\n")
+
+
+def test_leanctx_run_label_trailing_newline_rejected():
+    artifact = detect_structures(fixtures.fx_single())
+    with pytest.raises(ValueError):
+        leanctx_summary(artifact, "run-1\n")
+
+
+def test_leanctx_empty_artifact_rejected():
+    with pytest.raises(ValueError, match="artifact contains no records"):
+        leanctx_summary(FindingsArtifact(b""), "run-1")
+
+
+def test_validator_rejects_non_object_records_without_raising():
+    good = list(detect_structures(fixtures.fx_single()).records())
+    header, finding = good[0], good[1]
+    for bad in ([[]], ["text"], [header, []], [header, "text"],
+                [header, finding, 42, "x"]):
+        errors = schema.validate_records(bad)
+        assert errors and isinstance(errors, list)
+
+
+def test_validator_rejects_malformed_truncation_counters():
+    import copy
+    capped = list(detect_structures(
+        fixtures.fx_checkerboard(),
+        DetectorConfig(min_component_size=1, component_cap=64)).records())
+    budget = list(detect_structures(
+        fixtures.fx_single(), DetectorConfig(op_budget_multiplier=1)).records())
+    mutations = {
+        "capped": (capped, "truncation", (
+            lambda t: t.__setitem__("component_cap", -1),
+            lambda t: t.__setitem__("components_after_filter", True),
+            lambda t: t.__setitem__("component_cap", "64"),
+            lambda t: t.__setitem__("components_after_filter", 1.5),
+            lambda t: t.pop("component_cap"),
+            lambda t: t.__setitem__("extra", 1),
+        )),
+        "budget": (budget, "truncation", (
+            lambda t: t.__setitem__("required_ops", -5),
+            lambda t: t.__setitem__("op_budget", False),
+            lambda t: t.__setitem__("required_ops", "593"),
+            lambda t: t.pop("op_budget"),
+        )),
+    }
+    for base, key, mutators in mutations.values():
+        for mutate in mutators:
+            records = copy.deepcopy(base)
+            mutate(records[0][key])
+            errors = schema.validate_records(records)
+            assert errors and isinstance(errors, list)
 
 
 # ---- maximum supported case (measured observations, not promises) ---------------
