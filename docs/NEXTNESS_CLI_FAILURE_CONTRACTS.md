@@ -71,15 +71,29 @@ argparse's own `SystemExit(2)` — bypassing `main()`'s return path — with
 carve-out ("argparse's own usage errors also exit 2"); the argparse pins in the
 focused suites assert code 2, the `usage:` prefix, and no traceback.
 
-## Unexpected-error propagation
+## Unexpected-error propagation (bounded by each catch set)
 
-All six CLIs deliberately catch only their expected failure types; unexpected
-programming errors **propagate loudly** rather than masquerading as clean
-exits. This is docstring-stated in predictor, monitor, evaluator, replay lab
-and evidence packet, and stated for metrics in its module CLI section.
-Test-backed by propagation pins in all six focused suites (predictor's
-long-standing pin; metrics' read-side pin from PR #372; monitor/evaluator/
-replay-lab/evidence-packet pins added alongside this note).
+Each CLI's `main()` catches its **documented catch classes**; exceptions
+outside those classes propagate. The catch sets differ, and in five of the
+six they are broader than the typed subclasses alone:
+
+- **Plain `ValueError` is broadly mapped to exit 2** in predictor, metrics,
+  monitor, replay lab and evidence packet: their typed input errors subclass
+  `ValueError` and the catch clause names the base class, so a plain
+  `ValueError` escaping a call inside the `try` region takes the documented
+  data-failure lane rather than propagating.
+- The **evaluator catches its typed `EvaluatorInputError`** (alongside its
+  typed write-safety and ceiling classes), **not arbitrary plain
+  `ValueError`**; a plain `ValueError` raised inside its `try` region
+  propagates.
+- The focused propagation pins prove **their exact lanes only**: a sentinel
+  `RuntimeError` propagating in predictor, monitor, evaluator, replay lab
+  and evidence packet, and a read-side `OSError` propagating in metrics
+  (PR #372's pin). They establish those lanes, not a general theorem.
+
+**No claim is made that every possible programming error propagates**;
+propagation is exactly the complement of each CLI's documented catch set,
+per the maps above.
 
 ## Identity-inspection fail-closed rows
 
