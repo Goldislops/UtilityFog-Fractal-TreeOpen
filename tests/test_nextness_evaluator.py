@@ -1500,3 +1500,125 @@ def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(evaluator_module, "build_evaluation", boom)
     with pytest.raises(RuntimeError, match="sentinel propagation probe"):
         main(["--report", str(report_file)])
+
+
+# ---------------------------------------------------------------------------
+# Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
+# 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
+# the expected exit-4 operational-write lane — distinct from PUBLIC
+# filesystem behavior and never a public-reachability claim. Stage counters
+# assert the intended operation (open/write/close) actually fired, so no pin
+# can pass by triggering the wrong stage.
+# ---------------------------------------------------------------------------
+
+
+class _StageProxy:
+    def __init__(self, raw, fail_write_at=None, fail_close=False):
+        self._raw = raw
+        self._fail_at = fail_write_at
+        self._fail_close = fail_close
+        self.writes_ok = 0
+        self.close_attempted = False
+
+    def write(self, data):
+        if self._fail_at is not None and self.writes_ok + 1 >= self._fail_at:
+            raise OSError(28, "injected write failure")
+        n = self._raw.write(data)
+        self.writes_ok += 1
+        return n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close_attempted = True
+        self._raw.__exit__(*exc)
+        if self._fail_close and exc[0] is None:
+            raise OSError(5, "injected close failure")
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _patch_output_stage(monkeypatch, victim_resolved, *, deny_open=False,
+                        fail_write_at=None, fail_close=False):
+    """Patch ONLY the victim path's binary-write open; returns stage state."""
+    state = {"opens": 0, "proxy": None}
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            state["opens"] += 1
+            if deny_open:
+                raise PermissionError(13, "injected open denial")
+            raw = real_open(self, mode, *args, **kwargs)
+            state["proxy"] = _StageProxy(raw, fail_write_at, fail_close)
+            return state["proxy"]
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    return state
+
+
+def _stage_exit4_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_denial_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Open denial: no truncation ever happened — existing destination,
+    inputs and directory inventory all byte-identical; exit 4, one line."""
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    out = tmp_path / "stage_pin.out"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [report_file, receipts_file] + [out]}
+    inv = sorted(p.name for p in tmp_path.iterdir())
+    state = _patch_output_stage(monkeypatch, out.resolve(), deny_open=True)
+    assert main(["--report", str(report_file), "--receipts", str(receipts_file), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is None  # failed AT open
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == inv
+
+
+def test_cli_post_open_write_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Post-open failure of the FIRST whole-buffer write: open succeeded,
+    zero writes completed, destination truncated to empty; inputs
+    unchanged; exit 4 with one concise line."""
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    out = tmp_path / "stage_pin.out"
+    out.write_text("stale bytes to observe truncation\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [report_file, receipts_file]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_write_at=1)
+    assert main(["--report", str(report_file), "--receipts", str(receipts_file), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None  # open SUCCEEDED
+    assert state["proxy"].writes_ok == 0                       # first write failed
+    assert out.exists() and out.stat().st_size == 0            # truncated-empty
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Close-time failure: every write succeeded, the context exit raised —
+    the destination holds the COMPLETE canonical serialized bytes although
+    the run reports exit 4."""
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    canon = tmp_path / "canonical.out"
+    assert main(["--report", str(report_file), "--receipts", str(receipts_file), "--output", str(canon)]) == 0          # capture canonical success bytes
+    capsys.readouterr()
+    canonical = canon.read_bytes()
+    out = tmp_path / "stage_pin.out"
+    before = {p: p.read_bytes() for p in [report_file, receipts_file]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_close=True)
+    assert main(["--report", str(report_file), "--receipts", str(receipts_file), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None
+    assert state["proxy"].writes_ok == 1                       # whole buffer written
+    assert state["proxy"].close_attempted                      # failure was AT close
+    assert out.read_bytes() == canonical                       # complete bytes present
+    for p, b in before.items():
+        assert p.read_bytes() == b
