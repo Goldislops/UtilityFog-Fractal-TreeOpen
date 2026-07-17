@@ -759,20 +759,21 @@ def test_cli_existing_directory_output_target_pinned(tmp_path, capsys) -> None:
 
 
 def test_cli_symlink_to_directory_output_target_pinned(tmp_path, capsys) -> None:
-    import os
-
     real_dir = tmp_path / "real_dir"
     real_dir.mkdir()
     (real_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
     link = tmp_path / "lab.json"
     try:
-        os.symlink(real_dir, link, target_is_directory=True)
-    except OSError:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
         pytest.skip("symlink creation not permitted on this platform/user")
     _pin_dir_target_refusal(capsys, tmp_path, link)
     assert real_dir.is_dir()
     assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
     assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+    # The output link itself was not replaced by a regular file.
+    assert link.is_symlink()
+    assert link.resolve() == real_dir.resolve()
 
 
 # ---------------------------------------------------------------------------

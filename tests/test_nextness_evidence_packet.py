@@ -375,6 +375,9 @@ def test_cli_symlink_to_directory_output_target_pinned(chain, tmp_path, capsys) 
     assert real_dir.is_dir()
     assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
     assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+    # The output link itself was not replaced by a regular file.
+    assert link.is_symlink()
+    assert link.resolve() == real_dir.resolve()
 
 
 @pytest.mark.parametrize("role", list(ROLES))
