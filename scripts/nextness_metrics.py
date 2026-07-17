@@ -51,8 +51,10 @@ CLI:
     failure (``error:``; argparse usage errors also exit 2) · 3 pre-write
     containment/identity/directory safety refusal (``safety error:``) ·
     4 operational output-write failure (``error:``). Expected failures
-    print one concise line, never a traceback; unexpected errors
-    (including read-side OSErrors) propagate loudly.
+    print one concise line, never a traceback. Plain ``ValueError`` is
+    part of the documented exit-2 catch set; exceptions outside the
+    documented catch set — including read-side OSErrors — propagate
+    rather than being reclassified.
 """
 from __future__ import annotations
 
@@ -625,8 +627,14 @@ def main(argv: list[str] | None = None) -> int:
       direct streamed non-atomic output may be truncated or partial if
       a later write/close fails — no atomic-write claim is made.
 
-    Unexpected programming errors (including read-side OSErrors)
-    propagate loudly rather than being reclassified.
+    The documented catch set is exactly ``MetricsOutputWriteError``
+    (exit 4), ``WriteOutsideLogDirError`` (exit 3, ``safety error:``)
+    and plain ``ValueError``/``FileNotFoundError`` (exit 2, the data
+    lane — malformed JSONL raises plain ``ValueError`` directly).
+    Exceptions outside that set propagate: read-side ``OSError``
+    exceptions in particular are never reclassified as output failures
+    (test-pinned). Because the base ``ValueError`` class is part of the
+    catch set, no claim is made that every programming error propagates.
     """
     args = _build_parser().parse_args(argv)
     log_path = pathlib.Path(args.log)

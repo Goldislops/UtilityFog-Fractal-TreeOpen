@@ -493,7 +493,11 @@ def main(argv: list[str] | None = None) -> int:
     - ``3`` insufficient history for a train/holdout split
 
     Every expected failure prints one concise ``error:`` line to stderr —
-    never a traceback. Unexpected programming errors propagate loudly.
+    never a traceback. The documented catch set is exactly
+    ``InsufficientHistoryError`` and plain ``ValueError`` (the exit-2
+    lane, which includes ``MonitorInputError``); exceptions outside it
+    propagate. Because the base ``ValueError`` class is part of the
+    catch set, no claim is made that every programming error propagates.
     """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
