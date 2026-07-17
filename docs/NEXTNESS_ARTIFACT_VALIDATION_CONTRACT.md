@@ -26,7 +26,14 @@ writes to the filesystem.
 
 Exact builtin types everywhere (`bool` never passes as `int`; no
 conversion hook ever runs; hostile dict/list/str subclasses are
-rejected before any iteration or member access); finite numbers only
+rejected before any iteration or member access); **exact builtin `str`
+keys proven hook-free before any key operation** — every dict is swept
+by plain iteration + `type()` identity before any set construction,
+keyed lookup, `.get` probe, sort or membership test, so a hostile key's
+`__hash__`/`__eq__` never executes inside the validator and non-string
+or str-subclass keys fail closed as `ArtifactValidationError` (keyed
+lookups compare *stored* keys on hash collision, so this ordering is
+load-bearing, not defensive); finite numbers only
 (NaN/infinity/overflow-scale integers rejected); **exact key sets** at
 every nesting level (unknown and missing keys both fail closed); fixed
 vocabularies for every enum; deterministic error messages with no
@@ -116,7 +123,12 @@ single-field mutations** (26 evaluation / 19 lab / 15 packet) each fail
 at the expected boundary — covering hostile subclasses, duplicate keys,
 missing/extra fields, bool-as-int, NaN/infinity/huge integers, wrong
 vocabularies, count/rate disagreements, ordering/duplicate-role faults
-and truncation contradictions; seeded stdlib random corruption (3
+and truncation contradictions; a hostile-key matrix (armed
+`__hash__`/`__eq__` objects that hash-collide with probed literals, at
+top level of all three validators and at every nested probing site —
+envelope status, provenance slot, packet link, manifest entry — plus
+str-subclass keys) is rejected with `ArtifactValidationError` without
+ever executing the hostile hook; seeded stdlib random corruption (3
 seeds × 40 corruptions × 3 validators) never escapes the typed error;
 error messages are deterministic across repeated validation; bounded
 file loaders reject oversized, duplicate-key and pathologically nested

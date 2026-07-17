@@ -189,15 +189,38 @@ def _exact_float(
     return as_float
 
 
+def _exact_str_keys(value: dict[Any, Any], field: str) -> dict[str, Any]:
+    """Prove every key of a builtin dict is an exact builtin str — hook-free.
+
+    Iterating a builtin dict runs no user code, and ``type()`` identity
+    runs no hooks. This proof MUST come before any set construction,
+    keyed lookup, ``.get`` probe, sorting or membership test on the
+    dict: CPython reuses insertion-time hashes and compares stored keys
+    with ``__eq__`` during those operations, so a hostile key would
+    otherwise execute attacker-controlled ``__hash__``/``__eq__`` inside
+    the validator and escape as an unrelated exception. (Whether that
+    happened before this proof existed depended on accidental hash
+    collisions with expected key literals — never rely on it.)
+    """
+    for key in value:
+        if type(key) is not str:
+            raise ArtifactValidationError(
+                f"{field}: expected builtin str keys, got {type(key).__name__}"
+            )
+    return value
+
+
 def _exact_dict(value: Any, field: str, keys: frozenset[str] | tuple[str, ...]) -> dict[str, Any]:
     if type(value) is not dict:
         raise ArtifactValidationError(
             f"{field}: expected builtin dict, got {type(value).__name__}"
         )
+    _exact_str_keys(value, field)
     expected = frozenset(keys)
     present = set(value)
     if present != expected:
-        unknown = sorted(k if type(k) is str else f"<{type(k).__name__}>" for k in present - expected)
+        # Keys are proven exact str above, so plain sorts are hook-free.
+        unknown = sorted(present - expected)
         missing = sorted(expected - present)
         raise ArtifactValidationError(
             f"{field}: key set mismatch (unknown={unknown}, missing={missing})"
@@ -270,6 +293,10 @@ def _envelope(value: Any, field: str) -> tuple[str, Any]:
         raise ArtifactValidationError(
             f"{field}: expected a result envelope dict, got {type(value).__name__}"
         )
+    # Key-type proof BEFORE the .get probe: a keyed lookup compares
+    # stored keys with __eq__ on hash collision, so a hostile key would
+    # otherwise run inside the validator.
+    _exact_str_keys(value, field)
     status = value.get("status")
     if type(status) is not str:
         # Exact type BEFORE any comparison: a hostile str subclass's
@@ -912,6 +939,7 @@ def _validate_eval_cross_check(section: Any, report_provided: bool, receipts_pro
 def _validate_eval_artifact_slot(value: Any, field: str, schema: str, with_count: bool) -> dict[str, Any]:
     if type(value) is not dict:
         raise ArtifactValidationError(f"{field}: expected builtin dict, got {type(value).__name__}")
+    _exact_str_keys(value, field)  # key proof before the .get probe
     provided = value.get("provided")
     if type(provided) is not bool:
         raise ArtifactValidationError(f"{field}.provided: expected builtin bool")
@@ -1267,6 +1295,7 @@ def _validate_packet_entry(value: Any, field: str, role: str) -> dict[str, Any]:
 def _validate_packet_link(value: Any, field: str, with_reader_bounds: bool) -> dict[str, Any]:
     if type(value) is not dict:
         raise ArtifactValidationError(f"{field}: expected builtin dict, got {type(value).__name__}")
+    _exact_str_keys(value, field)  # key proof before the .get probe
     status = value.get("status")
     if type(status) is not str:
         raise ArtifactValidationError(f"{field}.status: expected builtin str")
@@ -1326,6 +1355,7 @@ def validate_evidence_packet(artifact: Any) -> dict[str, Any]:
             raise ArtifactValidationError(
                 f"packet.artifacts[{i}]: expected builtin dict, got {type(item).__name__}"
             )
+        _exact_str_keys(item, f"packet.artifacts[{i}]")  # key proof before the .get probe
         role = _enum(item.get("role"), f"packet.artifacts[{i}].role", ROLES)
         if role in seen_roles:
             raise ArtifactValidationError(f"packet.artifacts[{i}].role: duplicate role")

@@ -352,6 +352,122 @@ def test_hostile_container_subclasses_rejected_before_iteration(live) -> None:
         validate_evidence_packet(packet2)
 
 
+class _Boom(Exception):
+    """The hostile hook's own exception — must never escape the validator."""
+
+
+class _HostileHashKey:
+    """Benign while the artifact is built; armed before validation.
+
+    Hash-collides with the ``"schema"`` literal so containment can never
+    rely on a lucky hash mismatch with the expected key set.
+    """
+
+    armed = False
+
+    def __hash__(self):
+        if self.armed:
+            raise _Boom("hostile __hash__ executed inside the validator")
+        return hash("schema")
+
+    def __eq__(self, other):
+        if self.armed:
+            raise _Boom("hostile __eq__ executed inside the validator")
+        return self is other
+
+
+class _HostileEqKey:
+    """Hash-collides with a probed literal key; __eq__ raises once armed.
+
+    A ``d.get("status")`` probe on a dict storing this key makes CPython
+    compare the STORED key with ``__eq__`` — precisely the hook that must
+    never run inside the validator.
+    """
+
+    def __init__(self, collide_with: str) -> None:
+        self._h = hash(collide_with)
+        self.armed = False
+
+    def __hash__(self):
+        return self._h
+
+    def __eq__(self, other):
+        if self.armed:
+            raise _Boom("hostile __eq__ executed inside the validator")
+        return self is other
+
+
+def _hostile_key_cases(live):
+    """(name, validator, artifact, armable key) across top-level and every
+    nested dict site that probes keys — envelope status, provenance slot,
+    packet link, packet manifest entry — plus plain ``_exact_dict`` sites."""
+    cases = []
+    for name, validator in (
+        ("evaluation", validate_evaluation_artifact),
+        ("lab", validate_lab_artifact),
+        ("packet", validate_evidence_packet),
+    ):
+        key = _HostileHashKey()
+        cases.append((f"top-level/{name}", validator, {key: None}, key))
+
+    ev = _eval(live)
+    key = _HostileEqKey("status")
+    ev["prediction"]["uniform_nll_bits"] = {key: 1}
+    cases.append(("envelope-status-probe", validate_evaluation_artifact, ev, key))
+
+    ev = _eval(live)
+    key = _HostileEqKey("provided")
+    ev["artifacts"]["report"] = {key: 1}
+    cases.append(("slot-provided-probe", validate_evaluation_artifact, ev, key))
+
+    pk = _packet(live)
+    key = _HostileEqKey("status")
+    pk["links"]["lab_protocol_sha256"] = {key: 1}
+    cases.append(("link-status-probe", validate_evidence_packet, pk, key))
+
+    pk = _packet(live)
+    key = _HostileEqKey("role")
+    pk["artifacts"][0] = {key: 1}
+    cases.append(("entry-role-probe", validate_evidence_packet, pk, key))
+
+    ev = _eval(live)
+    key = _HostileHashKey()
+    ev["config"] = {key: 1}
+    cases.append(("nested-eval-config", validate_evaluation_artifact, ev, key))
+
+    lab = _lab(live)
+    key = _HostileHashKey()
+    lab["configurations"][0]["config"] = {key: 1}
+    cases.append(("nested-lab-config", validate_lab_artifact, lab, key))
+    return cases
+
+
+def test_hostile_nonstring_keys_rejected_before_any_hash_or_eq(live) -> None:
+    """A hostile key inside an exact builtin dict must be rejected by the
+    hook-free key-type proof — its __hash__/__eq__ must never execute in
+    the validator, and no exception other than ArtifactValidationError
+    may escape a public entry point."""
+    for name, validator, artifact, key in _hostile_key_cases(live):
+        key.armed = True
+        with pytest.raises(ArtifactValidationError, match="builtin str keys"):
+            validator(artifact)
+
+
+def test_string_subclass_keys_rejected(live) -> None:
+    """Key totality requires exact builtin str: even a well-behaved str
+    subclass key is rejected (before the fix it validated successfully,
+    and a hooked subclass would run __eq__ inside the validator)."""
+
+    class QuietStr(str):
+        __hash__ = str.__hash__
+
+    evaluation = _eval(live)
+    envelope = evaluation["prediction"]["uniform_nll_bits"]
+    envelope[QuietStr("status")] = envelope.pop("status")
+    with pytest.raises(ArtifactValidationError, match="builtin str keys"):
+        validate_evaluation_artifact(evaluation)
+
+
 def test_error_messages_deterministic(live) -> None:
     artifact = _eval(live)
     artifact["abstention"]["reason_counts"]["value"]["none"] = 99
