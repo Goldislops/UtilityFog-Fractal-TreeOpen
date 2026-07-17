@@ -1440,3 +1440,63 @@ def test_end_to_end_live_pipeline_via_cli(tmp_path, capsys) -> None:
         evaluation["cross_check"]["ece_match"]["value"]["results"][0]["verdict"]
         == "consistent"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# identity-inspection failure fails closed (exit 4);
+# unexpected-error propagation stays loud
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--bogus"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_identity_inspection_failure_fails_closed_exit_4(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    out = tmp_path / "evaluation.json"
+    out.write_text("stale existing non-alias output\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in (report_file, receipts_file, out)}
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    out_resolved = out.resolve()
+    real_samefile = os.path.samefile
+
+    def probed(a, b):
+        if pathlib.Path(a).resolve() == out_resolved:
+            raise PermissionError(13, "identity probe denied")
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", probed)
+    assert main(["--report", str(report_file), "--receipts", str(receipts_file),
+                 "--output", str(out)]) == 4
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
+    import scripts.nextness_evaluator as evaluator_module
+
+    report_file, _ = _write_artifacts(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sentinel propagation probe")
+
+    monkeypatch.setattr(evaluator_module, "build_evaluation", boom)
+    with pytest.raises(RuntimeError, match="sentinel propagation probe"):
+        main(["--report", str(report_file)])

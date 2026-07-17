@@ -606,3 +606,37 @@ def test_rejected_evidence_yields_typed_failure_or_documented_abstention() -> No
         "abstain_reason", "input_reduced", "discarded_field_count",
         "config", "non_claim",
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# unexpected-error propagation stays loud
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(log), "--model", "nope"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
+    import scripts.nextness_monitor as monitor_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sentinel propagation probe")
+
+    monkeypatch.setattr(monitor_module, "build_receipt", boom)
+    with pytest.raises(RuntimeError, match="sentinel propagation probe"):
+        main([str(log)])
