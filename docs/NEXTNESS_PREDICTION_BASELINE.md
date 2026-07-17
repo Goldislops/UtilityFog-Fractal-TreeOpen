@@ -130,6 +130,18 @@ is checked against a **64 KiB ceiling — fail closed** (`ReportTooLargeError`).
   translation (`\n` → `\r\n`, the old `write_text` behavior) can never
   alter the canonical bytes, so file reports are byte-identical across
   platforms and match the documented byte-identity guarantee.
+- **Destination boundary on operational write failure** (audited 2026-07-17;
+  stage-pinned in the focused tests): a failure **at or before the binary
+  open** — an unwritable or read-only destination, an absent or invalid
+  parent — preserves any existing destination byte-identically and creates
+  no output. **After a successful direct non-atomic open**, a later failure
+  may truncate the destination or leave partial output (the whole-buffer
+  write truncates on open, so a failed write leaves an empty file). A
+  **close-time failure** may leave the complete canonical report bytes
+  in place even though the run reports the operational-failure exit —
+  a present file does not imply a successful run. Supplied-input
+  preservation on these lanes is bounded by the existing validation-to-write
+  (TOCTOU) non-claim. No atomic-write behavior is provided or implied.
 - No network, HTTP, ZMQ, Ollama or model calls anywhere in the module
   (statically auditable: the only imports are stdlib + `TOKEN_NAMES` /
   `WriteOutsideLogDirError` from `scripts.nextness_observer`).

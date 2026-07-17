@@ -139,7 +139,22 @@ filesystem manipulation.
 
 Default output is **stdout**; `--output` must resolve inside the input
 log's directory and never inside the repository `data/` tree (NP1's
-convention). Exit codes mirror NP1: `0` success · `2` validation
+convention).
+
+**Destination boundary on operational write failure** (audited 2026-07-17;
+stage-pinned in the focused tests): a failure **at or before the binary
+open** — an unwritable or read-only destination, an absent or invalid
+parent — preserves any existing destination byte-identically and creates
+no output. **After a successful direct non-atomic open**, a later failure
+may truncate the destination or leave partial output (the whole-buffer
+write truncates on open, so a failed write leaves an empty file). A
+**close-time failure** may leave the complete canonical lab-report bytes
+in place even though the run reports the operational-failure exit —
+a present file does not imply a successful run. Supplied-input
+preservation on these lanes is bounded by the existing validation-to-write
+(TOCTOU) non-claim. No atomic-write behavior is provided or implied.
+
+Exit codes mirror NP1: `0` success · `2` validation
 failure (including a holdout beyond the replay bound) · `3`
 insufficient history · `4` write-boundary/unwritable · `5` report over
 the ceiling. Expected failures print one concise `error:` line, never a
