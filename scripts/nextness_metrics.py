@@ -46,6 +46,13 @@ Determinism contract (per Jack's audit on PR #141):
 CLI:
     python -m scripts.nextness_metrics --log <jsonl-in> --out <jsonl-out>
         [--smoothing FLOAT] [--boundary-delta FLOAT]
+
+    Exit codes: 0 success · 1 missing log (``error:``) · 2 data/validation
+    failure (``error:``; argparse usage errors also exit 2) · 3 pre-write
+    containment/identity/directory safety refusal (``safety error:``) ·
+    4 operational output-write failure (``error:``). Expected failures
+    print one concise line, never a traceback; unexpected errors
+    (including read-side OSErrors) propagate loudly.
 """
 from __future__ import annotations
 
@@ -66,6 +73,19 @@ from scripts.nextness_observer import (
     shannon_entropy_bits as _shannon_entropy_bits,
     void_compute_balance as _void_compute_balance,
 )
+
+
+class MetricsOutputWriteError(RuntimeError):
+    """Operational failure while writing the derived metrics output file.
+
+    Raised only from the output file's binary open/write region in
+    :func:`compute_run_metrics` — never for read-side or computation
+    errors, which stay loud. The CLI maps this to its own exit code (4)
+    so callers can distinguish "the write itself failed operationally"
+    (e.g. a read-only destination) from a pre-write safety refusal
+    (exit 3, ``WriteOutsideLogDirError``), a data error (exit 2), and a
+    missing input log (exit 1).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -503,11 +523,22 @@ def compute_run_metrics(
     # Binary mode, streamed row by row: each line is the canonical
     # serialization encoded as UTF-8 plus a single LF byte, so the
     # derived file's bytes never depend on platform newline translation.
+    #
+    # The OSError catch is deliberately confined to the output file's
+    # binary open/write/close region: an operational write failure (e.g.
+    # a read-only destination) becomes the typed MetricsOutputWriteError,
+    # while read-side or computation errors above are NEVER reclassified
+    # as output failures and stay loud.
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("wb") as f:
-        for row in pair_rows:
-            f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
-        f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
+    try:
+        with out_path.open("wb") as f:
+            for row in pair_rows:
+                f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
+            f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
+    except OSError as e:
+        raise MetricsOutputWriteError(
+            f"cannot write metrics output to {out_path}: {e}"
+        ) from e
 
     return aggregate
 
@@ -553,7 +584,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point. Returns 0 on success, non-zero on error."""
+    """CLI entry point.
+
+    Exit-code contract (complete map; each expected failure prints one
+    concise prefixed line to stderr, never a traceback):
+
+    - ``0`` success (multi-line summary on stdout; derived JSONL written)
+    - ``1`` missing input log (``error:``)
+    - ``2`` data/validation failure — malformed JSONL or out-of-bounds
+      configuration (``error:``; argparse's own usage errors also exit 2)
+    - ``3`` pre-write containment/identity/directory safety refusal
+      (``safety error:``, ``WriteOutsideLogDirError``) — the guard runs
+      before the log is read or any metric computed
+    - ``4`` operational output-write failure (``error:``,
+      ``MetricsOutputWriteError``) — the write itself failed, e.g. a
+      read-only destination; inputs and any pre-existing destination
+      bytes are left untouched
+
+    Unexpected programming errors (including read-side OSErrors)
+    propagate loudly rather than being reclassified.
+    """
     args = _build_parser().parse_args(argv)
     log_path = pathlib.Path(args.log)
     out_path = pathlib.Path(args.out)
@@ -566,6 +616,11 @@ def main(argv: list[str] | None = None) -> int:
             smoothing=args.smoothing,
             boundary_delta=args.boundary_delta,
         )
+    except MetricsOutputWriteError as e:
+        # Operational write failure: the output could not be written
+        # even though every pre-write safety check passed.
+        print(f"error: {e}", file=sys.stderr)
+        return 4
     except WriteOutsideLogDirError as e:
         # Lane B safety violation: --out points outside the log file's
         # directory. Return distinct non-zero code so callers can
@@ -589,6 +644,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "MetricsOutputWriteError",
     "smoothed_distribution",
     "kl_divergence",
     "js_divergence",

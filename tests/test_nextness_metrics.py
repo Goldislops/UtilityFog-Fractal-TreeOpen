@@ -514,12 +514,31 @@ def test_cli_main_runs_on_real_input(tmp_path, capsys):
 
 
 def test_cli_main_missing_log_returns_nonzero(tmp_path, capsys):
-    """CLI surfaces missing-file error as non-zero exit code."""
+    """CLI surfaces a missing log as EXACTLY exit 1 (its documented lane).
+
+    Upgraded from a nonzero-only assertion: exit 1 is metrics' distinct
+    missing-input code, and pinning it exactly keeps it distinguishable
+    from the exit-4 operational write-failure lane."""
     rc = main(["--log", str(tmp_path / "missing.jsonl"),
                "--out", str(tmp_path / "out.jsonl")])
-    assert rc != 0
+    assert rc == 1
     captured = capsys.readouterr()
     assert "not found" in captured.err.lower()
+    assert captured.err.count("error:") == 1
+    assert "Traceback" not in captured.err
+
+
+def test_cli_malformed_data_exits_2_exactly(tmp_path, capsys):
+    """Malformed JSONL rows are a data error: EXACTLY exit 2, one concise
+    error: line, no traceback."""
+    bad = tmp_path / "nextness_runs.jsonl"
+    bad.write_text("{not json at all\n", encoding="utf-8")
+    rc = main(["--log", str(bad), "--out", str(tmp_path / "out.jsonl")])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.err.count("error:") == 1
+    assert captured.err.startswith("error:")
+    assert "Traceback" not in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -607,12 +626,88 @@ def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
     ])
 
     rc = main(["--log", str(log_path), "--out", str(out_path)])
-    assert rc != 0
+    assert rc == 3  # upgraded from nonzero-only: the exact safety-refusal code
     captured = capsys.readouterr()
     assert "safety error" in captured.err.lower()
     assert "outside log_path" in captured.err.lower()
     # No side effects: the outside-of-boundary parent dir must not exist
     assert not (tmp_path / "elsewhere").exists()
+
+
+# ---------------------------------------------------------------------------
+# Operational output-write failure lane (exit 4): a write-side OSError is
+# an EXPECTED operational failure — one concise error: line, exit 4, no
+# traceback, inputs and any pre-existing destination byte-identical. It is
+# deliberately distinct from exit 3 (pre-write safety refusal) and from
+# exit 1 (missing log), and must never be produced by READ-side errors.
+# ---------------------------------------------------------------------------
+
+
+def _patch_binary_write_open(monkeypatch, victim_resolved: pathlib.Path, exc: OSError):
+    """Make Path.open raise ``exc`` only for the victim path's BINARY WRITE.
+
+    Reads and every other path stay untouched, so the failure is pinned to
+    the output file's open/write region and nothing else."""
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and pathlib.Path(self).resolve() == victim_resolved:
+            raise exc
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+
+
+def test_cli_write_side_permission_error_is_concise_exit_4(tmp_path, capsys, monkeypatch):
+    """Deterministic cross-platform pin of the repaired lane: a
+    PermissionError raised by the output file's binary open reaches
+    main() as the typed output-write failure — exit 4, one error: line,
+    no traceback, input log and pre-existing destination untouched."""
+    log_path = tmp_path / "nextness_runs.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+    out_path = tmp_path / "out.jsonl"
+    out_path.write_text("stale pre-existing content\n", encoding="utf-8")
+    log_before = log_path.read_bytes()
+    dest_before = out_path.read_bytes()
+
+    _patch_binary_write_open(monkeypatch, out_path.resolve(),
+                             PermissionError(13, "write denied"))
+
+    rc = main(["--log", str(log_path), "--out", str(out_path)])
+
+    assert rc == 4
+    captured = capsys.readouterr()
+    err_lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(err_lines) == 1
+    assert err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == log_before
+    assert out_path.read_bytes() == dest_before
+
+
+def test_read_side_unexpected_oserror_is_not_reclassified(tmp_path, monkeypatch):
+    """Scope precision: an unexpected OSError on the LOG READ must not be
+    converted into exit 4 by an over-broad handler — it stays loud."""
+    log_path = tmp_path / "nextness_runs.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+    out_path = tmp_path / "out.jsonl"
+    victim = log_path.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "b" not in mode and pathlib.Path(self).resolve() == victim:
+            raise PermissionError(13, "read denied")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError, match="read denied"):
+        main(["--log", str(log_path), "--out", str(out_path)])
 
 
 # ---------------------------------------------------------------------------
