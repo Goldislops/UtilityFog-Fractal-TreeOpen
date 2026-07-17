@@ -468,6 +468,92 @@ def test_string_subclass_keys_rejected(live) -> None:
         validate_evaluation_artifact(evaluation)
 
 
+class _NameBoomMeta(type):
+    @property
+    def __name__(cls):  # noqa: A003 - deliberately shadows the class-name slot
+        raise _Boom("metaclass __name__ hook executed inside the validator")
+
+
+class _MetaHostile(metaclass=_NameBoomMeta):
+    """Class-name access raises; default object hooks (hashable)."""
+
+
+class _FullHostile(metaclass=_NameBoomMeta):
+    """Class-name access AND repr/str/eq hooks raise; still hashable so it
+    can be planted as a dict key without tripping during test setup."""
+
+    def __repr__(self):
+        raise _Boom("__repr__ hook executed inside the validator")
+
+    def __str__(self):
+        raise _Boom("__str__ hook executed inside the validator")
+
+    def __eq__(self, other):
+        raise _Boom("__eq__ hook executed inside the validator")
+
+    __hash__ = object.__hash__
+
+
+def _metaclass_hostile_cases(live):
+    """(name, validator, artifact) planting metaclass-hostile objects at
+    top level, as a dict key, and at nested scalar/list/dict/envelope/
+    packet sites — every error-formatting path that used to read
+    ``type(x).__name__``."""
+    cases = [
+        ("top-level/evaluation", validate_evaluation_artifact, _MetaHostile()),
+        ("top-level/lab", validate_lab_artifact, _MetaHostile()),
+        ("top-level/packet", validate_evidence_packet, _MetaHostile()),
+        ("nonstr-key", validate_evaluation_artifact, {_MetaHostile(): 1}),
+        ("full-hostile-key", validate_evaluation_artifact, {_FullHostile(): 1}),
+    ]
+    ev = _eval(live)
+    ev["assumptions"] = [_MetaHostile()]
+    cases.append(("nested-str-scalar", validate_evaluation_artifact, ev))
+    ev = _eval(live)
+    ev["assumptions"] = [_FullHostile()]
+    cases.append(("full-hostile-scalar", validate_evaluation_artifact, ev))
+    ev = _eval(live)
+    ev["assumptions"] = _MetaHostile()
+    cases.append(("nested-list-site", validate_evaluation_artifact, ev))
+    ev = _eval(live)
+    ev["config"] = _MetaHostile()
+    cases.append(("nested-dict-site", validate_evaluation_artifact, ev))
+    ev = _eval(live)
+    ev["prediction"]["uniform_nll_bits"] = _MetaHostile()
+    cases.append(("envelope-site", validate_evaluation_artifact, ev))
+    ev = _eval(live)
+    ev["artifacts"]["report"]["bytes"] = _MetaHostile()
+    cases.append(("nested-int-site", validate_evaluation_artifact, ev))
+    packet = _packet(live)
+    packet["artifacts"][0] = _MetaHostile()
+    cases.append(("packet-entry-site", validate_evidence_packet, packet))
+    packet = _packet(live)
+    packet["links"]["lab_protocol_sha256"] = _MetaHostile()
+    cases.append(("packet-link-site", validate_evidence_packet, packet))
+    return cases
+
+
+def test_hostile_metaclass_never_consulted_in_error_formatting(live) -> None:
+    """Diagnostics themselves must honor the totality promise: type names
+    in error messages come from identity checks against builtin types
+    (with a generic 'non-builtin value' otherwise) — never from
+    ``type(x).__name__``, which consults an overridable metaclass. Armed
+    metaclass/object hooks must not escape or be executed."""
+    for name, validator, artifact in _metaclass_hostile_cases(live):
+        with pytest.raises(ArtifactValidationError):
+            validator(artifact)
+
+
+def test_non_builtin_values_described_generically(live) -> None:
+    """The generic phrase is deterministic and field-anchored."""
+    with pytest.raises(ArtifactValidationError, match=r"evaluation: expected builtin dict, got non-builtin value"):
+        validate_evaluation_artifact(_MetaHostile())
+    ev = _eval(live)
+    ev["assumptions"] = _MetaHostile()
+    with pytest.raises(ArtifactValidationError, match=r"expected builtin list, got non-builtin value"):
+        validate_evaluation_artifact(ev)
+
+
 def test_error_messages_deterministic(live) -> None:
     artifact = _eval(live)
     artifact["abstention"]["reason_counts"]["value"]["none"] = 99

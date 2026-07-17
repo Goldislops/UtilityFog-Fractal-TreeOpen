@@ -37,7 +37,12 @@ load-bearing, not defensive); finite numbers only
 (NaN/infinity/overflow-scale integers rejected); **exact key sets** at
 every nesting level (unknown and missing keys both fail closed); fixed
 vocabularies for every enum; deterministic error messages with no
-`repr` of hostile values; fixed validation depth by construction
+`repr` of hostile values and **hook-free diagnostics** — type names in
+messages come from identity comparison against a fixed builtin table,
+with anything else described generically as `non-builtin value`;
+`type(x).__name__` is never read for an untrusted value, since a
+hostile metaclass can raise from class-name access inside error
+formatting; fixed validation depth by construction
 (per-section functions, no recursion over unknown structure).
 
 ## What structural validation establishes — and what it cannot
@@ -128,7 +133,13 @@ and truncation contradictions; a hostile-key matrix (armed
 top level of all three validators and at every nested probing site —
 envelope status, provenance slot, packet link, manifest entry — plus
 str-subclass keys) is rejected with `ArtifactValidationError` without
-ever executing the hostile hook; seeded stdlib random corruption (3
+ever executing the hostile hook; a hostile-metaclass matrix (classes
+whose `__name__` access raises, alone and combined with raising
+`__repr__`/`__str__`/`__eq__` object hooks, planted at top level, as
+dict keys, and at nested scalar/list/dict/envelope/packet sites of all
+three validators) terminates as deterministic `ArtifactValidationError`
+— diagnostics never consult the metaclass; seeded stdlib random
+corruption (3
 seeds × 40 corruptions × 3 validators) never escapes the typed error;
 error messages are deterministic across repeated validation; bounded
 file loaders reject oversized, duplicate-key and pathologically nested
