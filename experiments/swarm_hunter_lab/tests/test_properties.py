@@ -336,6 +336,87 @@ def test_validator_rejects_malformed_truncation_counters():
             assert errors and isinstance(errors, list)
 
 
+# ---- Amendment 2: total validator — never raises on JSON-decodable input -------
+
+def test_validator_is_total_on_malformed_shapes():
+    """schema.validate_records must return list[str] errors — never raise —
+    for any JSON-decodable malformed input (Jack audit, Amendment 2)."""
+    import copy
+    good = list(detect_structures(fixtures.fx_stable()).records())
+    refusal_art = list(detect_structures(fixtures.fx_malformed_provenance()).records())
+    junk = (None, True, 7, 1.5, "text", [], ["x"], {"a": 1})
+
+    def mutations():
+        # top-level records value is not a sequence
+        for top in (42, None, "x", {}, True):
+            yield top
+        # every expected header container replaced by each junk shape
+        # (None is excluded for params/truncation — legitimately nullable)
+        for key in ("detector", "run", "params", "counts", "truncation"):
+            for value in junk:
+                if value is None and key in ("params", "truncation"):
+                    continue
+                recs = copy.deepcopy(good)
+                recs[0][key] = value
+                yield recs
+        # run sub-lists replaced by primitives/objects (Jack's examples)
+        for sub, value in (("snapshot_ids", None), ("snapshot_ids", 7),
+                           ("snapshot_ids", [None]), ("generations", 7),
+                           ("generations", None), ("generations", ["x"])):
+            recs = copy.deepcopy(good)
+            recs[0]["run"][sub] = value
+            yield recs
+        # every expected finding container replaced by junk shapes
+        for key in ("region", "state_counts", "density", "snapshot",
+                    "observations", "persistence", "reasons"):
+            for value in junk:
+                recs = copy.deepcopy(good)
+                recs[1][key] = value
+                yield recs
+        # region internals, mixed state_counts keys, reason shapes
+        recs = copy.deepcopy(good)
+        recs[1]["region"]["bbox_min"] = None
+        yield recs
+        recs = copy.deepcopy(good)
+        recs[1]["region"]["wraps"] = [1, 2, 3]
+        yield recs
+        recs = copy.deepcopy(good)
+        recs[1]["state_counts"] = {1: 27, "2": 0, "3": 0, "4": 0}
+        yield recs
+        recs = copy.deepcopy(good)
+        recs[1]["observations"] = [5]
+        yield recs
+        recs = copy.deepcopy(good)
+        recs[1]["reasons"] = [5]
+        yield recs
+        # refusal reason as unhashable/object values; unsafe snapshot_id
+        for value in (["x"], {"r": 1}, None, 7):
+            recs = copy.deepcopy(refusal_art)
+            recs[1]["reason"] = value
+            yield recs
+        recs = copy.deepcopy(refusal_art)
+        recs[1]["snapshot_id"] = 5
+        yield recs
+        # malformed later records mixed with valid ones
+        yield [copy.deepcopy(good[0]), 42, copy.deepcopy(good[1]), "x", None]
+
+    for case in mutations():
+        errors = schema.validate_records(case)
+        assert isinstance(errors, list) and errors
+        assert all(isinstance(e, str) for e in errors)
+
+
+def test_validator_still_accepts_all_valid_artifacts():
+    for snaps, cfg in ((fixtures.fx_stable(), None),
+                       (fixtures.fx_malformed_provenance(), None),
+                       (fixtures.fx_checkerboard(),
+                        DetectorConfig(min_component_size=1, component_cap=64)),
+                       (fixtures.fx_single(),
+                        DetectorConfig(op_budget_multiplier=1))):
+        artifact = detect_structures(snaps, cfg) if cfg else detect_structures(snaps)
+        assert schema.validate_records(list(artifact.records())) == []
+
+
 # ---- maximum supported case (measured observations, not promises) ---------------
 
 def test_max_lattice_64_cubed_measured():

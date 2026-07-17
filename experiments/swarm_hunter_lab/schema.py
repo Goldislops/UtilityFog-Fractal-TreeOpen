@@ -159,12 +159,20 @@ def _validate_header(errors, rec):
     if _check_keys(errors, "header.run", run, RUN_KEYS):
         if not _is_uint(run["snapshot_count"]):
             _fail(errors, "header.run", "snapshot_count not uint")
-        for sid in run["snapshot_ids"]:
-            if not is_safe_id(sid):
-                _fail(errors, "header.run", "snapshot id grammar")
-        for gen in run["generations"]:
-            if not _is_uint(gen):
-                _fail(errors, "header.run", "generation not uint")
+        sids = run["snapshot_ids"]
+        if not isinstance(sids, list):
+            _fail(errors, "header.run", "snapshot_ids is not a list")
+        else:
+            for sid in sids:
+                if not is_safe_id(sid):
+                    _fail(errors, "header.run", "snapshot id grammar")
+        gens = run["generations"]
+        if not isinstance(gens, list):
+            _fail(errors, "header.run", "generations is not a list")
+        else:
+            for gen in gens:
+                if not _is_uint(gen):
+                    _fail(errors, "header.run", "generation not uint")
     params = rec.get("params")
     if params is not None and _check_keys(errors, "header.params", params, PARAMS_KEYS):
         if params["connectivity"] != CONNECTIVITY:
@@ -224,7 +232,9 @@ def _validate_finding(errors, idx, rec):
     if not _is_uint(rec["cell_count"]) or rec["cell_count"] < 1:
         _fail(errors, path, "cell_count")
     sc = rec["state_counts"]
-    if not isinstance(sc, dict) or tuple(sorted(sc)) != STATE_KEYS:
+    if (not isinstance(sc, dict)
+            or not all(type(k) is str for k in sc)     # mixed-type keys are
+            or tuple(sorted(sc)) != STATE_KEYS):       # unsortable — prove first
         _fail(errors, path, "state_counts must have exactly keys 1..4")
     elif not all(_is_uint(v) for v in sc.values()):
         _fail(errors, path, "state_counts values not uint")
@@ -267,7 +277,9 @@ def _validate_refusal(errors, idx, rec):
                        REFUSAL_KEYS_OPTIONAL):
         return
     reason = rec["reason"]
-    if reason not in REFUSAL_MESSAGES:
+    # isinstance-str first: membership in a dict hashes the key, and an
+    # unhashable reason (list/object) must produce an error, not a TypeError.
+    if not isinstance(reason, str) or reason not in REFUSAL_MESSAGES:
         _fail(errors, path, "reason not in closed enum")
     elif rec["message"] != REFUSAL_MESSAGES[reason]:
         _fail(errors, path, "message must be the fixed table entry")
@@ -284,7 +296,9 @@ def validate_records(records):
     the closed schema (structural forbidden-content closure).
     """
     errors = []
-    if not records:
+    if not isinstance(records, (list, tuple)):
+        return ["artifact: records is not a sequence"]
+    if len(records) == 0:
         return ["artifact: empty (header required)"]
     first = records[0]
     if not isinstance(first, dict):
@@ -317,9 +331,11 @@ def validate_records(records):
     if refusal_count == 1 and finding_idx > 0:
         _fail(errors, "artifact", "refusal artifacts carry no findings")
     header = records[0]
-    counts = header.get("counts", {})
-    if counts.get("findings") != finding_idx or counts.get("refusals") != refusal_count:
-        _fail(errors, "artifact", "header counts disagree with records")
+    counts = header.get("counts")
+    if isinstance(counts, dict):  # malformed counts already reported above
+        if (counts.get("findings") != finding_idx
+                or counts.get("refusals") != refusal_count):
+            _fail(errors, "artifact", "header counts disagree with records")
     if header.get("empty") is not (finding_idx == 0):
         _fail(errors, "artifact", "header.empty disagrees with findings")
     return errors
