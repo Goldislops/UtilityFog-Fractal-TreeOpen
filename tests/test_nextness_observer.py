@@ -16,6 +16,7 @@ import inspect
 import json
 import os
 import pathlib
+import stat
 import time
 
 import numpy as np
@@ -783,6 +784,216 @@ def test_write_log_entry_fsync_failure_preserves_log_and_cleans_staging(tmp_path
     monkeypatch.setattr(os, "fsync", refuse_fsync)
     with pytest.raises(OSError, match="injected fsync failure"):
         write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+class _CloseFailProxy:
+    """Wraps a real file handle; ``close`` closes the underlying file, then
+    raises. ``write`` optionally raises a primary failure first."""
+
+    def __init__(self, fh, write_exc=None):
+        self._fh = fh
+        self._write_exc = write_exc
+
+    def write(self, data):
+        if self._write_exc is not None:
+            raise self._write_exc
+        return self._fh.write(data)
+
+    def close(self):
+        self._fh.close()
+        raise OSError("injected close failure")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+
+def test_write_log_entry_setup_close_failure_does_not_mask_primary(tmp_path, monkeypatch):
+    """O1: if the staged-descriptor setup fails AND the cleanup close also
+    fails, the caller must observe the primary setup failure."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    real_close = os.close
+
+    def fdopen_refused(*args, **kwargs):
+        raise RuntimeError("primary fdopen failure")
+
+    def close_then_fail(fd):
+        real_close(fd)
+        raise OSError("secondary close failure")
+
+    monkeypatch.setattr(os, "fdopen", fdopen_refused)
+    monkeypatch.setattr(os, "close", close_then_fail)
+    with pytest.raises(RuntimeError, match="primary fdopen failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_body_failure_not_masked_by_close_failure(tmp_path, monkeypatch):
+    """O1: a staging-write failure followed by a close failure must surface
+    the write failure, clean the staging file, and leave the log intact."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    real_fdopen = os.fdopen
+    monkeypatch.setattr(
+        os, "fdopen",
+        lambda *a, **k: _CloseFailProxy(
+            real_fdopen(*a, **k), write_exc=RuntimeError("primary write failure")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="primary write failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_close_only_failure_propagates(tmp_path, monkeypatch):
+    """O1: a close failure with NO earlier failure must propagate — without
+    a successful close the buffered record is not guaranteed on disk."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    real_fdopen = os.fdopen
+    monkeypatch.setattr(
+        os, "fdopen", lambda *a, **k: _CloseFailProxy(real_fdopen(*a, **k))
+    )
+    with pytest.raises(OSError, match="injected close failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission-bit semantics")
+def test_write_log_entry_preserves_existing_log_mode(tmp_path):
+    """O2: an existing log's permission bits survive publication (the
+    staged file's restrictive mkstemp mode must not leak through)."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    os.chmod(log_path, 0o640)
+    write_log_entry(log_dir, {"x": 2})
+    assert stat.S_IMODE(os.stat(log_path).st_mode) == 0o640
+    lines = log_path.read_text().splitlines()
+    assert [json.loads(line) for line in lines] == [{"seed": 1}, {"x": 2}]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX umask semantics")
+def test_write_log_entry_first_publication_uses_umask_creation_mode(tmp_path):
+    """O2: the first canonical log gets the ordinary creation mode under
+    the active umask (0o666 & ~umask), not mkstemp's 0o600 staging mode."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    log_dir.mkdir()
+    previous = os.umask(0o027)
+    try:
+        write_log_entry(log_dir, {"first": 1})
+    finally:
+        os.umask(previous)
+    log_path = log_dir / "nextness_runs.jsonl"
+    assert stat.S_IMODE(os.stat(log_path).st_mode) == 0o640  # 0o666 & ~0o027
+
+
+def test_write_log_entry_mode_copy_failure_aborts_before_replace(tmp_path, monkeypatch):
+    """O2: a permission-copy failure must abort publication with the prior
+    canonical bytes (and mode) untouched and the staging file removed."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    mode_before = stat.S_IMODE(os.stat(log_path).st_mode)
+
+    def chmod_refused(path, mode, **kwargs):
+        raise OSError("injected chmod failure")
+
+    monkeypatch.setattr(os, "chmod", chmod_refused)
+    with pytest.raises(OSError, match="injected chmod failure"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert stat.S_IMODE(os.stat(log_path).st_mode) == mode_before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_refuses_non_writable_existing_log(tmp_path):
+    """O2: publication to a non-writable existing log is refused with
+    PermissionError before any staging exists — the same write authority
+    the old append path enforced; replacement must not bypass it."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    os.chmod(log_path, 0o444)
+    try:
+        with pytest.raises(PermissionError):
+            write_log_entry(log_dir, {"x": 2})
+        assert log_path.read_bytes() == before
+        # Refusal happens before staging: nothing else in the directory.
+        assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+    finally:
+        os.chmod(log_path, 0o644)
+
+
+def test_write_log_entry_payload_phase_fault_preserves_existing_log(tmp_path, monkeypatch):
+    """O3: the existing bytes copy completely, then the NEW payload write
+    fails after a prefix — the canonical log must stay byte-identical and
+    no staging file may survive. (Complements the copy-phase fault test.)"""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"n": 0})
+    write_log_entry(log_dir, {"n": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    payload = (json.dumps({"n": 2}, sort_keys=True, default=str) + "\n").encode("utf-8")
+
+    class PayloadPhaseFault:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def write(self, data):
+            if bytes(data) == payload:
+                self._fh.write(data[: len(data) // 2])
+                self._fh.flush()
+                raise OSError("injected payload-phase fault")
+            return self._fh.write(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+            return False
+
+        def __getattr__(self, name):
+            return getattr(self._fh, name)
+
+    real_fdopen = os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: PayloadPhaseFault(real_fdopen(*a, **k)))
+    with pytest.raises(OSError, match="injected payload-phase fault"):
+        write_log_entry(log_dir, {"n": 2})
     monkeypatch.undo()
     assert log_path.read_bytes() == before
     assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]

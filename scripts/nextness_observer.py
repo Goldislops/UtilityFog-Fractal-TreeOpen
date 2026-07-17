@@ -1109,6 +1109,7 @@ import collections
 import json
 import pathlib
 import shutil
+import stat
 import tempfile
 from datetime import datetime, timezone
 
@@ -1338,6 +1339,26 @@ def write_log_entry(
     removed. The staged copy makes each publication O(current log size);
     the one-record-per-snapshot cadence keeps that acceptable.
 
+    Permissions and write authority: publishing to an existing log first
+    requires the same OS-enforced write access the old append path
+    required (a non-writable log raises ``PermissionError`` before any
+    staging exists), and the existing log's permission bits are copied
+    onto the staged file before the swap. First-time publication uses
+    the ordinary creation mode under the active umask (``0o666 & ~umask``
+    — what ``open("a")`` would have created), never ``mkstemp``'s
+    restrictive staging mode. A permission-copy failure aborts before
+    the swap. Only permission bits are preserved (on Windows that
+    reduces to the read-only flag); ownership, ACLs, extended
+    attributes and file identity are not — ``os.replace`` changes the
+    inode, so hard links and already-open handles keep seeing the old
+    file.
+
+    Failure transparency: the exception the caller observes is always
+    the primary failure — a secondary ``close()`` failure during cleanup
+    is suppressed rather than allowed to mask it. A close failure with
+    no earlier failure still propagates (the buffered record is not
+    guaranteed on disk without a successful close).
+
     Scope of the guarantee: in-process failures and kills between
     syscalls, single writer only. A hard kill mid-publication can at
     worst leave a stray ``nextness_runs.jsonl.*.tmp`` staging file, which
@@ -1349,6 +1370,24 @@ def write_log_entry(
     log_path = log_dir / _LOG_FILE_NAME
     _validate_write_path(log_path, log_dir)
     payload = (json.dumps(entry, sort_keys=True, default=str) + "\n").encode("utf-8")
+
+    log_exists = log_path.exists()
+    if log_exists:
+        # Same OS-enforced refusal the append path had: opening an
+        # existing log for append raises PermissionError when it is not
+        # writable — before any staging work. (An access pre-check, not
+        # a lock; the log is single-writer by contract.)
+        with log_path.open("ab"):
+            pass
+        canonical_mode = stat.S_IMODE(os.stat(log_path).st_mode)
+    else:
+        # First publication: the ordinary creation mode under the active
+        # umask, matching what open("a") used to create. Standard
+        # read-the-umask dance; the observer is single-threaded.
+        active_umask = os.umask(0)
+        os.umask(active_umask)
+        canonical_mode = 0o666 & ~active_umask
+
     fd, staged_name = tempfile.mkstemp(
         prefix=_LOG_FILE_NAME + ".", suffix=".tmp", dir=log_dir
     )
@@ -1357,17 +1396,40 @@ def write_log_entry(
         _validate_write_path(staged_path, log_dir)
         staged = os.fdopen(fd, "wb")
     except BaseException:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # a secondary close failure must not mask the primary
         _unlink_quietly(staged_path)
         raise
     try:
-        with staged:
-            if log_path.exists():
-                with log_path.open("rb") as current:
+        try:
+            if log_exists:
+                current = log_path.open("rb")
+                try:
                     shutil.copyfileobj(current, staged)
+                finally:
+                    try:
+                        current.close()
+                    except OSError:
+                        pass  # read-side close is best-effort
             staged.write(payload)
             staged.flush()
             os.fsync(staged.fileno())
+        except BaseException:
+            try:
+                staged.close()
+            except OSError:
+                pass  # never mask the staging failure with a close failure
+            raise
+        # A close failure with NO earlier failure must propagate: without
+        # a successful close the buffered record is not guaranteed on disk.
+        staged.close()
+        # Permission step before the atomic commit: preserve an existing
+        # log's bits, or apply the ordinary creation mode on first
+        # publication. A failure here aborts with the canonical log's
+        # bytes and mode untouched.
+        os.chmod(staged_path, canonical_mode)
         os.replace(staged_path, log_path)
     except BaseException:
         _unlink_quietly(staged_path)
