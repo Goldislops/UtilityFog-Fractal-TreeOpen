@@ -640,7 +640,15 @@ def main(argv: list[str] | None = None) -> int:
     failure (missing/oversized/malformed/unknown-variant artifact, or
     none provided) · ``4`` output-path failure · ``5`` packet over the
     ceiling. One concise ``error:`` line per expected failure — never a
-    traceback; unexpected programming errors propagate loudly.
+    traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``PacketTooLargeError``, plain
+    ``ValueError`` (the exit-2 lane, which includes ``PacketInputError``
+    and wrapped validator errors) and the write-lane ``OSError``;
+    exceptions outside it propagate — ``build_packet``'s self-check
+    deliberately re-raises its internal validation failure as
+    ``RuntimeError`` for exactly that reason. Because the base
+    ``ValueError`` class is part of the catch set, no claim is made that
+    every programming error propagates.
     """
     args = _build_parser().parse_args(argv)
     paths = {

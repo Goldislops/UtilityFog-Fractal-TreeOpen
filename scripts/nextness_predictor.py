@@ -633,9 +633,13 @@ def main(argv: list[str] | None = None) -> int:
     - ``5`` report exceeds MAX_REPORT_BYTES (fail closed)
 
     Every expected failure prints one concise ``error:`` line to stderr —
-    never a traceback. Only the expected error types above are caught;
-    unexpected programming errors propagate loudly rather than
-    masquerade as clean exits.
+    never a traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``InsufficientHistoryError``,
+    ``ReportTooLargeError``, plain ``ValueError`` (the exit-2 lane —
+    out-of-bounds configuration raises it directly) and the write-lane
+    ``OSError``. Exceptions outside that set propagate; because the base
+    ``ValueError`` class is part of the catch set, no claim is made that
+    every programming error propagates.
     """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():

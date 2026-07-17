@@ -669,7 +669,13 @@ def main(argv: list[str] | None = None) -> int:
     - ``5`` lab report exceeds MAX_LAB_REPORT_BYTES (fail closed)
 
     Every expected failure prints one concise ``error:`` line to stderr —
-    never a traceback; unexpected programming errors propagate loudly.
+    never a traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``InsufficientHistoryError``,
+    ``LabReportTooLargeError``, plain ``ValueError`` (the exit-2 lane,
+    which includes ``LabInputError``) and the write-lane ``OSError``;
+    exceptions outside it propagate. Because the base ``ValueError``
+    class is part of the catch set, no claim is made that every
+    programming error propagates.
     """
     args = _build_parser().parse_args(argv)
     for label, path in (("log", args.log_path), ("protocol", args.protocol_path)):
