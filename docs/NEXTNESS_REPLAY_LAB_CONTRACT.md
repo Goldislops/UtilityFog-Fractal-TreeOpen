@@ -106,7 +106,10 @@ steps; run count equals reorientations).
   early computation against the bridge's own holdout. Per-step rolling
   statistics cost O(steps × window), so the bound also caps total work.
 - Log reading inherits NP1's `max_rows` / `max_line_bytes` bounds via
-  `read_dominant_sequence`; protocol files are size-checked before
+  `read_dominant_sequence` (`max_line_bytes` accepts only a non-boolean
+  built-in integer in [1, 16 777 216] — the shared
+  `MAX_LINE_BYTES_CEILING`; the re-exposed CLI flag inherits the same
+  validated range); protocol files are size-checked before
   parsing; output is checked against a **64 KiB ceiling — fail closed**.
 
 ## Determinism and provenance

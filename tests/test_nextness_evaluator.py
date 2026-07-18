@@ -1693,3 +1693,21 @@ def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch, capsys)
     assert not out.exists()
     for p_, b_ in before.items():
         assert p_.read_bytes() == b_
+
+
+def test_report_config_max_line_bytes_ceiling() -> None:
+    """Boundary totality: recorded predictor configuration values obey
+    the shared [1, 16777216] ceiling — a report recording an index-
+    overflowing max_line_bytes is a typed refusal, at-ceiling accepted
+    (the failing-first validator-acceptance gap, inverted)."""
+    from scripts.nextness_evaluator import EvaluatorInputError
+    from scripts.nextness_predictor import MAX_LINE_BYTES_CEILING
+
+    report = _make_report()
+    report["config"]["max_line_bytes"] = MAX_LINE_BYTES_CEILING
+    validate_report(report)  # at-ceiling accepted
+    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806):
+        report = _make_report()
+        report["config"]["max_line_bytes"] = bad
+        with pytest.raises(EvaluatorInputError, match="outside"):
+            validate_report(report)

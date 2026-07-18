@@ -2328,3 +2328,59 @@ def test_in_bound_output_byte_identical_to_pre_repair(tmp_path, capsys) -> None:
     assert main(["--log", str(log), "--out", str(out)]) == 0
     assert (hashlib.sha256(out.read_bytes()).hexdigest()
             == _PRE_REPAIR_OUTPUT_SHA256)
+
+
+# ---------------------------------------------------------------------------
+# Line-bound arithmetic totality (boundary-totality repair): the
+# max_line_bytes parameter is capped at the shared 16 MiB ceiling so
+# the bounded probe arithmetic can never overflow an index-sized
+# integer; the ceiling explicitly mirrors the predictor reader's.
+# ---------------------------------------------------------------------------
+
+
+def test_max_line_bytes_ceiling_matches_predictor() -> None:
+    """Anti-drift pin: the two public ceilings are one value."""
+    from scripts.nextness_metrics import MAX_LINE_BYTES_CEILING as MET
+    from scripts.nextness_predictor import MAX_LINE_BYTES_CEILING as PRED
+    assert MET == PRED == 16_777_216
+
+
+def test_max_line_bytes_ceiling_totality(tmp_path, monkeypatch) -> None:
+    from scripts.nextness_metrics import MAX_LINE_BYTES_CEILING, MetricsInputError
+
+    log = tmp_path / "ceil.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    out = tmp_path / "ceil_out.jsonl"
+    # At-ceiling accepted on a TINY input (no 16 MiB allocation needed).
+    compute_run_metrics(log, out, max_line_bytes=MAX_LINE_BYTES_CEILING)
+    assert out.exists()
+
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806):
+        with pytest.raises(MetricsInputError):
+            compute_run_metrics(log, tmp_path / "n.jsonl", max_line_bytes=bad)
+    monkeypatch.undo()
+    assert opened == []  # refused before the log was opened
+    assert not (tmp_path / "n.jsonl").exists()
+
+
+def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:
+    """The failing-first OverflowError lane, inverted: concise typed
+    exit 2, one line, no traceback, destination absent stays absent."""
+    body = (_bounds_row(1, 120) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "9223372036854775806"])
+    _assert_concise_refusal(rc, captured, unchanged, "16777216")
+    assert not out.exists()

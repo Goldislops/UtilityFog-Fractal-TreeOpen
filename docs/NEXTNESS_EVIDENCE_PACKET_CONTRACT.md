@@ -31,7 +31,11 @@ the defaults would, so the sequence link recomputes with the lab's own
 recorded `config.max_rows`/`config.max_line_bytes` — exact-type
 validated against the same acceptance ranges NP1/NP6 enforce (bool,
 float, string, negative, zero and out-of-range values are malformed
-input, fail closed) and echoed in the link as `reader_bounds`. The log
+input, fail closed; `max_line_bytes` is additionally capped
+DEFENSIVELY at extraction to [1, 16 777 216] — the shared
+`MAX_LINE_BYTES_CEILING` — even if upstream validation changes later,
+so the reader replay can never receive an index-overflowing bound)
+and echoed in the link as `reader_bounds`. The log
 manifest entry's own `sequence_sha256` uses NP1 defaults, with the
 bounds echoed as `sequence_bounds`. No lab ⇒ no bounds are invented.
 

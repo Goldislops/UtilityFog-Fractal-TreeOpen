@@ -784,3 +784,25 @@ def test_cli_deeply_nested_row_is_contained_malformed(tmp_path, capsys) -> None:
     assert "Traceback" not in captured.err
     assert captured.err == ""
     assert log.read_bytes() == before
+
+
+def test_direct_reader_use_gets_shared_typed_exception(tmp_path) -> None:
+    """Boundary totality: an index-overflowing max_line_bytes through
+    the monitor's bridge raises the shared reader's typed
+    PredictorInputError — never raw OverflowError (the failing-first
+    inherited-overflow lane, inverted)."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text(
+        "\n".join(
+            json.dumps({"generation": i, "token_counts": {t: 3}})
+            for i, t in enumerate([A, B] * 30)
+        ) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PredictorInputError) as excinfo:
+        observations_from_log(
+            log, "first_order", max_line_bytes=9223372036854775806)
+    assert type(excinfo.value) is PredictorInputError
+    assert "16777216" in str(excinfo.value)

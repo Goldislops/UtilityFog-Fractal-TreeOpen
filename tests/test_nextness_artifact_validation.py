@@ -801,3 +801,20 @@ def test_math_constants_still_pinned() -> None:
     from scripts.nextness_artifact_validation import _NLL_BITS_MAX
 
     assert _NLL_BITS_MAX == -math.log2(1e-300) + 1e-6
+
+
+def test_lab_config_max_line_bytes_ceiling(live) -> None:
+    """Boundary totality: recorded lab configuration values obey the
+    shared [1, 16777216] ceiling — an index-overflowing recorded
+    max_line_bytes is a typed refusal, at-ceiling accepted (the
+    failing-first standalone-validator acceptance gap, inverted)."""
+    from scripts.nextness_predictor import MAX_LINE_BYTES_CEILING
+
+    lab = _lab(live)
+    lab["config"]["max_line_bytes"] = MAX_LINE_BYTES_CEILING
+    validate_lab_artifact(lab)  # at-ceiling accepted
+    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806):
+        lab = _lab(live)
+        lab["config"]["max_line_bytes"] = bad
+        with pytest.raises(ArtifactValidationError, match="outside"):
+            validate_lab_artifact(lab)

@@ -552,7 +552,11 @@ decision, metrics now enforces explicit per-invocation JSONL bounds:
 
 - **Defaults and ceiling**: `--max-rows` default **100,000** with a
   hard parameter ceiling of **1,000,000**; `--max-line-bytes` default
-  **65,536** (any positive integer). Both are validated typed BEFORE
+  **65,536** with a hard parameter ceiling of **16,777,216**
+  (`MAX_LINE_BYTES_CEILING`, mirrored from the predictor reader's
+  public constant, anti-drift test-pinned — NOT any positive integer:
+  the ceiling keeps the bounded probe arithmetic `max_line_bytes + 2`
+  safely index-representable on every platform). Both are validated typed BEFORE
   any input reading; both pass from `main()` into
   `compute_run_metrics` (direct-Python callers get the same defaults).
 - **What is counted**: bounds apply to **raw physical JSONL records** —

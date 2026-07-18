@@ -82,6 +82,15 @@ MAX_ROWS_DEFAULT: Final[int] = 100_000
 MAX_ROWS_CEILING: Final[int] = 1_000_000
 MAX_LINE_BYTES_DEFAULT: Final[int] = 65_536
 
+#: Hard ceiling on the max_line_bytes PARAMETER itself (16 MiB) —
+#: deliberately far above the 65,536-byte default while keeping the
+#: bounded probe arithmetic (max_line_bytes + 2) safely representable
+#: as an index-sized integer on every platform and preserving an honest
+#: per-record resource bound. Owned here; metrics mirrors it
+#: (anti-drift test-pinned) and the artifact validators enforce it on
+#: recorded configuration values.
+MAX_LINE_BYTES_CEILING: Final[int] = 16_777_216
+
 #: Additive (Laplace) smoothing pseudo-count, shared by all three models
 #: so their likelihoods are comparable. Documented in the baseline doc;
 #: configurable but bounded — smoothing is a floor against log(0), not a
@@ -211,9 +220,16 @@ def read_dominant_sequence(
         raise PredictorInputError(
             f"max_rows must be in (0, {MAX_ROWS_CEILING}], got {max_rows}"
         )
-    if max_line_bytes <= 0:
+    # Total line-bound validation: only a non-boolean builtin int in
+    # [1, MAX_LINE_BYTES_CEILING] reaches the bounded readline call, so
+    # the probe arithmetic (max_line_bytes + 2) can never overflow an
+    # index-sized integer — the OverflowError is made unreachable, not
+    # caught. Raised BEFORE the input is opened.
+    if (isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
+            or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
         raise PredictorInputError(
-            f"max_line_bytes must be positive, got {max_line_bytes}"
+            f"max_line_bytes must be a non-boolean integer in "
+            f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"
         )
 
     sequence: list[str] = []
@@ -639,7 +655,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--holdout-fraction", type=float, default=HOLDOUT_FRACTION_DEFAULT
     )
     parser.add_argument("--max-rows", type=int, default=MAX_ROWS_DEFAULT)
-    parser.add_argument("--max-line-bytes", type=int, default=MAX_LINE_BYTES_DEFAULT)
+    parser.add_argument(
+        "--max-line-bytes", type=int, default=MAX_LINE_BYTES_DEFAULT,
+        help=(
+            f"per-record content-byte bound (default "
+            f"{MAX_LINE_BYTES_DEFAULT}; ceiling {MAX_LINE_BYTES_CEILING})"
+        ),
+    )
     return parser
 
 

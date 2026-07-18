@@ -145,6 +145,13 @@ MAX_ROWS_CEILING = 1_000_000
 #: Default cap on one record's content bytes (terminator excluded).
 MAX_LINE_BYTES_DEFAULT = 65_536
 
+#: Hard ceiling on the max_line_bytes parameter itself — explicitly
+#: corresponding to the predictor reader's public
+#: MAX_LINE_BYTES_CEILING (anti-drift test-pinned): 16 MiB keeps the
+#: bounded probe arithmetic (max_line_bytes + 2) safely representable
+#: as an index-sized integer on every platform.
+MAX_LINE_BYTES_CEILING = 16_777_216
+
 
 # ---------------------------------------------------------------------------
 # Write-boundary guard (Lane B safety contract; mirrors the helper in
@@ -680,10 +687,13 @@ def compute_run_metrics(
             f"(0, {MAX_ROWS_CEILING}], got {max_rows!r}"
         )
     if (isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
-            or max_line_bytes <= 0):
+            or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
+        # Ceiling included so the bounded readline's max_line_bytes + 2
+        # can never overflow an index-sized integer (the OverflowError
+        # is made unreachable, not caught); raised before any read.
         raise MetricsInputError(
-            f"max_line_bytes must be a positive non-boolean integer, "
-            f"got {max_line_bytes!r}"
+            f"max_line_bytes must be a non-boolean integer in "
+            f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"
         )
 
     # Load and sort. The UnicodeDecodeError wrap keeps the pre-typed
@@ -959,9 +969,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=MAX_LINE_BYTES_DEFAULT,
         help=(
             f"Cap on one record's content bytes, LF/CRLF terminator "
-            f"excluded (default: {MAX_LINE_BYTES_DEFAULT}). Enforced "
-            f"with bounded reads before any record is materialized "
-            f"in full."
+            f"excluded (default: {MAX_LINE_BYTES_DEFAULT}; ceiling "
+            f"{MAX_LINE_BYTES_CEILING}). Enforced with bounded reads "
+            f"before any record is materialized in full."
         ),
     )
     return parser
