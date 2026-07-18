@@ -64,8 +64,10 @@ import dataclasses
 import hashlib
 import json
 import math
+import os
 import pathlib
 import re
+import stat as stat_module
 import tempfile
 from typing import Any
 
@@ -115,6 +117,129 @@ _SNAPSHOT_GENERATION_RE = re.compile(r"v\d+_gen(\d+)_step\d+_")
 
 
 # ---------------------------------------------------------------------------
+# Parameter-boundary helpers (Package C): every operator-controlled
+# parameter is proven exact-builtin, finite, non-empty and duplicate-free
+# BEFORE any arithmetic, NumPy work, observer mutation, snapshot
+# processing, path probing, or filesystem write. Malformed parameters
+# fail as deterministic, field-anchored ValueError. Diagnostics never run
+# untrusted __repr__/__str__/__eq__/__hash__ or metaclass name hooks:
+# type names come from an identity table and unproven values are
+# described generically instead of interpolated.
+# ---------------------------------------------------------------------------
+
+_BUILTIN_TYPE_NAMES: tuple[tuple[type, str], ...] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description: identity checks only — never
+    ``type(x).__name__`` (metaclass hook) or ``repr`` on unproven values."""
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
+
+
+def _require_exact_str(value: Any, field: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field}: expected builtin str, got {_describe_type(value)}")
+    return value
+
+
+def _require_exact_bool(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{field}: expected builtin bool, got {_describe_type(value)}")
+    return value
+
+
+def _require_exact_tuple(value: Any, field: str) -> tuple:
+    if type(value) is not tuple:
+        raise ValueError(f"{field}: expected builtin tuple, got {_describe_type(value)}")
+    return value
+
+
+def _require_unique(values: tuple, field: str) -> tuple:
+    """Reject duplicates that would collapse aggregate dictionary keys or
+    duplicate computations. Callers prove element types first, so set
+    membership here runs only builtin hashing/equality."""
+    seen: set = set()
+    for v in values:
+        if v in seen:
+            raise ValueError(
+                f"{field}: duplicate value {v!r} would collapse aggregate keys"
+            )
+        seen.add(v)
+    return values
+
+
+def _require_calibration_set(value: Any) -> str:
+    _require_exact_str(value, "calibration_set")
+    if value not in ("short", "long"):
+        raise ValueError(
+            f"calibration_set must be 'short' or 'long', got {value!r}"
+        )
+    return value
+
+
+def _require_positive_int_elements(values: Any, field: str, noun: str) -> tuple:
+    """Exact non-empty tuple of unique exact builtin positive ints.
+
+    The message keeps the historical ``positive int`` anchor for every
+    per-element failure (type, bool, subclass, or non-positive value)."""
+    _require_exact_tuple(values, field)
+    if not values:
+        raise ValueError(f"{field} must be non-empty")
+    for v in values:
+        if type(v) is not int:
+            raise ValueError(
+                f"every {noun} must be a positive int (exact builtin), "
+                f"got {_describe_type(v)}"
+            )
+        if v <= 0:
+            raise ValueError(f"every {noun} must be a positive int, got {v}")
+    return _require_unique(values, field)
+
+
+def _require_positive_finite_multipliers(values: Any, field: str) -> tuple:
+    """Exact non-empty tuple of unique finite, strictly positive builtin
+    reals. ``bool`` never passes; NaN, infinities and reals too large to
+    represent as a finite float are rejected before any arithmetic."""
+    _require_exact_tuple(values, field)
+    if not values:
+        raise ValueError(f"{field} must be non-empty")
+    for v in values:
+        if type(v) is not int and type(v) is not float:
+            raise ValueError(
+                f"every multiplier must be a positive number (exact builtin "
+                f"int or float), got {_describe_type(v)}"
+            )
+        try:
+            as_float = float(v)
+        except (OverflowError, ValueError):
+            raise ValueError(
+                "every multiplier must be a positive number representable "
+                "as a finite float"
+            ) from None
+        if not math.isfinite(as_float) or as_float <= 0:
+            raise ValueError(
+                f"every multiplier must be a positive number (finite and "
+                f"> 0), got {as_float!r}"
+            )
+    return _require_unique(values, field)
+
+
+# ---------------------------------------------------------------------------
 # Shared infrastructure: write-boundary, sort key, fingerprint, JSONL writer
 # ---------------------------------------------------------------------------
 
@@ -123,17 +248,71 @@ def _validate_calibration_output_path(
     out_path: pathlib.Path,
     log_path: pathlib.Path,
 ) -> None:
-    """Refuse output paths that resolve outside the input log's directory.
+    """Refuse output paths outside the log directory, or that ARE the input log.
 
-    Mirrors ``nextness_metrics._validate_metrics_output_path`` so the same
-    Lane B safety contract applies to calibration outputs. Resolves both
-    paths to canonical absolute form before comparing — symlink-aware.
+    Every caller runs this guard before any experiment computation, and
+    ``_write_calibration_jsonl`` opens its target with ``"w"`` — so a
+    fall-through here destroys the observer's recorded log, the one
+    artifact the Nextness stack cannot recompute. The enforced contract,
+    in evaluation order:
+
+    1. **Containment** — the output must resolve inside ``log_path``'s
+       directory. Catches literal mismatches (``/tmp/other.jsonl``) and
+       traversal/symlink escapes (``../elsewhere/out.jsonl``).
+    2. **Output status probe** — the output's true state is established
+       with an explicit ``stat()``, because a boolean ``Path.exists()``
+       cannot distinguish confirmed absence from an inaccessible or
+       otherwise uninspectable path (it reports False for both; the
+       stdlib documents ``stat()`` as the way to tell those apart).
+       Only a genuine ``FileNotFoundError`` counts as confirmed
+       absence; every other probe failure (permission, I/O) **fails
+       closed** with ``WriteOutsideLogDirError``.
+    3. **Directory targets** — an output resolving to an existing
+       directory (including through a symlink) is refused; it can never
+       be an output file. Detected from the captured stat result, never
+       from a boolean status method.
+    4. **Direct and resolved-path aliases** — an output resolving to the
+       input log itself is refused. Resolution targets are compared, not
+       path segments, so lexical variants (``sub/../log.jsonl``) and
+       symlink aliases resolving to the input log are covered. This
+       comparison is stat-free and applies whether or not either file
+       exists yet.
+    5. **File identity** — a *distinct* output confirmed absent is
+       allowed (nothing can share identity with it). Otherwise the input
+       log is probed the same way: a log confirmed absent — valid before
+       the observer's first write — cannot share file identity with a
+       distinct existing sibling, so the output is allowed; any other
+       log-probe failure **fails closed**. When both endpoints exist,
+       their captured stat results are compared with
+       ``os.path.samestat`` (device + inode / file ID), which catches
+       hard links whose paths differ — and, unlike a boolean-gated
+       ``samefile`` call, cannot be bypassed by a suppressed or false
+       existence report for either endpoint.
+
+    Ordinary sibling outputs — nonexistent, or existing non-alias files —
+    remain permitted; overwriting a stale calibration output is allowed.
+
+    This matches the **identity and directory protections** of
+    ``nextness_metrics._validate_metrics_output_path`` (same rules, same
+    order, same fail-closed posture). It deliberately does **not** claim
+    parity with that module's *writer*: ``_write_calibration_jsonl``
+    still writes in text mode, so calibration output is not byte-identical
+    across platforms the way the metrics writer's is. That difference is
+    out of this guard's scope.
+
+    Residual race, stated precisely: identity is verified here, at
+    validation time; the later write does not re-verify. A concurrent
+    actor replacing the output path between validation and write can
+    still redirect the write. This guard defends against aliases that
+    exist when it validates — it does not claim to eliminate the
+    validation-to-write (TOCTOU) interval.
 
     Raises :class:`WriteOutsideLogDirError` (reused from
     ``scripts.nextness_observer``) so the safety vocabulary stays unified
     across all three Lane B modules (observer + metrics + calibration).
     """
-    log_dir_resolved = log_path.resolve().parent
+    log_resolved = log_path.resolve()
+    log_dir_resolved = log_resolved.parent
     out_resolved = out_path.resolve()
     try:
         out_resolved.relative_to(log_dir_resolved)
@@ -142,6 +321,55 @@ def _validate_calibration_output_path(
             f"refusing to write calibration output outside log_path's "
             f"directory: {out_resolved} is not inside {log_dir_resolved}"
         ) from e
+    # Establish each endpoint's TRUE state with explicit stat() probes.
+    # A boolean Path.exists() cannot distinguish confirmed absence from
+    # an inaccessible/uninspectable path (it reports False for both), so
+    # gating identity comparison on it would let a suppressed or false
+    # status report skip the hard-link check entirely. Only a genuine
+    # FileNotFoundError counts as confirmed absence; every other probe
+    # failure is itself a refusal (fail closed), never a fall-through.
+    try:
+        out_stat = out_resolved.stat()
+    except FileNotFoundError:
+        out_stat = None  # confirmed absent
+    except OSError as e:
+        raise WriteOutsideLogDirError(
+            f"cannot inspect output path status: {out_resolved}"
+        ) from e
+    if out_stat is not None and stat_module.S_ISDIR(out_stat.st_mode):
+        raise WriteOutsideLogDirError(
+            f"refusing to write calibration output onto a directory: {out_resolved}"
+        )
+    # Direct/resolved equality is stat-free and applies even when the
+    # file does not exist yet.
+    if out_resolved == log_resolved:
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file: {out_resolved}"
+        )
+    if out_stat is None:
+        # A distinct output confirmed absent cannot share identity with
+        # anything: allowed.
+        return
+    try:
+        log_stat = log_resolved.stat()
+    except FileNotFoundError:
+        # The input log is confirmed absent (valid before the observer's
+        # first write): a distinct existing sibling cannot share file
+        # identity with it. Allowed.
+        return
+    except OSError as e:
+        raise WriteOutsideLogDirError(
+            f"cannot verify output file identity against the input log "
+            f"file: {out_resolved}"
+        ) from e
+    # Hard links share identity while having distinct paths; samestat on
+    # the captured probe results (device + inode / file ID) catches them
+    # and cannot be bypassed by a false existence report.
+    if os.path.samestat(out_stat, log_stat):
+        raise WriteOutsideLogDirError(
+            f"refusing to overwrite the input log file (shared file "
+            f"identity): {out_resolved}"
+        )
 
 
 def _validate_config_log_directory(
@@ -427,10 +655,12 @@ def check_determinism(
         ``ValueError`` if ``calibration_set`` isn't ``"short"`` or
             ``"long"``, or ``repeats`` < 2.
     """
-    if calibration_set not in {"short", "long"}:
+    _require_calibration_set(calibration_set)
+    # Exact builtin int BEFORE the `< 2` comparison (a non-int repeats
+    # otherwise escapes as TypeError from the comparison itself).
+    if type(repeats) is not int:
         raise ValueError(
-            f"calibration_set must be 'short' or 'long', got "
-            f"{calibration_set!r}"
+            f"repeats must be a builtin int, got {_describe_type(repeats)}"
         )
     if repeats < 2:
         raise ValueError(
@@ -731,8 +961,10 @@ def shuffle_test(
         modes: which shuffle modes to run. Defaults to all three. ``"unshuffled"``
             uses only one seed (the canonical one) since it doesn't involve
             randomization; shuffled modes use the full seed list.
-        seeds: which RNG seeds to use for shuffled modes. Defaults to
-            ``(DEFAULT_CANONICAL_SEED, *DEFAULT_VARIANCE_SEEDS)`` per
+        seeds: which RNG seeds to use for shuffled modes. Each must be a
+            non-negative exact builtin ``int`` (``np.random.default_rng``
+            itself rejects negative seeds; seed ``0`` is valid). Defaults
+            to ``(DEFAULT_CANONICAL_SEED, *DEFAULT_VARIANCE_SEEDS)`` per
             design doc §12 Q6 (one canonical + 5 variance estimates).
 
     Returns the aggregate dict for callers that want to inspect it without
@@ -741,21 +973,46 @@ def shuffle_test(
     Raises:
         :class:`WriteOutsideLogDirError` if ``out_path`` is outside the
             log directory.
-        ``ValueError`` for unknown modes or invalid calibration_set.
+        ``ValueError`` for unknown modes, invalid calibration_set, or a
+            seed that is not a non-negative exact builtin int.
     """
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
-        )
+    _require_calibration_set(calibration_set)
     if modes is None:
         modes = SHUFFLE_MODES
+    # Prove exact-str, uniqueness, then membership — exact-str first so a
+    # hostile/str-subclass mode never reaches a hashing/equality hook.
+    _require_exact_tuple(modes, "modes")
+    if not modes:
+        raise ValueError("modes must be non-empty")
     for mode in modes:
+        _require_exact_str(mode, "mode")
         if mode not in SHUFFLE_MODES:
             raise ValueError(
                 f"unknown shuffle mode {mode!r}; expected one of {SHUFFLE_MODES}"
             )
+    _require_unique(modes, "modes")
     if seeds is None:
         seeds = (DEFAULT_CANONICAL_SEED,) + DEFAULT_VARIANCE_SEEDS
+    # Non-empty tuple of unique, non-negative exact builtin ints, proven
+    # before seeds[0] indexing, path validation, snapshot sorting, RNG
+    # construction, or any NumPy/output work. np.random.default_rng itself
+    # rejects negative seeds (ValueError: expected non-negative integer),
+    # so this boundary owns that rejection deterministically; seed 0 and
+    # all shipped defaults remain valid.
+    _require_exact_tuple(seeds, "seeds")
+    if not seeds:
+        raise ValueError("seeds must be non-empty")
+    for seed in seeds:
+        if type(seed) is not int:
+            raise ValueError(
+                f"every seed must be a builtin int, got {_describe_type(seed)}"
+            )
+        if seed < 0:
+            raise ValueError(
+                f"every seed must be non-negative (np.random.default_rng "
+                f"rejects negative seeds), got {seed}"
+            )
+    _require_unique(seeds, "seeds")
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
@@ -1138,11 +1395,7 @@ def verify_memory_channels(
     the observer pipeline so it can catch drift that would otherwise
     silently propagate through it.
     """
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got "
-            f"{calibration_set!r}"
-        )
+    _require_calibration_set(calibration_set)
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
@@ -1311,18 +1564,8 @@ def sweep_stride(
         - ``"inconclusive"``: middle ground. Worth running more
           snapshots or tightening the predicates.
     """
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got "
-            f"{calibration_set!r}"
-        )
-    if not strides:
-        raise ValueError("strides must be non-empty")
-    for s in strides:
-        if not isinstance(s, int) or s <= 0:
-            raise ValueError(
-                f"every stride must be a positive int, got {s!r}"
-            )
+    _require_calibration_set(calibration_set)
+    _require_positive_int_elements(strides, "strides", "stride")
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
@@ -1594,32 +1837,32 @@ def sweep_threshold(
     Raises:
         :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir.
         ``ValueError`` for invalid calibration_set, missing threshold
-            attribute, empty multipliers, non-positive multipliers, or a
-            ``threshold_dependent_token`` that is ``None`` (not passed
-            explicitly), unknown, or non-routing.
+            attribute, a threshold attribute whose resolved value is not a
+            builtin int or float (bool and subclasses rejected), is not
+            representable as a finite float, or yields a non-finite
+            derived threshold, empty multipliers, non-positive
+            multipliers, or a ``threshold_dependent_token`` that is
+            ``None`` (not passed explicitly), unknown, or non-routing.
+            Value-shaped attribute failures are necessarily detected
+            after the attribute lookup itself (existence and name shape
+            are proven first); all are raised before path validation,
+            snapshot sorting, observer mutation, or NumPy/output work.
     """
     # Lazy import of the observer module so we can monkeypatch its
     # threshold attribute. This is the only place in the calibration
     # module that mutates observer state, and only within try/finally.
     from scripts import nextness_observer as _observer_module
 
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got "
-            f"{calibration_set!r}"
-        )
+    _require_calibration_set(calibration_set)
+    # Exact str BEFORE hasattr (attribute lookup requires a str name and
+    # otherwise escapes as TypeError; also blocks a hostile str subclass).
+    _require_exact_str(threshold_name, "threshold_name")
     if not hasattr(_observer_module, threshold_name):
         raise ValueError(
             f"threshold_name {threshold_name!r} not found on "
             f"scripts.nextness_observer module"
         )
-    if not multipliers:
-        raise ValueError("multipliers must be non-empty")
-    for m in multipliers:
-        if not isinstance(m, (int, float)) or m <= 0:
-            raise ValueError(
-                f"every multiplier must be a positive number, got {m!r}"
-            )
+    _require_positive_finite_multipliers(multipliers, "multipliers")
 
     # threshold_dependent_token is explicit-only (post-#164 hardening). We
     # refuse to silently default to a non-routing token: metta_warmth (the
@@ -1636,6 +1879,10 @@ def sweep_threshold(
             "count actually depends on the swept threshold, e.g. one of: "
             f"{sorted(_observer_module.ROUTING_TOKENS)}."
         )
+    # Exact str BEFORE the membership tests below, so a hostile or
+    # str-subclass token never reaches a set-membership hashing/equality
+    # hook or the {token!r} diagnostics.
+    _require_exact_str(threshold_dependent_token, "threshold_dependent_token")
     if threshold_dependent_token not in _observer_module.TOKEN_NAMES:
         raise ValueError(
             f"threshold_dependent_token {threshold_dependent_token!r} is not a "
@@ -1651,14 +1898,56 @@ def sweep_threshold(
             f"{sorted(_observer_module.ROUTING_TOKENS)}."
         )
 
+    # Resolve the named observer attribute once and prove its VALUE shape
+    # here at the boundary. The hasattr above proves existence only; the
+    # resolved value must itself be a builtin int or float (bool and int/
+    # float subclasses rejected by type identity), representable as a
+    # finite float, and every derived effective threshold must stay
+    # finite — all proven BEFORE path validation, snapshot sorting,
+    # observer-module mutation, process_snapshot, NumPy work, or output
+    # creation. Exact boundary truth: a value-shaped failure is only
+    # detectable AFTER this attribute lookup; only name-shaped failures
+    # (a non-str threshold_name) fail before the lookup. Diagnostics use
+    # _describe_type, never repr, so a hostile resolved value cannot run
+    # hooks while the error is formed.
+    resolved_threshold = getattr(_observer_module, threshold_name)
+    if type(resolved_threshold) is not int and type(resolved_threshold) is not float:
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to "
+            f"{_describe_type(resolved_threshold)}; expected the named "
+            "observer constant to be a builtin int or float"
+        )
+    try:
+        base_threshold_value = float(resolved_threshold)
+    except (OverflowError, ValueError):
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to a value not "
+            "representable as a finite float"
+        ) from None
+    if not math.isfinite(base_threshold_value):
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to a non-finite "
+            "value; expected a finite base threshold"
+        )
+    # Prove every derived effective threshold is finite BEFORE any path,
+    # sort or mutation work: multipliers are finite and the base is finite,
+    # but their product can still overflow to inf for a large-but-finite
+    # base.
+    for multiplier in multipliers:
+        derived = base_threshold_value * multiplier
+        if not math.isfinite(derived):
+            raise ValueError(
+                f"multiplier {multiplier} yields a non-finite effective "
+                f"threshold ({threshold_name} * {multiplier}); refusing to "
+                "mutate the observer module"
+            )
+
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
     _validate_calibration_output_path(out_path, log_path)
     _validate_config_log_directory(config, log_path)
 
     sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
-
-    base_threshold_value = float(getattr(_observer_module, threshold_name))
 
     per_snapshot_rows: list[dict[str, Any]] = []
     # Per-multiplier aggregator: multiplier -> list of {snapshot, metrics,
@@ -2118,16 +2407,23 @@ def ablate_cascade(
     # mutates observer state besides sweep_threshold; only within try/finally.
     from scripts import nextness_observer as _observer_module
 
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
-        )
+    _require_calibration_set(calibration_set)
+    # Exact booleans for the behavioral flags: truthiness must not admit
+    # "yes"/1/[] as an on/off value.
+    _require_exact_bool(include_baseline, "include_baseline")
+    _require_exact_bool(include_reverse, "include_reverse")
+    # disabled_tokens: exact-str each element BEFORE membership (blocks a
+    # hostile/str-subclass token from reaching a hashing/equality hook),
+    # then reject duplicates that would duplicate ablation modes.
+    _require_exact_tuple(disabled_tokens, "disabled_tokens")
     for t in disabled_tokens:
+        _require_exact_str(t, "disabled_token")
         if t not in _ACTIVE_CASCADE_ORDER:
             raise ValueError(
                 f"disabled token {t!r} is not an active cascade token "
                 f"(active: {_ACTIVE_CASCADE_ORDER})"
             )
+    _require_unique(disabled_tokens, "disabled_tokens")
 
     modes = _ablation_modes_for_run(
         disabled_tokens=disabled_tokens,
@@ -2409,31 +2705,40 @@ def sweep_temporal(
         ``ValueError`` for invalid calibration_set, empty gap_specs (when
             provided explicitly), empty label, or non-positive stride.
     """
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
-        )
+    _require_calibration_set(calibration_set)
     if gap_specs is None:
         gap_specs = (
             DEFAULT_GAP_SPECS_SHORT if calibration_set == "short"
             else DEFAULT_GAP_SPECS_LONG
         )
+    # Exact builtin tuple of exact (str label, int stride) pairs — tuple,
+    # str and int subclasses are all rejected before the values are used
+    # as aggregate keys; bool never passes as the stride.
+    _require_exact_tuple(gap_specs, "gap_specs")
     if not gap_specs:
         raise ValueError("gap_specs must be non-empty when provided explicitly")
+    labels: list[str] = []
     for entry in gap_specs:
-        if not (isinstance(entry, tuple) and len(entry) == 2):
+        if type(entry) is not tuple or len(entry) != 2:
             raise ValueError(
-                f"each gap_specs entry must be (label, index_stride), got {entry!r}"
+                "each gap_specs entry must be an exact (label, index_stride) "
+                f"tuple of length 2, got {_describe_type(entry)}"
             )
         label, stride = entry
-        if not isinstance(label, str) or not label:
+        if type(label) is not str:
             raise ValueError(
-                f"gap_spec label must be a non-empty str, got {label!r}"
+                f"gap_spec label must be a non-empty builtin str, got "
+                f"{_describe_type(label)}"
             )
-        if not isinstance(stride, int) or stride < 1:
+        if not label:
+            raise ValueError("gap_spec label must be a non-empty builtin str (got empty)")
+        if type(stride) is not int or stride < 1:
             raise ValueError(
-                f"gap_spec index_stride must be a positive int, got {stride!r}"
+                f"gap_spec index_stride must be a positive builtin int, got "
+                f"{_describe_type(stride) if type(stride) is not int else stride}"
             )
+        labels.append(label)
+    _require_unique(tuple(labels), "gap_specs labels")
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)
@@ -2722,15 +3027,8 @@ def sweep_patch_radius(
     # and ablate_cascade (Ch6); only here within try/finally.
     from scripts import nextness_observer as _observer_module
 
-    if calibration_set not in {"short", "long"}:
-        raise ValueError(
-            f"calibration_set must be 'short' or 'long', got {calibration_set!r}"
-        )
-    if not radii:
-        raise ValueError("radii must be non-empty")
-    for r in radii:
-        if not isinstance(r, int) or r <= 0:
-            raise ValueError(f"every radius must be a positive int, got {r!r}")
+    _require_calibration_set(calibration_set)
+    _require_positive_int_elements(radii, "radii", "radius")
 
     out_path = pathlib.Path(out_path)
     log_path = pathlib.Path(log_path)

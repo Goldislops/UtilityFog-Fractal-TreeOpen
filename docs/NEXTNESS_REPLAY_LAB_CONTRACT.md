@@ -139,11 +139,45 @@ filesystem manipulation.
 
 Default output is **stdout**; `--output` must resolve inside the input
 log's directory and never inside the repository `data/` tree (NP1's
-convention). Exit codes mirror NP1: `0` success · `2` validation
+convention).
+
+**Destination boundary on operational write failure** (audited 2026-07-17;
+stage-pinned in the focused tests): a failure **at or before the binary
+open** — an unwritable or read-only destination, an absent or invalid
+parent — preserves any existing destination byte-identically and creates
+no output. **After a successful direct non-atomic open**, a later failure
+may truncate the destination or leave partial output (the whole-buffer
+write truncates on open, so a failed write leaves an empty file). A
+**close-time failure** may leave the complete canonical lab-report bytes
+in place even though the run reports the operational-failure exit —
+a present file does not imply a successful run. Supplied-input
+preservation on these lanes is bounded by the existing validation-to-write
+(TOCTOU) non-claim. No atomic-write behavior is provided or implied.
+
+Exit codes mirror NP1: `0` success · `2` validation
 failure (including a holdout beyond the replay bound) · `3`
 insufficient history · `4` write-boundary/unwritable · `5` report over
 the ceiling. Expected failures print one concise `error:` line, never a
 traceback.
+
+**Typed input boundary (replay-lab pilot)**: the exit-2 catch is
+exactly the typed `LabInputError`. The shared reader's typed
+`PredictorInputError` (this lab publicly re-exposes `--max-rows`/
+`--max-line-bytes`) is **translated at the single reader call** —
+`except PredictorInputError` exactly, never broad `ValueError` —
+into `LabInputError` with the message byte-identical (`str(e)`) and
+the original error preserved as `__cause__`. A plain `ValueError`
+**reaching `main()` outside the existing scoped input-validation
+translations propagates** (the committed build-seam and reader-seam
+pins prove those exact lanes; a plain `ValueError` from the reader seam
+is deliberately not wrapped). No claim is made that every inner
+validation helper lacks a local base-class wrapper — the protocol
+loader's JSON-parse and `MonitorConfig.validate` regions deliberately
+catch base `ValueError` and translate it to `LabInputError`.
+Direct-Python note: callers catching `ValueError` remain compatible
+(`LabInputError` subclasses it); `read_dominant_sequence` called
+directly still raises `PredictorInputError`. This is a lab-only
+decision; no family-wide convention is implied.
 
 ## Safety
 

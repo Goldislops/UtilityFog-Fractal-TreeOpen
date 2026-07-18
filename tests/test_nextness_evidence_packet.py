@@ -321,6 +321,83 @@ def test_cli_write_boundary_and_alias_identity(chain, tmp_path, capsys) -> None:
     assert "identity" in err or "overwrite" in err
 
 
+# ---------------------------------------------------------------------------
+# Output-boundary pins: directory targets, symlink-to-directory targets,
+# and symlink output aliases against EVERY supplied input role.
+#
+# Coverage pinning of ESTABLISHED behavior (not a defect):
+# - a directory target passes path validation (inside the primary
+#   input's directory, aliases nothing) and is refused at write time by
+#   the documented OSError lane;
+# - a symlink whose resolution target IS a supplied input is refused by
+#   the identity guard before any packet is built.
+# Both refusals: exit 4, one concise ``error:`` line, no traceback,
+# every supplied input byte-identical, directory/sentinel contents
+# unchanged, no output artifact (whole or partial) created.
+# ---------------------------------------------------------------------------
+
+
+def _pin_packet_refusal(capsys, chain, tmp_path, out_target) -> None:
+    before = {role: path.read_bytes() for role, path in chain.items()}
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+
+    assert main(_chain_args(chain) + ["--output", str(out_target)]) == 4
+
+    captured = capsys.readouterr()
+    err_lines = [line for line in captured.err.strip().splitlines() if line]
+    assert len(err_lines) == 1 and err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    for role, path in chain.items():
+        assert path.read_bytes() == before[role], f"input mutated: {role}"
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_existing_directory_output_target_pinned(chain, tmp_path, capsys) -> None:
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    _pin_packet_refusal(capsys, chain, tmp_path, target_dir)
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in target_dir.iterdir()) == ["keep.txt"]
+
+
+def test_cli_symlink_to_directory_output_target_pinned(chain, tmp_path, capsys) -> None:
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "packet.json"
+    try:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    _pin_packet_refusal(capsys, chain, tmp_path, link)
+    assert real_dir.is_dir()
+    assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+    # The output link itself was not replaced by a regular file.
+    assert link.is_symlink()
+    assert link.resolve() == real_dir.resolve()
+
+
+@pytest.mark.parametrize("role", list(ROLES))
+def test_cli_symlink_output_alias_of_each_input_role_pinned(
+    chain, tmp_path, capsys, role
+) -> None:
+    """A symlink inside the primary input's directory whose resolution
+    target IS the supplied ``role`` artifact must be refused by the
+    identity guard — for every role the chain fixture exposes."""
+    link = tmp_path / f"alias_{role}.json"
+    try:
+        link.symlink_to(chain[role])
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported here (e.g. Windows w/o privilege)")
+    _pin_packet_refusal(capsys, chain, tmp_path, link)
+    # The link itself is untouched and still resolves to the intact input.
+    assert link.resolve() == chain[role].resolve()
+    assert link.read_bytes() == chain[role].read_bytes()
+
+
 def test_cli_data_tree_refused(chain, tmp_path, capsys, monkeypatch) -> None:
     import scripts.nextness_evidence_packet as packet_module
 
@@ -671,8 +748,9 @@ def test_self_validation_failure_is_internal_not_input_error(chain, monkeypatch,
     # A failure while validating the packet NP8 JUST EMITTED is an
     # internal programming/contract failure — it must propagate loudly,
     # never masquerade as the documented exit-2 "malformed user input"
-    # lane (ArtifactValidationError inherits ValueError, which main
-    # catches for external artifacts).
+    # lane. External validator failures are wrapped as PacketInputError
+    # at _validate_role (that is the exit-2 lane); the emitted-packet
+    # self-check deliberately becomes RuntimeError instead.
     import scripts.nextness_artifact_validation as validation_module
     from scripts.nextness_artifact_validation import ArtifactValidationError
 
@@ -713,3 +791,227 @@ def test_no_ranking_or_score_fields(chain) -> None:
 
     _walk(packet)
     assert packet["non_claims"]
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# identity-inspection failure fails closed (exit 4);
+# unexpected-error propagation stays loud
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--bogus"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_identity_inspection_failure_fails_closed_exit_4(
+    chain, tmp_path, capsys, monkeypatch
+) -> None:
+    import os
+    import pathlib as _pathlib
+
+    out = tmp_path / "packet.json"
+    out.write_text("stale existing non-alias output\n", encoding="utf-8")
+    before = {role: path.read_bytes() for role, path in chain.items()}
+    out_before = out.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    out_resolved = out.resolve()
+    real_samefile = os.path.samefile
+
+    def probed(a, b):
+        if _pathlib.Path(a).resolve() == out_resolved:
+            raise PermissionError(13, "identity probe denied")
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", probed)
+    assert main(_chain_args(chain) + ["--output", str(out)]) == 4
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    for role, path in chain.items():
+        assert path.read_bytes() == before[role], role
+    assert out.read_bytes() == out_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_unexpected_errors_are_not_hidden(chain, monkeypatch) -> None:
+    import scripts.nextness_evidence_packet as packet_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sentinel propagation probe")
+
+    monkeypatch.setattr(packet_module, "build_packet", boom)
+    with pytest.raises(RuntimeError, match="sentinel propagation probe"):
+        main(_chain_args(chain))
+
+
+# ---------------------------------------------------------------------------
+# Evidence-packet typed-input-boundary pilot (gated;
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Failing-first target: a sentinel
+# plain ValueError escaping the internal build seam must PROPAGATE through
+# public main(), never convert to the documented exit-2 input lane. Uses the
+# same build_packet monkeypatch seam as the sentinel-RuntimeError pin above.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(chain, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the packet's build
+    seam is an unexpected programming error and must propagate — not
+    masquerade as a concise exit-2 input failure. (PacketInputError and
+    the wrapped validator errors remain the documented exit-2 lane.)"""
+    import scripts.nextness_evidence_packet as packet_module
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(packet_module, "build_packet", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main(_chain_args(chain))
+
+
+def test_cli_packet_input_error_still_exit_2(chain, monkeypatch, capsys) -> None:
+    """Typed PacketInputError remains the documented exit-2 lane: one
+    concise error: line, byte-identical message shape, no traceback."""
+    import scripts.nextness_evidence_packet as packet_module
+    from scripts.nextness_evidence_packet import PacketInputError
+
+    def typed_boom(*args, **kwargs):
+        raise PacketInputError("sentinel typed input failure")
+
+    monkeypatch.setattr(packet_module, "build_packet", typed_boom)
+    assert main(_chain_args(chain)) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == ["error: sentinel typed input failure"]
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
+# 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
+# the expected exit-4 operational-write lane — distinct from PUBLIC
+# filesystem behavior and never a public-reachability claim. Stage counters
+# assert the intended operation (open/write/close) actually fired, so no pin
+# can pass by triggering the wrong stage.
+# ---------------------------------------------------------------------------
+
+
+class _StageProxy:
+    def __init__(self, raw, fail_write_at=None, fail_close=False):
+        self._raw = raw
+        self._fail_at = fail_write_at
+        self._fail_close = fail_close
+        self.writes_ok = 0
+        self.close_attempted = False
+
+    def write(self, data):
+        if self._fail_at is not None and self.writes_ok + 1 >= self._fail_at:
+            raise OSError(28, "injected write failure")
+        n = self._raw.write(data)
+        self.writes_ok += 1
+        return n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close_attempted = True
+        self._raw.__exit__(*exc)
+        if self._fail_close and exc[0] is None:
+            raise OSError(5, "injected close failure")
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _patch_output_stage(monkeypatch, victim_resolved, *, deny_open=False,
+                        fail_write_at=None, fail_close=False):
+    """Patch ONLY the victim path's binary-write open; returns stage state."""
+    state = {"opens": 0, "proxy": None}
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            state["opens"] += 1
+            if deny_open:
+                raise PermissionError(13, "injected open denial")
+            raw = real_open(self, mode, *args, **kwargs)
+            state["proxy"] = _StageProxy(raw, fail_write_at, fail_close)
+            return state["proxy"]
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    return state
+
+
+def _stage_exit4_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_denial_pinned(chain, tmp_path, capsys, monkeypatch) -> None:
+    """Open denial: no truncation ever happened — existing destination,
+    inputs and directory inventory all byte-identical; exit 4, one line."""
+    _ = tmp_path  # chain fixture provides inputs in tmp_path
+    out = tmp_path / "stage_pin.out"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in list(chain.values()) + [out]}
+    inv = sorted(p.name for p in tmp_path.iterdir())
+    state = _patch_output_stage(monkeypatch, out.resolve(), deny_open=True)
+    assert main(_chain_args(chain) + ["--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is None  # failed AT open
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == inv
+
+
+def test_cli_post_open_write_failure_pinned(chain, tmp_path, capsys, monkeypatch) -> None:
+    """Post-open failure of the FIRST whole-buffer write: open succeeded,
+    zero writes completed, destination truncated to empty; inputs
+    unchanged; exit 4 with one concise line."""
+    _ = tmp_path  # chain fixture provides inputs in tmp_path
+    out = tmp_path / "stage_pin.out"
+    out.write_text("stale bytes to observe truncation\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in list(chain.values())}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_write_at=1)
+    assert main(_chain_args(chain) + ["--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None  # open SUCCEEDED
+    assert state["proxy"].writes_ok == 0                       # first write failed
+    assert out.exists() and out.stat().st_size == 0            # truncated-empty
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_cli_close_time_failure_pinned(chain, tmp_path, capsys, monkeypatch) -> None:
+    """Close-time failure: every write succeeded, the context exit raised —
+    the destination holds the COMPLETE canonical serialized bytes although
+    the run reports exit 4."""
+    _ = tmp_path  # chain fixture provides inputs in tmp_path
+    canon = tmp_path / "canonical.out"
+    assert main(_chain_args(chain) + ["--output", str(canon)]) == 0          # capture canonical success bytes
+    capsys.readouterr()
+    canonical = canon.read_bytes()
+    out = tmp_path / "stage_pin.out"
+    before = {p: p.read_bytes() for p in list(chain.values())}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_close=True)
+    assert main(_chain_args(chain) + ["--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None
+    assert state["proxy"].writes_ok == 1                       # whole buffer written
+    assert state["proxy"].close_attempted                      # failure was AT close
+    assert out.read_bytes() == canonical                       # complete bytes present
+    for p, b in before.items():
+        assert p.read_bytes() == b

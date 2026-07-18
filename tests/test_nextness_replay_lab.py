@@ -719,6 +719,64 @@ def test_symlink_output_alias_refused_and_inputs_intact(tmp_path, capsys) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Output-boundary pins: directory and symlink-to-directory targets.
+#
+# Coverage pinning of ESTABLISHED behavior (not a defect): a directory
+# target passes path validation (inside the input-log directory, aliases
+# nothing) and is refused at write time by the documented OSError lane —
+# exit 4, one concise ``error:`` line, no traceback, both inputs
+# byte-identical, the directory and its contents untouched, no output
+# artifact (whole or partial) created.
+# ---------------------------------------------------------------------------
+
+
+def _pin_dir_target_refusal(capsys, tmp_path, out_target) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    log_before = log.read_bytes()
+    protocol_before = protocol.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+
+    assert main([str(log), str(protocol), "--output", str(out_target)]) == 4
+
+    captured = capsys.readouterr()
+    err_lines = [line for line in captured.err.strip().splitlines() if line]
+    assert len(err_lines) == 1 and err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == log_before
+    assert protocol.read_bytes() == protocol_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_existing_directory_output_target_pinned(tmp_path, capsys) -> None:
+    target_dir = tmp_path / "already_here"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    _pin_dir_target_refusal(capsys, tmp_path, target_dir)
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in target_dir.iterdir()) == ["keep.txt"]
+
+
+def test_cli_symlink_to_directory_output_target_pinned(tmp_path, capsys) -> None:
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+    (real_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
+    link = tmp_path / "lab.json"
+    try:
+        link.symlink_to(real_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform/user")
+    _pin_dir_target_refusal(capsys, tmp_path, link)
+    assert real_dir.is_dir()
+    assert (real_dir / "keep.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert sorted(p.name for p in real_dir.iterdir()) == ["keep.txt"]
+    # The output link itself was not replaced by a regular file.
+    assert link.is_symlink()
+    assert link.resolve() == real_dir.resolve()
+
+
+# ---------------------------------------------------------------------------
 # CLI: exit codes, write boundary, concise errors
 # ---------------------------------------------------------------------------
 
@@ -873,3 +931,346 @@ def test_summarize_trajectory_alternating_pattern_hand_traced() -> None:
     assert t["first_non_abstain_step"] == 3
     assert t["abstention_step_rate"] == 4 / 7
     assert t["final_reason"] == "distribution_shift"
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# identity-inspection failure fails closed (exit 4);
+# unexpected-error propagation stays loud
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main([])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_identity_inspection_failure_fails_closed_exit_4(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    import os
+    import pathlib as _pathlib
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out = tmp_path / "lab.json"
+    out.write_text("stale existing non-alias output\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in (log, protocol, out)}
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    out_resolved = out.resolve()
+    real_samefile = os.path.samefile
+
+    def probed(a, b):
+        if _pathlib.Path(a).resolve() == out_resolved:
+            raise PermissionError(13, "identity probe denied")
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", probed)
+    assert main([str(log), str(protocol), "--output", str(out)]) == 4
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
+    import scripts.nextness_replay_lab as lab_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sentinel propagation probe")
+
+    monkeypatch.setattr(lab_module, "build_lab_report", boom)
+    with pytest.raises(RuntimeError, match="sentinel propagation probe"):
+        main([str(log), str(protocol)])
+
+
+# ---------------------------------------------------------------------------
+# Replay-lab typed-input-boundary pilot (gated; the family's final module;
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Failing-first target: a sentinel
+# plain ValueError at the internal build_lab_report seam must PROPAGATE
+# through public main(), never convert to the documented exit-2 lane.
+# Preservation controls pin every genuine public lane.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the build seam is an
+    unexpected programming error and must propagate — not masquerade as
+    a concise exit-2 input failure. (LabInputError — and the reader's
+    typed PredictorInputError, translated at the reader call — remain
+    the documented exit-2 lane.)"""
+    import scripts.nextness_replay_lab as lab_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(lab_module, "build_lab_report", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main([str(log), str(protocol)])
+
+
+def test_cli_pilot_preservation_controls(tmp_path, capsys) -> None:
+    """Byte-exact public lanes: malformed protocol (LabInputError),
+    reader bounds, insufficient history exit 3; inputs untouched."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    bad_protocol = tmp_path / "bad_protocol.json"
+    bad_protocol.write_text(
+        protocol.read_text(encoding="utf-8").replace(
+            '"nextness-replay-protocol-v1"', '"nextness-replay-protocol-v9"'),
+        encoding="utf-8")
+    (tmp_path / "tiny").mkdir()
+    tiny = _write_log(tmp_path / "tiny", [A])
+    before = {p: p.read_bytes() for p in (log, protocol, bad_protocol, tiny)}
+    cases = (
+        ([str(log), str(bad_protocol)], 2, None),
+        ([str(log), str(protocol), "--max-rows", "0"], 2,
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), str(protocol), "--max-line-bytes", "0"], 2,
+         "error: max_line_bytes must be positive, got 0"),
+        ([str(tiny), str(protocol)], 3, None),
+    )
+    for argv, code, expected in cases:
+        assert main(argv) == code
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert len(lines) == 1 and lines[0].startswith("error:")
+        if expected is not None:
+            assert lines == [expected]
+        assert "Traceback" not in err
+    for p_, b_ in before.items():
+        assert p_.read_bytes() == b_
+
+
+def test_cli_pilot_output_determinism_control(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out1, out2 = tmp_path / "r1.json", tmp_path / "r2.json"
+    assert main([str(log), str(protocol), "--output", str(out1)]) == 0
+    assert main([str(log), str(protocol), "--output", str(out2)]) == 0
+    capsys.readouterr()
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
+# 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
+# the expected exit-4 operational-write lane — distinct from PUBLIC
+# filesystem behavior and never a public-reachability claim. Stage counters
+# assert the intended operation (open/write/close) actually fired, so no pin
+# can pass by triggering the wrong stage.
+# ---------------------------------------------------------------------------
+
+
+class _StageProxy:
+    def __init__(self, raw, fail_write_at=None, fail_close=False):
+        self._raw = raw
+        self._fail_at = fail_write_at
+        self._fail_close = fail_close
+        self.writes_ok = 0
+        self.close_attempted = False
+
+    def write(self, data):
+        if self._fail_at is not None and self.writes_ok + 1 >= self._fail_at:
+            raise OSError(28, "injected write failure")
+        n = self._raw.write(data)
+        self.writes_ok += 1
+        return n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close_attempted = True
+        self._raw.__exit__(*exc)
+        if self._fail_close and exc[0] is None:
+            raise OSError(5, "injected close failure")
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _patch_output_stage(monkeypatch, victim_resolved, *, deny_open=False,
+                        fail_write_at=None, fail_close=False):
+    """Patch ONLY the victim path's binary-write open; returns stage state."""
+    state = {"opens": 0, "proxy": None}
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            state["opens"] += 1
+            if deny_open:
+                raise PermissionError(13, "injected open denial")
+            raw = real_open(self, mode, *args, **kwargs)
+            state["proxy"] = _StageProxy(raw, fail_write_at, fail_close)
+            return state["proxy"]
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    return state
+
+
+def _stage_exit4_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_denial_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Open denial: no truncation ever happened — existing destination,
+    inputs and directory inventory all byte-identical; exit 4, one line."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out = tmp_path / "stage_pin.out"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [log, protocol] + [out]}
+    inv = sorted(p.name for p in tmp_path.iterdir())
+    state = _patch_output_stage(monkeypatch, out.resolve(), deny_open=True)
+    assert main([str(log), str(protocol), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is None  # failed AT open
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == inv
+
+
+def test_cli_post_open_write_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Post-open failure of the FIRST whole-buffer write: open succeeded,
+    zero writes completed, destination truncated to empty; inputs
+    unchanged; exit 4 with one concise line."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out = tmp_path / "stage_pin.out"
+    out.write_text("stale bytes to observe truncation\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [log, protocol]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_write_at=1)
+    assert main([str(log), str(protocol), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None  # open SUCCEEDED
+    assert state["proxy"].writes_ok == 0                       # first write failed
+    assert out.exists() and out.stat().st_size == 0            # truncated-empty
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Close-time failure: every write succeeded, the context exit raised —
+    the destination holds the COMPLETE canonical serialized bytes although
+    the run reports exit 4."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    canon = tmp_path / "canonical.out"
+    assert main([str(log), str(protocol), "--output", str(canon)]) == 0          # capture canonical success bytes
+    capsys.readouterr()
+    canonical = canon.read_bytes()
+    out = tmp_path / "stage_pin.out"
+    before = {p: p.read_bytes() for p in [log, protocol]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_close=True)
+    assert main([str(log), str(protocol), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None
+    assert state["proxy"].writes_ok == 1                       # whole buffer written
+    assert state["proxy"].close_attempted                      # failure was AT close
+    assert out.read_bytes() == canonical                       # complete bytes present
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Cross-module compatibility controls: the original predictor pilot
+# established the lab's public reader-bound lanes (--max-rows /
+# --max-line-bytes), pinned byte-for-byte here; the replay-lab pilot
+# (#384) now preserves them through the typed translation boundary at
+# the reader call.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_reader_bound_public_lanes_exit_2(tmp_path, capsys) -> None:
+    """The lab's reader-bound public lanes: exact message, single stderr
+    line, exit 2, no traceback, inputs untouched."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    before = {p: p.read_bytes() for p in (log, protocol)}
+    for argv, expected in (
+        ([str(log), str(protocol), "--max-rows", "0"],
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), str(protocol), "--max-line-bytes", "0"],
+         "error: max_line_bytes must be positive, got 0"),
+    ):
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert lines == [expected]
+        assert "Traceback" not in err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_reader_bound_error_is_translated_to_lab_input_lane(tmp_path, capsys) -> None:
+    """Cross-module compatibility pin: the direct reader raises
+    PredictorInputError; build_lab_report translates it to LabInputError
+    at the reader call; the public CLI retains the identical exit-2
+    text — it no longer travels through a broad main() catch (the
+    translation-boundary test below pins message/cause exactly)."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    assert issubclass(PredictorInputError, ValueError)
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    before = {p: p.read_bytes() for p in (log, protocol)}
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_rows=0)
+    assert main([str(log), str(protocol), "--max-rows", "0"]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == ["error: max_rows must be in (0, 1000000], got 0"]
+    assert "Traceback" not in err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_typed_reader_bound_translation_boundary(tmp_path, monkeypatch) -> None:
+    """Direct-API pins for the reader-bound translation boundary:
+    the reader itself still raises PredictorInputError; build_lab_report
+    translates exactly that class to LabInputError with the message
+    byte-identical and the cause preserved; a sentinel plain ValueError
+    from the reader seam is NOT wrapped and propagates."""
+    import scripts.nextness_replay_lab as lab_module
+    from scripts.nextness_predictor import PredictorInputError
+    from scripts.nextness_replay_lab import LabInputError, build_lab_report
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+
+    with pytest.raises(PredictorInputError) as reader_exc:
+        read_dominant_sequence(log, max_rows=0)
+
+    with pytest.raises(LabInputError) as lab_exc:
+        build_lab_report(log, protocol, max_rows=0)
+    assert str(lab_exc.value) == str(reader_exc.value)  # byte-identical message
+    assert isinstance(lab_exc.value.__cause__, PredictorInputError)
+
+    def plain_boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError from reader seam")
+
+    monkeypatch.setattr(lab_module, "read_dominant_sequence", plain_boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError from reader seam") as esc:
+        build_lab_report(log, protocol)
+    assert type(esc.value) is ValueError  # not wrapped into LabInputError

@@ -523,11 +523,12 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
     }
     # Self-check: the emitted packet must satisfy its own public
     # structural validator before serialization. A failure here is an
-    # internal programming/contract failure, NOT malformed user input —
-    # and ArtifactValidationError inherits ValueError, which the CLI
-    # catches as the documented exit-2 input lane. Re-raise as a plain
-    # RuntimeError at this boundary so the internal failure propagates
-    # loudly instead of masquerading as a concise input error.
+    # internal programming/contract failure, NOT malformed user input.
+    # The explicit conversion to a plain RuntimeError is retained as a
+    # stable internal-failure classification independent of exception
+    # ancestry: both a raw ArtifactValidationError and the converted
+    # RuntimeError lie outside main()'s typed PacketInputError catch,
+    # so the internal failure propagates loudly either way.
     validation = _np9()
     try:
         validation.validate_evidence_packet(packet)
@@ -640,7 +641,17 @@ def main(argv: list[str] | None = None) -> int:
     failure (missing/oversized/malformed/unknown-variant artifact, or
     none provided) · ``4`` output-path failure · ``5`` packet over the
     ceiling. One concise ``error:`` line per expected failure — never a
-    traceback; unexpected programming errors propagate loudly.
+    traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``PacketTooLargeError``, the typed
+    ``PacketInputError`` (the exit-2 lane — every wrapped validator
+    error arrives as ``PacketInputError`` at the existing wrapping
+    boundaries) and the write-lane ``OSError``. Exceptions outside it —
+    including plain ``ValueError`` — propagate (evidence-packet
+    typed-boundary pilot; test-pinned), consistent with
+    ``build_packet``'s self-check deliberately re-raising its internal
+    validation failure as ``RuntimeError``. Direct-Python note:
+    ``build_packet`` and its existing typed failures are unchanged; no
+    raise was retyped and no new exception class was introduced.
     """
     args = _build_parser().parse_args(argv)
     paths = {
@@ -664,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
     except PacketTooLargeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 5
-    except ValueError as e:  # includes PacketInputError and wrapped validators
+    except PacketInputError as e:  # wrapped validators arrive as PacketInputError
         print(f"error: {e}", file=sys.stderr)
         return 2
     serialized = serialize_packet(packet)

@@ -514,12 +514,31 @@ def test_cli_main_runs_on_real_input(tmp_path, capsys):
 
 
 def test_cli_main_missing_log_returns_nonzero(tmp_path, capsys):
-    """CLI surfaces missing-file error as non-zero exit code."""
+    """CLI surfaces a missing log as EXACTLY exit 1 (its documented lane).
+
+    Upgraded from a nonzero-only assertion: exit 1 is metrics' distinct
+    missing-input code, and pinning it exactly keeps it distinguishable
+    from the exit-4 operational write-failure lane."""
     rc = main(["--log", str(tmp_path / "missing.jsonl"),
                "--out", str(tmp_path / "out.jsonl")])
-    assert rc != 0
+    assert rc == 1
     captured = capsys.readouterr()
     assert "not found" in captured.err.lower()
+    assert captured.err.count("error:") == 1
+    assert "Traceback" not in captured.err
+
+
+def test_cli_malformed_data_exits_2_exactly(tmp_path, capsys):
+    """Malformed JSONL rows are a data error: EXACTLY exit 2, one concise
+    error: line, no traceback."""
+    bad = tmp_path / "nextness_runs.jsonl"
+    bad.write_text("{not json at all\n", encoding="utf-8")
+    rc = main(["--log", str(bad), "--out", str(tmp_path / "out.jsonl")])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert captured.err.count("error:") == 1
+    assert captured.err.startswith("error:")
+    assert "Traceback" not in captured.err
 
 
 # ---------------------------------------------------------------------------
@@ -607,12 +626,172 @@ def test_cli_main_returns_nonzero_for_outside_log_dir_output(tmp_path, capsys):
     ])
 
     rc = main(["--log", str(log_path), "--out", str(out_path)])
-    assert rc != 0
+    assert rc == 3  # upgraded from nonzero-only: the exact safety-refusal code
     captured = capsys.readouterr()
     assert "safety error" in captured.err.lower()
     assert "outside log_path" in captured.err.lower()
     # No side effects: the outside-of-boundary parent dir must not exist
     assert not (tmp_path / "elsewhere").exists()
+
+
+# ---------------------------------------------------------------------------
+# Operational output-write failure lane (exit 4): an OSError anywhere in
+# the OUTPUT region — parent-directory creation, binary open, streamed
+# writes, close — is an EXPECTED operational failure: one concise error:
+# line, exit 4, no traceback, input log byte-identical. Destination
+# preservation is guaranteed ONLY for failures at or before binary open
+# (a read-only destination is never truncated); once open succeeds,
+# direct streamed non-atomic output may be truncated or partial if a
+# later write/close fails. The lane must never be produced by READ-side
+# errors, and is distinct from exit 3 (pre-write safety refusal) and
+# exit 1 (missing log).
+# ---------------------------------------------------------------------------
+
+
+def _patch_binary_write_open(monkeypatch, victim_resolved: pathlib.Path, exc: OSError):
+    """Make Path.open raise ``exc`` only for the victim path's BINARY WRITE.
+
+    Reads and every other path stay untouched, so the failure is pinned to
+    the output file's open and nothing else."""
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            raise exc
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+
+
+def _write_two_row_log(tmp_path: pathlib.Path) -> pathlib.Path:
+    log_path = tmp_path / "nextness_runs.jsonl"
+    _write_log(log_path, [
+        _make_entry(generation=1, snapshot_file="a.npz"),
+        _make_entry(generation=2, snapshot_file="b.npz"),
+    ])
+    return log_path
+
+
+def _expect_exit4_receipt(capsys) -> None:
+    captured = capsys.readouterr()
+    err_lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(err_lines) == 1
+    assert err_lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_permission_error_is_concise_exit_4(tmp_path, capsys, monkeypatch):
+    """OUTPUT-OPEN failure (deterministic, cross-platform): a
+    PermissionError raised by the output file's binary open — i.e.
+    BEFORE any truncation — reaches main() as the typed output-write
+    failure. Exit 4, one error: line, no traceback, input log untouched,
+    and the pre-existing destination byte-identical: destination
+    preservation IS guaranteed at open time, because open never
+    succeeded."""
+    log_path = _write_two_row_log(tmp_path)
+    out_path = tmp_path / "out.jsonl"
+    out_path.write_text("stale pre-existing content\n", encoding="utf-8")
+    log_before = log_path.read_bytes()
+    dest_before = out_path.read_bytes()
+
+    _patch_binary_write_open(monkeypatch, out_path.resolve(),
+                             PermissionError(13, "write denied"))
+
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
+    assert log_path.read_bytes() == log_before
+    assert out_path.read_bytes() == dest_before
+
+
+def test_cli_output_parent_mkdir_permission_error_is_concise_exit_4(
+    tmp_path, capsys, monkeypatch
+):
+    """OUTPUT-PARENT-CREATION failure: parent mkdir is part of the output
+    region, so a PermissionError there must land in the same typed exit-4
+    lane — not escape as a traceback. Log untouched; no output created."""
+    log_path = _write_two_row_log(tmp_path)
+    out_path = tmp_path / "newsub" / "out.jsonl"  # inside containment; parent absent
+    victim = (tmp_path / "newsub").resolve()
+    log_before = log_path.read_bytes()
+    real_mkdir = pathlib.Path.mkdir
+
+    def patched(self, *args, **kwargs):
+        if self.resolve() == victim:
+            raise PermissionError(13, "mkdir denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", patched)
+
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
+    assert log_path.read_bytes() == log_before
+    assert not (tmp_path / "newsub").exists()  # no output, no partial scaffolding
+
+
+def test_cli_mid_write_oserror_is_concise_exit_4(tmp_path, capsys, monkeypatch):
+    """MID-WRITE failure: after binary open succeeds and one row has been
+    written, a later write raising OSError must still land in the typed
+    exit-4 lane — one error: line, no traceback, input log untouched.
+
+    Deliberately NO destination-integrity assertion: output is direct,
+    streamed and non-atomic, so a mid-write failure may leave a truncated
+    or partial destination. That is the documented contract."""
+    log_path = _write_two_row_log(tmp_path)  # 2 rows -> 1 pair row + aggregate
+    out_path = tmp_path / "out.jsonl"
+    log_before = log_path.read_bytes()
+    out_resolved = out_path.resolve()
+    real_open = pathlib.Path.open
+    writes = {"n": 0}
+
+    class _FailAfterFirstWrite:
+        def __init__(self, raw):
+            self._raw = raw
+
+        def write(self, data):
+            writes["n"] += 1
+            if writes["n"] > 1:
+                raise OSError(28, "device full mid-stream")
+            return self._raw.write(data)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._raw.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._raw, name)
+
+    def patched(self, mode="r", *args, **kwargs):
+        raw = real_open(self, mode, *args, **kwargs)
+        if "w" in mode and "b" in mode and self.resolve() == out_resolved:
+            return _FailAfterFirstWrite(raw)
+        return raw
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+
+    assert main(["--log", str(log_path), "--out", str(out_path)]) == 4
+    _expect_exit4_receipt(capsys)
+    assert writes["n"] > 1  # the failure genuinely occurred mid-stream
+    assert log_path.read_bytes() == log_before
+
+
+def test_read_side_unexpected_oserror_is_not_reclassified(tmp_path, monkeypatch):
+    """Scope precision: an unexpected OSError on the LOG READ must not be
+    converted into exit 4 by an over-broad handler — it stays loud."""
+    log_path = _write_two_row_log(tmp_path)
+    out_path = tmp_path / "out.jsonl"
+    victim = log_path.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "b" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "read denied")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError, match="read denied"):
+        main(["--log", str(log_path), "--out", str(out_path)])
 
 
 # ---------------------------------------------------------------------------
@@ -831,3 +1010,344 @@ def test_output_bytes_are_canonical_utf8_lf_only(tmp_path):
     # Byte-identical idempotent rewrite.
     assert main(["--log", str(log_path), "--out", str(out_path)]) == 0
     assert out_path.read_bytes() == raw
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# identity-inspection failure fails closed (exit 3, safety error:)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main([])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+
+
+def test_cli_identity_inspection_failure_fails_closed_exit_3(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """A PermissionError from the guard's identity comparison must be a
+    safety refusal in metrics' own lane — exit 3, one 'safety error:'
+    line, no traceback, everything untouched."""
+    log_path = _two_entry_log(tmp_path)
+    out = tmp_path / "out.jsonl"
+    out.write_text("stale existing non-alias output\n", encoding="utf-8")
+    log_before, out_before = log_path.read_bytes(), out.read_bytes()
+    entries_before = sorted(p.name for p in tmp_path.iterdir())
+    out_resolved = out.resolve()
+    real_samefile = os.path.samefile
+
+    def probed(a, b):
+        if pathlib.Path(a).resolve() == out_resolved:
+            raise PermissionError(13, "identity probe denied")
+        return real_samefile(a, b)
+
+    monkeypatch.setattr(os.path, "samefile", probed)
+    assert main(["--log", str(log_path), "--out", str(out)]) == 3
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("safety error:")
+    assert "Traceback" not in captured.err
+    assert log_path.read_bytes() == log_before
+    assert out.read_bytes() == out_before
+    assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+# ---------------------------------------------------------------------------
+# Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
+# 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
+# the expected exit-4 operational-write lane — distinct from PUBLIC
+# filesystem behavior and never a public-reachability claim. Stage counters
+# assert the intended operation (open/write/close) actually fired, so no pin
+# can pass by triggering the wrong stage.
+# ---------------------------------------------------------------------------
+
+
+class _StageProxy:
+    def __init__(self, raw, fail_write_at=None, fail_close=False):
+        self._raw = raw
+        self._fail_at = fail_write_at
+        self._fail_close = fail_close
+        self.writes_ok = 0
+        self.close_attempted = False
+
+    def write(self, data):
+        if self._fail_at is not None and self.writes_ok + 1 >= self._fail_at:
+            raise OSError(28, "injected write failure")
+        n = self._raw.write(data)
+        self.writes_ok += 1
+        return n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close_attempted = True
+        self._raw.__exit__(*exc)
+        if self._fail_close and exc[0] is None:
+            raise OSError(5, "injected close failure")
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _patch_output_stage(monkeypatch, victim_resolved, *, deny_open=False,
+                        fail_write_at=None, fail_close=False):
+    """Patch ONLY the victim path's binary-write open; returns stage state."""
+    state = {"opens": 0, "proxy": None}
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            state["opens"] += 1
+            if deny_open:
+                raise PermissionError(13, "injected open denial")
+            raw = real_open(self, mode, *args, **kwargs)
+            state["proxy"] = _StageProxy(raw, fail_write_at, fail_close)
+            return state["proxy"]
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    return state
+
+
+def _stage_exit4_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Close-time failure (streamed writer): every streamed row write
+    succeeds, only the context exit raises — the destination equals the
+    canonical successful output byte-for-byte although the CLI returns 4."""
+    log_path = _two_entry_log(tmp_path)
+    canon = tmp_path / "canonical.out"
+    assert main(["--log", str(log_path), "--out", str(canon)]) == 0
+    capsys.readouterr()
+    canonical = canon.read_bytes()
+    out = tmp_path / "stage_pin.out"
+    log_before = log_path.read_bytes()
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_close=True)
+    assert main(["--log", str(log_path), "--out", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None
+    assert state["proxy"].writes_ok == 2          # 1 pair row + 1 aggregate row
+    assert state["proxy"].close_attempted          # failure was AT close, not write
+    assert out.read_bytes() == canonical           # complete canonical stream
+    assert log_path.read_bytes() == log_before
+
+
+# ---------------------------------------------------------------------------
+# Metrics typed-input-boundary pilot (gated; docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md).
+# Failing-first target: a sentinel plain ValueError escaping a
+# post-validation metrics core call must PROPAGATE, never convert to the
+# documented exit-2 data lane. Preservation controls pin every public
+# lane byte-for-byte, plus the FileNotFoundError race lane, the exit-3
+# safety lane, the typed exit-4 write lane and output determinism.
+# ---------------------------------------------------------------------------
+
+
+def _expect_single_error_line(capsys, expected: str) -> str:
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == [expected]
+    assert "Traceback" not in err
+    return err
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the post-validation
+    computation core (js_divergence, called per pair after log parse and
+    pre-write safety validation) is an unexpected programming error and
+    must propagate — not masquerade as a concise exit-2 data failure."""
+    import scripts.nextness_metrics as metrics_module
+
+    log = tmp_path / "nextness_runs.jsonl"
+    _write_log(log, [_make_entry(generation=1, snapshot_file="a.npz"),
+                     _make_entry(generation=2, snapshot_file="b.npz")])
+    before = log.read_bytes()
+    out = tmp_path / "derived.jsonl"
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(metrics_module, "js_divergence", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main(["--log", str(log), "--out", str(out)])
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_cli_five_input_lanes_exact_public_behavior(tmp_path, capsys) -> None:
+    """The five reclassified lanes keep their public behavior
+    byte-for-byte: exact message, single stderr line, exit 2, no
+    traceback, input untouched, no output created."""
+    two = tmp_path / "two.jsonl"
+    _write_log(two, [_make_entry(generation=1, snapshot_file="a.npz"),
+                     _make_entry(generation=2, snapshot_file="b.npz")])
+    neg_rate = tmp_path / "negrate.jsonl"
+    _write_log(neg_rate, [_make_entry(generation=1, snapshot_file="a.npz"),
+                          _make_entry(generation=2, snapshot_file="b.npz",
+                                      boundary_rate=-0.5)])
+    one = tmp_path / "one.jsonl"
+    _write_log(one, [_make_entry(generation=1, snapshot_file="a.npz")])
+    bad = tmp_path / "malformed.jsonl"
+    bad_payload = "{not json"
+    bad.write_text(
+        json.dumps(_make_entry(generation=1, snapshot_file="a.npz"),
+                   sort_keys=True) + "\n" + bad_payload + "\n",
+        encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        json.loads(bad_payload)
+    json_err = str(exc_info.value)
+    cases = (
+        (bad, [], f"error: malformed JSONL at {bad}:2: {json_err}"),
+        (two, ["--smoothing", "-1"],
+         "error: smoothing must be non-negative, got -1.0"),
+        (neg_rate, [],
+         "error: boundary rates must be non-negative; got r_prev=0.3, r_curr=-0.5"),
+        (two, ["--boundary-delta", "0"],
+         "error: delta must be positive, got 0.0"),
+        (one, ["--boundary-delta", "0"],
+         "error: delta must be positive, got 0.0"),
+    )
+    for log, extra, expected in cases:
+        before = log.read_bytes()
+        out = tmp_path / "derived.jsonl"
+        assert main(["--log", str(log), "--out", str(out), *extra]) == 2
+        _expect_single_error_line(capsys, expected)
+        assert log.read_bytes() == before
+        assert not out.exists()
+
+
+def test_cli_filenotfound_race_lane_still_exit_2(tmp_path, monkeypatch, capsys) -> None:
+    """The validation-to-read race lane: a FileNotFoundError escaping
+    compute_run_metrics keeps the documented exit-2 clause (injected
+    exercise of the clause; the pre-check missing-log lane is exit 1)."""
+    import scripts.nextness_metrics as metrics_module
+
+    log = _two_entry_log(tmp_path)
+
+    def race(*args, **kwargs):
+        raise FileNotFoundError(f"log file not found: {log}")
+
+    monkeypatch.setattr(metrics_module, "compute_run_metrics", race)
+    assert main(["--log", str(log), "--out", str(tmp_path / "d.jsonl")]) == 2
+    _expect_single_error_line(capsys, f"error: log file not found: {log}")
+
+
+def test_cli_missing_log_still_exit_1(tmp_path, capsys) -> None:
+    missing = tmp_path / "absent.jsonl"
+    assert main(["--log", str(missing), "--out", str(tmp_path / "d.jsonl")]) == 1
+    _expect_single_error_line(capsys, f"error: log file not found: {missing}")
+
+
+def test_cli_safety_refusal_still_exit_3(tmp_path, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}_outside.jsonl"
+    assert main(["--log", str(log), "--out", str(outside)]) == 3
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("safety error:")
+    assert "Traceback" not in err
+    assert not outside.exists()
+
+
+def test_cli_output_write_failure_still_exit_4(tmp_path, monkeypatch, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    out = tmp_path / "denied.jsonl"
+    _patch_binary_write_open(monkeypatch, out.resolve(),
+                             PermissionError(13, "injected open denial"))
+    assert main(["--log", str(log), "--out", str(out)]) == 4
+    _expect_exit4_receipt(capsys)
+
+
+def test_cli_successful_output_byte_identical(tmp_path, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    out1 = tmp_path / "d1.jsonl"
+    out2 = tmp_path / "d2.jsonl"
+    assert main(["--log", str(log), "--out", str(out1)]) == 0
+    assert main(["--log", str(log), "--out", str(out2)]) == 0
+    capsys.readouterr()
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+def test_typed_identity_at_the_five_reclassified_sites(tmp_path) -> None:
+    """Direct-API pin: typed identity at the five reclassified sites
+    (a ValueError subclass — base-class catchers remain compatible)."""
+    from scripts.nextness_metrics import (
+        MetricsInputError,
+        boundary_cv,
+        boundary_persistence_pairwise,
+        compute_run_metrics,
+        smoothed_distribution,
+    )
+
+    assert issubclass(MetricsInputError, ValueError)
+    with pytest.raises(MetricsInputError):
+        smoothed_distribution({"karuna_relief": 1}, smoothing=-1.0)
+    with pytest.raises(MetricsInputError):
+        boundary_persistence_pairwise(-1.0, 0.3)
+    with pytest.raises(MetricsInputError):
+        boundary_persistence_pairwise(0.1, 0.2, delta=0.0)
+    with pytest.raises(MetricsInputError):
+        boundary_cv([0.1, 0.2], delta=0.0)
+    bad = tmp_path / "malformed.jsonl"
+    bad.write_text("{not json" + chr(10), encoding="utf-8")
+    with pytest.raises(MetricsInputError, match="malformed JSONL"):
+        compute_run_metrics(bad, tmp_path / "d.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# Invalid-UTF-8 input lane (regression vs the pre-#381 contract; see the
+# late review thread on merged #381). An undecodable log is genuine bad
+# input: pre-#381 the broad catch reported it as concise exit 2; the typed
+# narrowing let UnicodeDecodeError (a ValueError subclass) escape. Restored
+# by a narrow UnicodeDecodeError wrapping boundary around the text-reading
+# region only — message preserved byte-for-byte via str(e).
+# ---------------------------------------------------------------------------
+
+_BAD_UTF8 = b'\xff\xfe{"generation": 1}\n'
+
+
+def test_cli_invalid_utf8_log_is_concise_exit_2(tmp_path, capsys) -> None:
+    """Regression pin: invalid-UTF-8 log -> exit 2 with the exact
+    pre-#381 stderr bytes, one line, no traceback, input untouched,
+    no output created."""
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    before = log.read_bytes()
+    out = tmp_path / "derived.jsonl"
+    with pytest.raises(UnicodeDecodeError) as exc_info:
+        _BAD_UTF8.decode("utf-8")
+    expected = f"error: {exc_info.value}"
+    assert main(["--log", str(log), "--out", str(out)]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == [expected]
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_invalid_utf8_direct_api_typed_with_cause(tmp_path) -> None:
+    """Direct-API pin: compute_run_metrics raises MetricsInputError whose
+    __cause__ is the original UnicodeDecodeError; message equals str(e)
+    with no added inner prefix."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    with pytest.raises(MetricsInputError) as exc_info:
+        compute_run_metrics(log, tmp_path / "d.jsonl")
+    assert isinstance(exc_info.value.__cause__, UnicodeDecodeError)
+    assert str(exc_info.value) == str(exc_info.value.__cause__)

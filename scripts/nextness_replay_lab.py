@@ -88,6 +88,7 @@ from scripts.nextness_predictor import (
     SMOOTHING_DEFAULT,
     SMOOTHING_MAX,
     InsufficientHistoryError,
+    PredictorInputError,
     empirical_prior_distribution,
     first_order_distribution,
     persistence_distribution,
@@ -469,9 +470,19 @@ def build_lab_report(
     field, by contract.
     """
     protocol = load_protocol(protocol_path)
-    sequence, rejections, rows_read = read_dominant_sequence(
-        log_path, max_rows=max_rows, max_line_bytes=max_line_bytes
-    )
+    # Typed reader-bound translation: the shared reader raises the
+    # predictor's typed PredictorInputError for out-of-bounds
+    # max_rows/max_line_bytes (this lab re-exposes both publicly).
+    # Translate EXACTLY that class — never broad ValueError — into this
+    # module's own typed input error, message byte-identical via str(e),
+    # provenance kept in __cause__. A plain ValueError from the reader
+    # seam is not wrapped and propagates.
+    try:
+        sequence, rejections, rows_read = read_dominant_sequence(
+            log_path, max_rows=max_rows, max_line_bytes=max_line_bytes
+        )
+    except PredictorInputError as e:
+        raise LabInputError(str(e)) from e
     # Replay bound BEFORE any observation allocation: the holdout
     # length is fully determined by the already-bounded sequence length
     # and the protocol's holdout_fraction (the same floor arithmetic
@@ -669,7 +680,16 @@ def main(argv: list[str] | None = None) -> int:
     - ``5`` lab report exceeds MAX_LAB_REPORT_BYTES (fail closed)
 
     Every expected failure prints one concise ``error:`` line to stderr —
-    never a traceback; unexpected programming errors propagate loudly.
+    never a traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``InsufficientHistoryError``,
+    ``LabReportTooLargeError``, the typed ``LabInputError`` (the exit-2
+    lane — the shared reader's typed ``PredictorInputError`` is
+    translated to it at the reader call, message byte-identical) and the
+    write-lane ``OSError``. Exceptions outside it — including plain
+    ``ValueError`` — propagate (replay-lab typed-boundary pilot;
+    test-pinned). Direct-Python note: callers catching ``ValueError``
+    remain compatible (``LabInputError`` subclasses it); the reader
+    itself still raises ``PredictorInputError`` when called directly.
     """
     args = _build_parser().parse_args(argv)
     for label, path in (("log", args.log_path), ("protocol", args.protocol_path)):
@@ -694,7 +714,7 @@ def main(argv: list[str] | None = None) -> int:
     except LabReportTooLargeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 5
-    except ValueError as e:  # includes LabInputError (its subclass)
+    except LabInputError as e:  # reader-bound errors arrive translated
         print(f"error: {e}", file=sys.stderr)
         return 2
     serialized = serialize_lab_report(report)

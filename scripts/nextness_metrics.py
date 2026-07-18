@@ -46,6 +46,16 @@ Determinism contract (per Jack's audit on PR #141):
 CLI:
     python -m scripts.nextness_metrics --log <jsonl-in> --out <jsonl-out>
         [--smoothing FLOAT] [--boundary-delta FLOAT]
+
+    Exit codes: 0 success · 1 missing log (``error:``) · 2 data/validation
+    failure (``error:``; argparse usage errors also exit 2) · 3 pre-write
+    containment/identity/directory safety refusal (``safety error:``) ·
+    4 operational output-write failure (``error:``). Expected failures
+    print one concise line, never a traceback. The exit-2 catch set is
+    the typed ``MetricsInputError`` plus the ``FileNotFoundError``
+    validation-to-read race lane; exceptions outside the documented
+    catch set — including plain ``ValueError`` and read-side OSErrors —
+    propagate rather than being reclassified.
 """
 from __future__ import annotations
 
@@ -66,6 +76,42 @@ from scripts.nextness_observer import (
     shannon_entropy_bits as _shannon_entropy_bits,
     void_compute_balance as _void_compute_balance,
 )
+
+
+class MetricsOutputWriteError(RuntimeError):
+    """Operational failure in the derived output's write region.
+
+    Raised only from the OUTPUT region of :func:`compute_run_metrics` —
+    output-parent creation plus the binary open/write/close — never for
+    read-side or computation errors, which stay loud. The CLI maps this
+    to its own exit code (4) so callers can distinguish "the output
+    could not be produced operationally" from a pre-write safety refusal
+    (exit 3, ``WriteOutsideLogDirError``), a data error (exit 2), and a
+    missing input log (exit 1).
+
+    Destination-preservation contract, stated precisely: a failure at or
+    before the binary open (e.g. a read-only destination, or a failed
+    parent mkdir) leaves any existing destination byte-identical —
+    nothing was truncated. Once the binary open has succeeded, output is
+    direct, streamed and non-atomic, so a later write or close failure
+    may leave a truncated or partial destination. In the exercised
+    failure lanes, and absent the documented validation-to-write
+    replacement race, the input log remains unchanged. This repair adds
+    no stronger input-log guarantee: a concurrent actor may still
+    redirect the later direct write, as the existing TOCTOU non-claim
+    states. No atomic-write behavior is provided or claimed.
+    """
+
+
+class MetricsInputError(ValueError):
+    """Genuine input/configuration failure (typed input boundary).
+
+    Subclasses ``ValueError`` so direct-Python callers catching the base
+    class remain compatible; the CLI's exit-2 catch names exactly this
+    class (plus the ``FileNotFoundError`` validation-to-read race lane),
+    so a plain internal ``ValueError`` propagates instead of
+    masquerading as a data failure (metrics typed-boundary pilot).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +225,7 @@ def smoothed_distribution(
     and sums to 1.0 (within float precision).
     """
     if smoothing < 0:
-        raise ValueError(f"smoothing must be non-negative, got {smoothing}")
+        raise MetricsInputError(f"smoothing must be non-negative, got {smoothing}")
     raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
     total = sum(raw)
     if total <= 0:
@@ -259,14 +305,15 @@ def boundary_persistence_pairwise(
     near 1 when both rates are near zero (saturated by ``delta`` in the
     denominator, so the score doesn't whipsaw on noise).
 
-    Raises ``ValueError`` if either rate is negative.
+    Raises ``MetricsInputError`` (a ``ValueError`` subclass) if either
+    rate is negative.
     """
     if r_prev < 0 or r_curr < 0:
-        raise ValueError(
+        raise MetricsInputError(
             f"boundary rates must be non-negative; got r_prev={r_prev}, r_curr={r_curr}"
         )
     if delta <= 0:
-        raise ValueError(f"delta must be positive, got {delta}")
+        raise MetricsInputError(f"delta must be positive, got {delta}")
     diff = abs(r_curr - r_prev)
     denom = max(r_prev, r_curr, delta)
     return 1.0 - diff / denom
@@ -285,7 +332,7 @@ def boundary_cv(rates: Sequence[float], delta: float = 1e-3) -> float:
     defined).
     """
     if delta <= 0:
-        raise ValueError(f"delta must be positive, got {delta}")
+        raise MetricsInputError(f"delta must be positive, got {delta}")
     if len(rates) < 2:
         return 0.0
     mean = sum(rates) / len(rates)
@@ -407,20 +454,28 @@ def compute_run_metrics(
     # — no parent-mkdir, no file open, no writes — happen.
     _validate_metrics_output_path(out_path, log_path)
 
-    # Load and sort
+    # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
+    # public contract for an undecodable log (genuine bad input, concise
+    # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
+    # OSError — and re-raised as MetricsInputError(str(e)) so the stderr
+    # bytes match the pre-#381 lane while read-side OSErrors keep
+    # propagating.
     entries: list[dict[str, Any]] = []
-    with log_path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, 1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"malformed JSONL at {log_path}:{line_no}: {e}"
-                ) from e
-            entries.append(entry)
+    try:
+        with log_path.open("r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    raise MetricsInputError(
+                        f"malformed JSONL at {log_path}:{line_no}: {e}"
+                    ) from e
+                entries.append(entry)
+    except UnicodeDecodeError as e:
+        raise MetricsInputError(str(e)) from e
     entries.sort(key=_sort_key)
 
     # Per-snapshot CCI values (used by both pair rows and the aggregate)
@@ -503,11 +558,26 @@ def compute_run_metrics(
     # Binary mode, streamed row by row: each line is the canonical
     # serialization encoded as UTF-8 plus a single LF byte, so the
     # derived file's bytes never depend on platform newline translation.
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("wb") as f:
-        for row in pair_rows:
-            f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
-        f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
+    #
+    # The OSError catch is deliberately confined to the OUTPUT region —
+    # parent-directory creation plus the binary open/write/close: an
+    # operational failure anywhere in it (unwritable parent, read-only
+    # destination, mid-stream device error) becomes the typed
+    # MetricsOutputWriteError, while read-side or computation errors
+    # above are NEVER reclassified as output failures and stay loud.
+    # Failures at or before open leave an existing destination
+    # byte-identical; after a successful open, streamed non-atomic
+    # output may be truncated/partial if a later write or close fails.
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("wb") as f:
+            for row in pair_rows:
+                f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
+            f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
+    except OSError as e:
+        raise MetricsOutputWriteError(
+            f"cannot write metrics output to {out_path}: {e}"
+        ) from e
 
     return aggregate
 
@@ -553,7 +623,45 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point. Returns 0 on success, non-zero on error."""
+    """CLI entry point.
+
+    Exit-code contract (complete map; each expected failure prints one
+    concise prefixed line to stderr, never a traceback):
+
+    - ``0`` success (multi-line summary on stdout; derived JSONL written)
+    - ``1`` missing input log (``error:``)
+    - ``2`` data/validation failure — malformed JSONL or out-of-bounds
+      configuration (``error:``; argparse's own usage errors also exit 2)
+    - ``3`` pre-write containment/identity/directory safety refusal
+      (``safety error:``, ``WriteOutsideLogDirError``) — the guard runs
+      before the log is read or any metric computed
+    - ``4`` operational output-write failure (``error:``,
+      ``MetricsOutputWriteError``) — an OSError in the output region:
+      parent creation, binary open, streamed writes, or close. In the
+      exercised failure lanes, and absent the documented
+      validation-to-write replacement race, the input log remains
+      unchanged; this repair adds no stronger input-log guarantee — a
+      concurrent actor may still redirect the later direct write, as
+      the existing TOCTOU non-claim states. Destination preservation is
+      guaranteed only for failures at or before the binary open (a
+      read-only destination is never truncated); once open succeeds,
+      direct streamed non-atomic output may be truncated or partial if
+      a later write/close fails — no atomic-write claim is made.
+
+    The documented catch set is exactly ``MetricsOutputWriteError``
+    (exit 4), ``WriteOutsideLogDirError`` (exit 3, ``safety error:``)
+    and the typed ``MetricsInputError`` plus ``FileNotFoundError`` (exit
+    2 — the data lane and the validation-to-read race lane). Exceptions
+    outside it — including plain ``ValueError`` — propagate (metrics
+    typed-boundary pilot; test-pinned), and read-side ``OSError``
+    exceptions in particular are never reclassified as output failures
+    (test-pinned). Direct-Python note: callers catching ``ValueError``
+    remain compatible because ``MetricsInputError`` subclasses it, but
+    the exact exception type at the five reclassified sites (malformed
+    JSONL, negative smoothing, the existing negative-rate guard in
+    ``boundary_persistence_pairwise``, non-positive pairwise delta,
+    non-positive CV delta) is now ``MetricsInputError``.
+    """
     args = _build_parser().parse_args(argv)
     log_path = pathlib.Path(args.log)
     out_path = pathlib.Path(args.out)
@@ -566,13 +674,18 @@ def main(argv: list[str] | None = None) -> int:
             smoothing=args.smoothing,
             boundary_delta=args.boundary_delta,
         )
+    except MetricsOutputWriteError as e:
+        # Operational write failure: the output could not be written
+        # even though every pre-write safety check passed.
+        print(f"error: {e}", file=sys.stderr)
+        return 4
     except WriteOutsideLogDirError as e:
         # Lane B safety violation: --out points outside the log file's
         # directory. Return distinct non-zero code so callers can
         # distinguish safety refusals from data errors.
         print(f"safety error: {e}", file=sys.stderr)
         return 3
-    except (ValueError, FileNotFoundError) as e:
+    except (MetricsInputError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     # Compact stdout summary
@@ -589,6 +702,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "MetricsInputError",
+    "MetricsOutputWriteError",
     "smoothed_distribution",
     "kl_divergence",
     "js_divergence",

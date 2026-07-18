@@ -130,6 +130,18 @@ is checked against a **64 KiB ceiling — fail closed** (`ReportTooLargeError`).
   translation (`\n` → `\r\n`, the old `write_text` behavior) can never
   alter the canonical bytes, so file reports are byte-identical across
   platforms and match the documented byte-identity guarantee.
+- **Destination boundary on operational write failure** (audited 2026-07-17;
+  stage-pinned in the focused tests): a failure **at or before the binary
+  open** — an unwritable or read-only destination, an absent or invalid
+  parent — preserves any existing destination byte-identically and creates
+  no output. **After a successful direct non-atomic open**, a later failure
+  may truncate the destination or leave partial output (the whole-buffer
+  write truncates on open, so a failed write leaves an empty file). A
+  **close-time failure** may leave the complete canonical report bytes
+  in place even though the run reports the operational-failure exit —
+  a present file does not imply a successful run. Supplied-input
+  preservation on these lanes is bounded by the existing validation-to-write
+  (TOCTOU) non-claim. No atomic-write behavior is provided or implied.
 - No network, HTTP, ZMQ, Ollama or model calls anywhere in the module
   (statically auditable: the only imports are stdlib + `TOKEN_NAMES` /
   `WriteOutsideLogDirError` from `scripts.nextness_observer`).
@@ -144,10 +156,26 @@ exits.
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 2 | validation failure: missing log file or out-of-bounds configuration (argparse usage errors also exit 2) |
+| 2 | validation failure: missing log file or out-of-bounds configuration (typed `PredictorInputError`; argparse usage errors also exit 2) |
 | 3 | insufficient history for a train/holdout split |
 | 4 | output-path failure: write-boundary violation, input-log alias (direct path / lexical / symlink / hard link / unverifiable identity), or unwritable target |
 | 5 | serialized report exceeds the 64 KiB ceiling (fail closed) |
+
+**Typed input boundary (predictor pilot)**: the exit-2 catch is exactly
+the typed `PredictorInputError` — the four CLI-reachable validation
+raises (`max_rows`, `max_line_bytes`, `smoothing`, `holdout_fraction`
+bounds) raise it with their message text unchanged. A plain
+`ValueError` — like any exception outside the documented catch
+classes — **propagates** rather than being reported as a concise input
+failure (test-pinned); `evaluate_predictions`' equal-length/non-empty
+invariant deliberately stays a plain `ValueError` for exactly that
+reason. Direct-Python note: callers catching `ValueError` remain
+compatible because `PredictorInputError` subclasses it, but the exact
+exception type at those four sites is now `PredictorInputError` —
+including where importers re-expose the reader bounds (the replay lab's
+`--max-rows`/`--max-line-bytes` lanes still exit 2 through its own
+documented broad catch; test-pinned there). This is a predictor-only
+decision; no family-wide convention is implied.
 
 ## Relationship to what comes next
 

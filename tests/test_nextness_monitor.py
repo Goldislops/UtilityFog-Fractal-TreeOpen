@@ -606,3 +606,117 @@ def test_rejected_evidence_yields_typed_failure_or_documented_abstention() -> No
         "abstain_reason", "input_reduced", "discarded_field_count",
         "config", "non_claim",
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-module CLI failure-contract pins (Candidate C; see
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Pins of ESTABLISHED behavior:
+# argparse usage lane (SystemExit(2), multi-line usage:, outside main()'s
+# return path);
+# unexpected-error propagation stays loud
+# ---------------------------------------------------------------------------
+
+
+def test_cli_argparse_usage_error_exits_2(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(log), "--model", "nope"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "usage:" in err
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
+    import scripts.nextness_monitor as monitor_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sentinel propagation probe")
+
+    monkeypatch.setattr(monitor_module, "build_receipt", boom)
+    with pytest.raises(RuntimeError, match="sentinel propagation probe"):
+        main([str(log)])
+
+
+# ---------------------------------------------------------------------------
+# Monitor typed-input-boundary pilot (gated; docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md).
+# Failing-first target: a sentinel plain ValueError escaping the
+# post-validation monitor core must PROPAGATE, never convert to the
+# documented exit-2 input lane. Preservation controls pin the exact
+# public behavior of every genuine lane, byte-for-byte.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the post-validation
+    core (decide_abstention) is an unexpected programming error and must
+    propagate — not masquerade as a concise exit-2 input failure."""
+    import scripts.nextness_monitor as monitor_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(monitor_module, "decide_abstention", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main([str(log)])
+    assert log.read_bytes() == before
+
+
+def test_cli_monitor_input_error_still_exit_2(tmp_path, monkeypatch, capsys) -> None:
+    """Typed MonitorInputError remains the documented exit-2 lane: one
+    concise error: line, no traceback, supplied input untouched."""
+    import scripts.nextness_monitor as monitor_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+
+    def typed_boom(*args, **kwargs):
+        raise MonitorInputError("sentinel typed input failure")
+
+    monkeypatch.setattr(monitor_module, "observations_from_log", typed_boom)
+    assert main([str(log)]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == ["error: sentinel typed input failure"]
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_smoothing_and_holdout_bounds_exact_public_behavior(tmp_path, capsys) -> None:
+    """The two reclassified validation lanes keep their public behavior
+    byte-for-byte: exact message, single stderr line, exit 2, no
+    traceback, input untouched."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+    for argv, expected in (
+        ([str(log), "--smoothing", "0.0"],
+         "error: smoothing must be in (0, 1000.0], got 0.0"),
+        ([str(log), "--holdout-fraction", "0.9"],
+         "error: holdout_fraction must be in [0.05, 0.5], got 0.9"),
+    ):
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert lines == [expected]
+        assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_insufficient_history_still_exit_3(tmp_path, capsys) -> None:
+    """InsufficientHistoryError keeps its own exit-3 clause: one concise
+    error: line, no traceback, input untouched."""
+    log = _write_log(tmp_path, [A])
+    before = log.read_bytes()
+    assert main([str(log)]) == 3
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
