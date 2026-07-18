@@ -37,10 +37,11 @@ type HarnessWindow = Window &
     // (Jack delta-audit #350).
     __activeAppSocket: () => FakeSocketHarness;
     // The store instance the APP actually writes to, stashed once the
-    // readiness probe is observed landing on it. A dynamic import() of
-    // the store module resolves to a DISTINCT instance per page.evaluate
-    // under Vite dev, so the observation poll must read this one proven
-    // reference rather than re-importing (Jack delta-audit #350).
+    // readiness probe is observed landing on it. Store visibility across
+    // separate page.evaluate boundaries was inconsistent under the Vite-dev
+    // harness (observed on WebKit); no browser or module-loader root cause
+    // was demonstrated, so the observation poll retains and reads this one
+    // proven reference rather than re-importing (Jack delta-audit #350).
     __sceneStore?: SceneStoreHandle;
   };
 
@@ -120,9 +121,11 @@ test('1,000-node network: full ingestion, live shell, working interaction afterw
   //      listeners), and the subscription exposes no external ready
   //      signal — so a single probe sent at canvas-visible is lost (a
   //      strict-single-send variant failed 5/5 on WebKit).
-  //   2. A dynamic import() of the store module resolves to a DISTINCT
-  //      instance per page.evaluate under Vite dev — so the observation
-  //      poll must read the exact instance a write is proven to land on.
+  //   2. Store visibility across separate page.evaluate boundaries was
+  //      inconsistent under the Vite-dev harness (observed on WebKit); no
+  //      browser or module-loader root cause was demonstrated — so the poll
+  //      reads the one store reference on which the readiness write was
+  //      observed, rather than re-importing.
   // The handshake re-sends a probe update for n0 — one of the snapshot's
   // own ids, so the final count is unaffected — until it lands, then
   // stashes THAT proven store instance. The functional assertion below is
