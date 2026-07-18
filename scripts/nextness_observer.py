@@ -1339,19 +1339,30 @@ def write_log_entry(
     removed. The staged copy makes each publication O(current log size);
     the one-record-per-snapshot cadence keeps that acceptable.
 
-    Permissions and write authority: publishing to an existing log first
-    requires the same OS-enforced write access the old append path
-    required (a non-writable log raises ``PermissionError`` before any
-    staging exists), and the existing log's permission bits are copied
-    onto the staged file before the swap. First-time publication uses
-    the ordinary creation mode under the active umask (``0o666 & ~umask``
-    — what ``open("a")`` would have created), never ``mkstemp``'s
-    restrictive staging mode. A permission-copy failure aborts before
-    the swap. Only permission bits are preserved (on Windows that
-    reduces to the read-only flag); ownership, ACLs, extended
-    attributes and file identity are not — ``os.replace`` changes the
-    inode, so hard links and already-open handles keep seeing the old
-    file.
+    Permissions and write authority: TWO preconditions are necessary.
+    (1) Write access to an existing canonical log — probed with the same
+    OS-enforced ``open("ab")`` check the old append path implied, so a
+    non-writable log raises ``PermissionError`` before any staging
+    exists. (2) Directory permission to create, replace and clean a
+    same-directory staging entry — an unavoidable precondition of
+    same-directory atomic replacement, NOT a property append ever
+    needed. A process that can write a pre-created log but cannot
+    create entries in its locked-down directory could append under the
+    old implementation; transactional publication deliberately fails
+    closed there (``PermissionError`` from staging creation, canonical
+    log untouched) rather than silently falling back to a direct append
+    that would abandon the no-partial-write invariant. The existing
+    log's permission bits are copied onto the staged file before the
+    swap. First-time publication uses the ordinary creation mode under
+    the active umask (``0o666 & ~umask`` — what ``open("a")`` would
+    have created), never ``mkstemp``'s restrictive staging mode. A
+    permission-copy failure aborts before the swap. Only permission
+    bits are preserved (on Windows that reduces to the read-only flag);
+    ownership, ACLs, extended attributes and file identity are not —
+    ``os.replace`` changes the inode, so hard links and already-open
+    handles keep seeing the old file. No claim is made about
+    platform-specific access-control models beyond what the tests
+    exercise.
 
     Failure transparency: the exception the caller observes is always
     the primary failure — a secondary ``close()`` failure during cleanup

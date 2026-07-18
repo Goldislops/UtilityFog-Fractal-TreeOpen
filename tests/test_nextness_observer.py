@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import stat
+import tempfile
 import time
 
 import numpy as np
@@ -955,6 +956,60 @@ def test_write_log_entry_refuses_non_writable_existing_log(tmp_path):
         assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
     finally:
         os.chmod(log_path, 0o644)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory-permission semantics")
+def test_write_log_entry_fails_closed_without_directory_staging_permission(tmp_path):
+    """Append-authority layout: the process can write the pre-created log
+    itself but cannot create entries in its locked-down directory. Direct
+    append would succeed here; transactional publication deliberately
+    fails closed with PermissionError (no silent non-atomic fallback),
+    leaving the canonical bytes, mode, and directory contents untouched."""
+    if os.geteuid() == 0:
+        pytest.skip("euid 0 bypasses directory permission checks")
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+    mode_before = stat.S_IMODE(os.stat(log_path).st_mode)
+    os.chmod(log_dir, 0o500)  # r-x: entry creation/replacement refused
+    try:
+        # The layout's defining property: file-level append access is
+        # still granted...
+        with log_path.open("ab"):
+            pass
+        # ...but staging-entry creation in the directory is not.
+        with pytest.raises(PermissionError):
+            fd, name = tempfile.mkstemp(dir=log_dir)
+        # Transactional publication therefore fails closed.
+        with pytest.raises(PermissionError):
+            write_log_entry(log_dir, {"x": 2})
+    finally:
+        os.chmod(log_dir, 0o755)
+    assert log_path.read_bytes() == before
+    assert stat.S_IMODE(os.stat(log_path).st_mode) == mode_before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
+
+
+def test_write_log_entry_staging_creation_failure_fails_closed(tmp_path, monkeypatch):
+    """Cross-platform companion: a staging-creation refusal propagates as
+    PermissionError with the canonical log untouched and nothing staged."""
+    log_dir = tmp_path / "data" / "nextness_log"
+    log_dir.parent.mkdir()
+    write_log_entry(log_dir, {"seed": 1})
+    log_path = log_dir / "nextness_runs.jsonl"
+    before = log_path.read_bytes()
+
+    def refuse_mkstemp(*args, **kwargs):
+        raise PermissionError(13, "staging entry creation refused")
+
+    monkeypatch.setattr(tempfile, "mkstemp", refuse_mkstemp)
+    with pytest.raises(PermissionError, match="staging entry creation refused"):
+        write_log_entry(log_dir, {"x": 2})
+    monkeypatch.undo()
+    assert log_path.read_bytes() == before
+    assert [p.name for p in log_dir.iterdir()] == ["nextness_runs.jsonl"]
 
 
 def test_write_log_entry_payload_phase_fault_preserves_existing_log(tmp_path, monkeypatch):
