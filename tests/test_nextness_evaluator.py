@@ -1622,3 +1622,74 @@ def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
     assert out.read_bytes() == canonical                       # complete bytes present
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Read-side propagation pin (commits the post-train audit's probe-only
+# claim): an argument-conditional read-side PermissionError on the
+# primary input propagates unchanged through public main() — exact
+# identity and message, no concise stderr conversion, inputs
+# byte-identical, no destination created. The patch matches ONLY the
+# resolved victim path in a read mode, so output-write lanes are never
+# accidentally exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None:
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    out = tmp_path / "never_written.out"
+    inputs = [report_file, receipts_file]
+    before = {p: p.read_bytes() for p in inputs}
+    victim = report_file.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "injected read denial")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError) as excinfo:
+        main(["--report", str(report_file), "--receipts", str(receipts_file), "--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is PermissionError
+    assert excinfo.value.errno == 13
+    assert excinfo.value.strerror == "injected read denial"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    assert not out.exists()
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch, capsys) -> None:
+    """Committed pin for the post-train audit's probe-only claim: the
+    evaluator's typed-only boundary predates the pilots, so it had no
+    committed plain-ValueError propagation pin. A sentinel plain
+    ValueError at the established core seam (evaluate) propagates
+    unchanged through public main() — exact type and message, inputs
+    byte-identical, the supplied destination never created, and no
+    stdout/stderr emitted."""
+    import scripts.nextness_evaluator as evaluator_module
+
+    report_file, receipts_file = _write_artifacts(tmp_path)
+    before = {p: p.read_bytes() for p in (report_file, receipts_file)}
+    out = tmp_path / "never_written.out"
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(evaluator_module, "evaluate", boom)
+    with pytest.raises(ValueError) as excinfo:
+        main(["--report", str(report_file), "--receipts", str(receipts_file),
+              "--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is ValueError
+    assert str(excinfo.value) == "sentinel plain ValueError probe"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert not out.exists()
+    for p_, b_ in before.items():
+        assert p_.read_bytes() == b_
