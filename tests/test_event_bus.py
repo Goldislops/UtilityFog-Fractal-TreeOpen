@@ -215,14 +215,15 @@ def test_tuning_commit_emits_tuning_committed(tmp_path):
             justification="test",
             mode="commit-pending",
         )
-        state.commit(proposal_id=proposal["proposal_id"], approver="policy:auto")
+        # policy:auto is refused post-quarantine; a human approver commits.
+        state.commit(proposal_id=proposal["proposal_id"], approver="human:kevin")
 
         msg = sub.recv(timeout_ms=500)
         assert msg is not None
         topic, _ts, payload = msg
         assert topic == TOPIC_TUNING_COMMITTED
         assert payload["proposal_id"] == proposal["proposal_id"]
-        assert payload["approver"] == "policy:auto"
+        assert payload["approver"] == "human:kevin"
         assert payload["params"] == {"signal_interval": 14}
         assert payload["effective_after"]["signal_interval"] == 14
     finally:
@@ -243,10 +244,13 @@ def test_tuning_gate_denial_emits_tuning_rejected(tmp_path):
             justification="t",
             mode="commit-pending",
         )
-        # policy:auto is insufficient → TuningError + emit tuning.rejected
+        # A non-human approver on a HUMAN_APPROVAL param → human_approval_required
+        # + emit tuning.rejected. (Uses a neutral approver, not policy:auto, so
+        # this exercises the human-approval gate rather than the Package R
+        # auto-commit quarantine — both are 403 denials that emit tuning.rejected.)
         from scripts.tuning_api import TuningError
         with pytest.raises(TuningError):
-            state.commit(proposal_id=proposal["proposal_id"], approver="policy:auto")
+            state.commit(proposal_id=proposal["proposal_id"], approver="agent:opus")
 
         msg = sub.recv(timeout_ms=500)
         assert msg is not None
@@ -294,13 +298,13 @@ def test_rollback_emits_tuning_rolled_back(tmp_path):
             params={"signal_interval": 15},
             source="human:kevin", justification="t", mode="commit-pending",
         )
-        state.commit(proposal_id=p1["proposal_id"], approver="policy:auto")
+        state.commit(proposal_id=p1["proposal_id"], approver="human:kevin")
         gen.advance(MIN_GEN_BETWEEN_COMMITS_PER_PARAM + 1)
         p2 = state.propose(
             params={"joy_beta": 0.5},
             source="human:kevin", justification="t", mode="commit-pending",
         )
-        state.commit(proposal_id=p2["proposal_id"], approver="policy:auto")
+        state.commit(proposal_id=p2["proposal_id"], approver="human:kevin")
         # Rollback to p1's snapshot.
         state.rollback(to_proposal_id=p1["proposal_id"])
 
@@ -328,5 +332,5 @@ def test_tuning_state_without_publisher_works(tmp_path):
         params={"signal_interval": 15},
         source="human:kevin", justification="t", mode="commit-pending",
     )
-    entry = state.commit(proposal_id=prop["proposal_id"], approver="policy:auto")
+    entry = state.commit(proposal_id=prop["proposal_id"], approver="human:kevin")
     assert entry["effective_after"]["signal_interval"] == 15

@@ -150,34 +150,54 @@ def _propose(client, params, source="human:kevin", mode="commit-pending"):
     return resp.get_json()["proposal_id"]
 
 
-def test_commit_auto_category_accepts_policy_auto(tuning):
+def test_commit_auto_category_via_policy_auto_is_disabled(tuning):
+    """Package R quarantine: even a valid AUTO-category proposal can no longer
+    be committed by the autonomous policy:auto approver. The rejection is at
+    the server boundary; no engine-state mutation and no pending file result."""
     client, state, gen, tmp_path = tuning
     pid = _propose(client, {"signal_interval": 15})
     code, body = _json(client.post(
         "/api/tuning/commit",
         json={"proposal_id": pid, "approver": "policy:auto"},
     ))
+    assert code == 403
+    assert body["error"] == "auto_commit_disabled"
+    # No mutation: effective params unchanged, no pending file written.
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_commit_auto_category_still_accepts_human_approver(tuning):
+    """The quarantine closes only the autonomous path. A deliberate human
+    approver may still commit an AUTO-category proposal (they take
+    responsibility explicitly)."""
+    client, state, gen, tmp_path = tuning
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": "human:kevin"},
+    ))
     assert code == 200
     assert body["status"] == "committed"
-    assert body["applied_at_gen"] == gen.value
-    assert body["effective_after"]["signal_interval"] == 15
-    # Pending file was written.
-    pending = json.loads((tmp_path / "tuning_pending.json").read_text())
-    assert pending["effective_params"]["signal_interval"] == 15
-    assert pending["proposal_id"] == pid
-    # Effective state updated.
     assert state.effective_params()["signal_interval"] == 15
+    pending = json.loads((tmp_path / "tuning_pending.json").read_text())
+    assert pending["proposal_id"] == pid
 
 
-def test_commit_human_approval_required_rejects_policy_auto(tuning):
-    client, *_ = tuning
+def test_commit_human_approval_param_via_policy_auto_disabled(tuning):
+    """A HUMAN_APPROVAL param committed with policy:auto is refused. Post-R the
+    auto-commit quarantine fires first, so the stable reason is
+    auto_commit_disabled (still 403; still rejected; still no mutation)."""
+    client, state, *_ = tuning
     pid = _propose(client, {"magnon_coupling": 2.5})  # HUMAN_APPROVAL category
     code, body = _json(client.post(
         "/api/tuning/commit",
         json={"proposal_id": pid, "approver": "policy:auto"},
     ))
     assert code == 403
-    assert body["error"] == "human_approval_required"
+    assert body["error"] == "auto_commit_disabled"
+    assert "magnon_coupling" not in state.effective_params() or \
+        state.effective_params()["magnon_coupling"] == PARAMS["magnon_coupling"].default
 
 
 def test_commit_human_approval_accepts_human_prefix(tuning):
@@ -218,23 +238,25 @@ def test_commit_invalid_proposal_rejected_even_with_human(tuning):
 
 
 def test_commit_rate_limit_rejects_quick_repeat(tuning):
+    # Rate-limit protection is unchanged by the auto-commit quarantine; proven
+    # here via the still-available human-approver commit path.
     client, state, gen, _ = tuning
     # First commit succeeds.
     pid1 = _propose(client, {"signal_interval": 20})
     assert client.post("/api/tuning/commit",
-                       json={"proposal_id": pid1, "approver": "policy:auto"}).status_code == 200
+                       json={"proposal_id": pid1, "approver": "human:kevin"}).status_code == 200
     # Advance less than the cooldown.
     gen.advance(MIN_GEN_BETWEEN_COMMITS_PER_PARAM - 1)
     pid2 = _propose(client, {"signal_interval": 25})
     code, body = _json(client.post("/api/tuning/commit",
-                                    json={"proposal_id": pid2, "approver": "policy:auto"}))
+                                    json={"proposal_id": pid2, "approver": "human:kevin"}))
     assert code == 429
     assert body["error"] == "rate_limited"
     # Advance past the cooldown; second commit now succeeds.
     gen.advance(2)
     pid3 = _propose(client, {"signal_interval": 30})
     assert client.post("/api/tuning/commit",
-                       json={"proposal_id": pid3, "approver": "policy:auto"}).status_code == 200
+                       json={"proposal_id": pid3, "approver": "human:kevin"}).status_code == 200
 
 
 def test_commit_400_when_body_incomplete(tuning):
@@ -245,6 +267,168 @@ def test_commit_400_when_body_incomplete(tuning):
         assert body["error"] == "bad_request"
 
 
+# -- Package R: auto-commit quarantine (server boundary) --------------------
+
+
+def test_auto_commit_disabled_is_the_orchestrators_only_identity(tuning):
+    """The legacy orchestrator's ToolRouter hard-codes approver='policy:auto'
+    (see scripts/orchestrator.py) and offers the LLM no way to set it. That
+    exact identity is refused here, and the refusal does not mutate state — so
+    the orchestrator's whole write path is closed at the boundary."""
+    client, state, *_ = tuning
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post("/api/tuning/commit",
+                                   json={"proposal_id": pid, "approver": "policy:auto"}))
+    assert code == 403
+    assert body["error"] == "auto_commit_disabled"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+
+
+def test_auto_commit_rejection_emits_no_committed_event(tmp_path):
+    """A refused policy:auto commit must not fire tuning.committed on the event
+    bus (no downstream consumer should believe a commit happened)."""
+    class RecordingBus:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, topic, payload):
+            self.published.append((topic, payload))
+
+    gen = FakeGen()
+    bus = RecordingBus()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    client = app.test_client()
+
+    pid = _propose(client, {"signal_interval": 15})
+    resp = client.post("/api/tuning/commit",
+                       json={"proposal_id": pid, "approver": "policy:auto"})
+    assert resp.status_code == 403
+    topics = [t for t, _ in bus.published]
+    assert "tuning.committed" not in topics
+    # The rejection is surfaced as a rejected event (stage=commit).
+    assert any(t == "tuning.rejected" for t in topics)
+    # No pending file was written.
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_locked_and_dryrun_paths_unchanged_by_quarantine(tuning):
+    """Baseline preserved: LOCKED still rejected at propose; dry-run proposal
+    still accepted; proposal creation still returns an id."""
+    client, *_ = tuning
+    # LOCKED rejected at propose (unchanged).
+    code, body = _json(client.post(
+        "/api/tuning/propose",
+        json={"params": {"structural_to_void_decay_prob": 0.004}},
+    ))
+    assert code == 422
+    assert body["validation"]["errors"]["structural_to_void_decay_prob"]["error"] == "locked"
+    # Dry-run proposal still accepted and recorded.
+    code, body = _json(client.post(
+        "/api/tuning/propose",
+        json={"params": {"signal_interval": 12}, "justification": "ok", "mode": "dry-run"},
+    ))
+    assert code == 200
+    assert body["proposal_id"].startswith("prop-")
+
+
+# -- Package R amendment (Jack audit): type-guard + normalized match --------
+
+
+class _RecordingBus:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, topic, payload):
+        self.published.append((topic, payload))
+
+
+def _committed_ledger_entries(tmp_path):
+    p = tmp_path / "tuning_ledger.jsonl"
+    if not p.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("type") == "commit"
+    ]
+
+
+_BLOCKED_APPROVER_VARIANTS = [
+    "policy:auto",
+    " policy:auto ",
+    "POLICY:AUTO",
+    " POLICY:AUTO ",
+    "\tPolicy:Auto\n",
+    "policy:auto\n",
+]
+
+
+@pytest.mark.parametrize("approver", _BLOCKED_APPROVER_VARIANTS)
+def test_commit_normalized_policy_auto_variants_all_disabled(tmp_path, approver):
+    """Every whitespace/case variant of the autonomous identity is refused with
+    the same stable 403 auto_commit_disabled, and none of them touches any of
+    the four write surfaces: effective params, pending file, commit ledger, or
+    the tuning.committed event."""
+    gen = FakeGen()
+    bus = _RecordingBus()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    client = app.test_client()
+
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": approver},
+    ))
+    assert code == 403
+    assert body["error"] == "auto_commit_disabled"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+    assert not (tmp_path / "tuning_pending.json").exists()
+    assert _committed_ledger_entries(tmp_path) == []
+    assert "tuning.committed" not in [t for t, _ in bus.published]
+
+
+@pytest.mark.parametrize("approver", [True, 123, 1.5, ["human:kevin"], {"who": "human:kevin"}])
+def test_commit_non_string_approver_is_bad_request(tmp_path, approver):
+    """A non-string approver (bool/number/list/object) is a malformed request:
+    stable 400 bad_request checked before any string operation, never an
+    AttributeError, and no state mutation."""
+    gen = FakeGen()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    client = app.test_client()
+
+    pid = _propose(client, {"signal_interval": 15})
+    code, body = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": approver},
+    ))
+    assert code == 400
+    assert body["error"] == "bad_request"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_commit_preserves_raw_human_approver_identity(tuning):
+    """The quarantine normalization is comparison-only. A human approver's raw
+    identity — mixed case and trailing whitespace — is stored verbatim in the
+    committed ledger entry, never stripped or lowercased."""
+    client, state, gen, tmp_path = tuning
+    pid = _propose(client, {"signal_interval": 15})
+    raw = "human:Kevin "  # valid human prefix; capitalised name; trailing space
+    code, _ = _json(client.post(
+        "/api/tuning/commit",
+        json={"proposal_id": pid, "approver": raw},
+    ))
+    assert code == 200
+    commits = _committed_ledger_entries(tmp_path)
+    assert commits and commits[-1]["approver"] == raw
+
+
 # -- POST /api/tuning/rollback ---------------------------------------------
 
 
@@ -252,12 +436,12 @@ def test_rollback_happy_path(tuning):
     client, state, gen, tmp_path = tuning
     # Commit A
     pid_a = _propose(client, {"signal_interval": 17})
-    client.post("/api/tuning/commit", json={"proposal_id": pid_a, "approver": "policy:auto"})
+    client.post("/api/tuning/commit", json={"proposal_id": pid_a, "approver": "human:kevin"})
     # Move past rate limit for next param so we can vary state a bit
     gen.advance(MIN_GEN_BETWEEN_COMMITS_PER_PARAM + 1)
     # Commit B (different param so no rate-limit collision)
     pid_b = _propose(client, {"joy_beta": 0.5})
-    client.post("/api/tuning/commit", json={"proposal_id": pid_b, "approver": "policy:auto"})
+    client.post("/api/tuning/commit", json={"proposal_id": pid_b, "approver": "human:kevin"})
     assert state.effective_params()["signal_interval"] == 17
     assert state.effective_params()["joy_beta"] == 0.5
     # Rollback to the snapshot after A — joy_beta should return to its default.
@@ -291,7 +475,7 @@ def test_ledger_replay_restores_state_across_restart(tuning):
     client, state, gen, tmp_path = tuning
     # Propose + commit + rollback, then build a fresh TuningState from the same dir.
     pid_a = _propose(client, {"signal_interval": 22})
-    client.post("/api/tuning/commit", json={"proposal_id": pid_a, "approver": "policy:auto"})
+    client.post("/api/tuning/commit", json={"proposal_id": pid_a, "approver": "human:kevin"})
 
     fresh = TuningState(data_dir=tmp_path, gen_getter=gen)
     assert fresh.effective_params()["signal_interval"] == 22
@@ -305,7 +489,7 @@ def test_ledger_replay_restores_state_across_restart(tuning):
 def test_ledger_survives_corrupt_line(tuning):
     client, state, gen, tmp_path = tuning
     pid = _propose(client, {"signal_interval": 14})
-    client.post("/api/tuning/commit", json={"proposal_id": pid, "approver": "policy:auto"})
+    client.post("/api/tuning/commit", json={"proposal_id": pid, "approver": "human:kevin"})
     # Corrupt the ledger with a bad line in the middle.
     with (tmp_path / "tuning_ledger.jsonl").open("a", encoding="utf-8") as f:
         f.write("this-is-not-json\n")

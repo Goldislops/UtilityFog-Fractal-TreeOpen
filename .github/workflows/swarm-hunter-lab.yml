@@ -1,0 +1,31 @@
+name: swarm-hunter-lab
+
+on:
+  pull_request:
+    paths:
+      - "experiments/swarm_hunter_lab/**"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/swarm_hunter_lab/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swarm-hunter-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lab-tests:
+    name: swarm-hunter-lab (non-required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Install lab dependencies
+        run: pip install numpy pytest
+      - name: Run lab-local suite
+        run: python -m pytest experiments/swarm_hunter_lab/tests -q

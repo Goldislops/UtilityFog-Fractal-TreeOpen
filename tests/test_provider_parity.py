@@ -51,14 +51,17 @@ from scripts.agent_backends import (
     Message,
     OpenAICompatBackend,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
 )
 from scripts.orchestrator import (
+    MODE_PROPOSE,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
 )
 from scripts.tuning_api import TuningState, create_blueprint as create_tuning_blueprint
+from scripts.params_schema import PARAMS
 
 
 if AnthropicBackend is None or OpenAICompatBackend is None:
@@ -235,7 +238,7 @@ def _anthropic_script() -> list:
                 "tu_propose_a",
                 "propose_tuning",
                 {"params": PROPOSAL_PARAMS, "justification": JUSTIFICATION,
-                 "mode": "commit-pending"},
+                 "mode": "dry-run"},
             ),
         ], stop_reason="tool_use"),
         _anthropic_response([
@@ -263,7 +266,7 @@ def _openai_script() -> list:
                 "tu_propose_o",
                 "propose_tuning",
                 {"params": PROPOSAL_PARAMS, "justification": JUSTIFICATION,
-                 "mode": "commit-pending"},
+                 "mode": "dry-run"},
             )],
             finish_reason="tool_calls",
         ),
@@ -309,10 +312,11 @@ def _patch_commit_id_openai(script: list, real_proposal_id: str) -> list:
 def _run_one(backend, tuning_stack) -> tuple:
     state, http_do, _gen = tuning_stack
     client = OrchestratorClient("http://test:8080", http_do=http_do)
-    router = ToolRouter(client, orchestrator_source=SOURCE, commit_approver="policy:auto")
+    router = ToolRouter(client, mode=MODE_PROPOSE, orchestrator_source=SOURCE)
     orch = Orchestrator(
         backend=backend, client=client,
         system_prompt="be concise",
+        mode=MODE_PROPOSE,
         router=router,
         max_tool_depth=6,
     )
@@ -353,10 +357,9 @@ def test_anthropic_and_openai_compat_produce_equivalent_ledger_entries(tmp_path:
     a_client.messages.create = patched_create_a
 
     a_orch_client = OrchestratorClient("http://test:8080", http_do=http_do_a)
-    a_router = ToolRouter(a_orch_client, orchestrator_source=SOURCE,
-                          commit_approver="policy:auto")
+    a_router = ToolRouter(a_orch_client, mode=MODE_PROPOSE, orchestrator_source=SOURCE)
     a_orch = Orchestrator(
-        backend=a_backend, client=a_orch_client,
+        backend=a_backend, client=a_orch_client, mode=MODE_PROPOSE,
         system_prompt="be concise", router=a_router, max_tool_depth=6,
     )
     a_result = a_orch.run_one_iteration("Observe Medusa; tune if needed.")
@@ -383,43 +386,54 @@ def test_anthropic_and_openai_compat_produce_equivalent_ledger_entries(tmp_path:
     o_client.chat.completions.create = patched_create_o
 
     o_orch_client = OrchestratorClient("http://test:8080", http_do=http_do_o)
-    o_router = ToolRouter(o_orch_client, orchestrator_source=SOURCE,
-                          commit_approver="policy:auto")
+    o_router = ToolRouter(o_orch_client, mode=MODE_PROPOSE, orchestrator_source=SOURCE)
     o_orch = Orchestrator(
-        backend=o_backend, client=o_orch_client,
+        backend=o_backend, client=o_orch_client, mode=MODE_PROPOSE,
         system_prompt="be concise", router=o_router, max_tool_depth=6,
     )
     o_result = o_orch.run_one_iteration("Observe Medusa; tune if needed.")
 
     # ---- Parity assertions ----
+    #
+    # Post-quarantine: the orchestrator runs in `propose` mode, which exposes a
+    # dry-run-only proposal tool and NO commit tool (Package S). Each script
+    # also emits a commit_tuning tool call, which resolves to unknown_tool. So
+    # both backends behave identically at the *no-commit* outcome: one dry-run
+    # proposal each, zero commits, state unchanged. (Defense in depth: even if a
+    # commit reached the server it would be refused — Package R.) This proves
+    # backend-equivalence of the quarantined path.
 
     # 1. Both stopped naturally.
     assert a_result.stopped_because == o_result.stopped_because == "end_turn"
 
-    # 2. Both made the same number of tool calls (propose + commit = 2).
+    # 2. Both made the same number of tool calls (propose + commit-attempt = 2).
     assert a_result.tool_calls_executed == o_result.tool_calls_executed == 2
 
-    # 3. Both proposed exactly one and committed exactly one.
+    # 3. Both proposed exactly one; neither committed (server refused policy:auto).
     assert len(a_result.proposals_created) == len(o_result.proposals_created) == 1
-    assert len(a_result.commits_applied) == len(o_result.commits_applied) == 1
+    assert len(a_result.commits_applied) == len(o_result.commits_applied) == 0
+    assert a_result.commits_applied == o_result.commits_applied
 
-    # 4. Both backends pushed the same effective param into the live state.
-    assert state_a.effective_params()["signal_interval"] == 14
-    assert state_o.effective_params()["signal_interval"] == 14
+    # 4. No mutation reached the live state; both remain at the registry default.
+    default_si = PARAMS["signal_interval"].default
+    assert state_a.effective_params()["signal_interval"] == default_si
+    assert state_o.effective_params()["signal_interval"] == default_si
 
-    # 5. Both ledgers have a propose + commit entry for the same param value.
+    # 5. Both ledgers hold only the propose entry (the refused commit is not
+    #    recorded as a commit).
     a_lines = [json.loads(ln) for ln in
                (tmp_path / "a" / "tuning_ledger.jsonl").read_text().splitlines() if ln.strip()]
     o_lines = [json.loads(ln) for ln in
                (tmp_path / "o" / "tuning_ledger.jsonl").read_text().splitlines() if ln.strip()]
-    assert len(a_lines) == len(o_lines) == 2
-    assert [e["type"] for e in a_lines] == ["propose", "commit"]
-    assert [e["type"] for e in o_lines] == ["propose", "commit"]
+    assert len(a_lines) == len(o_lines) == 1
+    assert [e["type"] for e in a_lines] == ["propose"]
+    assert [e["type"] for e in o_lines] == ["propose"]
     # Parameters and source match modulo backend-specific proposal_ids
     assert a_lines[0]["params"] == o_lines[0]["params"] == PROPOSAL_PARAMS
     assert a_lines[0]["source"] == o_lines[0]["source"] == SOURCE
     assert a_lines[0]["justification"] == o_lines[0]["justification"] == JUSTIFICATION
-    assert a_lines[1]["approver"] == o_lines[1]["approver"] == "policy:auto"
+    # No commit ledger entry exists on either side — the policy:auto commit was
+    # refused at the server boundary (Package R), so both ledgers stop at propose.
 
 
 def test_parity_at_response_translation_layer():
@@ -493,3 +507,67 @@ def test_orchestrator_treats_both_backends_identically_for_text_only():
         assert result.stopped_because == "end_turn"
         assert result.tool_calls_executed == 0
         assert result.final_text == "looks healthy"
+
+
+# ---------------------------------------------------------------------------
+# Package S amendment (Jack audit): failed-tool-result parity across encodings.
+# An identical error result must remain recognizable as an error through BOTH
+# backend wire formats — Anthropic's native `is_error` flag and the
+# OpenAI-compatible backend's `[ERROR] ` content marker (it has no native
+# flag). This locks the two representations the system prompt tells the model
+# to recognise (orchestrator_config rule 6).
+# ---------------------------------------------------------------------------
+
+
+def test_failed_tool_result_recognizable_through_both_encodings():
+    failed = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id="tid-1",
+                content="rate_limited: try later",
+                is_error=True,
+            )
+        ],
+    )
+
+    # Anthropic native shape: a tool_result block carrying is_error=True.
+    a_wire = AnthropicBackend._message_to_wire(failed)
+    a_results = [
+        blk for blk in a_wire["content"] if blk.get("type") == "tool_result"
+    ]
+    assert len(a_results) == 1
+    assert a_results[0]["is_error"] is True
+    # The native flag carries the signal; the payload text is NOT marker-mangled.
+    assert a_results[0]["content"] == "rate_limited: try later"
+
+    # OpenAI-compatible shape: a role:tool message whose content is marked.
+    o_wire = OpenAICompatBackend._message_to_wire(failed)
+    o_tool_msgs = [msg for msg in o_wire if msg.get("role") == "tool"]
+    assert len(o_tool_msgs) == 1
+    assert o_tool_msgs[0]["content"].startswith("[ERROR] ")
+    assert "rate_limited: try later" in o_tool_msgs[0]["content"]
+
+
+def test_successful_tool_result_carries_no_error_marker_in_either_encoding():
+    """The mirror of the above: a non-error result must NOT gain an error flag
+    or an "[ERROR] " marker in either encoding, so success and failure stay
+    distinguishable through both transports."""
+    ok = Message(
+        role="user",
+        content=[
+            ToolResultBlock(
+                tool_use_id="tid-2",
+                content="census: 42 live",
+                is_error=False,
+            )
+        ],
+    )
+
+    a_wire = AnthropicBackend._message_to_wire(ok)
+    a_result = [b for b in a_wire["content"] if b.get("type") == "tool_result"][0]
+    assert "is_error" not in a_result
+
+    o_tool_msg = [m for m in OpenAICompatBackend._message_to_wire(ok) if m.get("role") == "tool"][0]
+    assert not o_tool_msg["content"].startswith("[ERROR] ")
+    assert o_tool_msg["content"] == "census: 42 live"

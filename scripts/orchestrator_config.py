@@ -1,4 +1,4 @@
-"""Phase 18 PR 6 + 7a — Orchestrator configuration.
+"""Phase 18 PR 6 + 7a — Legacy tuning orchestrator configuration.
 
 Centralises the knobs an operator will realistically want to change between
 environments (local dev vs. live Medusa) without having to edit the
@@ -9,6 +9,9 @@ Reads the following env vars, all optional:
   Core:
     MEDUSA_API_BASE_URL        Medusa REST endpoint (default: http://127.0.0.1:8080)
     MEDUSA_AGENT_BACKEND       "mock" | "anthropic" | "openai-compat"  (default: "mock")
+    MEDUSA_ORCHESTRATOR_MODE   "observe" | "propose"  (default: "observe"; any
+                               absent/malformed/unknown value fails closed to
+                               "observe" — see scripts/orchestrator.resolve_mode)
     MEDUSA_MAX_TOOL_DEPTH      int (default: 8)
     MEDUSA_MAX_TOKENS          int (default: 2048)
 
@@ -61,38 +64,52 @@ from scripts.agent_backends import (
     OpenAICompatBackend,
 )
 from scripts.orchestrator import (
+    DEFAULT_MAX_TOTAL_TOOL_CALLS,
+    MODE_OBSERVE,
     Orchestrator,
     OrchestratorClient,
+    OrchestratorMode,
     ToolRouter,
+    resolve_mode,
+    tools_for_mode,
 )
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 
 # Crafted to work with Phase 18's tool surface. Not model-specific.
+# Describes the quarantined surface accurately: observation is always
+# available; in `propose` mode a dry-run-only proposal tool is added; there is
+# no LLM-facing commit tool. Tool errors are surfaced two ways depending on
+# transport: native backends expose an `is_error` result flag; the
+# OpenAI-compatible backend marks the same condition with a leading "[ERROR]"
+# in the tool-result text (it has no native error flag). The prompt names both
+# so the model recognises an error regardless of backend.
 DEFAULT_SYSTEM_PROMPT = """\
-You are the Medusa Swarm Hunter orchestrator. Your job is to observe the
-Medusa cellular-automata engine and, when warranted, propose small
-parameter tunings to keep the matrix healthy.
+You are the Medusa legacy tuning orchestrator. Your job is to observe the
+Medusa cellular-automata engine and report what you see. In `propose` mode you
+may additionally validate a small parameter tuning as a DRY RUN for a human to
+review later.
 
 Rules:
-  1. ALWAYS inspect the current state before proposing. Use get_params,
+  1. ALWAYS inspect the current state first. Use get_params,
      get_params_schema, get_medusa_census, get_medusa_equanimity, and
      get_acoustic_map to gather context.
-  2. Every propose_tuning call MUST include a `justification` string
-     explaining what concerning signal you saw and why this change helps.
+  2. If a `propose_tuning` tool is available, every call MUST include a
+     `justification` string explaining what concerning signal you saw and why
+     this change would help. Proposals are validated as dry-run only — this
+     orchestrator cannot commit any change.
   3. Prefer SMALL adjustments. Change at most 1–2 params per proposal.
-  4. Only commit AUTO-category parameters. HUMAN_APPROVAL params can be
-     proposed as dry-run for human review, but don't attempt to commit
-     them — the API will return 403 and you should stop and explain
-     what a human should check.
-  5. LOCKED params are off-limits entirely. Don't propose changes to them.
-  6. If the matrix looks healthy, say so and stop. No tuning is correct.
-  7. Tool results that begin with "[ERROR]" indicate the tool execution
-     failed. Read the rest of the message, decide whether to retry, choose
-     a different tool, or stop and report.
+  4. LOCKED params are off-limits entirely. Don't propose changes to them.
+     HUMAN_APPROVAL params may be proposed as dry-run for a human to review.
+  5. If the matrix looks healthy, say so and stop. No tuning is correct.
+  6. A tool result may be reported as an error. Native backends flag it with
+     `is_error`; the OpenAI-compatible backend marks the same condition with a
+     leading `[ERROR]` in the result text. Either form means the call failed —
+     read it, then decide whether to retry, choose a different tool, or stop
+     and report.
 
-Be concise. Observation first, then at most one proposal per iteration."""
+Be concise. Observation first, then at most one dry-run proposal per iteration."""
 
 
 @dataclass
@@ -100,11 +117,12 @@ class OrchestratorConfig:
     base_url: str = DEFAULT_BASE_URL
     backend_name: str = "mock"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    mode: OrchestratorMode = MODE_OBSERVE
     max_tool_depth: int = 8
+    max_total_tool_calls: int = DEFAULT_MAX_TOTAL_TOOL_CALLS
     max_tokens: int = 2048
     temperature: float = 0.0
     orchestrator_source: str = "agent:orchestrator"
-    commit_approver: str = "policy:auto"
     # Used only when backend_name == "openai-compat":
     openai_base_url: Optional[str] = None
     openai_model: Optional[str] = None
@@ -126,7 +144,11 @@ class OrchestratorConfig:
         return cls(
             base_url=os.environ.get("MEDUSA_API_BASE_URL", DEFAULT_BASE_URL),
             backend_name=os.environ.get("MEDUSA_AGENT_BACKEND", "mock").lower(),
+            # Fail-closed: absent/malformed/unknown → observe (resolve_mode).
+            mode=resolve_mode(os.environ.get("MEDUSA_ORCHESTRATOR_MODE")),
             max_tool_depth=int(os.environ.get("MEDUSA_MAX_TOOL_DEPTH", "8")),
+            max_total_tool_calls=int(os.environ.get(
+                "MEDUSA_MAX_TOTAL_TOOL_CALLS", str(DEFAULT_MAX_TOTAL_TOOL_CALLS))),
             max_tokens=int(os.environ.get("MEDUSA_MAX_TOKENS", "2048")),
             openai_base_url=os.environ.get("MEDUSA_OPENAI_BASE_URL") or None,
             openai_model=os.environ.get("MEDUSA_OPENAI_MODEL") or None,
@@ -207,15 +229,18 @@ def create_orchestrator(
     client = client or OrchestratorClient(config.base_url)
     router = ToolRouter(
         client,
+        mode=config.mode,
         orchestrator_source=config.orchestrator_source,
-        commit_approver=config.commit_approver,
     )
     return Orchestrator(
         backend=backend,
         client=client,
         system_prompt=config.system_prompt,
+        mode=config.mode,
+        tools=tools_for_mode(config.mode),
         router=router,
         max_tool_depth=config.max_tool_depth,
+        max_total_tool_calls=config.max_total_tool_calls,
         max_tokens_per_call=config.max_tokens,
         temperature=config.temperature,
     )
