@@ -1777,10 +1777,13 @@ def test_decoder_valueerror_seam_translated(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Parser deep-nesting (RecursionError) decoder totality: a row nested
-# deeper than the parser's recursion limit — while inside the byte
-# ceilings — must follow the reader's EXISTING malformed-row containment
-# policy (counted, run continues), never crash with a traceback.
+# Parser deep-nesting (RecursionError) decoder totality: metrics is
+# fatal located-typed at the decode boundary — a row nested deeper than
+# the parser's recursion limit (while inside the byte ceilings) is a
+# located typed rejection, exit 2, one concise line, no traceback; the
+# run does NOT continue. Per-row containment (counted, run continues)
+# is the predictor's shared reader's policy alone — metrics never
+# contains a malformed row.
 # ---------------------------------------------------------------------------
 
 _DEEP_NEST_ROW = ('{"generation": 1, "token_counts": {"void_static": '
@@ -1806,3 +1809,102 @@ def test_cli_deeply_nested_row_rejected_located_typed(tmp_path, capsys) -> None:
     assert "Traceback" not in captured.err
     assert log.read_bytes() == before
     assert not out.exists()
+
+
+def test_cli_deeply_nested_row_preexisting_destination_untouched(
+    tmp_path, capsys
+) -> None:
+    """The natural deep-nesting rejection with a PRE-EXISTING destination:
+    same located typed exit 2, no traceback, input unchanged and the
+    destination byte-identical (the rejection fires before any
+    destination open)."""
+    log = tmp_path / "nest.jsonl"
+    log.write_text(_DEEP_NEST_ROW + "\n", encoding="utf-8")
+    out = tmp_path / "nest_out.jsonl"
+    out.write_bytes(b'{"pre-existing": true}\n')
+    before = {p: p.read_bytes() for p in (log, out)}
+    rc = main(["--log", str(log), "--out", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert f"{log}:1" in lines[0]
+    assert "Traceback" not in captured.err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_decoder_recursionerror_seam_translated(tmp_path, monkeypatch) -> None:
+    """Runtime-independent seam pin: a sentinel RecursionError raised by
+    the module-local json.loads for one marked line becomes exactly
+    MetricsInputError — the RecursionError is __cause__ with the exact
+    sentinel message retained there, and the log path/line appears in
+    the typed message; input preserved, absent destination stays
+    absent. Proves the identity/cause chain of the new decode-boundary
+    catch independent of any real parser depth limit."""
+    import scripts.nextness_metrics as metrics_module
+    from scripts.nextness_metrics import MetricsInputError
+
+    marker = '{"generation": 1, "snapshot_file": "SEAM-MARKER.npz"}'
+    log = tmp_path / "seam.jsonl"
+    log.write_text(marker + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "seam_out.jsonl"
+    real_loads = metrics_module.json.loads
+
+    def patched(s, *args, **kwargs):
+        if isinstance(s, str) and "SEAM-MARKER" in s:
+            raise RecursionError("sentinel parser depth probe")
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(metrics_module.json, "loads", patched)
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, out)
+    monkeypatch.undo()
+    assert type(excinfo.value) is MetricsInputError
+    assert type(excinfo.value.__cause__) is RecursionError
+    assert str(excinfo.value.__cause__) == "sentinel parser depth probe"
+    assert f"{log}:1" in str(excinfo.value)
+    assert "nesting exceeds the parser's depth limit" in str(excinfo.value)
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_post_decode_recursionerror_propagates(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Outside-seam pin: the new decode-boundary catch is decode-call-
+    local, not broad swallowing. A sentinel RecursionError raised by
+    _validate_entry AFTER a successful decode propagates exactly — no
+    typed conversion, no stdout/stderr output, input and pre-existing
+    destination byte-identical."""
+    import scripts.nextness_metrics as metrics_module
+
+    log = tmp_path / "post.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": "POST-SEAM-MARKER.npz"}\n',
+        encoding="utf-8",
+    )
+    out = tmp_path / "post_out.jsonl"
+    out.write_bytes(b'{"pre-existing": true}\n')
+    before = {p: p.read_bytes() for p in (log, out)}
+    real_validate = metrics_module._validate_entry
+
+    def patched(entry, log_path, line_no):
+        if (type(entry) is dict
+                and entry.get("snapshot_file") == "POST-SEAM-MARKER.npz"):
+            raise RecursionError("sentinel post-decode recursion")
+        return real_validate(entry, log_path, line_no)
+
+    monkeypatch.setattr(metrics_module, "_validate_entry", patched)
+    with pytest.raises(RecursionError) as excinfo:
+        main(["--log", str(log), "--out", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is RecursionError
+    assert str(excinfo.value) == "sentinel post-decode recursion"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    for p, b in before.items():
+        assert p.read_bytes() == b

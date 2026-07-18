@@ -1329,7 +1329,9 @@ _DEEP_NEST_ROW = ('{"generation": 1, "token_counts": {"void_static": '
 
 def test_cli_deeply_nested_log_row_is_contained_malformed(tmp_path, capsys) -> None:
     """Inherited reader containment on the LOG path (the protocol path
-    already translates RecursionError typed): exit 0, no traceback."""
+    already translates RecursionError typed): exit 0, no traceback, and
+    the emitted report itself records the contained row as
+    malformed_json — the containment is receipted, not silent."""
     log = tmp_path / "nest.jsonl"
     good = "\n".join(
         json.dumps({"generation": i + 2, "token_counts": {t: 3}})
@@ -1341,5 +1343,7 @@ def test_cli_deeply_nested_log_row_is_contained_malformed(tmp_path, capsys) -> N
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err
     assert captured.err == ""
+    report = json.loads(captured.out)
+    assert report["input"]["rejections"]["malformed_json"] == 1
     for p_, b_ in before.items():
         assert p_.read_bytes() == b_

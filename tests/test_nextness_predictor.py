@@ -1072,3 +1072,66 @@ def test_cli_deeply_nested_row_is_contained_malformed(tmp_path, capsys) -> None:
     assert captured.err == ""
     assert '"malformed_json": 1' in captured.out
     assert log.read_bytes() == before
+
+
+def test_reader_recursionerror_seam_contained_once(tmp_path, monkeypatch) -> None:
+    """Runtime-independent seam pin: a sentinel RecursionError raised by
+    the module-local json.loads for ONE marked row follows the existing
+    malformed-row containment policy — counted exactly once as
+    malformed_json (and as nothing else), later valid rows still
+    accepted, input unchanged. Proves the containment identity of the
+    decode-boundary catch independent of any real parser depth limit."""
+    marker = '{"generation": 99, "snapshot_file": "SEAM-MARKER"}'
+    valid = _dominant_rows([A, B, A, B])
+    log = _write_log(tmp_path, valid[:1] + [marker] + valid[1:])
+    before = log.read_bytes()
+    real_loads = nextness_predictor.json.loads
+
+    def patched(s, *args, **kwargs):
+        if isinstance(s, str) and "SEAM-MARKER" in s:
+            raise RecursionError("sentinel parser depth probe")
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(nextness_predictor.json, "loads", patched)
+    sequence, rejections, rows_read = read_dominant_sequence(log)
+    monkeypatch.undo()
+    assert sequence == [A, B, A, B]           # later valid rows continue
+    assert rejections["malformed_json"] == 1  # counted exactly once...
+    assert sum(rejections.values()) == 1      # ...and as nothing else
+    assert rows_read == 5
+    assert log.read_bytes() == before
+
+
+def test_post_decode_recursionerror_propagates(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Outside-seam pin: the reader's RecursionError containment is
+    decode-call-local, not broad swallowing. A sentinel RecursionError
+    raised by the post-decode dominant_token call for a marked row
+    propagates exactly — no containment, no stdout/stderr conversion,
+    input unchanged, no output created."""
+    marker_row = _row(0, {A: 7777})
+    rows = [marker_row] + [
+        _row(i + 1, {tok: 3}) for i, tok in enumerate(_FIXTURE_SEQUENCE)
+    ]
+    log = _write_log(tmp_path, rows)
+    out = tmp_path / "never_written.out"
+    before = log.read_bytes()
+    real_dominant = nextness_predictor.dominant_token
+
+    def patched(token_counts):
+        if token_counts.get(A) == 7777:
+            raise RecursionError("sentinel post-decode recursion")
+        return real_dominant(token_counts)
+
+    monkeypatch.setattr(nextness_predictor, "dominant_token", patched)
+    with pytest.raises(RecursionError) as excinfo:
+        main([str(log), "--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is RecursionError
+    assert str(excinfo.value) == "sentinel post-decode recursion"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    assert not out.exists()
+    assert log.read_bytes() == before
