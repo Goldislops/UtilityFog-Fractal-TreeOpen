@@ -30,7 +30,16 @@ Scope guarantees (carried forward from PR #138 / PR #140):
     - No HTTP, ZMQ, or network of any kind.
     - CPU-only.
     - allow_pickle=False (no .npz reads here; JSONL only).
-    - Bounded compute: O(N * K) where N = snapshots, K = vocabulary size.
+    - Bounded compute: O(N * K) where N = snapshots, K = vocabulary size —
+      and N is now ENFORCED per invocation (``max_rows``, ceiling
+      ``MAX_ROWS_CEILING``) rather than assumed small: raw physical JSONL
+      records (blank and rejected included) are counted against
+      ``max_rows``, each record's content is capped at ``max_line_bytes``
+      raw bytes (LF/CRLF terminator excluded) via bounded binary reads
+      that never materialize an oversized record in full, and an input
+      exceeding ``max_rows`` is a typed refusal — never a silent prefix
+      summary. No output-size ceiling is added: the derived JSONL remains
+      un-ceilinged by documented contract.
 
 Determinism contract (per Jack's audit on PR #141):
     - Snapshots are sorted by (generation, snapshot_file, ts) before any
@@ -46,6 +55,7 @@ Determinism contract (per Jack's audit on PR #141):
 CLI:
     python -m scripts.nextness_metrics --log <jsonl-in> --out <jsonl-out>
         [--smoothing FLOAT] [--boundary-delta FLOAT]
+        [--max-rows INT] [--max-line-bytes INT]
 
     Exit codes: 0 success · 1 missing log (``error:``) · 2 data/validation
     failure (``error:``; argparse usage errors also exit 2) · 3 pre-write
@@ -112,6 +122,28 @@ class MetricsInputError(ValueError):
     so a plain internal ``ValueError`` propagates instead of
     masquerading as a data failure (metrics typed-boundary pilot).
     """
+
+
+# ---------------------------------------------------------------------------
+# Input-work bounds (Jack policy decision 2026-07-18). The values mirror
+# the shared predictor reader's established constants; the enforcement
+# policy deliberately does NOT: metrics summarizes a COMPLETE run, so an
+# input with more physical records than ``max_rows`` is a typed refusal,
+# never a silent prefix truncation — metrics computed from a prefix would
+# misrepresent a complete-run result. Line size is raw record content in
+# bytes (LF or CRLF terminator excluded), enforced with bounded binary
+# ``readline(max_line_bytes + 2)`` probes so an oversized record is never
+# materialized in full and never drained past.
+# ---------------------------------------------------------------------------
+
+#: Default cap on physical JSONL records (blank and rejected included).
+MAX_ROWS_DEFAULT = 100_000
+
+#: Hard ceiling on the ``max_rows`` parameter itself.
+MAX_ROWS_CEILING = 1_000_000
+
+#: Default cap on one record's content bytes (terminator excluded).
+MAX_LINE_BYTES_DEFAULT = 65_536
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +634,8 @@ def compute_run_metrics(
     out_path: str | pathlib.Path,
     smoothing: float = 1e-6,
     boundary_delta: float = 1e-3,
+    max_rows: int = MAX_ROWS_DEFAULT,
+    max_line_bytes: int = MAX_LINE_BYTES_DEFAULT,
 ) -> dict[str, Any]:
     """Read a ``nextness_runs.jsonl`` log, emit a derived metrics JSONL.
 
@@ -637,18 +671,79 @@ def compute_run_metrics(
             f"boundary_delta must be finite and positive, got {boundary_delta!r}"
         )
 
-    # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
+    # Input-work bounds: validated typed BEFORE any input reading (the
+    # log is never opened for an invalid bound).
+    if (isinstance(max_rows, bool) or not isinstance(max_rows, int)
+            or not 0 < max_rows <= MAX_ROWS_CEILING):
+        raise MetricsInputError(
+            f"max_rows must be a non-boolean integer in "
+            f"(0, {MAX_ROWS_CEILING}], got {max_rows!r}"
+        )
+    if (isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
+            or max_line_bytes <= 0):
+        raise MetricsInputError(
+            f"max_line_bytes must be a positive non-boolean integer, "
+            f"got {max_line_bytes!r}"
+        )
+
+    # Load and sort. The UnicodeDecodeError wrap keeps the pre-typed
     # public contract for an undecodable log (genuine bad input, concise
     # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
-    # OSError — and re-raised as MetricsInputError(str(e)) so the stderr
-    # bytes match the pre-#381 lane while read-side OSErrors keep
-    # propagating.
+    # OSError — and re-raised as MetricsInputError(str(e)) with the
+    # original as __cause__, while read-side OSErrors keep propagating.
+    # Offset contract: the bounded reader decodes each physical record
+    # independently, so the numeric offset in the message is
+    # RECORD-relative. The historical leading-invalid-byte stderr is
+    # preserved byte-for-byte (record 1 offset 0 — pinned); offsets on
+    # later records are record-relative rather than the old text
+    # decoder's buffer-relative artifact, and no whole-buffer offset
+    # compatibility is claimed (regression-pinned).
     entries: list[dict[str, Any]] = []
     try:
-        with log_path.open("r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-                stripped = line.strip()
+        with log_path.open("rb") as f:
+            line_no = 0
+            while True:
+                # Pre-allocation bound: at most max_line_bytes + 2 bytes
+                # are ever probed per record (content + LF/CRLF), so an
+                # oversized record is never materialized in full.
+                chunk = f.readline(max_line_bytes + 2)
+                if not chunk:
+                    break  # EOF
+                line_no += 1
+                if line_no > max_rows:
+                    # Fail closed on excess input: metrics summarizes a
+                    # COMPLETE run, so more physical records than
+                    # max_rows is a located typed refusal — deliberately
+                    # NOT the predictor's truncating row budget, because
+                    # metrics silently computed from a prefix would
+                    # misrepresent a complete-run result.
+                    raise MetricsInputError(
+                        f"more than {max_rows} physical records "
+                        f"(max_rows) at {log_path}:{line_no}; refusing "
+                        f"to summarize a prefix"
+                    )
+                if chunk.endswith(b"\n"):
+                    # LF or CRLF terminator — excluded from the content
+                    # bound (a record of exactly max_line_bytes content
+                    # plus either terminator fits the probe).
+                    content = (chunk[:-2] if chunk.endswith(b"\r\n")
+                               else chunk[:-1])
+                else:
+                    # EOF-unterminated record, or a probe that hit the
+                    # read limit mid-record (already past the bound
+                    # either way).
+                    content = chunk
+                if len(content) > max_line_bytes:
+                    # Never drained past: the refusal is fatal-typed
+                    # (unlike the reader's counted terminal skip).
+                    raise MetricsInputError(
+                        f"line exceeds {max_line_bytes} bytes at "
+                        f"{log_path}:{line_no}"
+                    )
+                stripped = content.decode("utf-8").strip()
                 if not stripped:
+                    # Blank records are not observations, but they still
+                    # consume physical-row budget (bounded work).
                     continue
                 try:
                     entry = json.loads(
@@ -847,6 +942,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1e-3,
         help="Stabilization constant for boundary metrics (default: 1e-3)",
     )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=MAX_ROWS_DEFAULT,
+        help=(
+            f"Cap on physical JSONL records, blank and rejected included "
+            f"(default: {MAX_ROWS_DEFAULT}; ceiling {MAX_ROWS_CEILING}). "
+            f"An input with more records is a typed refusal, never a "
+            f"silent prefix summary."
+        ),
+    )
+    parser.add_argument(
+        "--max-line-bytes",
+        type=int,
+        default=MAX_LINE_BYTES_DEFAULT,
+        help=(
+            f"Cap on one record's content bytes, LF/CRLF terminator "
+            f"excluded (default: {MAX_LINE_BYTES_DEFAULT}). Enforced "
+            f"with bounded reads before any record is materialized "
+            f"in full."
+        ),
+    )
     return parser
 
 
@@ -901,6 +1018,8 @@ def main(argv: list[str] | None = None) -> int:
             log_path, out_path,
             smoothing=args.smoothing,
             boundary_delta=args.boundary_delta,
+            max_rows=args.max_rows,
+            max_line_bytes=args.max_line_bytes,
         )
     except MetricsOutputWriteError as e:
         # Operational write failure: the output could not be written
