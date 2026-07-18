@@ -1006,3 +1006,42 @@ def test_typed_identity_at_the_four_reclassified_sites(tmp_path) -> None:
     with pytest.raises(ValueError) as excinfo:
         evaluate_predictions([], [])
     assert type(excinfo.value) is ValueError  # plain, deliberately untyped
+
+
+# ---------------------------------------------------------------------------
+# Read-side propagation pin (commits the post-train audit's probe-only
+# claim): an argument-conditional read-side PermissionError on the
+# primary input propagates unchanged through public main() — exact
+# identity and message, no concise stderr conversion, inputs
+# byte-identical, no destination created. The patch matches ONLY the
+# resolved victim path in a read mode, so output-write lanes are never
+# accidentally exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    out = tmp_path / "never_written.out"
+    inputs = [log]
+    before = {p: p.read_bytes() for p in inputs}
+    victim = log.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "injected read denial")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError) as excinfo:
+        main([str(log), "--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is PermissionError
+    assert excinfo.value.errno == 13
+    assert excinfo.value.strerror == "injected read denial"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    assert not out.exists()
+    for p, b in before.items():
+        assert p.read_bytes() == b

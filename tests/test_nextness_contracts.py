@@ -25,8 +25,12 @@ The guard is discovered by the existing pytest configuration
 (pytest.ini testpaths = tests); no workflow or required-check change is
 needed or made. LIMITATION (honest scope): the guard runs when the test
 suite runs - it detects drift at CI time, not at artifact-read time,
-and it guards these four packages only, not the observer's own log
-format beyond what read_dominant_sequence consumes.
+and it guards these four packages' contracts with each other plus, via
+the live producer->consumer seam guard below, the EXPLICIT
+observer->metrics consumer fields (exact built-in containers,
+non-boolean non-negative integer counts, unit fields real/finite/[0,1])
+- not the observer's entire log format beyond those pinned fields and
+what read_dominant_sequence consumes.
 
 If a test here fails because a contract was CHANGED DELIBERATELY,
 regenerate the goldens with the documented procedure in
@@ -918,3 +922,121 @@ def test_hard_link_output_alias_refused_by_the_stack(tmp_path) -> None:
         lab.validate_output_path(alias, log, protocol)
     assert log.read_bytes() == before
 
+
+# ---------------------------------------------------------------------------
+# Producer -> consumer seam guard: observer rows must satisfy the strict
+# metrics input domain (§9.4), live, end to end. Two deterministic
+# synthetic snapshots run through the REAL observer process_snapshot,
+# the emitted log is proven row-by-row against the metrics consumer
+# contract, then fed unmodified into the merged strict
+# compute_run_metrics with strict-JSON and byte-determinism proofs.
+# The mutation matrix already committed in the metrics suite is NOT
+# duplicated here.
+# ---------------------------------------------------------------------------
+
+
+def _reject_constant(name: str):
+    raise AssertionError(f"non-standard JSON constant {name} in output")
+
+
+def _make_guard_snapshot(np, path, generation: int, stride: int):
+    from scripts.nextness_observer import MEMORY_CHANNEL_LAYOUT, STATE_COMPUTE
+
+    state = np.zeros((16, 16, 16), dtype=np.uint8)
+    state[::stride, ::stride, ::stride] = STATE_COMPUTE
+    memory = np.zeros((8, 16, 16, 16), dtype=np.float32)
+    memory[MEMORY_CHANNEL_LAYOUT["compute_age"]].fill(15.0)
+    np.savez(
+        str(path),
+        lattice=state, memory_grid=memory,
+        generation=np.array(generation), best_fitness=np.array(0.5),
+    )
+    return path
+
+
+def test_observer_rows_satisfy_strict_metrics_consumer_contract(tmp_path) -> None:
+    """Live producer->consumer guard (observer -> metrics seam)."""
+    np = pytest.importorskip("numpy")
+    from scripts.nextness_metrics import compute_run_metrics
+    from scripts.nextness_observer import ObserverConfig, process_snapshot
+
+    snap_a = _make_guard_snapshot(np, tmp_path / "v070_gen100.npz", 100, 4)
+    snap_b = _make_guard_snapshot(np, tmp_path / "v070_gen101.npz", 101, 2)
+    log_dir = tmp_path / "log"
+    cfg = ObserverConfig(log_directory=str(log_dir),
+                         uniform_grid_stride=4, budget_seconds=30.0)
+    process_snapshot(snap_a, cfg, medusa_is_live=False)
+    process_snapshot(snap_b, cfg, medusa_is_live=False)
+    log_file = log_dir / "nextness_runs.jsonl"
+    assert log_file.is_file()
+
+    # Row-by-row consumer-contract proof: exact built-in containers,
+    # non-boolean non-negative integer counts, unit fields real, finite
+    # and within [0, 1].
+    lines = [l for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2
+    for line in lines:
+        row = json.loads(line, parse_constant=_reject_constant)
+        assert type(row) is dict
+        counts = row["token_counts"]
+        assert type(counts) is dict
+        for key, count in counts.items():
+            assert type(key) is str
+            assert not isinstance(count, bool)
+            assert isinstance(count, int) and count >= 0
+            assert math.isfinite(float(count))
+        for field in ("void_compute_balance", "boundary_rate", "entropy_normalized"):
+            assert field in row, field
+            value = row[field]
+            assert not isinstance(value, bool)
+            assert isinstance(value, (int, float))
+            assert math.isfinite(value) and 0.0 <= value <= 1.0, (field, value)
+
+    # The unmodified observer log feeds the merged strict consumer.
+    out_a = log_dir / "derived_a.jsonl"
+    compute_run_metrics(log_file, out_a)
+    derived = [l for l in out_a.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(derived) == 2  # exactly one pair row + one aggregate row
+    for line in derived:
+        json.loads(line, parse_constant=_reject_constant)  # strict JSON
+
+    # Deterministic byte-identical output on a second sibling destination.
+    out_b = log_dir / "derived_b.jsonl"
+    compute_run_metrics(log_file, out_b)
+    assert out_a.read_bytes() == out_b.read_bytes()
+
+
+def test_metrics_historical_absent_unit_fields_compatibility(tmp_path) -> None:
+    """Compact historical-compatibility fixture: rows without unit
+    fields still succeed under the strict domain (the authorized
+    absent -> 0.0 policy), with strict-JSON output."""
+    from scripts.nextness_metrics import compute_run_metrics
+
+    log = tmp_path / "historical.jsonl"
+    log.write_text(
+        json.dumps({"generation": 1, "snapshot_file": "s1.npz",
+                    "token_counts": {"void_static": 3}}, sort_keys=True) + "\n" +
+        json.dumps({"generation": 2, "snapshot_file": "s2.npz",
+                    "token_counts": {"compute_static": 3}}, sort_keys=True) + "\n",
+        encoding="utf-8")
+    out = tmp_path / "derived.jsonl"
+    aggregate = compute_run_metrics(log, out)
+    assert aggregate["n_snapshots"] == 2
+    lines = [l for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2  # exactly one pair row + one aggregate row
+    pair, agg = (json.loads(l, parse_constant=_reject_constant) for l in lines)
+    # The authorized absent -> 0.0 policy, pinned exactly: zeroed unit
+    # fields give zero CCIs, identical (zero) rates give full pairwise
+    # persistence, zero variance gives zero CV and a fully-clamped
+    # aggregate persistence of 1.0.
+    assert pair["summary_type"] == "pair"
+    assert pair["cci_prev"] == 0.0
+    assert pair["cci_curr"] == 0.0
+    assert pair["boundary_persistence_pairwise"] == 1.0
+    assert agg["summary_type"] == "run_aggregate"
+    assert agg["mean_cci"] == 0.0
+    assert agg["std_cci"] == 0.0
+    assert agg["min_cci"] == 0.0
+    assert agg["max_cci"] == 0.0
+    assert agg["boundary_cv"] == 0.0
+    assert agg["boundary_persistence_aggregate_clamped"] == 1.0

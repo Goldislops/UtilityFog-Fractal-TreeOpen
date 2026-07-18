@@ -429,6 +429,99 @@ separately observable production/API change. It is **not a defect
 repaired by the typed-boundary pilot** and no `boundary_cv` production
 behavior changed in it.
 
+### 9.4 Strict input domain (2026-07-18, Kev-authorized policy)
+
+Recorded as metrics-specific policy (not harmonisation). Every rejection
+below is typed `MetricsInputError` → exit 2, one `error:` line, no
+traceback, input and any pre-existing destination byte-identical, no new
+destination.
+
+- **JSON constants**: `NaN`, `Infinity`, `-Infinity` are rejected at
+  decode (`parse_constant` hook) — in **any** field of any row.
+- **Unit fields** (`void_compute_balance`, `boundary_rate`,
+  `entropy_normalized`), when present: real JSON numbers (booleans
+  excluded), finite, within `[0, 1]`. Explicit `null`, numeric strings
+  and all other non-numeric values are rejected. **An absent unit field
+  is `0.0` — an explicitly chosen compatibility policy established
+  HERE**; PR #141 never documented default-on-failure, and `_safe_float`
+  is retained only as the realization of this absent-field policy behind
+  the validation gate.
+- **`token_counts`**, when the key is present: a JSON object of
+  non-boolean, non-negative integer counts (the shape the canonical
+  distributions consume). Rows must be JSON objects.
+- **Numeric parameters**: `smoothing` finite and non-negative;
+  `boundary_delta` finite and strictly positive (validated before any
+  read work).
+- **Public boundary helpers hardened consistently** (`pairwise`,
+  `boundary_cv`, `aggregate_clamped`): out-of-type and out-of-domain
+  rates and invalid deltas raise `MetricsInputError`, validated
+  **before** single-element early returns — closing the direct-API
+  `TypeError`/`ZeroDivisionError`/negative-CV/sign-flip escapes. The
+  aggregate now carries an explicit two-sided clamp (a no-op for valid
+  input; results for the valid domain are unchanged).
+- **Pre-write invariant + strict serialization**: before parent-mkdir/
+  open, every float in every output row — computed AND pass-through,
+  **recursively through nested built-in containers** (e.g. a
+  numeric-overflow `generation` such as `1e400` → `inf`, or an `inf`
+  nested inside a pass-through list) — must be finite, with the
+  rejection naming the offending output key/path. The traversal is
+  hook-safe (exact built-in `dict`/`list`/`tuple` and exact `float`
+  only). The writer serializes with `allow_nan=False` as a backstop
+  (unreachable given the invariant; a failure there is an internal
+  contract failure and propagates loudly). This adds **no partial-output
+  claim** and leaves the §9.2 streamed, non-atomic write contract for
+  genuine write failures unchanged.
+- **Finite-computability of counts**: a token count too large to
+  participate in finite float arithmetic is a typed rejection at
+  ingestion (no arbitrary semantic cap — the constraint is numeric
+  computability); the smoothed raw vector and its total are also
+  guarded against non-finite arithmetic.
+- **Zero smoothing, defined semantics**: `smoothing >= 0` remains the
+  authorized policy; KL with positive support in P and zero support in
+  Q under zero smoothing is mathematically undefined and raises a
+  typed, concise `MetricsInputError` stating that positive smoothing is
+  required (direct and public pins).
+- **Located constant rejections**: the NaN/Infinity refusal is wrapped
+  at the decode call site with the exact log path and line number
+  (`invalid JSON value at <path>:<line>: …`, cause preserved) — a valid
+  JSON extension token refused by policy, never mislabeled an ordinary
+  `JSONDecodeError`.
+- **Finite-computability totality (2026-07-18 follow-up)**: the late
+  Codex finding on the merged strict domain — a raw oversized INTEGER
+  (magnitude `10**400`) on the unit-field, helper (`_require_rate`/
+  `_require_delta`), smoothing or boundary-delta surfaces reached
+  `float()`/`math.isfinite()` and escaped as `OverflowError`. Closed by
+  one narrow conversion path (`_finite_float`): types are rejected
+  exactly as before; accepted ints/floats convert catching only the
+  expected conversion `OverflowError`; `math.isfinite` applies only
+  after safe conversion; the smoothed raw vector/total guard uses the
+  same path so `smoothed_distribution` cannot leak `OverflowError` from
+  huge counts with integer-zero smoothing. **This is finite-
+  computability totality, not a semantic value cap** — no magnitude
+  limit is invented; messages, strict JSON, absent-field 0.0, output
+  bytes, exit codes, failure classification and write/preservation
+  contracts are unchanged.
+- **Decoder conversion-limit boundary (distinct from materialized huge
+  integers)**: `_finite_float` repairs integers that have already
+  MATERIALIZED as Python values; a valid JSON integer literal beyond
+  Python's decimal-digit conversion limit (>= ~4300 digits) makes the
+  DECODER itself raise `ValueError` before any value exists. That is
+  translated at the narrow `json.loads` boundary only — located
+  `malformed JSONL at <path>:<line>` with the original as `__cause__`.
+  `main()` and the computation catches are NOT broadened; the
+  post-validation internal plain-`ValueError` sentinel still propagates
+  (pinned). No arbitrary application-level magnitude cap exists on
+  either lane.
+- **Message origins**: the negative-rate / smoothing / delta rejection
+  messages now originate at the ingestion/parameter seam with
+  strict-domain wording; the old helper-origin messages are subsumed
+  (codes and one-line shape unchanged).
+- **Byte compatibility**: accepted historical fixtures and ordinary
+  valid logs produce byte-identical output (golden + determinism pins).
+- ~~Recorded residual: zero-smoothing `ZeroDivisionError`~~ — **closed
+  by this policy's hardening round**: the formerly escaping crash is now
+  the typed zero-smoothing rejection above.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.
