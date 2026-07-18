@@ -720,3 +720,38 @@ def test_cli_insufficient_history_still_exit_3(tmp_path, capsys) -> None:
     assert len(lines) == 1 and lines[0].startswith("error:")
     assert "Traceback" not in err
     assert log.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Read-side propagation pin (commits the post-train audit's probe-only
+# claim): an argument-conditional read-side PermissionError on the
+# primary input propagates unchanged through public main() — exact
+# identity and message, no concise stderr conversion, inputs
+# byte-identical, no destination created. The patch matches ONLY the
+# resolved victim path in a read mode, so output-write lanes are never
+# accidentally exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    inputs = [log]
+    before = {p: p.read_bytes() for p in inputs}
+    victim = log.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "injected read denial")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError) as excinfo:
+        main([str(log)])
+    monkeypatch.undo()
+    assert "injected read denial" in str(excinfo.value)
+    assert type(excinfo.value) is PermissionError
+    err = capsys.readouterr().err
+    assert err == ""  # no misleading concise conversion
+    for p, b in before.items():
+        assert p.read_bytes() == b
