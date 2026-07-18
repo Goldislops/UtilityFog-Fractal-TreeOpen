@@ -1044,10 +1044,12 @@ def test_cli_read_side_oserror_propagates(chain, tmp_path, monkeypatch, capsys) 
     with pytest.raises(PermissionError) as excinfo:
         main(_chain_args(chain) + ["--output", str(out)])
     monkeypatch.undo()
-    assert "injected read denial" in str(excinfo.value)
     assert type(excinfo.value) is PermissionError
-    err = capsys.readouterr().err
-    assert err == ""  # no misleading concise conversion
+    assert excinfo.value.errno == 13
+    assert excinfo.value.strerror == "injected read denial"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
     assert not out.exists()
     for p, b in before.items():
         assert p.read_bytes() == b
