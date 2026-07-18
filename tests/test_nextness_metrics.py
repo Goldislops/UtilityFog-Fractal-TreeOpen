@@ -785,7 +785,9 @@ def test_read_side_unexpected_oserror_is_not_reclassified(tmp_path, monkeypatch)
     real_open = pathlib.Path.open
 
     def patched(self, mode="r", *args, **kwargs):
-        if "r" in mode and "b" not in mode and self.resolve() == victim:
+        # Match the log's READ open in any mode (the bounded reader opens
+        # binary; write lanes are excluded so exit-4 paths stay real).
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
             raise PermissionError(13, "read denied")
         return real_open(self, mode, *args, **kwargs)
 
@@ -1908,3 +1910,372 @@ def test_post_decode_recursionerror_propagates(
     assert captured.err == ""  # no misleading concise conversion
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Input-work bounds (Jack policy decision 2026-07-18, Kev-authorized):
+# explicit per-invocation JSONL ingestion bounds. Metrics summarizes a
+# COMPLETE run, so excess physical rows are a located typed refusal —
+# deliberately NOT the predictor's truncating row budget: silently
+# producing metrics from a prefix would misrepresent a complete-run
+# result. Line size is raw content bytes with the LF or CRLF terminator
+# excluded, enforced with bounded BINARY readline probes so an oversized
+# record is never materialized in full and never drained past. Blank
+# records consume row budget. Refusals are located MetricsInputError on
+# the existing concise exit-2 lane; the exit-code map is unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _bounds_row(gen: int, content_bytes: int) -> str:
+    """A valid row padded to EXACTLY content_bytes bytes (ASCII-only)."""
+    base = json.dumps({"generation": gen, "token_counts": {"void_static": 3},
+                       "pad": ""})
+    deficit = content_bytes - len(base)
+    assert deficit >= 0, "content_bytes too small for the base row"
+    padded = json.dumps({"generation": gen, "token_counts": {"void_static": 3},
+                         "pad": "x" * deficit})
+    assert len(padded.encode("utf-8")) == content_bytes
+    return padded
+
+
+def _run_bounds(tmp_path, capsys, body: bytes, extra_argv=(),
+                out_name="b_out.jsonl", preexisting: bytes | None = None):
+    log = tmp_path / "bounds.jsonl"
+    log.write_bytes(body)
+    before = log.read_bytes()
+    out = tmp_path / out_name
+    if preexisting is not None:
+        out.write_bytes(preexisting)
+    rc = main(["--log", str(log), "--out", str(out), *extra_argv])
+    captured = capsys.readouterr()
+    return rc, captured, log.read_bytes() == before, out
+
+
+def _assert_concise_refusal(rc, captured, unchanged, needle: str) -> None:
+    assert rc == 2
+    assert captured.out == ""
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert needle in lines[0]
+    assert "Traceback" not in captured.err
+    assert unchanged
+
+
+def test_cli_line_one_below_bound_accepted(tmp_path, capsys) -> None:
+    body = (_bounds_row(1, 199) + "\n" + _bounds_row(2, 120) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "200"])
+    assert rc == 0
+    assert captured.err == ""
+    assert unchanged and out.exists()
+
+
+def test_cli_line_exactly_at_bound_accepted_lf_and_crlf(tmp_path, capsys) -> None:
+    """The bound is on record CONTENT — LF or CRLF terminator excluded."""
+    for terminator in (b"\n", b"\r\n"):
+        body = (_bounds_row(1, 200).encode() + terminator
+                + _bounds_row(2, 120).encode() + terminator)
+        rc, captured, unchanged, out = _run_bounds(
+            tmp_path, capsys, body, ["--max-line-bytes", "200"],
+            out_name=f"b_out_{len(terminator)}.jsonl")
+        assert rc == 0, terminator
+        assert captured.err == "", terminator
+        assert unchanged and out.exists(), terminator
+
+
+def test_cli_line_one_above_bound_refused_located_typed(tmp_path, capsys) -> None:
+    body = (_bounds_row(1, 201) + "\n" + _bounds_row(2, 120) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "200"])
+    _assert_concise_refusal(rc, captured, unchanged, "exceeds 200 bytes")
+    assert f"{tmp_path / 'bounds.jsonl'}:1" in captured.err
+    assert not out.exists()
+
+
+def test_cli_line_bound_refusal_preserves_preexisting_destination(
+    tmp_path, capsys
+) -> None:
+    stale = b'{"pre-existing": true}\n'
+    body = (_bounds_row(1, 201) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "200"], preexisting=stale)
+    _assert_concise_refusal(rc, captured, unchanged, "exceeds 200 bytes")
+    assert out.read_bytes() == stale
+
+
+def test_cli_default_line_bound_refuses_131072_byte_record(tmp_path, capsys) -> None:
+    """The audit's MET-LONGLINE existence probe, inverted by the repair:
+    a 131,072-B record (2x the family line ceiling) is a located typed
+    refusal under the DEFAULT bound — no flags supplied."""
+    body = (_bounds_row(1, 131072) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(tmp_path, capsys, body)
+    _assert_concise_refusal(rc, captured, unchanged, "exceeds 65536 bytes")
+    assert f"{tmp_path / 'bounds.jsonl'}:1" in captured.err
+    assert not out.exists()
+
+
+def test_line_bound_counts_raw_bytes_not_characters(tmp_path, capsys) -> None:
+    """Multibyte UTF-8: the limit counts encoded bytes, not characters —
+    a pad of 2-byte characters crosses a 300-BYTE bound while remaining
+    far under 300 characters."""
+    scaffold_pre = '{"generation": 1, "token_counts": {"void_static": 3}, "pad": "'
+    scaffold_post = '"}'
+    ascii_len = len((scaffold_pre + scaffold_post).encode("utf-8"))
+
+    def build(target_bytes: int) -> bytes:
+        rem = target_bytes - ascii_len
+        x = rem % 2
+        row = scaffold_pre + "x" * x + "é" * ((rem - x) // 2) + scaffold_post
+        encoded = row.encode("utf-8")
+        assert len(encoded) == target_bytes
+        assert len(row) < target_bytes  # char count strictly below the bound
+        return encoded
+
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, build(301) + b"\n", ["--max-line-bytes", "300"])
+    _assert_concise_refusal(rc, captured, unchanged, "exceeds 300 bytes")
+    assert not out.exists()
+    body = build(300) + b"\n" + (_bounds_row(2, 120) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "300"],
+        out_name="b_mb_ok.jsonl")
+    assert rc == 0
+    assert captured.err == ""
+    assert unchanged and out.exists()
+
+
+def test_cli_unterminated_final_record_within_bound_accepted(
+    tmp_path, capsys
+) -> None:
+    body = (_bounds_row(1, 120) + "\n").encode() + _bounds_row(2, 150).encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-line-bytes", "200"])
+    assert rc == 0
+    assert captured.err == ""
+    assert out.read_bytes().count(b'"summary_type": "pair"') == 1  # both rows read
+    assert unchanged
+
+
+def test_cli_row_bound_below_at_above(tmp_path, capsys) -> None:
+    body = b"".join((_bounds_row(g, 120) + "\n").encode() for g in (1, 2, 3))
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "4"], out_name="o4.jsonl")
+    assert rc == 0 and captured.err == ""
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "3"], out_name="o3.jsonl")
+    assert rc == 0 and captured.err == ""
+    # budget below the file's row count: typed refusal, NOT truncation
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "2"], out_name="o2.jsonl")
+    _assert_concise_refusal(rc, captured, unchanged, "more than 2 physical records")
+    assert f"{tmp_path / 'bounds.jsonl'}:3" in captured.err
+    assert not out.exists()
+
+
+def test_cli_row_bound_refusal_preserves_preexisting_destination(
+    tmp_path, capsys
+) -> None:
+    stale = b'{"pre-existing": true}\n'
+    body = b"".join((_bounds_row(g, 120) + "\n").encode() for g in (1, 2, 3))
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "2"], preexisting=stale)
+    _assert_concise_refusal(rc, captured, unchanged, "more than 2 physical records")
+    assert out.read_bytes() == stale
+
+
+def test_blank_records_count_toward_row_bound(tmp_path, capsys) -> None:
+    # 3 physical records: row, BLANK, row — blank consumes row budget
+    body = (_bounds_row(1, 120) + "\n\n" + _bounds_row(3, 120) + "\n").encode()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "3"], out_name="ob3.jsonl")
+    assert rc == 0 and captured.err == ""
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "2"], out_name="ob2.jsonl")
+    _assert_concise_refusal(rc, captured, unchanged, "more than 2 physical records")
+
+
+def test_over_bound_row_is_never_decoded(tmp_path, monkeypatch) -> None:
+    """Both refusals precede json.loads (and so precede _validate_entry)
+    for the offending record — the bound is not a post-decode check."""
+    import scripts.nextness_metrics as metrics_module
+    from scripts.nextness_metrics import MetricsInputError
+
+    real_loads = metrics_module.json.loads
+
+    def patched(s, *args, **kwargs):
+        assert "OVER-LIMIT-MARKER" not in s, "over-limit row was decoded"
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(metrics_module.json, "loads", patched)
+
+    log = tmp_path / "never.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n"
+                     + '{"generation": 2, "snapshot_file": "OVER-LIMIT-MARKER"}\n'
+                     ).encode())
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, tmp_path / "n1.jsonl", max_rows=1)
+    assert "more than 1 physical records" in str(excinfo.value)
+
+    marker_row = ('{"generation": 1, "snapshot_file": "OVER-LIMIT-MARKER", '
+                  '"pad": "' + "x" * 300 + '"}')
+    log2 = tmp_path / "never2.jsonl"
+    log2.write_bytes((marker_row + "\n").encode())
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log2, tmp_path / "n2.jsonl", max_line_bytes=200)
+    assert "exceeds 200 bytes" in str(excinfo.value)
+    monkeypatch.undo()
+
+
+class _BoundedReadSpy:
+    """Wraps a binary file object, recording every readline size."""
+
+    def __init__(self, inner, sizes):
+        self._inner = inner
+        self._sizes = sizes
+
+    def readline(self, size=-1):
+        self._sizes.append(size)
+        return self._inner.readline(size)
+
+    def __enter__(self):
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._inner.__exit__(*args)
+
+    def __iter__(self):
+        return iter(self._inner)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _spy_metrics_read(tmp_path, monkeypatch, **kwargs):
+    log = tmp_path / "spy.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n" + _bounds_row(2, 150) + "\n"
+                     ).encode())
+    victim = log.resolve()
+    sizes: list[int] = []
+    modes: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **open_kwargs):
+        inner = real_open(self, mode, *args, **open_kwargs)
+        try:
+            is_victim = self.resolve() == victim
+        except OSError:
+            is_victim = False
+        if is_victim and "r" in mode and "w" not in mode:
+            modes.append(mode)
+            return _BoundedReadSpy(inner, sizes)
+        return inner
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    compute_run_metrics(log, tmp_path / "spy_out.jsonl", **kwargs)
+    monkeypatch.undo()
+    return modes, sizes
+
+
+def test_reader_open_mode_is_binary_bounded(tmp_path, monkeypatch) -> None:
+    """Pre-allocation pin at DEFAULTS: the log is opened in binary mode
+    and consumed via bounded readline probes of max_line_bytes + 2."""
+    modes, sizes = _spy_metrics_read(tmp_path, monkeypatch)
+    assert modes == ["rb"]
+    assert sizes and all(s == 65536 + 2 for s in sizes)
+
+
+def test_reader_uses_bounded_binary_readline(tmp_path, monkeypatch) -> None:
+    """Pre-allocation pin at a configured bound: every read probe is
+    exactly max_line_bytes + 2 bytes — an oversized record can never be
+    materialized in full."""
+    modes, sizes = _spy_metrics_read(tmp_path, monkeypatch, max_line_bytes=200)
+    assert modes == ["rb"]
+    assert sizes and all(s == 202 for s in sizes)
+
+
+def test_bounds_parameters_validated_before_reading(tmp_path, monkeypatch) -> None:
+    """Invalid max_rows / max_line_bytes are typed rejections raised
+    BEFORE the log is ever opened."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "params.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    out = tmp_path / "p_out.jsonl"
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for bad_rows in (0, -1, True, False, 1_000_001, 2.5, "10", None):
+        with pytest.raises(MetricsInputError):
+            compute_run_metrics(log, out, max_rows=bad_rows)
+    for bad_line in (0, -1, True, False, 3.5, "64", None):
+        with pytest.raises(MetricsInputError):
+            compute_run_metrics(log, out, max_line_bytes=bad_line)
+    monkeypatch.undo()
+    assert opened == []  # the log was never opened
+    assert not out.exists()
+    # ceiling boundary: exactly at the ceiling is accepted
+    compute_run_metrics(log, out, max_rows=1_000_000)
+    assert out.exists()
+
+
+def test_cli_bounds_parameter_refusals(tmp_path, capsys) -> None:
+    body = (_bounds_row(1, 120) + "\n").encode()
+    for argv_extra, needle in (
+        (["--max-rows", "0"], "max_rows"),
+        (["--max-rows", "1000001"], "max_rows"),
+        (["--max-line-bytes", "0"], "max_line_bytes"),
+    ):
+        rc, captured, unchanged, out = _run_bounds(
+            tmp_path, capsys, body, argv_extra, out_name="pc.jsonl")
+        _assert_concise_refusal(rc, captured, unchanged, needle)
+        assert not out.exists()
+    rc, captured, unchanged, out = _run_bounds(
+        tmp_path, capsys, body, ["--max-rows", "1000000"], out_name="pc_ok.jsonl")
+    assert rc == 0
+
+
+_PRE_REPAIR_IDENTITY_LOG_SHA256 = (
+    "86a22180ae0d071611d925216d1682aa2e5cf0eaf335ae45f0a4a652176c98ae")
+_PRE_REPAIR_OUTPUT_SHA256 = (
+    "2bf562cb36d7f3671132df7dbf9a58a43eff3ff3b7b8761937e95bd4afa4fbc3")
+
+
+def test_in_bound_output_byte_identical_to_pre_repair(tmp_path, capsys) -> None:
+    """In-bound accepted output is byte-identical to unrepaired main
+    `4fa0f458` — receipt captured against that tree before the repair
+    (1,066-byte derived output)."""
+    import hashlib
+
+    rows = [
+        {"generation": 1, "snapshot_file": "s1.npz",
+         "token_counts": {"void_static": 3, "compute_static": 1},
+         "void_compute_balance": 0.5, "boundary_rate": 0.25,
+         "entropy_normalized": 0.4},
+        {"generation": 2, "snapshot_file": "s2.npz",
+         "token_counts": {"void_static": 2, "compute_static": 2},
+         "void_compute_balance": 0.6, "boundary_rate": 0.3,
+         "entropy_normalized": 0.5},
+        {"generation": 3, "snapshot_file": "s3.npz",
+         "token_counts": {"compute_static": 4},
+         "void_compute_balance": 0.4, "boundary_rate": 0.2,
+         "entropy_normalized": 0.45},
+    ]
+    log = tmp_path / "identity.jsonl"
+    log.write_bytes(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
+    assert (hashlib.sha256(log.read_bytes()).hexdigest()
+            == _PRE_REPAIR_IDENTITY_LOG_SHA256)
+    out = tmp_path / "identity_out.jsonl"
+    assert main(["--log", str(log), "--out", str(out)]) == 0
+    assert (hashlib.sha256(out.read_bytes()).hexdigest()
+            == _PRE_REPAIR_OUTPUT_SHA256)
