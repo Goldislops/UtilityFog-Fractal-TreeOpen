@@ -417,6 +417,94 @@ def test_validator_still_accepts_all_valid_artifacts():
         assert schema.validate_records(list(artifact.records())) == []
 
 
+# ---- LeanCTX malformed-artifact hardening (Jack audit disposition) --------------
+# A JSON-decodable but non-conforming FindingsArtifact reaching leanctx_summary
+# must fail as a deterministic fixed-message ValueError before any header/record
+# indexing — never as a KeyError. The empty-artifact and invalid-run-label guards
+# keep their existing messages and precedence; valid output stays byte-identical.
+
+_LEANCTX_CONFORMANCE_MSG = "artifact is not a conforming findings artifact"
+
+
+def _artifact_from_records(records):
+    return FindingsArtifact(b"".join(schema.canonical_line(r) for r in records))
+
+
+def test_leanctx_malformed_header_raises_fixed_valueerror_not_keyerror():
+    # The exact minimal reproduction from the acceptance audit: JSON-decodable,
+    # header present but missing "counts". Previously raised KeyError('counts').
+    # pytest.raises(ValueError) also proves it is NOT a KeyError (KeyError is not
+    # a ValueError subclass, so it would propagate and fail the test).
+    with pytest.raises(ValueError, match=_LEANCTX_CONFORMANCE_MSG):
+        leanctx_summary(FindingsArtifact(b'{"kind":"header"}\n'), "run-1")
+
+
+def test_leanctx_rejects_representative_malformed_shapes():
+    import copy
+    good = list(detect_structures(fixtures.fx_single()).records())
+    cases = [FindingsArtifact(b'{"kind":"header"}\n')]  # minimal, raw
+    # first record is not a header
+    recs = copy.deepcopy(good); recs[0]["kind"] = "finding"
+    cases.append(_artifact_from_records(recs))
+    # header carries a wrong schema id
+    recs = copy.deepcopy(good); recs[0]["schema"] = "not-the-schema"
+    cases.append(_artifact_from_records(recs))
+    # a finding record is missing a required container
+    recs = copy.deepcopy(good); del recs[1]["region"]
+    cases.append(_artifact_from_records(recs))
+    # header counts disagree with the actual records
+    recs = copy.deepcopy(good); recs[0]["counts"]["findings"] = 999
+    cases.append(_artifact_from_records(recs))
+    for artifact in cases:
+        with pytest.raises(ValueError, match=_LEANCTX_CONFORMANCE_MSG):
+            leanctx_summary(artifact, "run-1")
+
+
+def test_leanctx_empty_guard_precedes_conformance_check():
+    # Requirement 3 + precedence: empty artifact keeps its exact prior message,
+    # raised before the new conformance gate.
+    with pytest.raises(ValueError, match="artifact contains no records"):
+        leanctx_summary(FindingsArtifact(b""), "run-1")
+
+
+def test_leanctx_run_label_guard_precedes_conformance_check():
+    # Requirement 4 + precedence: an invalid run label wins over a malformed
+    # artifact — the run-label guard still runs first with its own message.
+    with pytest.raises(ValueError, match="run_label must satisfy the safe identifier grammar"):
+        leanctx_summary(FindingsArtifact(b'{"kind":"header"}\n'), "Bad Label!")
+
+
+def test_leanctx_accepts_all_valid_artifact_kinds():
+    # Requirement 5: findings / refusal / component-cap-truncated /
+    # budget-preflight-truncated artifacts all remain accepted.
+    cases = (
+        detect_structures(fixtures.fx_single()),
+        detect_structures(fixtures.fx_malformed_provenance()),
+        detect_structures(fixtures.fx_checkerboard(),
+                          DetectorConfig(min_component_size=1, component_cap=64)),
+        detect_structures(fixtures.fx_single(),
+                          DetectorConfig(op_budget_multiplier=1)),
+    )
+    for artifact in cases:
+        payload = leanctx_summary(artifact, "run-1")
+        assert payload and b"leanctx-header" in payload
+
+
+def test_leanctx_valid_output_byte_identical_after_hardening():
+    # Requirement 6: repeated valid summaries stay byte-identical.
+    artifact = detect_structures(fixtures.fx_stable())
+    assert leanctx_summary(artifact, "run-1") == leanctx_summary(artifact, "run-1")
+
+
+def test_leanctx_does_not_mutate_artifact_bytes():
+    # Requirement 7: the canonical artifact bytes are never mutated (the gate
+    # validates freshly decoded record copies, not the authoritative jsonl).
+    artifact = detect_structures(fixtures.fx_single())
+    before = bytes(artifact.jsonl)
+    leanctx_summary(artifact, "run-1")
+    assert artifact.jsonl == before
+
+
 # ---- maximum supported case (measured observations, not promises) ---------------
 
 def test_max_lattice_64_cubed_measured():

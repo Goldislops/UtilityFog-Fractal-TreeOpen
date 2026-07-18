@@ -515,6 +515,17 @@ def leanctx_summary(artifact: FindingsArtifact, run_label: str) -> bytes:
     records = artifact.records()
     if not records:
         raise ValueError("artifact contains no records")
+    # Conformance gate before any header/record indexing: a JSON-decodable but
+    # non-conforming artifact (e.g. a hand-built FindingsArtifact whose header
+    # lacks "counts") must fail as a deterministic ValueError here, never as a
+    # KeyError deeper in this function. schema.validate_records is already total
+    # (returns a list, never raises) on any JSON-decodable input. The exception
+    # carries a fixed message only — the validator's error detail is not exposed
+    # through this public surface. Valid detector-produced artifacts validate
+    # clean (detect_structures self-checks the same records in _finalize), so
+    # their LeanCTX output is byte-identical.
+    if schema.validate_records(records):
+        raise ValueError("artifact is not a conforming findings artifact")
     header = records[0]
     rows = [{"kind": "leanctx-row", "finding_id": r["finding_id"],
              "label": r["label"], "cell_count": r["cell_count"],
