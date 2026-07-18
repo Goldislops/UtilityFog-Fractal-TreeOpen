@@ -1015,3 +1015,41 @@ def test_cli_close_time_failure_pinned(chain, tmp_path, capsys, monkeypatch) -> 
     assert out.read_bytes() == canonical                       # complete bytes present
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Read-side propagation pin (commits the post-train audit's probe-only
+# claim): an argument-conditional read-side PermissionError on the
+# primary input propagates unchanged through public main() — exact
+# identity and message, no concise stderr conversion, inputs
+# byte-identical, no destination created. The patch matches ONLY the
+# resolved victim path in a read mode, so output-write lanes are never
+# accidentally exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_side_oserror_propagates(chain, tmp_path, monkeypatch, capsys) -> None:
+    out = tmp_path / "never_written.out"
+    inputs = list(chain.values())
+    before = {p: p.read_bytes() for p in inputs}
+    victim = chain["report"].resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "injected read denial")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError) as excinfo:
+        main(_chain_args(chain) + ["--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is PermissionError
+    assert excinfo.value.errno == 13
+    assert excinfo.value.strerror == "injected read denial"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    assert not out.exists()
+    for p, b in before.items():
+        assert p.read_bytes() == b

@@ -1274,3 +1274,43 @@ def test_typed_reader_bound_translation_boundary(tmp_path, monkeypatch) -> None:
     with pytest.raises(ValueError, match="sentinel plain ValueError from reader seam") as esc:
         build_lab_report(log, protocol)
     assert type(esc.value) is ValueError  # not wrapped into LabInputError
+
+
+# ---------------------------------------------------------------------------
+# Read-side propagation pin (commits the post-train audit's probe-only
+# claim): an argument-conditional read-side PermissionError on the
+# primary input propagates unchanged through public main() — exact
+# identity and message, no concise stderr conversion, inputs
+# byte-identical, no destination created. The patch matches ONLY the
+# resolved victim path in a read mode, so output-write lanes are never
+# accidentally exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out = tmp_path / "never_written.out"
+    inputs = [log, protocol]
+    before = {p: p.read_bytes() for p in inputs}
+    victim = log.resolve()
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "r" in mode and "w" not in mode and self.resolve() == victim:
+            raise PermissionError(13, "injected read denial")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    with pytest.raises(PermissionError) as excinfo:
+        main([str(log), str(protocol), "--output", str(out)])
+    monkeypatch.undo()
+    assert type(excinfo.value) is PermissionError
+    assert excinfo.value.errno == 13
+    assert excinfo.value.strerror == "injected read denial"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
+    assert not out.exists()
+    for p, b in before.items():
+        assert p.read_bytes() == b
