@@ -512,6 +512,12 @@ destination.
   post-validation internal plain-`ValueError` sentinel still propagates
   (pinned). No arbitrary application-level magnitude cap exists on
   either lane.
+- **Parser depth boundary**: a JSONL row nested beyond the parser's
+  recursion limit (inside the byte ceiling) is a located typed
+  rejection at the same narrow decode seam (`malformed JSONL at
+  <path>:<line>: nesting exceeds the parser's depth limit`) — metrics
+  is fatal-typed, not row-contained. `RecursionError` outside the
+  decode seam is not swallowed anywhere and still propagates.
 - **Message origins**: the negative-rate / smoothing / delta rejection
   messages now originate at the ingestion/parameter seam with
   strict-domain wording; the old helper-origin messages are subsumed

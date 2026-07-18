@@ -757,3 +757,30 @@ def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None
     assert captured.err == ""  # no misleading concise conversion
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Parser deep-nesting (RecursionError) decoder totality: a row nested
+# deeper than the parser's recursion limit — while inside the byte
+# ceilings — must follow the reader's EXISTING malformed-row containment
+# policy (counted, run continues), never crash with a traceback.
+# ---------------------------------------------------------------------------
+
+_DEEP_NEST_ROW = ('{"generation": 1, "token_counts": {"void_static": '
+                  + "[" * 20000 + "]" * 20000 + '}}')
+
+
+def test_cli_deeply_nested_row_is_contained_malformed(tmp_path, capsys) -> None:
+    """Inherited reader containment: the nested row is counted malformed
+    and the receipt still emits — exit 0, no traceback."""
+    log = tmp_path / "nest.jsonl"
+    good = "\n".join(
+        json.dumps({"generation": i + 2, "token_counts": {t: 3}})
+        for i, t in enumerate([A, B] * 30))
+    log.write_text(_DEEP_NEST_ROW + "\n" + good + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    assert main([str(log)]) == 0
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert captured.err == ""
+    assert log.read_bytes() == before

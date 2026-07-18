@@ -1774,3 +1774,35 @@ def test_decoder_valueerror_seam_translated(tmp_path, monkeypatch) -> None:
     assert f"{log}:1" in str(excinfo.value)
     assert log.read_bytes() == before
     assert not out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Parser deep-nesting (RecursionError) decoder totality: a row nested
+# deeper than the parser's recursion limit — while inside the byte
+# ceilings — must follow the reader's EXISTING malformed-row containment
+# policy (counted, run continues), never crash with a traceback.
+# ---------------------------------------------------------------------------
+
+_DEEP_NEST_ROW = ('{"generation": 1, "token_counts": {"void_static": '
+                  + "[" * 20000 + "]" * 20000 + '}}')
+
+
+def test_cli_deeply_nested_row_rejected_located_typed(tmp_path, capsys) -> None:
+    """Metrics is fatal-typed (not row-contained): parser RecursionError
+    at the decode boundary becomes a located typed exit 2 — one line, no
+    traceback, input unchanged, absent destination stays absent."""
+    log = tmp_path / "nest.jsonl"
+    log.write_text(_DEEP_NEST_ROW + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "nest_out.jsonl"
+    rc = main(["--log", str(log), "--out", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert f"{log}:1" in lines[0]
+    assert "depth" in lines[0] or "nesting" in lines[0]
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == before
+    assert not out.exists()
