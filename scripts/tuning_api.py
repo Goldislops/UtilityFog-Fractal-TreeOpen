@@ -16,9 +16,20 @@ For now, the pending file is an authoritative promise waiting to be picked up.
 
 Safety contract enforced here:
   - LOCKED params always rejected at `propose` (via params_schema.validate_proposal).
+  - The autonomous ``policy:auto`` commit approver is rejected at the commit
+    boundary (``AUTO_COMMIT_APPROVER`` / ``auto_commit_disabled``). This closes
+    the legacy orchestrator's only write identity: it commits with
+    ``approver="policy:auto"`` (see ``scripts/orchestrator.py`` ToolRouter),
+    so with this path shut, no LLM-facing tool call can mutate a parameter —
+    the protection lives at the server boundary, not in a prompt or tool list.
+    A deliberate human commit (``approver="human:<name>"``) is unaffected.
   - HUMAN_APPROVAL params require `approver` starting with `human:` at commit.
   - Per-parameter rate limit (MIN_GEN_BETWEEN_COMMITS_PER_PARAM generations).
   - Invalid proposals cannot be committed even if approver is otherwise sufficient.
+
+Scope note: this module does NOT authenticate callers or make the tuning API
+generally secure. It closes exactly the proven ``policy:auto`` auto-commit path;
+propose/dry-run, reads, and human-approved commits are intentionally unchanged.
 """
 
 from __future__ import annotations
@@ -46,6 +57,15 @@ MIN_GEN_BETWEEN_COMMITS_PER_PARAM = 1000
 Prevents an LLM in a tight loop from oscillating a tunable."""
 
 VALID_MODES = ("dry-run", "commit-pending")
+
+AUTO_COMMIT_APPROVER = "policy:auto"
+"""The autonomous approver identity the legacy orchestrator commits with.
+
+Stored lowercase; the commit boundary compares against ``approver.strip()
+.casefold()`` so whitespace- and case-variant spellings of the same autonomous
+identity are all rejected (``auto_commit_disabled``). Re-enabling autonomous
+commits must be a reviewed code change here — there is deliberately no env flag,
+query param, header, or alternate route that turns it back on."""
 
 
 # -- helpers ----------------------------------------------------------------
@@ -203,6 +223,18 @@ class TuningState:
 
     def _commit_locked(self, proposal_id: str, approver: str) -> dict[str, Any]:
         with self._lock:
+            # Type guard: `approver` must be a string before any string
+            # operation (the quarantine comparison and the human-approval
+            # startswith check below both assume str). A bool/number/null/
+            # list/dict is a malformed request → stable 400 bad_request, never
+            # an AttributeError. Checked first so a bad type cannot slip past
+            # on an otherwise-valid proposal.
+            if not isinstance(approver, str):
+                raise TuningError(
+                    400, "bad_request",
+                    "approver must be a string.",
+                )
+
             proposal = self._proposals.get(proposal_id)
             if proposal is None:
                 raise TuningError(
@@ -215,6 +247,30 @@ class TuningState:
                     "Proposal failed validation; cannot commit.",
                 )
             params: dict[str, Any] = proposal["params"]
+
+            # Auto-commit quarantine: the autonomous policy:auto approver is
+            # refused at the write boundary regardless of parameter category.
+            # This is the legacy orchestrator's only commit identity, so with
+            # it shut, no LLM-facing tool call can mutate a parameter. Checked
+            # before the human-approval branch so policy:auto yields one stable
+            # reason. A human commit (approver="human:<name>") is unaffected.
+            #
+            # The match is stripped + case-insensitive so surface variants of
+            # the same autonomous identity — " POLICY:AUTO ", tab/newline
+            # padding, mixed case — cannot slip a mutation through. This
+            # normalization is used ONLY for the quarantine comparison; the
+            # human approver identity is never stripped or rewritten (the
+            # startswith check below and the ledger entry both keep the raw
+            # value, preserving existing human semantics exactly).
+            if approver.strip().casefold() == AUTO_COMMIT_APPROVER:
+                raise TuningError(
+                    403, "auto_commit_disabled",
+                    "approver='policy:auto' is disabled at the server boundary "
+                    "for otherwise-valid proposals. For AUTO-category "
+                    "parameters, other caller-supplied strings pass the "
+                    "approver gate; HUMAN_APPROVAL-category parameters require "
+                    "approver='human:<name>' (an unauthenticated label).",
+                )
 
             # Approver policy.
             if _contains_human_approval_param(params) and not approver.startswith("human:"):
@@ -462,6 +518,7 @@ def create_blueprint(state: TuningState) -> Blueprint:
 __all__ = [
     "MIN_GEN_BETWEEN_COMMITS_PER_PARAM",
     "VALID_MODES",
+    "AUTO_COMMIT_APPROVER",
     "TuningError",
     "TuningState",
     "create_blueprint",

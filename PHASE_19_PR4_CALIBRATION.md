@@ -384,7 +384,7 @@ This was conflated in an earlier proposal. Recording the correction here so futu
 - ✅ No HTTP. No ZMQ. No network.
 - ✅ CPU-only default.
 - ✅ `allow_pickle=False` preserved in all snapshot reads.
-- ✅ Bounded compute: O(N × K × S) where N=snapshots, K=vocabulary, S=sweep parameter count. All small.
+- ⚠️ **Caller-bounded compute** (narrowed, Package C): total work is O(N × K × S) where N=snapshots, K=vocabulary, S=sweep parameter count. Each parameter is now validated for exact type, finiteness and uniqueness before any snapshot processing, but **no hard ceiling on N or S is enforced** — the module does not cap how many snapshots or sweep values a caller may pass, so "all small" holds only under the documented calibration design (short=5 / long=12 snapshots, single-digit sweep tuples), not as a guarantee against an arbitrarily large caller-supplied workload. Runtime and memory therefore scale linearly with caller input and are the caller's responsibility. **Recommended future cap** (not implemented here to avoid inventing an unreviewed policy number): a configurable `max_total_runs = N × Σ|sweep tuples|` ceiling, sized from the design's 12-snapshot / ≤7-value sweeps against the PR #138 31 µs/patch budget, raising `ValueError` before processing when exceeded.
 - ✅ No CCI regime thresholds. PR #4 produces candidate bands and sensitivity maps only.
 - ✅ No multi-snapshot mode added to `nextness_observer.py`. Calibration uses a separate orchestrator.
 - ✅ No fresh `generated_at` field in derived outputs.

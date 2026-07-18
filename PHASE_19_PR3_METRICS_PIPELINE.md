@@ -301,6 +301,233 @@ Deliberately deferred to **Lane A** (engine track, separately scoped, currently 
 - ✅ `allow_pickle=False` preserved in any new snapshot reads (the metrics module reads JSONL, not `.npz`, so this is N/A for the new module, but is preserved in `process_snapshot()` extensions).
 - ✅ Bounded compute (the metrics module is $O(N \cdot K)$ where $N$ is number of snapshots and $K$ is vocabulary size; both are small).
 
+### 9.1 Output-boundary hardening (2026-07-15 reliability amendment)
+
+Two gaps in the original write lane were repaired after the Nextness
+NP-stack established the house convention for derived-output safety
+(`os.path.samefile` identity guards in NP6/NP8; explicit byte output
+in NP5/NP6/NP8, later NP1):
+
+- **Input-identity guard**: `--out` may never name or alias the input
+  log — refused by resolved-path equality (direct path, lexical
+  variants like `sub/../log.jsonl`, symlink aliases) and by file
+  identity (`os.path.samefile` on resolved paths, catching hard
+  links), failing closed when an existing output's identity cannot be
+  verified. The refusal keeps the existing boundary convention (exit
+  code 3, one `safety error:` line, `WriteOutsideLogDirError`) and
+  happens before the log is read, any metric computed, or any output
+  parent created. Ordinary sibling outputs — nonexistent or existing
+  non-alias — remain allowed.
+- **Byte-exact streamed output**: the derived JSONL is written in
+  binary mode, one row at a time — each line is its canonical
+  `json.dumps(..., sort_keys=True, default=str)` serialization encoded
+  as UTF-8 plus a single LF byte. Windows text-mode newline
+  translation can no longer alter the derived file's bytes, so
+  re-runs are byte-identical across platforms. Streaming is
+  preserved: the output is never materialized in full.
+- **Directory-target refusal**: an `--out` that resolves to an existing
+  directory (including through a symlink) is refused in the same exit-3
+  boundary lane, before the log is read or any metric computed — the
+  binary open would otherwise escape as an uncaught
+  `IsADirectoryError`/`PermissionError` traceback after computation.
+  Ordinary non-alias *file* targets are unaffected.
+- **Residual race, stated precisely**: identity is verified at
+  validation time; the write does not re-verify. A concurrent actor
+  replacing the output path between validation and write can still
+  redirect the write. The guard defends against aliases that exist at
+  validation time; it does not claim to eliminate the
+  validation-to-write (TOCTOU) interval.
+
+All metric formulas, row ordering, JSON field ordering, the stdout
+summary and every exit code are unchanged by this amendment.
+
+### 9.2 Operational output-write failure lane (2026-07-17 reliability amendment)
+
+The 2026-07-17 CLI failure-contract audit reproduced (twice, public CLI)
+an escaped `PermissionError` traceback when `--out` named an existing
+**read-only file** inside the log directory: every pre-write safety
+check legitimately passed, and the binary `open("wb")` then failed with
+no handler — crashing at process exit 1, numerically colliding with the
+missing-log lane. Repaired by a **narrowly typed** lane, and recorded
+here as metrics-specific truth (this is not harmonisation with any
+other module's map):
+
+- `OSError` is caught **only around the output region — output-parent
+  creation plus the binary open/write/close** — inside
+  `compute_run_metrics`, where it becomes the typed
+  `MetricsOutputWriteError` with a concise path-specific message.
+  Read-side or computation errors are **never** reclassified as output
+  failures and continue to propagate loudly.
+- The CLI maps `MetricsOutputWriteError` to **exit 4** with one
+  `error:` line — deliberately distinct from **exit 3 + `safety
+  error:`** (pre-write containment/identity/directory safety refusal),
+  **exit 2** (data/validation), and **exit 1** (missing log, now also
+  documented). Complete map: 0 success · 1 missing log · 2
+  data/validation · 3 pre-write safety refusal (`safety error:`) · 4
+  operational output-write failure (`error:`).
+- **Destination-preservation contract, stated precisely**: a failure at
+  or before the binary open — a read-only destination, or a failed
+  output-parent mkdir — leaves any existing destination byte-identical
+  (nothing was truncated) and creates no output. Once the binary open
+  has succeeded, output is direct, streamed and **non-atomic**: a later
+  write or close failure may leave a truncated or partial destination,
+  and **no general destination-preservation guarantee is made or
+  implied**. In the exercised failure lanes, and absent the documented
+  validation-to-write replacement race (§9.1), the input log remains
+  unchanged. This repair adds no stronger input-log guarantee: a
+  concurrent actor may still redirect the later direct write, as the
+  existing TOCTOU non-claim states.
+- Streaming binary LF-only output, row order, field order, formulas,
+  aggregate values, ordinary sibling-overwrite behavior, and the
+  documented validation-to-write (TOCTOU) non-claim are all unchanged.
+  No atomic-write behavior was introduced.
+
+### 9.3 Typed input boundary (2026-07-18 metrics pilot)
+
+Recorded here as metrics-specific truth (not harmonisation with any
+other module's map): the CLI's **exit-2 catch is exactly the typed
+`MetricsInputError` plus the `FileNotFoundError` validation-to-read race
+lane** (the pre-checked missing-log lane remains exit 1). The five
+genuine input/configuration raises carry the typed class with their
+message text byte-identical: malformed JSONL (the `json.JSONDecodeError`
+wrapper), negative smoothing, **the existing negative-rate guard in
+`boundary_persistence_pairwise`**, non-positive pairwise delta, and
+non-positive CV delta. A plain `ValueError` — like
+any exception outside the documented catch classes — **propagates**
+rather than being reported as a concise data failure (test-pinned
+alongside the standing read-side-OSError propagation pin). Locally
+handled `_safe_float` coercion and the containment-to-
+`WriteOutsideLogDirError` conversion are untouched. `MetricsInputError`
+is exported through `__all__`. Direct-Python note: callers catching
+`ValueError` remain compatible because `MetricsInputError` subclasses
+it, but exact class identity, repr and traceback text change at the five
+reclassified sites. Exit codes, messages, output bytes and the §9.1/§9.2
+contracts are unchanged.
+
+**Invalid-UTF-8 input lane (post-pilot restoration)**: the typed
+narrowing initially let `UnicodeDecodeError` (a `ValueError` subclass)
+escape on an undecodable `--log` — pre-pilot the broad catch reported it
+as concise exit 2. Restored by a **narrow wrapping boundary** around the
+input-log text-reading region only: `except UnicodeDecodeError` exactly
+(never `UnicodeError`/`ValueError`/`OSError`), re-raised as
+`MetricsInputError(str(e))` with the original error as `__cause__`, so
+the public stderr bytes match the pre-pilot lane byte-for-byte and
+read-side `OSError` propagation is untouched. The typed lane therefore
+comprises the **five existing direct typed raises plus this one
+invalid-UTF-8 wrapping boundary**. This is a **restoration of an
+undocumented behavior changed by the pilot**, not a new family-wide
+convention.
+
+**Separate observation — `boundary_cv` rate validation (recorded, not
+changed here)**: `boundary_cv` currently performs **no**
+non-negative-rate validation of its own — direct calls may accept
+negative rates or reach an invalid denominator, and a one-entry CLI log
+bypasses the pairwise guard entirely (no pair row is computed, so the
+`boundary_persistence_pairwise` guard never runs). This is a **future,
+independently gated behavior candidate**: adding validation would be a
+separately observable production/API change. It is **not a defect
+repaired by the typed-boundary pilot** and no `boundary_cv` production
+behavior changed in it.
+
+### 9.4 Strict input domain (2026-07-18, Kev-authorized policy)
+
+Recorded as metrics-specific policy (not harmonisation). Every rejection
+below is typed `MetricsInputError` → exit 2, one `error:` line, no
+traceback, input and any pre-existing destination byte-identical, no new
+destination.
+
+- **JSON constants**: `NaN`, `Infinity`, `-Infinity` are rejected at
+  decode (`parse_constant` hook) — in **any** field of any row.
+- **Unit fields** (`void_compute_balance`, `boundary_rate`,
+  `entropy_normalized`), when present: real JSON numbers (booleans
+  excluded), finite, within `[0, 1]`. Explicit `null`, numeric strings
+  and all other non-numeric values are rejected. **An absent unit field
+  is `0.0` — an explicitly chosen compatibility policy established
+  HERE**; PR #141 never documented default-on-failure, and `_safe_float`
+  is retained only as the realization of this absent-field policy behind
+  the validation gate.
+- **`token_counts`**, when the key is present: a JSON object of
+  non-boolean, non-negative integer counts (the shape the canonical
+  distributions consume). Rows must be JSON objects.
+- **Numeric parameters**: `smoothing` finite and non-negative;
+  `boundary_delta` finite and strictly positive (validated before any
+  read work).
+- **Public boundary helpers hardened consistently** (`pairwise`,
+  `boundary_cv`, `aggregate_clamped`): out-of-type and out-of-domain
+  rates and invalid deltas raise `MetricsInputError`, validated
+  **before** single-element early returns — closing the direct-API
+  `TypeError`/`ZeroDivisionError`/negative-CV/sign-flip escapes. The
+  aggregate now carries an explicit two-sided clamp (a no-op for valid
+  input; results for the valid domain are unchanged).
+- **Pre-write invariant + strict serialization**: before parent-mkdir/
+  open, every float in every output row — computed AND pass-through,
+  **recursively through nested built-in containers** (e.g. a
+  numeric-overflow `generation` such as `1e400` → `inf`, or an `inf`
+  nested inside a pass-through list) — must be finite, with the
+  rejection naming the offending output key/path. The traversal is
+  hook-safe (exact built-in `dict`/`list`/`tuple` and exact `float`
+  only). The writer serializes with `allow_nan=False` as a backstop
+  (unreachable given the invariant; a failure there is an internal
+  contract failure and propagates loudly). This adds **no partial-output
+  claim** and leaves the §9.2 streamed, non-atomic write contract for
+  genuine write failures unchanged.
+- **Finite-computability of counts**: a token count too large to
+  participate in finite float arithmetic is a typed rejection at
+  ingestion (no arbitrary semantic cap — the constraint is numeric
+  computability); the smoothed raw vector and its total are also
+  guarded against non-finite arithmetic.
+- **Zero smoothing, defined semantics**: `smoothing >= 0` remains the
+  authorized policy; KL with positive support in P and zero support in
+  Q under zero smoothing is mathematically undefined and raises a
+  typed, concise `MetricsInputError` stating that positive smoothing is
+  required (direct and public pins).
+- **Located constant rejections**: the NaN/Infinity refusal is wrapped
+  at the decode call site with the exact log path and line number
+  (`invalid JSON value at <path>:<line>: …`, cause preserved) — a valid
+  JSON extension token refused by policy, never mislabeled an ordinary
+  `JSONDecodeError`.
+- **Finite-computability totality (2026-07-18 follow-up)**: the late
+  Codex finding on the merged strict domain — a raw oversized INTEGER
+  (magnitude `10**400`) on the unit-field, helper (`_require_rate`/
+  `_require_delta`), smoothing or boundary-delta surfaces reached
+  `float()`/`math.isfinite()` and escaped as `OverflowError`. Closed by
+  one narrow conversion path (`_finite_float`): types are rejected
+  exactly as before; accepted ints/floats convert catching only the
+  expected conversion `OverflowError`; `math.isfinite` applies only
+  after safe conversion; the smoothed raw vector/total guard uses the
+  same path so `smoothed_distribution` cannot leak `OverflowError` from
+  huge counts with integer-zero smoothing. **This is finite-
+  computability totality, not a semantic value cap** — no magnitude
+  limit is invented; messages, strict JSON, absent-field 0.0, output
+  bytes, exit codes, failure classification and write/preservation
+  contracts are unchanged.
+- **Decoder conversion-limit boundary (distinct from materialized huge
+  integers)**: `_finite_float` repairs integers that have already
+  MATERIALIZED as Python values; a valid JSON integer literal beyond
+  Python's decimal-digit conversion limit (>= ~4300 digits) makes the
+  DECODER itself raise `ValueError` before any value exists. That is
+  translated at the narrow `json.loads` boundary only — located
+  `malformed JSONL at <path>:<line>` with the original as `__cause__`.
+  `main()` and the computation catches are NOT broadened; the
+  post-validation internal plain-`ValueError` sentinel still propagates
+  (pinned). No arbitrary application-level magnitude cap exists on
+  either lane.
+- **Parser depth boundary**: a JSONL row nested beyond the parser's
+  recursion limit (inside the byte ceiling) is a located typed
+  rejection at the same narrow decode seam (`malformed JSONL at
+  <path>:<line>: nesting exceeds the parser's depth limit`) — metrics
+  is fatal-typed, not row-contained. `RecursionError` outside the
+  decode seam is not swallowed anywhere and still propagates.
+- **Message origins**: the negative-rate / smoothing / delta rejection
+  messages now originate at the ingestion/parameter seam with
+  strict-domain wording; the old helper-origin messages are subsumed
+  (codes and one-line shape unchanged).
+- **Byte compatibility**: accepted historical fixtures and ordinary
+  valid logs produce byte-identical output (golden + determinism pins).
+- ~~Recorded residual: zero-smoothing `ZeroDivisionError`~~ — **closed
+  by this policy's hardening round**: the formerly escaping crash is now
+  the typed zero-smoothing rejection above.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.

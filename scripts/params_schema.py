@@ -27,7 +27,11 @@ class Category(str, Enum):
     """How a tuning proposal for this parameter is gated."""
 
     AUTO = "auto"
-    """Small-effect, self-bounded. Agents may commit with approver='policy:auto'."""
+    """Small-effect, self-bounded. Historically committable by the autonomous
+    approver='policy:auto'; that autonomous commit path is now disabled at the
+    tuning-API write boundary (``auto_commit_disabled``), so an AUTO proposal
+    still validates and can be proposed/dry-run, but committing it requires a
+    deliberate human approver ('human:<name>'). See scripts/tuning_api.py."""
 
     HUMAN_APPROVAL = "human_approval"
     """Significant effect on dynamics. Requires approver='human:<name>'."""
