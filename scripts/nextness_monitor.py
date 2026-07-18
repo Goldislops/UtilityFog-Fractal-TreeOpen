@@ -405,11 +405,16 @@ def observations_from_log(
         raise MonitorInputError(f"model {model!r} not in fixed allowlist {MODEL_ALLOWLIST}")
     # Inherited NP1 option bounds (same messages as run_evaluation) —
     # out-of-bounds options must fail closed here too, never reach the
-    # distribution builders as silent garbage.
+    # distribution builders as silent garbage. Typed as MonitorInputError
+    # (message text unchanged) so the CLI's exit-2 catch can be exactly
+    # the typed class: these two are the only CLI-reachable input raises
+    # on this path.
     if not 0.0 < smoothing <= SMOOTHING_MAX:
-        raise ValueError(f"smoothing must be in (0, {SMOOTHING_MAX}], got {smoothing}")
+        raise MonitorInputError(
+            f"smoothing must be in (0, {SMOOTHING_MAX}], got {smoothing}"
+        )
     if not HOLDOUT_FRACTION_MIN <= holdout_fraction <= HOLDOUT_FRACTION_MAX:
-        raise ValueError(
+        raise MonitorInputError(
             f"holdout_fraction must be in [{HOLDOUT_FRACTION_MIN}, "
             f"{HOLDOUT_FRACTION_MAX}], got {holdout_fraction}"
         )
@@ -494,10 +499,14 @@ def main(argv: list[str] | None = None) -> int:
 
     Every expected failure prints one concise ``error:`` line to stderr —
     never a traceback. The documented catch set is exactly
-    ``InsufficientHistoryError`` and plain ``ValueError`` (the exit-2
-    lane, which includes ``MonitorInputError``); exceptions outside it
-    propagate. Because the base ``ValueError`` class is part of the
-    catch set, no claim is made that every programming error propagates.
+    ``InsufficientHistoryError`` (exit 3) and the typed
+    ``MonitorInputError`` (exit 2); exceptions outside it — including
+    plain ``ValueError`` — propagate (monitor typed-input-boundary
+    pilot; test-pinned). Direct-Python note: callers catching
+    ``ValueError`` remain compatible because ``MonitorInputError``
+    subclasses it, but the exact exception type at the two reclassified
+    validation sites (smoothing, holdout fraction) is now
+    ``MonitorInputError``.
     """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
@@ -522,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     except InsufficientHistoryError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
-    except ValueError as e:  # includes MonitorInputError (its subclass)
+    except MonitorInputError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     sys.stdout.write(serialize_receipt(receipt))
