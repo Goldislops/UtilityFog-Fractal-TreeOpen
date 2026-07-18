@@ -998,6 +998,77 @@ def test_cli_unexpected_errors_are_not_hidden(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Replay-lab typed-input-boundary pilot (gated; the family's final module;
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Failing-first target: a sentinel
+# plain ValueError at the internal build_lab_report seam must PROPAGATE
+# through public main(), never convert to the documented exit-2 lane.
+# Preservation controls pin every genuine public lane.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the build seam is an
+    unexpected programming error and must propagate — not masquerade as
+    a concise exit-2 input failure. (LabInputError — and the reader's
+    typed PredictorInputError, translated at the reader call — remain
+    the documented exit-2 lane.)"""
+    import scripts.nextness_replay_lab as lab_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(lab_module, "build_lab_report", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main([str(log), str(protocol)])
+
+
+def test_cli_pilot_preservation_controls(tmp_path, capsys) -> None:
+    """Byte-exact public lanes: malformed protocol (LabInputError),
+    reader bounds, insufficient history exit 3; inputs untouched."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    bad_protocol = tmp_path / "bad_protocol.json"
+    bad_protocol.write_text(
+        protocol.read_text(encoding="utf-8").replace(
+            '"nextness-replay-protocol-v1"', '"nextness-replay-protocol-v9"'),
+        encoding="utf-8")
+    (tmp_path / "tiny").mkdir()
+    tiny = _write_log(tmp_path / "tiny", [A])
+    before = {p: p.read_bytes() for p in (log, protocol, bad_protocol, tiny)}
+    cases = (
+        ([str(log), str(bad_protocol)], 2, None),
+        ([str(log), str(protocol), "--max-rows", "0"], 2,
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), str(protocol), "--max-line-bytes", "0"], 2,
+         "error: max_line_bytes must be positive, got 0"),
+        ([str(tiny), str(protocol)], 3, None),
+    )
+    for argv, code, expected in cases:
+        assert main(argv) == code
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert len(lines) == 1 and lines[0].startswith("error:")
+        if expected is not None:
+            assert lines == [expected]
+        assert "Traceback" not in err
+    for p_, b_ in before.items():
+        assert p_.read_bytes() == b_
+
+
+def test_cli_pilot_output_determinism_control(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    out1, out2 = tmp_path / "r1.json", tmp_path / "r2.json"
+    assert main([str(log), str(protocol), "--output", str(out1)]) == 0
+    assert main([str(log), str(protocol), "--output", str(out2)]) == 0
+    capsys.readouterr()
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
 # 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
 # the expected exit-4 operational-write lane — distinct from PUBLIC
@@ -1171,3 +1242,33 @@ def test_reader_bound_error_is_predictor_typed_through_broad_lane(tmp_path, caps
     assert "Traceback" not in err
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+def test_typed_reader_bound_translation_boundary(tmp_path, monkeypatch) -> None:
+    """Direct-API pins for the reader-bound translation boundary:
+    the reader itself still raises PredictorInputError; build_lab_report
+    translates exactly that class to LabInputError with the message
+    byte-identical and the cause preserved; a sentinel plain ValueError
+    from the reader seam is NOT wrapped and propagates."""
+    import scripts.nextness_replay_lab as lab_module
+    from scripts.nextness_predictor import PredictorInputError
+    from scripts.nextness_replay_lab import LabInputError, build_lab_report
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+
+    with pytest.raises(PredictorInputError) as reader_exc:
+        read_dominant_sequence(log, max_rows=0)
+
+    with pytest.raises(LabInputError) as lab_exc:
+        build_lab_report(log, protocol, max_rows=0)
+    assert str(lab_exc.value) == str(reader_exc.value)  # byte-identical message
+    assert isinstance(lab_exc.value.__cause__, PredictorInputError)
+
+    def plain_boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError from reader seam")
+
+    monkeypatch.setattr(lab_module, "read_dominant_sequence", plain_boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError from reader seam") as esc:
+        build_lab_report(log, protocol)
+    assert type(esc.value) is ValueError  # not wrapped into LabInputError
