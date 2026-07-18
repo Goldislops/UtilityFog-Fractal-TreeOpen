@@ -454,20 +454,28 @@ def compute_run_metrics(
     # — no parent-mkdir, no file open, no writes — happen.
     _validate_metrics_output_path(out_path, log_path)
 
-    # Load and sort
+    # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
+    # public contract for an undecodable log (genuine bad input, concise
+    # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
+    # OSError — and re-raised as MetricsInputError(str(e)) so the stderr
+    # bytes match the pre-#381 lane while read-side OSErrors keep
+    # propagating.
     entries: list[dict[str, Any]] = []
-    with log_path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, 1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError as e:
-                raise MetricsInputError(
-                    f"malformed JSONL at {log_path}:{line_no}: {e}"
-                ) from e
-            entries.append(entry)
+    try:
+        with log_path.open("r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    raise MetricsInputError(
+                        f"malformed JSONL at {log_path}:{line_no}: {e}"
+                    ) from e
+                entries.append(entry)
+    except UnicodeDecodeError as e:
+        raise MetricsInputError(str(e)) from e
     entries.sort(key=_sort_key)
 
     # Per-snapshot CCI values (used by both pair rows and the aggregate)

@@ -404,6 +404,20 @@ it, but exact class identity, repr and traceback text change at the five
 reclassified sites. Exit codes, messages, output bytes and the §9.1/§9.2
 contracts are unchanged.
 
+**Invalid-UTF-8 input lane (post-pilot restoration)**: the typed
+narrowing initially let `UnicodeDecodeError` (a `ValueError` subclass)
+escape on an undecodable `--log` — pre-pilot the broad catch reported it
+as concise exit 2. Restored by a **narrow wrapping boundary** around the
+input-log text-reading region only: `except UnicodeDecodeError` exactly
+(never `UnicodeError`/`ValueError`/`OSError`), re-raised as
+`MetricsInputError(str(e))` with the original error as `__cause__`, so
+the public stderr bytes match the pre-pilot lane byte-for-byte and
+read-side `OSError` propagation is untouched. The typed lane therefore
+comprises the **five existing direct typed raises plus this one
+invalid-UTF-8 wrapping boundary**. This is a **restoration of an
+undocumented behavior changed by the pilot**, not a new family-wide
+convention.
+
 **Separate observation — `boundary_cv` rate validation (recorded, not
 changed here)**: `boundary_cv` currently performs **no**
 non-negative-rate validation of its own — direct calls may accept
