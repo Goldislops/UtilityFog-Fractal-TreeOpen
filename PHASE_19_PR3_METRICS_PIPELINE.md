@@ -486,6 +486,32 @@ destination.
   (`invalid JSON value at <path>:<line>: …`, cause preserved) — a valid
   JSON extension token refused by policy, never mislabeled an ordinary
   `JSONDecodeError`.
+- **Finite-computability totality (2026-07-18 follow-up)**: the late
+  Codex finding on the merged strict domain — a raw oversized INTEGER
+  (magnitude `10**400`) on the unit-field, helper (`_require_rate`/
+  `_require_delta`), smoothing or boundary-delta surfaces reached
+  `float()`/`math.isfinite()` and escaped as `OverflowError`. Closed by
+  one narrow conversion path (`_finite_float`): types are rejected
+  exactly as before; accepted ints/floats convert catching only the
+  expected conversion `OverflowError`; `math.isfinite` applies only
+  after safe conversion; the smoothed raw vector/total guard uses the
+  same path so `smoothed_distribution` cannot leak `OverflowError` from
+  huge counts with integer-zero smoothing. **This is finite-
+  computability totality, not a semantic value cap** — no magnitude
+  limit is invented; messages, strict JSON, absent-field 0.0, output
+  bytes, exit codes, failure classification and write/preservation
+  contracts are unchanged.
+- **Decoder conversion-limit boundary (distinct from materialized huge
+  integers)**: `_finite_float` repairs integers that have already
+  MATERIALIZED as Python values; a valid JSON integer literal beyond
+  Python's decimal-digit conversion limit (>= ~4300 digits) makes the
+  DECODER itself raise `ValueError` before any value exists. That is
+  translated at the narrow `json.loads` boundary only — located
+  `malformed JSONL at <path>:<line>` with the original as `__cause__`.
+  `main()` and the computation catches are NOT broadened; the
+  post-validation internal plain-`ValueError` sentinel still propagates
+  (pinned). No arbitrary application-level magnitude cap exists on
+  either lane.
 - **Message origins**: the negative-rate / smoothing / delta rejection
   messages now originate at the ingestion/parameter seam with
   strict-domain wording; the old helper-origin messages are subsumed
