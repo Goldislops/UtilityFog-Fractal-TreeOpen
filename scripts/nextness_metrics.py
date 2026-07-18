@@ -51,10 +51,11 @@ CLI:
     failure (``error:``; argparse usage errors also exit 2) · 3 pre-write
     containment/identity/directory safety refusal (``safety error:``) ·
     4 operational output-write failure (``error:``). Expected failures
-    print one concise line, never a traceback. Plain ``ValueError`` is
-    part of the documented exit-2 catch set; exceptions outside the
-    documented catch set — including read-side OSErrors — propagate
-    rather than being reclassified.
+    print one concise line, never a traceback. The exit-2 catch set is
+    the typed ``MetricsInputError`` plus the ``FileNotFoundError``
+    validation-to-read race lane; exceptions outside the documented
+    catch set — including plain ``ValueError`` and read-side OSErrors —
+    propagate rather than being reclassified.
 """
 from __future__ import annotations
 
@@ -99,6 +100,17 @@ class MetricsOutputWriteError(RuntimeError):
     no stronger input-log guarantee: a concurrent actor may still
     redirect the later direct write, as the existing TOCTOU non-claim
     states. No atomic-write behavior is provided or claimed.
+    """
+
+
+class MetricsInputError(ValueError):
+    """Genuine input/configuration failure (typed input boundary).
+
+    Subclasses ``ValueError`` so direct-Python callers catching the base
+    class remain compatible; the CLI's exit-2 catch names exactly this
+    class (plus the ``FileNotFoundError`` validation-to-read race lane),
+    so a plain internal ``ValueError`` propagates instead of
+    masquerading as a data failure (metrics typed-boundary pilot).
     """
 
 
@@ -213,7 +225,7 @@ def smoothed_distribution(
     and sums to 1.0 (within float precision).
     """
     if smoothing < 0:
-        raise ValueError(f"smoothing must be non-negative, got {smoothing}")
+        raise MetricsInputError(f"smoothing must be non-negative, got {smoothing}")
     raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
     total = sum(raw)
     if total <= 0:
@@ -293,14 +305,15 @@ def boundary_persistence_pairwise(
     near 1 when both rates are near zero (saturated by ``delta`` in the
     denominator, so the score doesn't whipsaw on noise).
 
-    Raises ``ValueError`` if either rate is negative.
+    Raises ``MetricsInputError`` (a ``ValueError`` subclass) if either
+    rate is negative.
     """
     if r_prev < 0 or r_curr < 0:
-        raise ValueError(
+        raise MetricsInputError(
             f"boundary rates must be non-negative; got r_prev={r_prev}, r_curr={r_curr}"
         )
     if delta <= 0:
-        raise ValueError(f"delta must be positive, got {delta}")
+        raise MetricsInputError(f"delta must be positive, got {delta}")
     diff = abs(r_curr - r_prev)
     denom = max(r_prev, r_curr, delta)
     return 1.0 - diff / denom
@@ -319,7 +332,7 @@ def boundary_cv(rates: Sequence[float], delta: float = 1e-3) -> float:
     defined).
     """
     if delta <= 0:
-        raise ValueError(f"delta must be positive, got {delta}")
+        raise MetricsInputError(f"delta must be positive, got {delta}")
     if len(rates) < 2:
         return 0.0
     mean = sum(rates) / len(rates)
@@ -441,20 +454,28 @@ def compute_run_metrics(
     # — no parent-mkdir, no file open, no writes — happen.
     _validate_metrics_output_path(out_path, log_path)
 
-    # Load and sort
+    # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
+    # public contract for an undecodable log (genuine bad input, concise
+    # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
+    # OSError — and re-raised as MetricsInputError(str(e)) so the stderr
+    # bytes match the pre-#381 lane while read-side OSErrors keep
+    # propagating.
     entries: list[dict[str, Any]] = []
-    with log_path.open("r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, 1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                entry = json.loads(stripped)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"malformed JSONL at {log_path}:{line_no}: {e}"
-                ) from e
-            entries.append(entry)
+    try:
+        with log_path.open("r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError as e:
+                    raise MetricsInputError(
+                        f"malformed JSONL at {log_path}:{line_no}: {e}"
+                    ) from e
+                entries.append(entry)
+    except UnicodeDecodeError as e:
+        raise MetricsInputError(str(e)) from e
     entries.sort(key=_sort_key)
 
     # Per-snapshot CCI values (used by both pair rows and the aggregate)
@@ -629,12 +650,17 @@ def main(argv: list[str] | None = None) -> int:
 
     The documented catch set is exactly ``MetricsOutputWriteError``
     (exit 4), ``WriteOutsideLogDirError`` (exit 3, ``safety error:``)
-    and plain ``ValueError``/``FileNotFoundError`` (exit 2, the data
-    lane — malformed JSONL raises plain ``ValueError`` directly).
-    Exceptions outside that set propagate: read-side ``OSError``
+    and the typed ``MetricsInputError`` plus ``FileNotFoundError`` (exit
+    2 — the data lane and the validation-to-read race lane). Exceptions
+    outside it — including plain ``ValueError`` — propagate (metrics
+    typed-boundary pilot; test-pinned), and read-side ``OSError``
     exceptions in particular are never reclassified as output failures
-    (test-pinned). Because the base ``ValueError`` class is part of the
-    catch set, no claim is made that every programming error propagates.
+    (test-pinned). Direct-Python note: callers catching ``ValueError``
+    remain compatible because ``MetricsInputError`` subclasses it, but
+    the exact exception type at the five reclassified sites (malformed
+    JSONL, negative smoothing, the existing negative-rate guard in
+    ``boundary_persistence_pairwise``, non-positive pairwise delta,
+    non-positive CV delta) is now ``MetricsInputError``.
     """
     args = _build_parser().parse_args(argv)
     log_path = pathlib.Path(args.log)
@@ -659,7 +685,7 @@ def main(argv: list[str] | None = None) -> int:
         # distinguish safety refusals from data errors.
         print(f"safety error: {e}", file=sys.stderr)
         return 3
-    except (ValueError, FileNotFoundError) as e:
+    except (MetricsInputError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     # Compact stdout summary
@@ -676,6 +702,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "MetricsInputError",
     "MetricsOutputWriteError",
     "smoothed_distribution",
     "kl_divergence",

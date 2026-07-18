@@ -160,6 +160,25 @@ insufficient history · `4` write-boundary/unwritable · `5` report over
 the ceiling. Expected failures print one concise `error:` line, never a
 traceback.
 
+**Typed input boundary (replay-lab pilot)**: the exit-2 catch is
+exactly the typed `LabInputError`. The shared reader's typed
+`PredictorInputError` (this lab publicly re-exposes `--max-rows`/
+`--max-line-bytes`) is **translated at the single reader call** —
+`except PredictorInputError` exactly, never broad `ValueError` —
+into `LabInputError` with the message byte-identical (`str(e)`) and
+the original error preserved as `__cause__`. A plain `ValueError`
+**reaching `main()` outside the existing scoped input-validation
+translations propagates** (the committed build-seam and reader-seam
+pins prove those exact lanes; a plain `ValueError` from the reader seam
+is deliberately not wrapped). No claim is made that every inner
+validation helper lacks a local base-class wrapper — the protocol
+loader's JSON-parse and `MonitorConfig.validate` regions deliberately
+catch base `ValueError` and translate it to `LabInputError`.
+Direct-Python note: callers catching `ValueError` remain compatible
+(`LabInputError` subclasses it); `read_dominant_sequence` called
+directly still raises `PredictorInputError`. This is a lab-only
+decision; no family-wide convention is implied.
+
 ## Safety
 
 Offline; no network; imports only `nextness_predictor`,

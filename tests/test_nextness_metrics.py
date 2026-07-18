@@ -1144,3 +1144,210 @@ def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
     assert state["proxy"].close_attempted          # failure was AT close, not write
     assert out.read_bytes() == canonical           # complete canonical stream
     assert log_path.read_bytes() == log_before
+
+
+# ---------------------------------------------------------------------------
+# Metrics typed-input-boundary pilot (gated; docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md).
+# Failing-first target: a sentinel plain ValueError escaping a
+# post-validation metrics core call must PROPAGATE, never convert to the
+# documented exit-2 data lane. Preservation controls pin every public
+# lane byte-for-byte, plus the FileNotFoundError race lane, the exit-3
+# safety lane, the typed exit-4 write lane and output determinism.
+# ---------------------------------------------------------------------------
+
+
+def _expect_single_error_line(capsys, expected: str) -> str:
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == [expected]
+    assert "Traceback" not in err
+    return err
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the post-validation
+    computation core (js_divergence, called per pair after log parse and
+    pre-write safety validation) is an unexpected programming error and
+    must propagate — not masquerade as a concise exit-2 data failure."""
+    import scripts.nextness_metrics as metrics_module
+
+    log = tmp_path / "nextness_runs.jsonl"
+    _write_log(log, [_make_entry(generation=1, snapshot_file="a.npz"),
+                     _make_entry(generation=2, snapshot_file="b.npz")])
+    before = log.read_bytes()
+    out = tmp_path / "derived.jsonl"
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(metrics_module, "js_divergence", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main(["--log", str(log), "--out", str(out)])
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_cli_five_input_lanes_exact_public_behavior(tmp_path, capsys) -> None:
+    """The five reclassified lanes keep their public behavior
+    byte-for-byte: exact message, single stderr line, exit 2, no
+    traceback, input untouched, no output created."""
+    two = tmp_path / "two.jsonl"
+    _write_log(two, [_make_entry(generation=1, snapshot_file="a.npz"),
+                     _make_entry(generation=2, snapshot_file="b.npz")])
+    neg_rate = tmp_path / "negrate.jsonl"
+    _write_log(neg_rate, [_make_entry(generation=1, snapshot_file="a.npz"),
+                          _make_entry(generation=2, snapshot_file="b.npz",
+                                      boundary_rate=-0.5)])
+    one = tmp_path / "one.jsonl"
+    _write_log(one, [_make_entry(generation=1, snapshot_file="a.npz")])
+    bad = tmp_path / "malformed.jsonl"
+    bad_payload = "{not json"
+    bad.write_text(
+        json.dumps(_make_entry(generation=1, snapshot_file="a.npz"),
+                   sort_keys=True) + "\n" + bad_payload + "\n",
+        encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError) as exc_info:
+        json.loads(bad_payload)
+    json_err = str(exc_info.value)
+    cases = (
+        (bad, [], f"error: malformed JSONL at {bad}:2: {json_err}"),
+        (two, ["--smoothing", "-1"],
+         "error: smoothing must be non-negative, got -1.0"),
+        (neg_rate, [],
+         "error: boundary rates must be non-negative; got r_prev=0.3, r_curr=-0.5"),
+        (two, ["--boundary-delta", "0"],
+         "error: delta must be positive, got 0.0"),
+        (one, ["--boundary-delta", "0"],
+         "error: delta must be positive, got 0.0"),
+    )
+    for log, extra, expected in cases:
+        before = log.read_bytes()
+        out = tmp_path / "derived.jsonl"
+        assert main(["--log", str(log), "--out", str(out), *extra]) == 2
+        _expect_single_error_line(capsys, expected)
+        assert log.read_bytes() == before
+        assert not out.exists()
+
+
+def test_cli_filenotfound_race_lane_still_exit_2(tmp_path, monkeypatch, capsys) -> None:
+    """The validation-to-read race lane: a FileNotFoundError escaping
+    compute_run_metrics keeps the documented exit-2 clause (injected
+    exercise of the clause; the pre-check missing-log lane is exit 1)."""
+    import scripts.nextness_metrics as metrics_module
+
+    log = _two_entry_log(tmp_path)
+
+    def race(*args, **kwargs):
+        raise FileNotFoundError(f"log file not found: {log}")
+
+    monkeypatch.setattr(metrics_module, "compute_run_metrics", race)
+    assert main(["--log", str(log), "--out", str(tmp_path / "d.jsonl")]) == 2
+    _expect_single_error_line(capsys, f"error: log file not found: {log}")
+
+
+def test_cli_missing_log_still_exit_1(tmp_path, capsys) -> None:
+    missing = tmp_path / "absent.jsonl"
+    assert main(["--log", str(missing), "--out", str(tmp_path / "d.jsonl")]) == 1
+    _expect_single_error_line(capsys, f"error: log file not found: {missing}")
+
+
+def test_cli_safety_refusal_still_exit_3(tmp_path, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}_outside.jsonl"
+    assert main(["--log", str(log), "--out", str(outside)]) == 3
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("safety error:")
+    assert "Traceback" not in err
+    assert not outside.exists()
+
+
+def test_cli_output_write_failure_still_exit_4(tmp_path, monkeypatch, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    out = tmp_path / "denied.jsonl"
+    _patch_binary_write_open(monkeypatch, out.resolve(),
+                             PermissionError(13, "injected open denial"))
+    assert main(["--log", str(log), "--out", str(out)]) == 4
+    _expect_exit4_receipt(capsys)
+
+
+def test_cli_successful_output_byte_identical(tmp_path, capsys) -> None:
+    log = _two_entry_log(tmp_path)
+    out1 = tmp_path / "d1.jsonl"
+    out2 = tmp_path / "d2.jsonl"
+    assert main(["--log", str(log), "--out", str(out1)]) == 0
+    assert main(["--log", str(log), "--out", str(out2)]) == 0
+    capsys.readouterr()
+    assert out1.read_bytes() == out2.read_bytes()
+
+
+def test_typed_identity_at_the_five_reclassified_sites(tmp_path) -> None:
+    """Direct-API pin: typed identity at the five reclassified sites
+    (a ValueError subclass — base-class catchers remain compatible)."""
+    from scripts.nextness_metrics import (
+        MetricsInputError,
+        boundary_cv,
+        boundary_persistence_pairwise,
+        compute_run_metrics,
+        smoothed_distribution,
+    )
+
+    assert issubclass(MetricsInputError, ValueError)
+    with pytest.raises(MetricsInputError):
+        smoothed_distribution({"karuna_relief": 1}, smoothing=-1.0)
+    with pytest.raises(MetricsInputError):
+        boundary_persistence_pairwise(-1.0, 0.3)
+    with pytest.raises(MetricsInputError):
+        boundary_persistence_pairwise(0.1, 0.2, delta=0.0)
+    with pytest.raises(MetricsInputError):
+        boundary_cv([0.1, 0.2], delta=0.0)
+    bad = tmp_path / "malformed.jsonl"
+    bad.write_text("{not json" + chr(10), encoding="utf-8")
+    with pytest.raises(MetricsInputError, match="malformed JSONL"):
+        compute_run_metrics(bad, tmp_path / "d.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# Invalid-UTF-8 input lane (regression vs the pre-#381 contract; see the
+# late review thread on merged #381). An undecodable log is genuine bad
+# input: pre-#381 the broad catch reported it as concise exit 2; the typed
+# narrowing let UnicodeDecodeError (a ValueError subclass) escape. Restored
+# by a narrow UnicodeDecodeError wrapping boundary around the text-reading
+# region only — message preserved byte-for-byte via str(e).
+# ---------------------------------------------------------------------------
+
+_BAD_UTF8 = b'\xff\xfe{"generation": 1}\n'
+
+
+def test_cli_invalid_utf8_log_is_concise_exit_2(tmp_path, capsys) -> None:
+    """Regression pin: invalid-UTF-8 log -> exit 2 with the exact
+    pre-#381 stderr bytes, one line, no traceback, input untouched,
+    no output created."""
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    before = log.read_bytes()
+    out = tmp_path / "derived.jsonl"
+    with pytest.raises(UnicodeDecodeError) as exc_info:
+        _BAD_UTF8.decode("utf-8")
+    expected = f"error: {exc_info.value}"
+    assert main(["--log", str(log), "--out", str(out)]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == [expected]
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_invalid_utf8_direct_api_typed_with_cause(tmp_path) -> None:
+    """Direct-API pin: compute_run_metrics raises MetricsInputError whose
+    __cause__ is the original UnicodeDecodeError; message equals str(e)
+    with no added inner prefix."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    with pytest.raises(MetricsInputError) as exc_info:
+        compute_run_metrics(log, tmp_path / "d.jsonl")
+    assert isinstance(exc_info.value.__cause__, UnicodeDecodeError)
+    assert str(exc_info.value) == str(exc_info.value.__cause__)
