@@ -382,6 +382,27 @@ other module's map):
   documented validation-to-write (TOCTOU) non-claim are all unchanged.
   No atomic-write behavior was introduced.
 
+### 9.3 Typed input boundary (2026-07-18 metrics pilot)
+
+Recorded here as metrics-specific truth (not harmonisation with any
+other module's map): the CLI's **exit-2 catch is exactly the typed
+`MetricsInputError` plus the `FileNotFoundError` validation-to-read race
+lane** (the pre-checked missing-log lane remains exit 1). The five
+genuine input/configuration raises carry the typed class with their
+message text byte-identical: malformed JSONL (the `json.JSONDecodeError`
+wrapper), negative smoothing, negative boundary rates, non-positive
+pairwise delta, and non-positive CV delta. A plain `ValueError` — like
+any exception outside the documented catch classes — **propagates**
+rather than being reported as a concise data failure (test-pinned
+alongside the standing read-side-OSError propagation pin). Locally
+handled `_safe_float` coercion and the containment-to-
+`WriteOutsideLogDirError` conversion are untouched. `MetricsInputError`
+is exported through `__all__`. Direct-Python note: callers catching
+`ValueError` remain compatible because `MetricsInputError` subclasses
+it, but exact class identity, repr and traceback text change at the five
+reclassified sites. Exit codes, messages, output bytes and the §9.1/§9.2
+contracts are unchanged.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.
