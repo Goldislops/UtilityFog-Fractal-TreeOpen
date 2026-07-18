@@ -299,7 +299,7 @@ Deliberately deferred to **Lane A** (engine track, separately scoped, currently 
 - ✅ CPU-only default.
 - ✅ `WriteOutsideLogDirError` continues to gate all writes via realpath check.
 - ✅ `allow_pickle=False` preserved in any new snapshot reads (the metrics module reads JSONL, not `.npz`, so this is N/A for the new module, but is preserved in `process_snapshot()` extensions).
-- ✅ Bounded compute (the metrics module is $O(N \cdot K)$ where $N$ is number of snapshots and $K$ is vocabulary size; both are small).
+- ✅ Bounded compute (the metrics module is $O(N \cdot K)$ where $N$ is number of snapshots and $K$ is vocabulary size). ~~both are small~~ — the smallness of $N$ was an **unenforced assumption** until the 2026-07-18 input-work-bounds amendment: $N$ is now enforced per invocation (§9.5); $K$ is fixed by the vocabulary.
 
 ### 9.1 Output-boundary hardening (2026-07-15 reliability amendment)
 
@@ -527,6 +527,45 @@ destination.
 - ~~Recorded residual: zero-smoothing `ZeroDivisionError`~~ — **closed
   by this policy's hardening round**: the formerly escaping crash is now
   the typed zero-smoothing rejection above.
+
+### 9.5 Input-work bounds (2026-07-18, Jack policy decision; Kev-authorized)
+
+The input-work-bounds audit found metrics was the only CLI in the
+family with no ingestion bounds — §9's "both are small" was a
+documented assumption with nothing enforcing it. Per Jack's policy
+decision, metrics now enforces explicit per-invocation JSONL bounds:
+
+- **Defaults and ceiling**: `--max-rows` default **100,000** with a
+  hard parameter ceiling of **1,000,000**; `--max-line-bytes` default
+  **65,536** (any positive integer). Both are validated typed BEFORE
+  any input reading; both pass from `main()` into
+  `compute_run_metrics` (direct-Python callers get the same defaults).
+- **What is counted**: bounds apply to **raw physical JSONL records** —
+  blank and rejected records consume row budget alike. Line size is
+  measured in **raw bytes with the LF or CRLF terminator excluded**.
+- **Enforced before unbounded materialization**: the log is read in
+  binary with bounded `readline(max_line_bytes + 2)` probes, so an
+  oversized record is never materialized in full and never drained
+  past; the offending record is refused before it is decoded or
+  validated.
+- **Excess rows are a typed refusal, not prefix truncation**: unlike
+  the predictor's truncating row budget (a prediction can honestly use
+  a prefix), metrics summarizes a COMPLETE run — silently producing
+  metrics from a prefix would misrepresent a complete-run result, so
+  an input with more than `max_rows` physical records is a located
+  `MetricsInputError`.
+- **Exit code unchanged**: bounds refusals ride the existing concise
+  exit-**2** data lane (one `error:` line, no traceback; input and any
+  pre-existing destination preserved byte-for-byte, absent destination
+  stays absent).
+- **Accepted-input behavior unchanged**: the metrics/output schema and
+  deterministic bytes for in-bound inputs are byte-identical to
+  pre-repair main (`4fa0f458`, receipt-pinned in the suite).
+- **No output-size ceiling is added** by this amendment: the derived
+  JSONL remains un-ceilinged, as the failure-contracts table has
+  always recorded.
+
+This closes §9's previously unenforced "both are small" assumption.
 
 ## 10. Open questions for AURA + Jack
 
