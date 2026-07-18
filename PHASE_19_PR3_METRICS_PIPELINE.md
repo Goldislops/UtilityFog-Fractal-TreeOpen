@@ -404,19 +404,34 @@ it, but exact class identity, repr and traceback text change at the five
 reclassified sites. Exit codes, messages, output bytes and the §9.1/§9.2
 contracts are unchanged.
 
-**Invalid-UTF-8 input lane (post-pilot restoration)**: the typed
-narrowing initially let `UnicodeDecodeError` (a `ValueError` subclass)
-escape on an undecodable `--log` — pre-pilot the broad catch reported it
-as concise exit 2. Restored by a **narrow wrapping boundary** around the
-input-log text-reading region only: `except UnicodeDecodeError` exactly
-(never `UnicodeError`/`ValueError`/`OSError`), re-raised as
-`MetricsInputError(str(e))` with the original error as `__cause__`, so
-the public stderr bytes match the pre-pilot lane byte-for-byte and
+**Invalid-UTF-8 input lane (post-pilot restoration; offset contract
+corrected by the §9.5 bounded reader)**: the typed narrowing initially
+let `UnicodeDecodeError` (a `ValueError` subclass) escape on an
+undecodable `--log` — pre-pilot the broad catch reported it as concise
+exit 2. Restored by a **narrow wrapping boundary** around the input-log
+reading region only: `except UnicodeDecodeError` exactly (never
+`UnicodeError`/`ValueError`/`OSError`), re-raised as
+`MetricsInputError(str(e))` with the original error as `__cause__`;
 read-side `OSError` propagation is untouched. The typed lane therefore
 comprises the **five existing direct typed raises plus this one
 invalid-UTF-8 wrapping boundary**. This is a **restoration of an
 undocumented behavior changed by the pilot**, not a new family-wide
 convention.
+
+*Offset contract (stated precisely, 2026-07-19 correction)*: the §9.5
+bounded binary reader decodes **each physical record independently**,
+so the numeric offset inside the `UnicodeDecodeError` message is
+**record-relative** — not relative to a whole text-decoder input
+buffer. Byte-for-byte historical stderr preservation is guaranteed for
+the existing leading-invalid-byte fixture (invalid byte at record 1,
+offset 0 — record-relative and buffer-relative coincide, pinned).
+For an invalid byte on a **later** record, the pre-§9.5 reader reported
+a text-decoder buffer-relative position (itself an internal buffering
+artifact, not a documented file offset); the bounded reader reports the
+record-relative position (regression-pinned). Exception class, exact
+`UnicodeDecodeError` cause, concise one-line public shape and exit
+code 2 are unchanged; **no arbitrary whole-buffer offset compatibility
+is claimed**.
 
 **Separate observation — `boundary_cv` rate validation (recorded, not
 changed here)**: `boundary_cv` currently performs **no**

@@ -686,12 +686,18 @@ def compute_run_metrics(
             f"got {max_line_bytes!r}"
         )
 
-    # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
+    # Load and sort. The UnicodeDecodeError wrap keeps the pre-typed
     # public contract for an undecodable log (genuine bad input, concise
     # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
-    # OSError — and re-raised as MetricsInputError(str(e)) so the stderr
-    # bytes match the pre-#381 lane while read-side OSErrors keep
-    # propagating.
+    # OSError — and re-raised as MetricsInputError(str(e)) with the
+    # original as __cause__, while read-side OSErrors keep propagating.
+    # Offset contract: the bounded reader decodes each physical record
+    # independently, so the numeric offset in the message is
+    # RECORD-relative. The historical leading-invalid-byte stderr is
+    # preserved byte-for-byte (record 1 offset 0 — pinned); offsets on
+    # later records are record-relative rather than the old text
+    # decoder's buffer-relative artifact, and no whole-buffer offset
+    # compatibility is claimed (regression-pinned).
     entries: list[dict[str, Any]] = []
     try:
         with log_path.open("rb") as f:

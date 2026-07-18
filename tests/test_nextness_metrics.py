@@ -1360,6 +1360,55 @@ def test_invalid_utf8_direct_api_typed_with_cause(tmp_path) -> None:
     assert str(exc_info.value) == str(exc_info.value.__cause__)
 
 
+def test_cli_invalid_utf8_on_later_record_is_record_relative(
+    tmp_path, capsys
+) -> None:
+    """Offset-contract pin (2026-07-19 correction): the bounded reader
+    decodes each physical record independently, so an invalid byte on a
+    LATER record reports a RECORD-relative decoder position — provably
+    different from the whole-buffer position the pre-bounded text reader
+    frame yields for the same bytes. Class, exact UnicodeDecodeError
+    cause, concise one-line shape, exit 2 and preservation unchanged."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    first = b'{"generation": 1, "token_counts": {"void_static": 3}}\n'
+    bad_record = b'\xff\xfe{"generation": 2}'
+    log = tmp_path / "later_bad_utf8.jsonl"
+    log.write_bytes(first + bad_record + b"\n")
+    before = log.read_bytes()
+    out = tmp_path / "later_out.jsonl"
+
+    # The old reader's frame for this small file: one whole text-decoder
+    # buffer, so its reported position is the ABSOLUTE byte offset.
+    with pytest.raises(UnicodeDecodeError) as whole_exc:
+        (first + bad_record + b"\n").decode("utf-8")
+    assert whole_exc.value.start == len(first)  # nonzero, buffer-relative
+
+    # The bounded reader's frame: the offending RECORD alone.
+    with pytest.raises(UnicodeDecodeError) as record_exc:
+        bad_record.decode("utf-8")
+    assert record_exc.value.start == 0  # record-relative
+    assert record_exc.value.start != whole_exc.value.start  # positions differ
+
+    expected = f"error: {record_exc.value}"
+    assert main(["--log", str(log), "--out", str(out)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert lines == [expected]  # exact record-relative one-line message
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+    # Exact cause identity on the direct API, record-relative offset.
+    with pytest.raises(MetricsInputError) as exc_info:
+        compute_run_metrics(log, tmp_path / "later_d.jsonl")
+    assert type(exc_info.value.__cause__) is UnicodeDecodeError
+    assert exc_info.value.__cause__.start == 0
+    assert str(exc_info.value) == str(exc_info.value.__cause__)
+    assert not (tmp_path / "later_d.jsonl").exists()
+
+
 # ---------------------------------------------------------------------------
 # Strict input domain (Kev-authorized policy; PHASE_19_PR3 §9.4).
 # Failing-first: every confirmed public divergence from the documented
