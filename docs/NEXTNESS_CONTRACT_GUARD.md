@@ -62,6 +62,21 @@ failed, then the original was restored and the guard passed (29/29):
 | extra field added to receipts | caught (2 failures) |
 | evaluator cross-check tolerance 1e-6 → 1e-5 | caught (2 failures) |
 
+## Observer → metrics seam (added 2026-07-18)
+
+NP7 now carries one **live producer→consumer guard** for the
+observer→metrics seam: two deterministic synthetic snapshots run through
+the real `process_snapshot`, every emitted row is proven against the
+strict metrics consumer contract (exact built-in row and `token_counts`
+containers; non-boolean, non-negative integer counts; unit fields real,
+finite and within `[0, 1]`), and the unmodified log is then fed to the
+merged strict `compute_run_metrics` with strict-JSON parsing of every
+derived line and a byte-identical second-run determinism proof. A
+compact historical fixture separately proves the authorized
+absent-unit-field → `0.0` compatibility policy still succeeds. The
+existing NP1/NP2/NP5/NP6 goldens are unchanged; the metrics suite's own
+mutation matrix is not duplicated here.
+
 ## Honest scope and limitations
 
 - The guard runs **when the test suite runs** (CI and local); it
