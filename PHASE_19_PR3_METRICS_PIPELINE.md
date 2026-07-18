@@ -460,24 +460,41 @@ destination.
   aggregate now carries an explicit two-sided clamp (a no-op for valid
   input; results for the valid domain are unchanged).
 - **Pre-write invariant + strict serialization**: before parent-mkdir/
-  open, every float in every output row — computed AND pass-through
-  (e.g. a numeric-overflow `generation` such as `1e400` → `inf`) — must
-  be finite; the writer serializes with `allow_nan=False` as a backstop
+  open, every float in every output row — computed AND pass-through,
+  **recursively through nested built-in containers** (e.g. a
+  numeric-overflow `generation` such as `1e400` → `inf`, or an `inf`
+  nested inside a pass-through list) — must be finite, with the
+  rejection naming the offending output key/path. The traversal is
+  hook-safe (exact built-in `dict`/`list`/`tuple` and exact `float`
+  only). The writer serializes with `allow_nan=False` as a backstop
   (unreachable given the invariant; a failure there is an internal
   contract failure and propagates loudly). This adds **no partial-output
-  claim** and leaves the §9.2 streamed, non-atomic write contract
-  unchanged.
+  claim** and leaves the §9.2 streamed, non-atomic write contract for
+  genuine write failures unchanged.
+- **Finite-computability of counts**: a token count too large to
+  participate in finite float arithmetic is a typed rejection at
+  ingestion (no arbitrary semantic cap — the constraint is numeric
+  computability); the smoothed raw vector and its total are also
+  guarded against non-finite arithmetic.
+- **Zero smoothing, defined semantics**: `smoothing >= 0` remains the
+  authorized policy; KL with positive support in P and zero support in
+  Q under zero smoothing is mathematically undefined and raises a
+  typed, concise `MetricsInputError` stating that positive smoothing is
+  required (direct and public pins).
+- **Located constant rejections**: the NaN/Infinity refusal is wrapped
+  at the decode call site with the exact log path and line number
+  (`invalid JSON value at <path>:<line>: …`, cause preserved) — a valid
+  JSON extension token refused by policy, never mislabeled an ordinary
+  `JSONDecodeError`.
 - **Message origins**: the negative-rate / smoothing / delta rejection
   messages now originate at the ingestion/parameter seam with
   strict-domain wording; the old helper-origin messages are subsumed
   (codes and one-line shape unchanged).
 - **Byte compatibility**: accepted historical fixtures and ordinary
   valid logs produce byte-identical output (golden + determinism pins).
-- **Recorded residual (pre-existing, unchanged)**: `--smoothing 0` with
-  disjoint token supports can raise `ZeroDivisionError` inside
-  `kl_divergence` — a loud crash that produces no output (it is not a
-  non-standard-output lane); it predates this policy and is left to its
-  own future decision.
+- ~~Recorded residual: zero-smoothing `ZeroDivisionError`~~ — **closed
+  by this policy's hardening round**: the formerly escaping crash is now
+  the typed zero-smoothing rejection above.
 
 ## 10. Open questions for AURA + Jack
 

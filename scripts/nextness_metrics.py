@@ -229,8 +229,17 @@ def smoothed_distribution(
         raise MetricsInputError(
             f"smoothing must be finite and non-negative, got {smoothing!r}"
         )
-    raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
+    try:
+        raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
+    except OverflowError as e:
+        raise MetricsInputError(
+            "token counts are too large for finite arithmetic"
+        ) from e
     total = sum(raw)
+    if not all(math.isfinite(v) for v in raw) or not math.isfinite(total):
+        raise MetricsInputError(
+            "token counts and smoothing produce non-finite arithmetic"
+        )
     if total <= 0:
         # Pathological: empty counts AND zero smoothing. Return uniform
         # rather than raise — divergence against uniform is well-defined
@@ -256,8 +265,16 @@ def kl_divergence(
     p = smoothed_distribution(counts_p, smoothing)
     q = smoothed_distribution(counts_q, smoothing)
     total = 0.0
-    for p_i, q_i in zip(p, q):
+    for i, (p_i, q_i) in enumerate(zip(p, q)):
         if p_i > 0.0:
+            if q_i == 0.0:
+                # Zero smoothing keeps its authorized non-negative
+                # policy, but KL is mathematically undefined here.
+                raise MetricsInputError(
+                    f"KL divergence is undefined for token "
+                    f"{TOKEN_NAMES[i]!r}: positive support in P with "
+                    f"zero support in Q; positive smoothing is required"
+                )
             total += p_i * math.log2(p_i / q_i)
     return total
 
@@ -505,19 +522,51 @@ def _validate_entry(entry: Any, log_path: pathlib.Path, line_no: int) -> None:
                     f"token_counts[{key!r}] must be a non-negative, "
                     f"non-boolean integer, got {count!r} at {log_path}:{line_no}"
                 )
+            # Finite-computability constraint (not an arbitrary semantic
+            # cap): the count must participate in finite float
+            # arithmetic for the canonical distributions.
+            try:
+                as_float = float(count)
+            except OverflowError as e:
+                raise MetricsInputError(
+                    f"token_counts[{key!r}] is too large for finite "
+                    f"arithmetic at {log_path}:{line_no}"
+                ) from e
+            if not math.isfinite(as_float):
+                raise MetricsInputError(
+                    f"token_counts[{key!r}] is too large for finite "
+                    f"arithmetic at {log_path}:{line_no}"
+                )
+
+
+def _require_finite_tree(value: Any, location: str) -> None:
+    """RECURSIVE pre-write invariant: no non-finite float may reach the
+    serialized output anywhere — top level or nested inside built-in
+    containers (covers computed AND pass-through fields; runs before any
+    destination is touched, so it can never truncate or partially write).
+
+    Hook-safe by construction: only exact built-in ``dict``/``list``/
+    ``tuple`` containers are traversed and only exact built-in ``float``
+    values are inspected — no subclass hooks (``__iter__``/``keys``/
+    ``__float__``) are ever invoked.
+    """
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise MetricsInputError(
+                f"non-finite value in derived output: {location}={value!r}"
+            )
+    elif type(value) is dict:
+        for key, item in value.items():
+            _require_finite_tree(item, f"{location}.{key}" if location else str(key))
+    elif type(value) in (list, tuple):
+        for index, item in enumerate(value):
+            _require_finite_tree(item, f"{location}[{index}]")
 
 
 def _require_finite_row(row: dict[str, Any]) -> None:
-    """Pre-write invariant: no non-finite float may reach the serialized
-    output (covers computed AND pass-through fields; runs before any
-    destination is touched, so it can never truncate or partially write)."""
+    """Recursive whole-row finiteness (see :func:`_require_finite_tree`)."""
     for key, value in row.items():
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, float) and not math.isfinite(value):
-            raise MetricsInputError(
-                f"non-finite value in derived output: {key}={value!r}"
-            )
+        _require_finite_tree(value, str(key))
 
 
 def _entry_cci(entry: dict[str, Any]) -> float:
@@ -589,6 +638,13 @@ def compute_run_metrics(
                 except json.JSONDecodeError as e:
                     raise MetricsInputError(
                         f"malformed JSONL at {log_path}:{line_no}: {e}"
+                    ) from e
+                except MetricsInputError as e:
+                    # A valid JSON extension token (NaN/Infinity) refused
+                    # by policy — locate it precisely without mislabeling
+                    # it an ordinary JSONDecodeError; cause preserved.
+                    raise MetricsInputError(
+                        f"invalid JSON value at {log_path}:{line_no}: {e}"
                     ) from e
                 _validate_entry(entry, log_path, line_no)
                 entries.append(entry)
