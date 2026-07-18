@@ -3744,6 +3744,25 @@ def _boundary_guard(monkeypatch):
     return None
 
 
+@pytest.fixture
+def _boundary_guard_paths(monkeypatch):
+    """Extension of ``_boundary_guard`` (request both): additionally fences
+    path probing — output-path and config-log validation — so rejection is
+    proven to precede even path work, and acceptance is proven by tripping
+    the FIRST downstream stage (``path validation``) instead of running
+    the experiment."""
+    def breach(name):
+        def _spy(*args, **kwargs):
+            raise _BoundaryBreach(f"reached {name} despite a malformed parameter")
+        return _spy
+
+    monkeypatch.setattr(calibration_module, "_validate_calibration_output_path",
+                        breach("path validation"))
+    monkeypatch.setattr(calibration_module, "_validate_config_log_directory",
+                        breach("config-log path validation"))
+    return None
+
+
 def _boundary_setup(tmp_path):
     snaps_dir, log_path, config = _calibration_setup(tmp_path)
     snap = _make_snapshot(snaps_dir / "v070_gen100_step1000_a.npz",
@@ -3814,6 +3833,48 @@ def test_boundary_shuffle_duplicate_modes(tmp_path, _boundary_guard):
         shuffle_test([snap], out, log_path, "short", config,
                      modes=("unshuffled", "unshuffled"), seeds=(1,))
     assert not out.exists()
+
+
+def test_boundary_shuffle_negative_seed(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Jack C1: ``seeds=(-1,)`` formerly passed the boundary and reached
+    ``_sort_snapshots_by_generation`` (NumPy itself rejects
+    ``default_rng(-1)`` with ``ValueError: expected non-negative integer``).
+    The boundary now owns that rejection: a deterministic, field-anchored
+    ValueError before path validation, snapshot sorting, NumPy/RNG,
+    processing, or output creation — the spies turn any such reach into an
+    unmistakable ``_BoundaryBreach`` failure instead."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every seed must be non-negative"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(-1,))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_int_subclass_seed(tmp_path, _boundary_guard, _boundary_guard_paths):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every seed must be a builtin int"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(_MyInt(1),))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_seed_zero_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: seed 0 passes the hardened boundary — the run
+    proceeds to the first downstream stage (path validation), where the
+    extended guard trips. A ValueError here would mean over-rejection."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(0,))
+
+
+def test_boundary_shuffle_default_seeds_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: the shipped defaults remain accepted. All are
+    non-negative exact builtin ints, so the new non-negativity bound
+    cannot reject them; ``seeds=None`` resolves to the defaults and must
+    reach path validation, not fail validation."""
+    assert type(DEFAULT_CANONICAL_SEED) is int and DEFAULT_CANONICAL_SEED >= 0
+    assert all(type(s) is int and s >= 0 for s in DEFAULT_VARIANCE_SEEDS)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=None)
 
 
 # ---- verify_memory_channels ----
@@ -3912,6 +3973,86 @@ def test_boundary_sweep_threshold_hostile_token(tmp_path, _boundary_guard):
         sweep_threshold([snap], out, log_path, "short", config,
                         multipliers=(1.0,), threshold_dependent_token=_HostileHook())
     assert not out.exists()
+
+
+def test_boundary_sweep_threshold_tuple_attribute(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Jack C2: ``threshold_name="TOKEN_NAMES"`` formerly passed ``hasattr``
+    and escaped later as ``TypeError: float() argument must be a string or
+    a real number, not 'tuple'``. The resolved VALUE's shape is now proven
+    at the boundary: deterministic, field-anchored ValueError before path
+    probing, snapshot sorting, observer mutation, ``process_snapshot``,
+    NumPy, or output work — the spies make any such reach an unmistakable
+    ``_BoundaryBreach`` failure instead."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="threshold_name 'TOKEN_NAMES' resolves to tuple"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="TOKEN_NAMES", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_bool_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_BOOL_THRESHOLD", True, raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="resolves to bool"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_BOOL_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_nonfinite_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_NAN_THRESHOLD", float("nan"), raising=False)
+    monkeypatch.setattr(obs, "FAKE_INF_THRESHOLD", float("inf"), raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    for name in ("FAKE_NAN_THRESHOLD", "FAKE_INF_THRESHOLD"):
+        with pytest.raises(ValueError, match="resolves to a non-finite value"):
+            sweep_threshold([snap], out, log_path, "short", config,
+                            threshold_name=name, multipliers=(1.0,),
+                            threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_astronomical_int_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    """An exact builtin int attribute too large for float() (OverflowError)
+    must translate into the deterministic field-anchored ValueError, not
+    escape as OverflowError or reach downstream stages."""
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_HUGE_THRESHOLD", 10 ** 400, raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="not representable as a finite float"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_HUGE_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_hostile_attribute_no_hooks(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    """A hostile resolved value must be rejected via the identity-table
+    description ("non-builtin value") without its repr/str/eq hooks ever
+    executing while the diagnostic is formed."""
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_HOSTILE_THRESHOLD", _HostileHook(), raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="resolves to non-builtin value"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_HOSTILE_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_valid_canonical_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: the canonical default threshold name resolves to a
+    finite builtin number and passes the hardened boundary — the run
+    proceeds to the first downstream stage (path validation), where the
+    extended guard trips. A ValueError here would mean over-rejection."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name=DEFAULT_THRESHOLD_NAME, multipliers=(1.0, 2.0),
+                        threshold_dependent_token="compute_decay")
 
 
 # ---- ablate_cascade ----

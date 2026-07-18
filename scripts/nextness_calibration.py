@@ -163,15 +163,6 @@ def _require_exact_bool(value: Any, field: str) -> bool:
     return value
 
 
-def _require_exact_int(value: Any, field: str, minimum: int) -> int:
-    # type identity: bool and int subclasses are rejected, never coerced.
-    if type(value) is not int:
-        raise ValueError(f"{field}: expected builtin int, got {_describe_type(value)}")
-    if value < minimum:
-        raise ValueError(f"{field}: {value} is below the minimum {minimum}")
-    return value
-
-
 def _require_exact_tuple(value: Any, field: str) -> tuple:
     if type(value) is not tuple:
         raise ValueError(f"{field}: expected builtin tuple, got {_describe_type(value)}")
@@ -970,8 +961,10 @@ def shuffle_test(
         modes: which shuffle modes to run. Defaults to all three. ``"unshuffled"``
             uses only one seed (the canonical one) since it doesn't involve
             randomization; shuffled modes use the full seed list.
-        seeds: which RNG seeds to use for shuffled modes. Defaults to
-            ``(DEFAULT_CANONICAL_SEED, *DEFAULT_VARIANCE_SEEDS)`` per
+        seeds: which RNG seeds to use for shuffled modes. Each must be a
+            non-negative exact builtin ``int`` (``np.random.default_rng``
+            itself rejects negative seeds; seed ``0`` is valid). Defaults
+            to ``(DEFAULT_CANONICAL_SEED, *DEFAULT_VARIANCE_SEEDS)`` per
             design doc §12 Q6 (one canonical + 5 variance estimates).
 
     Returns the aggregate dict for callers that want to inspect it without
@@ -980,7 +973,8 @@ def shuffle_test(
     Raises:
         :class:`WriteOutsideLogDirError` if ``out_path`` is outside the
             log directory.
-        ``ValueError`` for unknown modes or invalid calibration_set.
+        ``ValueError`` for unknown modes, invalid calibration_set, or a
+            seed that is not a non-negative exact builtin int.
     """
     _require_calibration_set(calibration_set)
     if modes is None:
@@ -999,9 +993,12 @@ def shuffle_test(
     _require_unique(modes, "modes")
     if seeds is None:
         seeds = (DEFAULT_CANONICAL_SEED,) + DEFAULT_VARIANCE_SEEDS
-    # Non-empty tuple of unique exact builtin ints, proven before seeds[0]
-    # indexing or RNG construction. Seeds may be any int NumPy accepts,
-    # including 0 and negatives, so no positivity bound here.
+    # Non-empty tuple of unique, non-negative exact builtin ints, proven
+    # before seeds[0] indexing, path validation, snapshot sorting, RNG
+    # construction, or any NumPy/output work. np.random.default_rng itself
+    # rejects negative seeds (ValueError: expected non-negative integer),
+    # so this boundary owns that rejection deterministically; seed 0 and
+    # all shipped defaults remain valid.
     _require_exact_tuple(seeds, "seeds")
     if not seeds:
         raise ValueError("seeds must be non-empty")
@@ -1009,6 +1006,11 @@ def shuffle_test(
         if type(seed) is not int:
             raise ValueError(
                 f"every seed must be a builtin int, got {_describe_type(seed)}"
+            )
+        if seed < 0:
+            raise ValueError(
+                f"every seed must be non-negative (np.random.default_rng "
+                f"rejects negative seeds), got {seed}"
             )
     _require_unique(seeds, "seeds")
 
@@ -1835,9 +1837,16 @@ def sweep_threshold(
     Raises:
         :class:`WriteOutsideLogDirError` if ``out_path`` is outside log dir.
         ``ValueError`` for invalid calibration_set, missing threshold
-            attribute, empty multipliers, non-positive multipliers, or a
-            ``threshold_dependent_token`` that is ``None`` (not passed
-            explicitly), unknown, or non-routing.
+            attribute, a threshold attribute whose resolved value is not a
+            builtin int or float (bool and subclasses rejected), is not
+            representable as a finite float, or yields a non-finite
+            derived threshold, empty multipliers, non-positive
+            multipliers, or a ``threshold_dependent_token`` that is
+            ``None`` (not passed explicitly), unknown, or non-routing.
+            Value-shaped attribute failures are necessarily detected
+            after the attribute lookup itself (existence and name shape
+            are proven first); all are raised before path validation,
+            snapshot sorting, observer mutation, or NumPy/output work.
     """
     # Lazy import of the observer module so we can monkeypatch its
     # threshold attribute. This is the only place in the calibration
@@ -1889,17 +1898,41 @@ def sweep_threshold(
             f"{sorted(_observer_module.ROUTING_TOKENS)}."
         )
 
-    out_path = pathlib.Path(out_path)
-    log_path = pathlib.Path(log_path)
-    _validate_calibration_output_path(out_path, log_path)
-    _validate_config_log_directory(config, log_path)
-
-    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
-
-    base_threshold_value = float(getattr(_observer_module, threshold_name))
-    # Prove every derived effective threshold is finite BEFORE mutating the
-    # observer module: multipliers are finite and the base is finite, but
-    # their product can still overflow to inf for a large-but-finite base.
+    # Resolve the named observer attribute once and prove its VALUE shape
+    # here at the boundary. The hasattr above proves existence only; the
+    # resolved value must itself be a builtin int or float (bool and int/
+    # float subclasses rejected by type identity), representable as a
+    # finite float, and every derived effective threshold must stay
+    # finite — all proven BEFORE path validation, snapshot sorting,
+    # observer-module mutation, process_snapshot, NumPy work, or output
+    # creation. Exact boundary truth: a value-shaped failure is only
+    # detectable AFTER this attribute lookup; only name-shaped failures
+    # (a non-str threshold_name) fail before the lookup. Diagnostics use
+    # _describe_type, never repr, so a hostile resolved value cannot run
+    # hooks while the error is formed.
+    resolved_threshold = getattr(_observer_module, threshold_name)
+    if type(resolved_threshold) is not int and type(resolved_threshold) is not float:
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to "
+            f"{_describe_type(resolved_threshold)}; expected the named "
+            "observer constant to be a builtin int or float"
+        )
+    try:
+        base_threshold_value = float(resolved_threshold)
+    except (OverflowError, ValueError):
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to a value not "
+            "representable as a finite float"
+        ) from None
+    if not math.isfinite(base_threshold_value):
+        raise ValueError(
+            f"threshold_name {threshold_name!r} resolves to a non-finite "
+            "value; expected a finite base threshold"
+        )
+    # Prove every derived effective threshold is finite BEFORE any path,
+    # sort or mutation work: multipliers are finite and the base is finite,
+    # but their product can still overflow to inf for a large-but-finite
+    # base.
     for multiplier in multipliers:
         derived = base_threshold_value * multiplier
         if not math.isfinite(derived):
@@ -1908,6 +1941,13 @@ def sweep_threshold(
                 f"threshold ({threshold_name} * {multiplier}); refusing to "
                 "mutate the observer module"
             )
+
+    out_path = pathlib.Path(out_path)
+    log_path = pathlib.Path(log_path)
+    _validate_calibration_output_path(out_path, log_path)
+    _validate_config_log_directory(config, log_path)
+
+    sorted_snapshots = _sort_snapshots_by_generation(list(snapshots))
 
     per_snapshot_rows: list[dict[str, Any]] = []
     # Per-multiplier aggregator: multiplier -> list of {snapshot, metrics,
