@@ -3678,3 +3678,487 @@ def test_sweep_patch_radius_sorts_input_by_generation(tmp_path):
     rows = [json.loads(l) for l in out.read_text().splitlines()[:-1]]
     generations = [r["snapshot_generation"] for r in rows]
     assert generations == [100, 200, 300]
+
+
+# ---------------------------------------------------------------------------
+# Package C — parameter-boundary totality (Kev word, Jack spec)
+#
+# Every malformed operator-controlled parameter must raise a deterministic,
+# field-anchored ValueError BEFORE process_snapshot, NumPy load/RNG, observer
+# module mutation, path probing, or output creation. Spies below fail the
+# test if any of those are reached; a hostile object proves diagnostics never
+# execute untrusted repr/str/eq/hash hooks.
+# ---------------------------------------------------------------------------
+
+
+class _BoundaryBreach(Exception):
+    """Raised by a spy when a malformed input reaches costly/stateful work."""
+
+
+class _HostileHook:
+    """Hashable; every diagnostic hook (repr/str/eq) raises if consulted."""
+
+    def __repr__(self):
+        raise _BoundaryBreach("__repr__ hook executed forming an error")
+
+    def __str__(self):
+        raise _BoundaryBreach("__str__ hook executed forming an error")
+
+    def __eq__(self, other):
+        raise _BoundaryBreach("__eq__ hook executed")
+
+    __hash__ = object.__hash__
+
+
+class _MyInt(int):
+    pass
+
+
+class _MyStr(str):
+    pass
+
+
+class _MyTuple(tuple):
+    pass
+
+
+@pytest.fixture
+def _boundary_guard(monkeypatch):
+    """Install spies so any post-validation work trips the test.
+
+    ``_sort_snapshots_by_generation`` is the first step every experiment
+    runs after its parameter guards, so tripping it proves rejection
+    happened before snapshot processing, NumPy work, observer mutation
+    (each experiment's ``setattr``/``process_snapshot`` come strictly
+    later), and output creation. The ``process_snapshot``, writer and
+    ``np.load`` spies fence the deeper stages directly."""
+    def breach(name):
+        def _spy(*args, **kwargs):
+            raise _BoundaryBreach(f"reached {name} despite a malformed parameter")
+        return _spy
+
+    monkeypatch.setattr(calibration_module, "process_snapshot", breach("process_snapshot"))
+    monkeypatch.setattr(calibration_module, "_sort_snapshots_by_generation", breach("snapshot sort"))
+    monkeypatch.setattr(calibration_module, "_write_calibration_jsonl", breach("output writer"))
+    monkeypatch.setattr(calibration_module.np, "load", breach("numpy load"))
+    return None
+
+
+@pytest.fixture
+def _boundary_guard_paths(monkeypatch):
+    """Extension of ``_boundary_guard`` (request both): additionally fences
+    path probing — output-path and config-log validation — so rejection is
+    proven to precede even path work, and acceptance is proven by tripping
+    the FIRST downstream stage (``path validation``) instead of running
+    the experiment."""
+    def breach(name):
+        def _spy(*args, **kwargs):
+            raise _BoundaryBreach(f"reached {name} despite a malformed parameter")
+        return _spy
+
+    monkeypatch.setattr(calibration_module, "_validate_calibration_output_path",
+                        breach("path validation"))
+    monkeypatch.setattr(calibration_module, "_validate_config_log_directory",
+                        breach("config-log path validation"))
+    return None
+
+
+def _boundary_setup(tmp_path):
+    snaps_dir, log_path, config = _calibration_setup(tmp_path)
+    snap = _make_snapshot(snaps_dir / "v070_gen100_step1000_a.npz",
+                          generation=100, lattice=8)
+    out = log_path.parent / "out.jsonl"
+    return snap, out, log_path, config
+
+
+# ---- check_determinism ----
+
+def test_boundary_check_determinism_non_int_repeats(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="repeats must be a builtin int"):
+        check_determinism([snap], out, log_path, "short", config, repeats="two")
+    assert not out.exists()
+
+
+def test_boundary_check_determinism_bool_repeats(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="repeats must be a builtin int"):
+        check_determinism([snap], out, log_path, "short", config, repeats=True)
+    assert not out.exists()
+
+
+def test_boundary_check_determinism_hostile_calibration_set(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="calibration_set: expected builtin str"):
+        check_determinism([snap], out, log_path, _HostileHook(), config, repeats=2)
+    assert not out.exists()
+
+
+# ---- shuffle_test ----
+
+def test_boundary_shuffle_empty_seeds(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="seeds must be non-empty"):
+        shuffle_test([snap], out, log_path, "short", config,
+                     modes=("unshuffled",), seeds=())
+    assert not out.exists()
+
+
+def test_boundary_shuffle_bool_seed(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every seed must be a builtin int"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(True,))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_duplicate_seeds(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        shuffle_test([snap], out, log_path, "short", config,
+                     modes=("lattice_only_shuffle",), seeds=(1, 1))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_str_subclass_mode(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="mode: expected builtin str"):
+        shuffle_test([snap], out, log_path, "short", config,
+                     modes=(_MyStr("unshuffled"),), seeds=(1,))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_duplicate_modes(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        shuffle_test([snap], out, log_path, "short", config,
+                     modes=("unshuffled", "unshuffled"), seeds=(1,))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_negative_seed(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Jack C1: ``seeds=(-1,)`` formerly passed the boundary and reached
+    ``_sort_snapshots_by_generation`` (NumPy itself rejects
+    ``default_rng(-1)`` with ``ValueError: expected non-negative integer``).
+    The boundary now owns that rejection: a deterministic, field-anchored
+    ValueError before path validation, snapshot sorting, NumPy/RNG,
+    processing, or output creation — the spies turn any such reach into an
+    unmistakable ``_BoundaryBreach`` failure instead."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every seed must be non-negative"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(-1,))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_int_subclass_seed(tmp_path, _boundary_guard, _boundary_guard_paths):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every seed must be a builtin int"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(_MyInt(1),))
+    assert not out.exists()
+
+
+def test_boundary_shuffle_seed_zero_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: seed 0 passes the hardened boundary — the run
+    proceeds to the first downstream stage (path validation), where the
+    extended guard trips. A ValueError here would mean over-rejection."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=(0,))
+
+
+def test_boundary_shuffle_default_seeds_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: the shipped defaults remain accepted. All are
+    non-negative exact builtin ints, so the new non-negativity bound
+    cannot reject them; ``seeds=None`` resolves to the defaults and must
+    reach path validation, not fail validation."""
+    assert type(DEFAULT_CANONICAL_SEED) is int and DEFAULT_CANONICAL_SEED >= 0
+    assert all(type(s) is int and s >= 0 for s in DEFAULT_VARIANCE_SEEDS)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        shuffle_test([snap], out, log_path, "short", config, seeds=None)
+
+
+# ---- verify_memory_channels ----
+
+def test_boundary_verify_memory_channels_hostile_calibration_set(tmp_path, _boundary_guard):
+    snap, out, log_path, _config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="calibration_set: expected builtin str"):
+        verify_memory_channels([snap], out, log_path, _HostileHook())
+    assert not out.exists()
+
+
+# ---- sweep_stride ----
+
+def test_boundary_sweep_stride_bool(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="positive int"):
+        sweep_stride([snap], out, log_path, "short", config, strides=(True,))
+    assert not out.exists()
+
+
+def test_boundary_sweep_stride_int_subclass(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="positive int"):
+        sweep_stride([snap], out, log_path, "short", config, strides=(_MyInt(4),))
+    assert not out.exists()
+
+
+def test_boundary_sweep_stride_duplicate(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        sweep_stride([snap], out, log_path, "short", config, strides=(8, 8))
+    assert not out.exists()
+
+
+def test_boundary_sweep_stride_empty(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="strides must be non-empty"):
+        sweep_stride([snap], out, log_path, "short", config, strides=())
+    assert not out.exists()
+
+
+# ---- sweep_threshold ----
+
+def test_boundary_sweep_threshold_bool_multiplier(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="every multiplier must be a positive number"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(True,), threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_nan_multiplier(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="finite"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(float("nan"),), threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_inf_multiplier(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="finite"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(float("inf"),), threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_astronomical_multiplier(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="finite float"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(10 ** 400,), threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_duplicate_multiplier(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(1.0, 1.0), threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_non_str_name(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="threshold_name: expected builtin str"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name=123, multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_hostile_token(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="threshold_dependent_token: expected builtin str"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(1.0,), threshold_dependent_token=_HostileHook())
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_tuple_attribute(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Jack C2: ``threshold_name="TOKEN_NAMES"`` formerly passed ``hasattr``
+    and escaped later as ``TypeError: float() argument must be a string or
+    a real number, not 'tuple'``. The resolved VALUE's shape is now proven
+    at the boundary: deterministic, field-anchored ValueError before path
+    probing, snapshot sorting, observer mutation, ``process_snapshot``,
+    NumPy, or output work — the spies make any such reach an unmistakable
+    ``_BoundaryBreach`` failure instead."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="threshold_name 'TOKEN_NAMES' resolves to tuple"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="TOKEN_NAMES", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_bool_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_BOOL_THRESHOLD", True, raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="resolves to bool"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_BOOL_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_nonfinite_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_NAN_THRESHOLD", float("nan"), raising=False)
+    monkeypatch.setattr(obs, "FAKE_INF_THRESHOLD", float("inf"), raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    for name in ("FAKE_NAN_THRESHOLD", "FAKE_INF_THRESHOLD"):
+        with pytest.raises(ValueError, match="resolves to a non-finite value"):
+            sweep_threshold([snap], out, log_path, "short", config,
+                            threshold_name=name, multipliers=(1.0,),
+                            threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_astronomical_int_attribute(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    """An exact builtin int attribute too large for float() (OverflowError)
+    must translate into the deterministic field-anchored ValueError, not
+    escape as OverflowError or reach downstream stages."""
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_HUGE_THRESHOLD", 10 ** 400, raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="not representable as a finite float"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_HUGE_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_hostile_attribute_no_hooks(tmp_path, monkeypatch, _boundary_guard, _boundary_guard_paths):
+    """A hostile resolved value must be rejected via the identity-table
+    description ("non-builtin value") without its repr/str/eq hooks ever
+    executing while the diagnostic is formed."""
+    from scripts import nextness_observer as obs
+    monkeypatch.setattr(obs, "FAKE_HOSTILE_THRESHOLD", _HostileHook(), raising=False)
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="resolves to non-builtin value"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name="FAKE_HOSTILE_THRESHOLD", multipliers=(1.0,),
+                        threshold_dependent_token="phase_boundary")
+    assert not out.exists()
+
+
+def test_boundary_sweep_threshold_valid_canonical_accepted(tmp_path, _boundary_guard, _boundary_guard_paths):
+    """Positive control: the canonical default threshold name resolves to a
+    finite builtin number and passes the hardened boundary — the run
+    proceeds to the first downstream stage (path validation), where the
+    extended guard trips. A ValueError here would mean over-rejection."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(_BoundaryBreach, match="reached path validation"):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        threshold_name=DEFAULT_THRESHOLD_NAME, multipliers=(1.0, 2.0),
+                        threshold_dependent_token="compute_decay")
+
+
+# ---- ablate_cascade ----
+
+def test_boundary_ablate_non_bool_include_baseline(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="include_baseline: expected builtin bool"):
+        ablate_cascade([snap], out, log_path, "short", config,
+                       disabled_tokens=(), include_baseline="yes", include_reverse=True)
+    assert not out.exists()
+
+
+def test_boundary_ablate_non_bool_include_reverse(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="include_reverse: expected builtin bool"):
+        ablate_cascade([snap], out, log_path, "short", config,
+                       disabled_tokens=(), include_baseline=True, include_reverse=1)
+    assert not out.exists()
+
+
+def test_boundary_ablate_hostile_disabled_token(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="disabled_token: expected builtin str"):
+        ablate_cascade([snap], out, log_path, "short", config,
+                       disabled_tokens=(_HostileHook(),),
+                       include_baseline=True, include_reverse=True)
+    assert not out.exists()
+
+
+def test_boundary_ablate_duplicate_disabled_token(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        ablate_cascade([snap], out, log_path, "short", config,
+                       disabled_tokens=("void_static", "void_static"),
+                       include_baseline=True, include_reverse=True)
+    assert not out.exists()
+
+
+# ---- sweep_temporal ----
+
+def test_boundary_sweep_temporal_bool_stride(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="gap_spec index_stride must be a positive builtin int"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=(("x", True),))
+    assert not out.exists()
+
+
+def test_boundary_sweep_temporal_tuple_subclass(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="each gap_specs entry must be an exact"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=(_MyTuple((_MyStr("x"), 2)),))
+    assert not out.exists()
+
+
+def test_boundary_sweep_temporal_str_subclass_label(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="gap_spec label must be a non-empty builtin str"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=((_MyStr("x"), 2),))
+    assert not out.exists()
+
+
+def test_boundary_sweep_temporal_duplicate_label(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        sweep_temporal([snap], out, log_path, "short", config,
+                       gap_specs=(("x", 1), ("x", 2)))
+    assert not out.exists()
+
+
+# ---- sweep_patch_radius ----
+
+def test_boundary_sweep_patch_radius_bool(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="positive int"):
+        sweep_patch_radius([snap], out, log_path, "short", config, radii=(True,))
+    assert not out.exists()
+
+
+def test_boundary_sweep_patch_radius_duplicate(tmp_path, _boundary_guard):
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError, match="duplicate value"):
+        sweep_patch_radius([snap], out, log_path, "short", config, radii=(1, 1))
+    assert not out.exists()
+
+
+# ---- deterministic-message + hostile-hook diagnostics ----
+
+def test_boundary_error_messages_deterministic(tmp_path, _boundary_guard):
+    """Repeated rejection yields one identical field-anchored message."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    messages = set()
+    for _ in range(3):
+        try:
+            sweep_stride([snap], out, log_path, "short", config, strides=(True,))
+        except ValueError as exc:
+            messages.add(str(exc))
+    assert len(messages) == 1
+
+
+def test_boundary_hostile_hook_never_consulted_in_diagnostics(tmp_path, _boundary_guard):
+    """A hostile object rejected at a scalar site must not have its repr/str/
+    eq consulted to build the message (it would raise _BoundaryBreach)."""
+    snap, out, log_path, config = _boundary_setup(tmp_path)
+    with pytest.raises(ValueError):
+        sweep_threshold([snap], out, log_path, "short", config,
+                        multipliers=(1.0,), threshold_dependent_token=_HostileHook())
