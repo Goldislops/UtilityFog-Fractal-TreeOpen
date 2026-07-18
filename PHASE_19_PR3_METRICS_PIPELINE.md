@@ -501,6 +501,17 @@ destination.
   limit is invented; messages, strict JSON, absent-field 0.0, output
   bytes, exit codes, failure classification and write/preservation
   contracts are unchanged.
+- **Decoder conversion-limit boundary (distinct from materialized huge
+  integers)**: `_finite_float` repairs integers that have already
+  MATERIALIZED as Python values; a valid JSON integer literal beyond
+  Python's decimal-digit conversion limit (>= ~4300 digits) makes the
+  DECODER itself raise `ValueError` before any value exists. That is
+  translated at the narrow `json.loads` boundary only — located
+  `malformed JSONL at <path>:<line>` with the original as `__cause__`.
+  `main()` and the computation catches are NOT broadened; the
+  post-validation internal plain-`ValueError` sentinel still propagates
+  (pinned). No arbitrary application-level magnitude cap exists on
+  either lane.
 - **Message origins**: the negative-rate / smoothing / delta rejection
   messages now originate at the ingestion/parameter seam with
   strict-domain wording; the old helper-origin messages are subsumed

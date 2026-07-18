@@ -1669,9 +1669,13 @@ def test_direct_helpers_huge_integer_totality() -> None:
         lambda: smoothed_distribution({"void_static": 3}, smoothing=_HUGE),
         lambda: smoothed_distribution({"void_static": _HUGE}, smoothing=0),
         lambda: kl_divergence({"void_static": _HUGE}, {"void_static": 3}, smoothing=0),
+        lambda: boundary_persistence_pairwise(-_HUGE, 0.3),
+        lambda: smoothed_distribution({"void_static": 3}, smoothing=-_HUGE),
+        lambda: boundary_cv([0.3, 0.4], delta=-_HUGE),
     ):
-        with pytest.raises(MetricsInputError):
+        with pytest.raises(MetricsInputError) as excinfo:
             bad_call()
+        assert type(excinfo.value) is MetricsInputError
 
 
 def test_compute_run_metrics_huge_parameters_typed_prewrite(tmp_path) -> None:
@@ -1687,9 +1691,86 @@ def test_compute_run_metrics_huge_parameters_typed_prewrite(tmp_path) -> None:
     out = tmp_path / "d.jsonl"
     out.write_text("pre-existing destination\n", encoding="utf-8")
     dest_before = out.read_bytes()
-    with pytest.raises(MetricsInputError):
-        compute_run_metrics(log, out, smoothing=_HUGE)
-    with pytest.raises(MetricsInputError):
-        compute_run_metrics(log, out, boundary_delta=_HUGE)
+    for kwargs in ({"smoothing": _HUGE}, {"smoothing": -_HUGE},
+                   {"boundary_delta": _HUGE}, {"boundary_delta": -_HUGE}):
+        with pytest.raises(MetricsInputError) as excinfo:
+            compute_run_metrics(log, out, **kwargs)
+        assert type(excinfo.value) is MetricsInputError
     assert log.read_bytes() == before
     assert out.read_bytes() == dest_before
+
+
+# ---------------------------------------------------------------------------
+# Decoder conversion-limit hole (distinct from materialized huge integers,
+# which _finite_float repairs): a VALID JSON integer literal of >= 5000
+# decimal digits makes the DECODER itself raise ValueError (Python's
+# int-conversion digit limit) before any value exists to validate. The
+# repair translates decoder-originated ValueError at the narrow
+# json.loads boundary only — main() and computation catches unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_decoder_digit_limit_rejected_located(tmp_path, capsys) -> None:
+    """Public 5,000-digit valid-JSON regression: typed exit 2, empty
+    stdout, exactly one located error: line, no traceback, input and
+    pre-existing destination byte-identical, absent destination stays
+    absent."""
+    huge_literal = "1" + "0" * 4999
+    log = tmp_path / "digits.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": "s1.npz", '
+        '"token_counts": {"void_static": ' + huge_literal + '}, '
+        '"boundary_rate": 0.3}' + "\n",
+        encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "digits_out.jsonl"
+    out.write_text("pre-existing destination" + "\n", encoding="utf-8")
+    dest_before = out.read_bytes()
+    rc = main(["--log", str(log), "--out", str(out)])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert f"{log}:1" in lines[0]
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == before
+    assert out.read_bytes() == dest_before
+    absent = tmp_path / "absent_out.jsonl"
+    rc2 = main(["--log", str(log), "--out", str(absent)])
+    capsys.readouterr()
+    assert rc2 == 2 and not absent.exists()
+
+
+def test_decoder_valueerror_seam_translated(tmp_path, monkeypatch) -> None:
+    """Runtime-independent seam pin: a sentinel plain ValueError raised
+    by the module-local json.loads for one marked line becomes exactly
+    MetricsInputError with the original as __cause__ and the log
+    path/line in the message; inputs preserved, no destination created.
+    (The post-validation internal plain-ValueError sentinel test above
+    separately proves propagation is untouched.)"""
+    import scripts.nextness_metrics as metrics_module
+    from scripts.nextness_metrics import MetricsInputError
+
+    marker = '{"generation": 1, "snapshot_file": "SEAM-MARKER.npz"}'
+    log = tmp_path / "seam.jsonl"
+    log.write_text(marker + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "seam_out.jsonl"
+    real_loads = metrics_module.json.loads
+
+    def patched(s, *args, **kwargs):
+        if isinstance(s, str) and "SEAM-MARKER" in s:
+            raise ValueError("sentinel decoder limit probe")
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(metrics_module.json, "loads", patched)
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, out)
+    monkeypatch.undo()
+    assert type(excinfo.value) is MetricsInputError
+    assert type(excinfo.value.__cause__) is ValueError
+    assert "sentinel decoder limit probe" in str(excinfo.value)
+    assert f"{log}:1" in str(excinfo.value)
+    assert log.read_bytes() == before
+    assert not out.exists()

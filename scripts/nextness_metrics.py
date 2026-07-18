@@ -224,11 +224,8 @@ def smoothed_distribution(
     algorithm; the result vector always has length ``len(TOKEN_NAMES)``
     and sums to 1.0 (within float precision).
     """
-    if isinstance(smoothing, bool) or not isinstance(smoothing, (int, float)):
-        raise MetricsInputError(
-            f"smoothing must be finite and non-negative, got {smoothing!r}"
-        )
-    if _finite_float(smoothing) is None or smoothing < 0:
+    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
+            or _finite_float(smoothing) is None or smoothing < 0):
         raise MetricsInputError(
             f"smoothing must be finite and non-negative, got {smoothing!r}"
         )
@@ -628,19 +625,14 @@ def compute_run_metrics(
     _validate_metrics_output_path(out_path, log_path)
 
     # §9.4 strict numeric parameters (typed, before any read work).
-    if isinstance(smoothing, bool) or not isinstance(smoothing, (int, float)):
+    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
+            or _finite_float(smoothing) is None or smoothing < 0):
         raise MetricsInputError(
             f"smoothing must be finite and non-negative, got {smoothing!r}"
         )
-    if _finite_float(smoothing) is None or smoothing < 0:
-        raise MetricsInputError(
-            f"smoothing must be finite and non-negative, got {smoothing!r}"
-        )
-    if isinstance(boundary_delta, bool) or not isinstance(boundary_delta, (int, float)):
-        raise MetricsInputError(
-            f"boundary_delta must be finite and positive, got {boundary_delta!r}"
-        )
-    if _finite_float(boundary_delta) is None or boundary_delta <= 0:
+    if (isinstance(boundary_delta, bool)
+            or not isinstance(boundary_delta, (int, float))
+            or _finite_float(boundary_delta) is None or boundary_delta <= 0):
         raise MetricsInputError(
             f"boundary_delta must be finite and positive, got {boundary_delta!r}"
         )
@@ -672,6 +664,17 @@ def compute_run_metrics(
                     # it an ordinary JSONDecodeError; cause preserved.
                     raise MetricsInputError(
                         f"invalid JSON value at {log_path}:{line_no}: {e}"
+                    ) from e
+                except ValueError as e:
+                    # Decoder-originated ValueError scoped to THIS
+                    # json.loads call only (e.g. Python's int-conversion
+                    # digit limit on a valid JSON integer literal) —
+                    # translated to a located typed rejection. main()'s
+                    # catch set and the computation catches are NOT
+                    # broadened; an internal post-validation plain
+                    # ValueError still propagates (sentinel-pinned).
+                    raise MetricsInputError(
+                        f"malformed JSONL at {log_path}:{line_no}: {e}"
                     ) from e
                 _validate_entry(entry, log_path, line_no)
                 entries.append(entry)
