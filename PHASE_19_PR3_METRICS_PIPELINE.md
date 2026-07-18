@@ -429,6 +429,56 @@ separately observable production/API change. It is **not a defect
 repaired by the typed-boundary pilot** and no `boundary_cv` production
 behavior changed in it.
 
+### 9.4 Strict input domain (2026-07-18, Kev-authorized policy)
+
+Recorded as metrics-specific policy (not harmonisation). Every rejection
+below is typed `MetricsInputError` → exit 2, one `error:` line, no
+traceback, input and any pre-existing destination byte-identical, no new
+destination.
+
+- **JSON constants**: `NaN`, `Infinity`, `-Infinity` are rejected at
+  decode (`parse_constant` hook) — in **any** field of any row.
+- **Unit fields** (`void_compute_balance`, `boundary_rate`,
+  `entropy_normalized`), when present: real JSON numbers (booleans
+  excluded), finite, within `[0, 1]`. Explicit `null`, numeric strings
+  and all other non-numeric values are rejected. **An absent unit field
+  is `0.0` — an explicitly chosen compatibility policy established
+  HERE**; PR #141 never documented default-on-failure, and `_safe_float`
+  is retained only as the realization of this absent-field policy behind
+  the validation gate.
+- **`token_counts`**, when the key is present: a JSON object of
+  non-boolean, non-negative integer counts (the shape the canonical
+  distributions consume). Rows must be JSON objects.
+- **Numeric parameters**: `smoothing` finite and non-negative;
+  `boundary_delta` finite and strictly positive (validated before any
+  read work).
+- **Public boundary helpers hardened consistently** (`pairwise`,
+  `boundary_cv`, `aggregate_clamped`): out-of-type and out-of-domain
+  rates and invalid deltas raise `MetricsInputError`, validated
+  **before** single-element early returns — closing the direct-API
+  `TypeError`/`ZeroDivisionError`/negative-CV/sign-flip escapes. The
+  aggregate now carries an explicit two-sided clamp (a no-op for valid
+  input; results for the valid domain are unchanged).
+- **Pre-write invariant + strict serialization**: before parent-mkdir/
+  open, every float in every output row — computed AND pass-through
+  (e.g. a numeric-overflow `generation` such as `1e400` → `inf`) — must
+  be finite; the writer serializes with `allow_nan=False` as a backstop
+  (unreachable given the invariant; a failure there is an internal
+  contract failure and propagates loudly). This adds **no partial-output
+  claim** and leaves the §9.2 streamed, non-atomic write contract
+  unchanged.
+- **Message origins**: the negative-rate / smoothing / delta rejection
+  messages now originate at the ingestion/parameter seam with
+  strict-domain wording; the old helper-origin messages are subsumed
+  (codes and one-line shape unchanged).
+- **Byte compatibility**: accepted historical fixtures and ordinary
+  valid logs produce byte-identical output (golden + determinism pins).
+- **Recorded residual (pre-existing, unchanged)**: `--smoothing 0` with
+  disjoint token supports can raise `ZeroDivisionError` inside
+  `kl_divergence` — a loud crash that produces no output (it is not a
+  non-standard-output lane); it predates this policy and is left to its
+  own future decision.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.
