@@ -166,10 +166,14 @@ exactly the typed `LabInputError`. The shared reader's typed
 `--max-line-bytes`) is **translated at the single reader call** —
 `except PredictorInputError` exactly, never broad `ValueError` —
 into `LabInputError` with the message byte-identical (`str(e)`) and
-the original error preserved as `__cause__`. A plain `ValueError`,
-like any exception outside the documented catch classes, **propagates**
-(test-pinned beside the standing `RuntimeError` pin); a plain
-`ValueError` from the reader seam is deliberately not wrapped.
+the original error preserved as `__cause__`. A plain `ValueError`
+**reaching `main()` outside the existing scoped input-validation
+translations propagates** (the committed build-seam and reader-seam
+pins prove those exact lanes; a plain `ValueError` from the reader seam
+is deliberately not wrapped). No claim is made that every inner
+validation helper lacks a local base-class wrapper — the protocol
+loader's JSON-parse and `MonitorConfig.validate` regions deliberately
+catch base `ValueError` and translate it to `LabInputError`.
 Direct-Python note: callers catching `ValueError` remain compatible
 (`LabInputError` subclasses it); `read_dominant_sequence` called
 directly still raises `PredictorInputError`. This is a lab-only

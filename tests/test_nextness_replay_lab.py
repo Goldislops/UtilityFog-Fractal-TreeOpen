@@ -1194,10 +1194,11 @@ def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-module compatibility controls for the predictor typed-input-
-# boundary pilot: the lab publicly re-exposes the imported reader's
-# bounds (--max-rows / --max-line-bytes), so their public exit-2 lanes
-# are pinned byte-for-byte here. No replay-lab production change.
+# Cross-module compatibility controls: the original predictor pilot
+# established the lab's public reader-bound lanes (--max-rows /
+# --max-line-bytes), pinned byte-for-byte here; the replay-lab pilot
+# (#384) now preserves them through the typed translation boundary at
+# the reader call.
 # ---------------------------------------------------------------------------
 
 
@@ -1222,11 +1223,12 @@ def test_cli_reader_bound_public_lanes_exit_2(tmp_path, capsys) -> None:
         assert p.read_bytes() == b
 
 
-def test_reader_bound_error_is_predictor_typed_through_broad_lane(tmp_path, capsys) -> None:
-    """Cross-module compatibility pin: the predictor's typed reader-bound
-    error (PredictorInputError) subclasses ValueError, so it continues
-    through this CLI's documented broad exit-2 lane unchanged — same
-    message, one concise line, no traceback, inputs untouched."""
+def test_reader_bound_error_is_translated_to_lab_input_lane(tmp_path, capsys) -> None:
+    """Cross-module compatibility pin: the direct reader raises
+    PredictorInputError; build_lab_report translates it to LabInputError
+    at the reader call; the public CLI retains the identical exit-2
+    text — it no longer travels through a broad main() catch (the
+    translation-boundary test below pins message/cause exactly)."""
     from scripts.nextness_predictor import PredictorInputError
 
     assert issubclass(PredictorInputError, ValueError)

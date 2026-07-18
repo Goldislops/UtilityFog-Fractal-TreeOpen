@@ -88,21 +88,33 @@ broadly catch plain `ValueError`**:
   propagates. Each map remains that module's own decision, per this
   document's non-harmonizing rule — the shared end state is a fact, not
   a convention.
-- **Inner input-validation boundaries may deliberately translate known
-  input failures** into the module's typed class: metrics wraps the
-  read-region `UnicodeDecodeError` and the malformed-JSONL
-  `json.JSONDecodeError`; the replay lab translates the shared reader's
-  `PredictorInputError` at the reader call (message byte-identical,
-  cause preserved); the evidence packet wraps its imported validators;
-  the evaluator wraps stdlib parse errors. These are named, exact-class
-  boundaries — none reintroduces a broad `ValueError` catch.
+- **Inner input-validation regions may still deliberately catch or
+  translate base `ValueError` locally.** The six typed `main()` clauses
+  above are the top-level catch boundary; beneath them, some tightly
+  scoped validation regions retain base-class wrappers by design: the
+  replay lab's protocol loader catches base `ValueError` in its
+  JSON-parse and `MonitorConfig.validate` input-validation regions
+  (→ `LabInputError`); the evidence packet's bounded JSON loader
+  retains a scoped base-`ValueError` wrapper (→ `PacketInputError`);
+  the evaluator's artifact loader and exact-float helpers do the same
+  (→ `EvaluatorInputError`). Other inner boundaries are exact-class:
+  metrics wraps the read-region `UnicodeDecodeError` and the
+  malformed-JSONL `json.JSONDecodeError`; the replay lab translates the
+  shared reader's `PredictorInputError` at the reader call (message
+  byte-identical, cause preserved). **These existing local boundaries
+  are distinct from the six `main()` catch clauses and were not
+  normalized by the typed-boundary train.**
 - The focused propagation pins prove **their exact lanes only**: a sentinel
   `RuntimeError` propagating in predictor, monitor, evaluator, replay lab
   and evidence packet, a read-side `OSError` propagating in metrics
   (PR #372's pin), and a sentinel plain `ValueError` propagating in the
   monitor, the predictor, metrics, the evidence packet and the replay
-  lab (the pilots' pins). They establish those lanes, not a general
-  theorem.
+  lab (the pilots' pins). They prove **their named seams only** — a
+  sentinel injected at the established build/core seam of each module —
+  not every possible origin of a plain `ValueError` (a plain
+  `ValueError` arising *inside* one of the scoped inner validation
+  regions above is translated there by design, never reaching
+  `main()`).
 
 **No claim is made that every possible programming error propagates**;
 propagation is exactly the complement of each CLI's documented catch set,
