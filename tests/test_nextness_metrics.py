@@ -1209,16 +1209,21 @@ def test_cli_five_input_lanes_exact_public_behavior(tmp_path, capsys) -> None:
     with pytest.raises(json.JSONDecodeError) as exc_info:
         json.loads(bad_payload)
     json_err = str(exc_info.value)
+    # §9.4 strict-input-domain note: these lanes now originate at the
+    # ingestion/parameter validation seam, so their messages carry the
+    # strict-domain wording (the old pairwise/helper-origin messages are
+    # subsumed; exit codes and one-concise-line shape unchanged).
     cases = (
         (bad, [], f"error: malformed JSONL at {bad}:2: {json_err}"),
         (two, ["--smoothing", "-1"],
-         "error: smoothing must be non-negative, got -1.0"),
+         "error: smoothing must be finite and non-negative, got -1.0"),
         (neg_rate, [],
-         "error: boundary rates must be non-negative; got r_prev=0.3, r_curr=-0.5"),
+         f"error: boundary_rate must be finite and within [0, 1], "
+         f"got -0.5 at {neg_rate}:2"),
         (two, ["--boundary-delta", "0"],
-         "error: delta must be positive, got 0.0"),
+         "error: boundary_delta must be finite and positive, got 0.0"),
         (one, ["--boundary-delta", "0"],
-         "error: delta must be positive, got 0.0"),
+         "error: boundary_delta must be finite and positive, got 0.0"),
     )
     for log, extra, expected in cases:
         before = log.read_bytes()
@@ -1351,3 +1356,255 @@ def test_invalid_utf8_direct_api_typed_with_cause(tmp_path) -> None:
         compute_run_metrics(log, tmp_path / "d.jsonl")
     assert isinstance(exc_info.value.__cause__, UnicodeDecodeError)
     assert str(exc_info.value) == str(exc_info.value.__cause__)
+
+
+# ---------------------------------------------------------------------------
+# Strict input domain (Kev-authorized policy; PHASE_19_PR3 §9.4).
+# Failing-first: every confirmed public divergence from the documented
+# [0,1] domain must become a typed exit-2 rejection. The absent-field
+# 0.0 policy is pinned separately as the explicitly chosen compatibility
+# behavior established by this change.
+# ---------------------------------------------------------------------------
+
+
+def _entry_line(br=0.3, gen=1, extra=""):
+    core = (f'{{"generation": {gen}, "snapshot_file": "s{gen}.npz", '
+            f'"token_counts": {{"void_static": 3}}, "void_compute_balance": 0.5, '
+            f'"entropy_normalized": 0.4{extra}')
+    if br is not None:
+        core += f', "boundary_rate": {br}'
+    return core + "}"
+
+
+def _run_strict(tmp_path, capsys, lines, extra_argv=(), out_name="derived.jsonl"):
+    log = tmp_path / "strict.jsonl"
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / out_name
+    rc = main(["--log", str(log), "--out", str(out), *extra_argv])
+    err = capsys.readouterr().err
+    return rc, err, log.read_bytes() == before, out.exists()
+
+
+def _assert_rejected(rc, err, unchanged, out_exists):
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert unchanged
+    assert not out_exists
+
+
+def test_cli_strict_domain_rejections(tmp_path, capsys) -> None:
+    """Failing-first: the eight confirmed public divergences each become
+    typed exit 2 — one line, no traceback, input untouched, no output."""
+    cases = (
+        [_entry_line(br=-0.5)],                       # single-entry negative
+        [_entry_line(br=1.5), _entry_line(br=2.5, gen=2)],  # above one
+        [_entry_line(br="NaN")],                      # JSON NaN constant
+        [_entry_line(br="Infinity")],                 # JSON Infinity constant
+        [_entry_line(br="true")],                     # boolean
+        [_entry_line(br='"0.7"')],                    # numeric string
+        [_entry_line(br='"high"')],                   # garbage string
+        [_entry_line(br="null")],                     # explicit JSON null
+    )
+    for i, lines in enumerate(cases):
+        rc, err, unchanged, out_exists = _run_strict(
+            tmp_path, capsys, lines, out_name=f"d{i}.jsonl")
+        _assert_rejected(rc, err, unchanged, out_exists)
+
+
+def test_cli_absent_unit_field_accepted_as_zero(tmp_path, capsys) -> None:
+    """The absent-field 0.0 policy (explicitly chosen compatibility,
+    established here — not historical proof from PR #141): success,
+    deterministic bytes."""
+    lines = [_entry_line(br=None), _entry_line(br=0.3, gen=2)]
+    rc, err, unchanged, out_exists = _run_strict(tmp_path, capsys, lines)
+    assert rc == 0 and unchanged and out_exists
+    rc2, _, _, _ = _run_strict(tmp_path, capsys, lines, out_name="d2.jsonl")
+    assert rc2 == 0
+    assert (tmp_path / "derived.jsonl").read_bytes() == (tmp_path / "d2.jsonl").read_bytes()
+
+
+def test_helper_totality_typed(tmp_path) -> None:
+    """Direct-helper totality: out-of-type and out-of-domain values raise
+    the typed MetricsInputError — before single-element early returns —
+    and the aggregate is genuinely bounded for valid input."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    for bad_call in (
+        lambda: boundary_persistence_pairwise("0.5", 0.3),
+        lambda: boundary_persistence_pairwise(None, 0.3),
+        lambda: boundary_persistence_pairwise(float("nan"), 0.3),
+        lambda: boundary_persistence_pairwise(True, 0.3),
+        lambda: boundary_persistence_pairwise(1.5, 0.3),
+        lambda: boundary_persistence_pairwise(0.3, 0.3, delta=float("nan")),
+        lambda: boundary_cv([-0.5, -0.7]),
+        lambda: boundary_cv([-0.002, 0.0]),          # old ZeroDivisionError lane
+        lambda: boundary_cv([-0.5]),                 # BEFORE single-element return
+        lambda: boundary_cv([1.5, 2.5]),
+        lambda: boundary_cv([0.3, 0.4], delta=float("inf")),
+        lambda: boundary_persistence_aggregate_clamped([float("nan")]),
+        lambda: boundary_persistence_aggregate_clamped([-0.5, -0.7]),
+    ):
+        with pytest.raises(MetricsInputError):
+            bad_call()
+    for rates in ([0.0, 0.0], [0.0, 1.0], [0.5, 0.5, 0.5], [1.0], []):
+        v = boundary_persistence_aggregate_clamped(rates)
+        assert 0.0 <= v <= 1.0
+
+
+def test_cli_numeric_params_strict(tmp_path, capsys) -> None:
+    """--smoothing must be finite and non-negative; --boundary-delta
+    finite and strictly positive."""
+    good = [_entry_line(), _entry_line(gen=2)]
+    for extra in (["--smoothing", "inf"], ["--smoothing", "nan"],
+                  ["--boundary-delta", "inf"], ["--boundary-delta", "nan"]):
+        rc, err, unchanged, out_exists = _run_strict(
+            tmp_path, capsys, good, extra_argv=extra,
+            out_name=f"p_{extra[0][2:4]}{extra[1]}.jsonl")
+        _assert_rejected(rc, err, unchanged, out_exists)
+
+
+def test_cli_token_counts_strict(tmp_path, capsys) -> None:
+    """token_counts, when present, must be a mapping of non-boolean,
+    non-negative integer counts."""
+    cases = (
+        '{"generation": 1, "snapshot_file": "s1.npz", "token_counts": '
+        '{"void_static": true}, "boundary_rate": 0.3}',
+        '{"generation": 1, "snapshot_file": "s1.npz", "token_counts": '
+        '{"void_static": -3}, "boundary_rate": 0.3}',
+        '{"generation": 1, "snapshot_file": "s1.npz", "token_counts": '
+        '[1, 2], "boundary_rate": 0.3}',
+        '{"generation": 1, "snapshot_file": "s1.npz", "token_counts": '
+        'null, "boundary_rate": 0.3}',
+    )
+    for i, line in enumerate(cases):
+        rc, err, unchanged, out_exists = _run_strict(
+            tmp_path, capsys, [line], out_name=f"t{i}.jsonl")
+        _assert_rejected(rc, err, unchanged, out_exists)
+
+
+def test_cli_prewrite_finiteness_rejects_passthrough_overflow(tmp_path, capsys) -> None:
+    """The pre-write invariant closes pass-through lanes: a numeric-
+    overflow generation (1e400 -> inf, no constant token involved) is
+    rejected before any destination is touched — including a
+    pre-existing destination, byte-identically preserved."""
+    log = tmp_path / "of.jsonl"
+    log.write_text(_entry_line(gen="1e400") + "\n" + _entry_line(gen=2) + "\n",
+                   encoding="utf-8")
+    out = tmp_path / "of_out.jsonl"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    dest_before = out.read_bytes()
+    rc = main(["--log", str(log), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert out.read_bytes() == dest_before
+
+
+# ---------------------------------------------------------------------------
+# §9.4 hardening round (Jack audit of draft #385): recursive finiteness,
+# huge-count arithmetic, zero-smoothing KL, and located constant messages.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_nested_overflow_rejected_prewrite_destination_preserved(tmp_path, capsys) -> None:
+    """A nested non-finite float inside a pass-through container (a
+    snapshot_file LIST holding 1e400 -> inf) must be caught by the
+    RECURSIVE pre-write invariant — typed exit 2 with a useful key
+    location, BEFORE any open, so a pre-existing destination stays
+    byte-identical (the shallow check let allow_nan=False raise only
+    after the destination had been truncated)."""
+    log = tmp_path / "nested.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": [1e400], '
+        '"token_counts": {"void_static": 3}, "boundary_rate": 0.3}' + "\n" +
+        '{"generation": 2, "snapshot_file": "s2.npz", '
+        '"token_counts": {"void_static": 3}, "boundary_rate": 0.3}' + "\n",
+        encoding="utf-8")
+    before = log.read_bytes()
+    out = tmp_path / "nested_out.jsonl"
+    out.write_text("pre-existing destination" + "\n", encoding="utf-8")
+    dest_before = out.read_bytes()
+    rc = main(["--log", str(log), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "snapshot_file" in lines[0]  # useful output key location
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+    assert out.read_bytes() == dest_before  # NEVER truncated
+
+
+def test_cli_huge_token_count_rejected_typed(tmp_path, capsys) -> None:
+    """A valid JSON non-negative integer too large for finite float
+    arithmetic must be a typed rejection, not an OverflowError escape.
+    No arbitrary semantic cap — the constraint is finite computability."""
+    huge = str(10 ** 400)
+    log = tmp_path / "huge.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": "s1.npz", '
+        '"token_counts": {"void_static": ' + huge + '}, "boundary_rate": 0.3}' + "\n" +
+        '{"generation": 2, "snapshot_file": "s2.npz", '
+        '"token_counts": {"void_static": 3}, "boundary_rate": 0.3}' + "\n",
+        encoding="utf-8")
+    out = tmp_path / "huge_out.jsonl"
+    rc = main(["--log", str(log), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+def test_zero_smoothing_disjoint_support_typed(tmp_path, capsys) -> None:
+    """smoothing=0 stays authorized; but KL with positive p_i and zero
+    q_i is mathematically undefined — typed MetricsInputError (direct
+    and public), never a ZeroDivisionError escape."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    with pytest.raises(MetricsInputError, match="positive smoothing"):
+        kl_divergence({"void_static": 3}, {"compute_static": 3}, smoothing=0.0)
+    log = tmp_path / "disjoint.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": "s1.npz", '
+        '"token_counts": {"void_static": 3}, "boundary_rate": 0.3}' + "\n" +
+        '{"generation": 2, "snapshot_file": "s2.npz", '
+        '"token_counts": {"compute_static": 3}, "boundary_rate": 0.3}' + "\n",
+        encoding="utf-8")
+    out = tmp_path / "disjoint_out.jsonl"
+    rc = main(["--log", str(log), "--out", str(out), "--smoothing", "0"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "positive smoothing" in lines[0]
+    assert "Traceback" not in err
+    assert not out.exists()
+
+
+def test_cli_json_constant_message_carries_location(tmp_path, capsys) -> None:
+    """The typed NaN/Infinity rejection must carry the exact log path
+    and line number (wrapped at the json.loads call site, cause
+    preserved) — labelled as an invalid JSON value, not mislabelled a
+    JSONDecodeError."""
+    log = tmp_path / "const.jsonl"
+    log.write_text(
+        '{"generation": 1, "snapshot_file": "s1.npz", '
+        '"token_counts": {"void_static": 3}, "boundary_rate": 0.3}' + "\n" +
+        '{"generation": 2, "snapshot_file": "s2.npz", '
+        '"token_counts": {"void_static": 3}, "boundary_rate": NaN}' + "\n",
+        encoding="utf-8")
+    rc = main(["--log", str(log), "--out", str(tmp_path / "c.jsonl")])
+    err = capsys.readouterr().err
+    assert rc == 2
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert lines[0].startswith("error: invalid JSON value at ")
+    assert f"{log}:2" in lines[0]
+    assert "non-standard JSON constant NaN" in lines[0]

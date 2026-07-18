@@ -224,10 +224,22 @@ def smoothed_distribution(
     algorithm; the result vector always has length ``len(TOKEN_NAMES)``
     and sums to 1.0 (within float precision).
     """
-    if smoothing < 0:
-        raise MetricsInputError(f"smoothing must be non-negative, got {smoothing}")
-    raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
+    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
+            or not math.isfinite(smoothing) or smoothing < 0):
+        raise MetricsInputError(
+            f"smoothing must be finite and non-negative, got {smoothing!r}"
+        )
+    try:
+        raw = [counts.get(tok, 0) + smoothing for tok in TOKEN_NAMES]
+    except OverflowError as e:
+        raise MetricsInputError(
+            "token counts are too large for finite arithmetic"
+        ) from e
     total = sum(raw)
+    if not all(math.isfinite(v) for v in raw) or not math.isfinite(total):
+        raise MetricsInputError(
+            "token counts and smoothing produce non-finite arithmetic"
+        )
     if total <= 0:
         # Pathological: empty counts AND zero smoothing. Return uniform
         # rather than raise — divergence against uniform is well-defined
@@ -253,8 +265,16 @@ def kl_divergence(
     p = smoothed_distribution(counts_p, smoothing)
     q = smoothed_distribution(counts_q, smoothing)
     total = 0.0
-    for p_i, q_i in zip(p, q):
+    for i, (p_i, q_i) in enumerate(zip(p, q)):
         if p_i > 0.0:
+            if q_i == 0.0:
+                # Zero smoothing keeps its authorized non-negative
+                # policy, but KL is mathematically undefined here.
+                raise MetricsInputError(
+                    f"KL divergence is undefined for token "
+                    f"{TOKEN_NAMES[i]!r}: positive support in P with "
+                    f"zero support in Q; positive smoothing is required"
+                )
             total += p_i * math.log2(p_i / q_i)
     return total
 
@@ -305,15 +325,14 @@ def boundary_persistence_pairwise(
     near 1 when both rates are near zero (saturated by ``delta`` in the
     denominator, so the score doesn't whipsaw on noise).
 
-    Raises ``MetricsInputError`` (a ``ValueError`` subclass) if either
-    rate is negative.
+    Raises ``MetricsInputError`` (a ``ValueError`` subclass) for
+    out-of-type or out-of-domain rates and invalid deltas (§9.4 strict
+    input domain: real non-boolean numbers, finite, rates in [0, 1],
+    delta finite and strictly positive).
     """
-    if r_prev < 0 or r_curr < 0:
-        raise MetricsInputError(
-            f"boundary rates must be non-negative; got r_prev={r_prev}, r_curr={r_curr}"
-        )
-    if delta <= 0:
-        raise MetricsInputError(f"delta must be positive, got {delta}")
+    r_prev = _require_rate(r_prev, "r_prev")
+    r_curr = _require_rate(r_curr, "r_curr")
+    delta = _require_delta(delta)
     diff = abs(r_curr - r_prev)
     denom = max(r_prev, r_curr, delta)
     return 1.0 - diff / denom
@@ -331,8 +350,8 @@ def boundary_cv(rates: Sequence[float], delta: float = 1e-3) -> float:
     Returns 0.0 for empty or single-element sequences (no variance
     defined).
     """
-    if delta <= 0:
-        raise MetricsInputError(f"delta must be positive, got {delta}")
+    delta = _require_delta(delta)
+    rates = [_require_rate(r, f"rates[{i}]") for i, r in enumerate(rates)]
     if len(rates) < 2:
         return 0.0
     mean = sum(rates) / len(rates)
@@ -357,9 +376,14 @@ def boundary_persistence_aggregate_clamped(
     possible, treated as "perfectly persistent"). The aggregate is
     most meaningful for runs with N ≥ 3 snapshots.
     """
+    delta = _require_delta(delta)
+    rates = [_require_rate(r, f"rates[{i}]") for i, r in enumerate(rates)]
     if len(rates) < 2:
         return 1.0
-    return max(0.0, 1.0 - boundary_cv(rates, delta))
+    # Explicit two-sided clamp: with the §9.4 domain (rates in [0, 1],
+    # delta > 0) the CV is non-negative so the upper clamp is a no-op
+    # for valid input — it makes the documented bound structural.
+    return min(1.0, max(0.0, 1.0 - boundary_cv(rates, delta)))
 
 
 # ---------------------------------------------------------------------------
@@ -411,11 +435,138 @@ def _sort_key(entry: dict[str, Any]) -> tuple:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Best-effort float extraction. Used to defend against malformed log entries."""
+    """Best-effort float extraction. Used to defend against malformed log entries.
+
+    Legacy permissive surface: with the strict input domain (§9.4) every
+    present unit field is validated BEFORE this runs, so on the CLI path
+    this now only realizes the documented absent-field -> 0.0 policy.
+    """
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# ---------------------------------------------------------------------------
+# Strict input domain (design doc §9.4; Kev-authorized policy)
+# ---------------------------------------------------------------------------
+
+_UNIT_FIELDS = ("boundary_rate", "entropy_normalized", "void_compute_balance")
+
+
+def _reject_json_constant(name: str) -> float:
+    """json.loads parse_constant hook: NaN/Infinity/-Infinity are refused."""
+    raise MetricsInputError(f"non-standard JSON constant {name} is not allowed")
+
+
+def _require_rate(value: Any, name: str) -> float:
+    """A rate/unit value must be a real, non-boolean JSON number, finite
+    and within [0, 1]."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MetricsInputError(
+            f"{name} must be a JSON number in [0, 1], got {value!r}"
+        )
+    v = float(value)
+    if not math.isfinite(v) or not 0.0 <= v <= 1.0:
+        raise MetricsInputError(
+            f"{name} must be finite and within [0, 1], got {value!r}"
+        )
+    return v
+
+
+def _require_delta(delta: Any) -> float:
+    """delta must be a real, non-boolean, finite, strictly positive number."""
+    if (isinstance(delta, bool) or not isinstance(delta, (int, float))
+            or not math.isfinite(delta) or delta <= 0):
+        raise MetricsInputError(f"delta must be positive and finite, got {delta!r}")
+    return float(delta)
+
+
+def _validate_entry(entry: Any, log_path: pathlib.Path, line_no: int) -> None:
+    """Strict per-entry domain validation (fail closed, typed).
+
+    Present unit fields must be real JSON numbers (no booleans, strings
+    or null), finite, within [0, 1]. An ABSENT unit field remains the
+    explicitly chosen 0.0 compatibility policy (established in §9.4, not
+    historical proof from PR #141). token_counts, when the key is
+    present, must be a JSON object of non-boolean, non-negative integer
+    counts (the shape the canonical distributions consume).
+    """
+    if type(entry) is not dict:
+        raise MetricsInputError(
+            f"log entry must be a JSON object at {log_path}:{line_no}"
+        )
+    for field in _UNIT_FIELDS:
+        if field not in entry:
+            continue
+        value = entry[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise MetricsInputError(
+                f"{field} must be a JSON number in [0, 1], "
+                f"got {value!r} at {log_path}:{line_no}"
+            )
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise MetricsInputError(
+                f"{field} must be finite and within [0, 1], "
+                f"got {value!r} at {log_path}:{line_no}"
+            )
+    if "token_counts" in entry:
+        counts = entry["token_counts"]
+        if type(counts) is not dict:
+            raise MetricsInputError(
+                f"token_counts must be a JSON object at {log_path}:{line_no}"
+            )
+        for key, count in counts.items():
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise MetricsInputError(
+                    f"token_counts[{key!r}] must be a non-negative, "
+                    f"non-boolean integer, got {count!r} at {log_path}:{line_no}"
+                )
+            # Finite-computability constraint (not an arbitrary semantic
+            # cap): the count must participate in finite float
+            # arithmetic for the canonical distributions.
+            try:
+                as_float = float(count)
+            except OverflowError as e:
+                raise MetricsInputError(
+                    f"token_counts[{key!r}] is too large for finite "
+                    f"arithmetic at {log_path}:{line_no}"
+                ) from e
+            if not math.isfinite(as_float):
+                raise MetricsInputError(
+                    f"token_counts[{key!r}] is too large for finite "
+                    f"arithmetic at {log_path}:{line_no}"
+                )
+
+
+def _require_finite_tree(value: Any, location: str) -> None:
+    """RECURSIVE pre-write invariant: no non-finite float may reach the
+    serialized output anywhere — top level or nested inside built-in
+    containers (covers computed AND pass-through fields; runs before any
+    destination is touched, so it can never truncate or partially write).
+
+    Hook-safe by construction: only exact built-in ``dict``/``list``/
+    ``tuple`` containers are traversed and only exact built-in ``float``
+    values are inspected — no subclass hooks (``__iter__``/``keys``/
+    ``__float__``) are ever invoked.
+    """
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise MetricsInputError(
+                f"non-finite value in derived output: {location}={value!r}"
+            )
+    elif type(value) is dict:
+        for key, item in value.items():
+            _require_finite_tree(item, f"{location}.{key}" if location else str(key))
+    elif type(value) in (list, tuple):
+        for index, item in enumerate(value):
+            _require_finite_tree(item, f"{location}[{index}]")
+
+
+def _require_finite_row(row: dict[str, Any]) -> None:
+    """Recursive whole-row finiteness (see :func:`_require_finite_tree`)."""
+    for key, value in row.items():
+        _require_finite_tree(value, str(key))
 
 
 def _entry_cci(entry: dict[str, Any]) -> float:
@@ -454,6 +605,19 @@ def compute_run_metrics(
     # — no parent-mkdir, no file open, no writes — happen.
     _validate_metrics_output_path(out_path, log_path)
 
+    # §9.4 strict numeric parameters (typed, before any read work).
+    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
+            or not math.isfinite(smoothing) or smoothing < 0):
+        raise MetricsInputError(
+            f"smoothing must be finite and non-negative, got {smoothing!r}"
+        )
+    if (isinstance(boundary_delta, bool)
+            or not isinstance(boundary_delta, (int, float))
+            or not math.isfinite(boundary_delta) or boundary_delta <= 0):
+        raise MetricsInputError(
+            f"boundary_delta must be finite and positive, got {boundary_delta!r}"
+        )
+
     # Load and sort. The UnicodeDecodeError wrap restores the pre-typed
     # public contract for an undecodable log (genuine bad input, concise
     # exit 2): it is caught EXACTLY — never UnicodeError/ValueError/
@@ -468,11 +632,21 @@ def compute_run_metrics(
                 if not stripped:
                     continue
                 try:
-                    entry = json.loads(stripped)
+                    entry = json.loads(
+                        stripped, parse_constant=_reject_json_constant
+                    )
                 except json.JSONDecodeError as e:
                     raise MetricsInputError(
                         f"malformed JSONL at {log_path}:{line_no}: {e}"
                     ) from e
+                except MetricsInputError as e:
+                    # A valid JSON extension token (NaN/Infinity) refused
+                    # by policy — locate it precisely without mislabeling
+                    # it an ordinary JSONDecodeError; cause preserved.
+                    raise MetricsInputError(
+                        f"invalid JSON value at {log_path}:{line_no}: {e}"
+                    ) from e
+                _validate_entry(entry, log_path, line_no)
                 entries.append(entry)
     except UnicodeDecodeError as e:
         raise MetricsInputError(str(e)) from e
@@ -568,12 +742,26 @@ def compute_run_metrics(
     # Failures at or before open leave an existing destination
     # byte-identical; after a successful open, streamed non-atomic
     # output may be truncated/partial if a later write or close fails.
+    # §9.4 pre-write invariant: every float in every row (computed AND
+    # pass-through) must be finite. This runs BEFORE parent-mkdir/open,
+    # so a rejection preserves any existing destination byte-identically
+    # and creates nothing — it adds no partial-output claim and leaves
+    # the streamed, non-atomic write contract below unchanged.
+    for row in (*pair_rows, aggregate):
+        _require_finite_row(row)
+
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("wb") as f:
+            # allow_nan=False: strict-JSON serialization backstop. With
+            # the invariant above it is unreachable; a ValueError here
+            # would be an internal contract failure and propagates
+            # loudly (it is not an OSError).
             for row in pair_rows:
-                f.write(json.dumps(row, sort_keys=True, default=str).encode("utf-8") + b"\n")
-            f.write(json.dumps(aggregate, sort_keys=True, default=str).encode("utf-8") + b"\n")
+                f.write(json.dumps(row, sort_keys=True, default=str,
+                                   allow_nan=False).encode("utf-8") + b"\n")
+            f.write(json.dumps(aggregate, sort_keys=True, default=str,
+                               allow_nan=False).encode("utf-8") + b"\n")
     except OSError as e:
         raise MetricsOutputWriteError(
             f"cannot write metrics output to {out_path}: {e}"
