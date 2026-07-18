@@ -156,10 +156,26 @@ exits.
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 2 | validation failure: missing log file or out-of-bounds configuration (argparse usage errors also exit 2) |
+| 2 | validation failure: missing log file or out-of-bounds configuration (typed `PredictorInputError`; argparse usage errors also exit 2) |
 | 3 | insufficient history for a train/holdout split |
 | 4 | output-path failure: write-boundary violation, input-log alias (direct path / lexical / symlink / hard link / unverifiable identity), or unwritable target |
 | 5 | serialized report exceeds the 64 KiB ceiling (fail closed) |
+
+**Typed input boundary (predictor pilot)**: the exit-2 catch is exactly
+the typed `PredictorInputError` — the four CLI-reachable validation
+raises (`max_rows`, `max_line_bytes`, `smoothing`, `holdout_fraction`
+bounds) raise it with their message text unchanged. A plain
+`ValueError` — like any exception outside the documented catch
+classes — **propagates** rather than being reported as a concise input
+failure (test-pinned); `evaluate_predictions`' equal-length/non-empty
+invariant deliberately stays a plain `ValueError` for exactly that
+reason. Direct-Python note: callers catching `ValueError` remain
+compatible because `PredictorInputError` subclasses it, but the exact
+exception type at those four sites is now `PredictorInputError` —
+including where importers re-expose the reader bounds (the replay lab's
+`--max-rows`/`--max-line-bytes` lanes still exit 2 through its own
+documented broad catch; test-pinned there). This is a predictor-only
+decision; no family-wide convention is implied.
 
 ## Relationship to what comes next
 

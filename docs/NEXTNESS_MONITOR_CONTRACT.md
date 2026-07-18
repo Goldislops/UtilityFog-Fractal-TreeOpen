@@ -94,6 +94,18 @@ options) · `3` insufficient history. Every expected failure prints one
 concise `error:` line to stderr — never a traceback. The monitor writes
 no files on any path, success or failure.
 
+**Typed input boundary (monitor pilot)**: the exit-2 catch is exactly
+the typed `MonitorInputError` — the two CLI-reachable validation raises
+(smoothing and holdout-fraction bounds) raise it with their message text
+unchanged. A plain `ValueError`, like any exception outside the
+documented catch classes, **propagates** rather than being reported as a
+concise input failure (test-pinned alongside the standing `RuntimeError`
+propagation pin). Direct-Python note: callers catching `ValueError`
+remain compatible because `MonitorInputError` subclasses it, but the
+exact exception type at those two reclassified sites is now
+`MonitorInputError`. This is a monitor-only decision; no family-wide
+convention is implied.
+
 ## A finding worth keeping (from the test suite)
 
 With NP1's default Laplace smoothing (α = 1.0 over 16 tokens), a

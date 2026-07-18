@@ -1120,3 +1120,54 @@ def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
     assert out.read_bytes() == canonical                       # complete bytes present
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Cross-module compatibility controls for the predictor typed-input-
+# boundary pilot: the lab publicly re-exposes the imported reader's
+# bounds (--max-rows / --max-line-bytes), so their public exit-2 lanes
+# are pinned byte-for-byte here. No replay-lab production change.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_reader_bound_public_lanes_exit_2(tmp_path, capsys) -> None:
+    """The lab's reader-bound public lanes: exact message, single stderr
+    line, exit 2, no traceback, inputs untouched."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    before = {p: p.read_bytes() for p in (log, protocol)}
+    for argv, expected in (
+        ([str(log), str(protocol), "--max-rows", "0"],
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), str(protocol), "--max-line-bytes", "0"],
+         "error: max_line_bytes must be positive, got 0"),
+    ):
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert lines == [expected]
+        assert "Traceback" not in err
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_reader_bound_error_is_predictor_typed_through_broad_lane(tmp_path, capsys) -> None:
+    """Cross-module compatibility pin: the predictor's typed reader-bound
+    error (PredictorInputError) subclasses ValueError, so it continues
+    through this CLI's documented broad exit-2 lane unchanged — same
+    message, one concise line, no traceback, inputs untouched."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    assert issubclass(PredictorInputError, ValueError)
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    before = {p: p.read_bytes() for p in (log, protocol)}
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_rows=0)
+    assert main([str(log), str(protocol), "--max-rows", "0"]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == ["error: max_rows must be in (0, 1000000], got 0"]
+    assert "Traceback" not in err
+    for p, b in before.items():
+        assert p.read_bytes() == b
