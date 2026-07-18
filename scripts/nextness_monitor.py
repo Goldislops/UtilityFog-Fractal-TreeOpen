@@ -496,17 +496,25 @@ def main(argv: list[str] | None = None) -> int:
     - ``2`` validation failure — missing log file or out-of-bounds
       options (argparse's own usage errors also exit 2)
     - ``3`` insufficient history for a train/holdout split
+    - ``5`` receipt would exceed ``MAX_RECEIPT_BYTES`` (fail closed —
+      **defensive completion** of the family's ceiling convention: the
+      current fixed public receipt shape cannot naturally reach the
+      64 KiB ceiling, so this lane is reachable only if the receipt
+      shape ever grows; it is NOT a claim of present public
+      reachability)
 
     Every expected failure prints one concise ``error:`` line to stderr —
     never a traceback. The documented catch set is exactly
-    ``InsufficientHistoryError`` (exit 3) and the typed
-    ``MonitorInputError`` (exit 2); exceptions outside it — including
-    plain ``ValueError`` — propagate (monitor typed-input-boundary
-    pilot; test-pinned). Direct-Python note: callers catching
-    ``ValueError`` remain compatible because ``MonitorInputError``
-    subclasses it, but the exact exception type at the two reclassified
-    validation sites (smoothing, holdout fraction) is now
-    ``MonitorInputError``.
+    ``InsufficientHistoryError`` (exit 3), the typed
+    ``MonitorInputError`` (exit 2) and ``ReceiptTooLargeError``
+    (exit 5); exceptions outside it — including plain ``ValueError`` —
+    propagate (monitor typed-input-boundary pilot; test-pinned).
+    Direct-Python note: callers catching ``ValueError`` remain
+    compatible because ``MonitorInputError`` subclasses it, but the
+    exact exception type at the two reclassified validation sites
+    (smoothing, holdout fraction) is now ``MonitorInputError``; direct
+    ``build_receipt`` callers still receive the raised
+    ``ReceiptTooLargeError`` unchanged.
     """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
@@ -534,6 +542,14 @@ def main(argv: list[str] | None = None) -> int:
     except MonitorInputError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except ReceiptTooLargeError as e:
+        # Defensive ceiling completion (Jack's policy decision on the
+        # output-ceiling audit): build_receipt's fail-closed refusal now
+        # maps to the family's concise exit-5 lane instead of
+        # propagating raw. ONLY this class is caught; direct
+        # build_receipt callers still receive the typed exception.
+        print(f"error: {e}", file=sys.stderr)
+        return 5
     sys.stdout.write(serialize_receipt(receipt))
     return 0
 

@@ -90,9 +90,18 @@ float thresholds ∈ (0, 1)).
 ## CLI expected-failure contract (inherited from NP1)
 
 `0` success · `2` validation failure (missing log file or out-of-bounds
-options) · `3` insufficient history. Every expected failure prints one
-concise `error:` line to stderr — never a traceback. The monitor writes
-no files on any path, success or failure.
+options) · `3` insufficient history · `5` receipt would exceed
+`MAX_RECEIPT_BYTES` (`ReceiptTooLargeError`, fail closed). Every
+expected failure prints one concise `error:` line to stderr — never a
+traceback. The monitor writes no files on any path, success or failure.
+
+**Exit 5 is defensive completion** (Jack's policy decision on the
+2026-07-19 output-ceiling exactness audit), NOT a claim that the
+current fixed public receipt shape naturally reaches the 64 KiB
+ceiling — it cannot; the lane exists so that if the receipt shape ever
+grows, the refusal is the family's concise exit-5 form instead of a
+raw traceback. Direct `build_receipt` callers still receive the typed
+`ReceiptTooLargeError` unchanged.
 
 **Typed input boundary (monitor pilot)**: the exit-2 catch is exactly
 the typed `MonitorInputError` — the two CLI-reachable validation raises

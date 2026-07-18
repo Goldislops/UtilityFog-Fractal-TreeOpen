@@ -17,7 +17,7 @@ test suites named per row.
 |---|---|---|---|---|---|---|---|
 | `nextness_predictor` | **0/2/3/4/5** | 0 (report → stdout or `--output`) | 2 missing log, out-of-bounds config (typed `PredictorInputError`; plain `ValueError` propagates — predictor typed-boundary pilot) · 3 insufficient history (`InsufficientHistoryError`) | 4 (`WriteOutsideLogDirError`: containment, `data/` tree, input alias by resolved path + `os.path.samefile`, fail-closed identity) | 4 (write-lane `OSError`: directory target, unwritable destination) | 5 (`ReportTooLargeError`, 64 KiB fail-closed) | `error:` |
 | `nextness_metrics` | **0/1/2/3/4** | 0 (summary → stdout; derived JSONL written) | **1 missing log** · 2 malformed JSONL / invalid-UTF-8 log / bad config / **strict-domain violation** / **input-work-bounds refusal** (typed `MetricsInputError` — §9.4 strict input domain: JSON-constant rejection, unit fields in [0,1] with absent→0.0 policy, token-count shape, finite params, pre-write whole-row finiteness (recursive), finite-computability totality on unit/helper/parameter surfaces (oversized integers typed, never OverflowError), decoder conversion-limit ValueError and parser-depth RecursionError both located-typed at the narrow decode boundary; §9.5 input-work bounds: `--max-rows` (default 100000, ceiling 1000000) / `--max-line-bytes` (default 65536, ceiling 16777216 — the shared `MAX_LINE_BYTES_CEILING`) over raw physical records and content bytes (LF/CRLF excluded), bounded binary `readline(max_line_bytes+2)` pre-materialization reads, excess rows = located typed refusal — **never prefix truncation** (metrics summarizes a COMPLETE run); plus the invalid-UTF-8 wrapping boundary; `FileNotFoundError` race lane retained; plain `ValueError` propagates) | **3 with `safety error:`** (`WriteOutsideLogDirError`: containment, directory target, input alias, fail-closed identity — all pre-read, pre-compute) | **4** (`MetricsOutputWriteError`: typed `OSError` region = output-parent creation + binary open/write/close) | input bounds ride the **2**-lane (typed, located); — no serialized **output** ceiling (unchanged by §9.5) | `error:`; **`safety error:` on the 3-lane only** |
-| `nextness_monitor` | **0/2/3** | 0 (receipt → stdout; writes no files on any path) | 2 missing log, typed `MonitorInputError` (plain `ValueError` propagates — monitor typed-boundary pilot) | — (no output lane exists) | — | — | `error:` |
+| `nextness_monitor` | **0/2/3/5** | 0 (receipt → stdout; writes no files on any path) | 2 missing log, typed `MonitorInputError` (plain `ValueError` propagates — monitor typed-boundary pilot) | — (no output lane exists) | — | 5 (`ReceiptTooLargeError`, 64 KiB fail-closed — **defensive completion**: the current fixed public receipt shape cannot naturally reach the ceiling; no public reachability is claimed) | `error:` |
 | `nextness_evaluator` | **0/2/4/5** | 0 (evaluation → stdout or `--output`) | 2 missing/oversized/malformed/unknown-variant artifact, `EvaluatorInputError` | 4 (`WriteOutsideLogDirError`: primary-dir containment, `data/` tree, alias of ANY supplied role, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`EvaluationTooLargeError`) | `error:` |
 | `nextness_replay_lab` | **0/2/3/4/5** | 0 (lab report → stdout or `--output`) | 2 missing input, malformed/oversized protocol, or out-of-bounds reader configuration — all typed `LabInputError` (reader bounds translated from `PredictorInputError` at the reader call, message byte-identical; plain `ValueError` propagates — replay-lab typed-boundary pilot) · 3 insufficient history | 4 (`WriteOutsideLogDirError`: containment, both-input alias, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`LabReportTooLargeError`) | `error:` |
 | `nextness_evidence_packet` | **0/2/4/5** | 0 (packet → stdout or `--output`) | 2 none/missing/oversized artifact — typed `PacketInputError`, incl. wrapped validators (plain `ValueError` propagates — evidence-packet typed-boundary pilot) | 4 (`WriteOutsideLogDirError`: primary-dir containment, alias of any of the six roles, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`PacketTooLargeError`) | `error:` |
@@ -79,11 +79,13 @@ broadly catch plain `ValueError`**:
 
 - The **evaluator catches its typed `EvaluatorInputError`**, and — via
   their typed-boundary pilots — the **monitor catches its typed
-  `MonitorInputError`**, the **predictor its typed
-  `PredictorInputError`**, **metrics its typed `MetricsInputError`
-  (plus the `FileNotFoundError` validation-to-read race lane)**, the
-  **evidence packet its typed `PacketInputError`**, and the **replay lab
-  its typed `LabInputError`** — each alongside its other typed classes.
+  `MonitorInputError` (and, since the boundary-totality repair, its
+  typed `ReceiptTooLargeError` → exit 5, defensive completion)**, the
+  **predictor its typed `PredictorInputError`**, **metrics its typed
+  `MetricsInputError` (plus the `FileNotFoundError` validation-to-read
+  race lane)**, the **evidence packet its typed `PacketInputError`**,
+  and the **replay lab its typed `LabInputError`** — each alongside its
+  other typed classes.
   In all six, a plain `ValueError` raised inside the `try` region
   propagates. Each map remains that module's own decision, per this
   document's non-harmonizing rule — the shared end state is a fact, not
