@@ -1608,3 +1608,88 @@ def test_cli_json_constant_message_carries_location(tmp_path, capsys) -> None:
     assert lines[0].startswith("error: invalid JSON value at ")
     assert f"{log}:2" in lines[0]
     assert "non-standard JSON constant NaN" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# §9.4 huge-integer totality (the late Codex finding on merged #385): a
+# raw oversized INTEGER on unit-field / helper / parameter surfaces
+# reached float()/math.isfinite() and escaped as OverflowError. The
+# repair is one narrow finite-computability conversion path — never an
+# arbitrary magnitude cap.
+# ---------------------------------------------------------------------------
+
+_HUGE = 10 ** 400
+
+
+def test_cli_huge_integer_unit_fields_rejected_typed(tmp_path, capsys) -> None:
+    """Public CLI: each unit field with +/- 10**400 -> typed exit 2,
+    empty stdout, one concise error: line, no traceback, input
+    byte-identical, supplied pre-existing destination byte-identical
+    (and an absent destination stays absent)."""
+    for field in ("boundary_rate", "entropy_normalized", "void_compute_balance"):
+        for sign, magnitude in (("+", _HUGE), ("-", -_HUGE)):
+            log = tmp_path / f"huge_{field}_{sign}.jsonl"
+            log.write_text(
+                '{"generation": 1, "snapshot_file": "s1.npz", '
+                '"token_counts": {"void_static": 3}, '
+                '"' + field + '": ' + str(magnitude) + '}' + "\n",
+                encoding="utf-8")
+            before = log.read_bytes()
+            out = tmp_path / f"out_{field}_{sign}.jsonl"
+            out.write_text("pre-existing destination\n", encoding="utf-8")
+            dest_before = out.read_bytes()
+            rc = main(["--log", str(log), "--out", str(out)])
+            captured = capsys.readouterr()
+            assert rc == 2, (field, sign)
+            assert captured.out == ""
+            lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+            assert len(lines) == 1 and lines[0].startswith("error:"), (field, sign)
+            assert "Traceback" not in captured.err
+            assert log.read_bytes() == before
+            assert out.read_bytes() == dest_before
+            absent_out = tmp_path / f"absent_{field}_{sign}.jsonl"
+            rc2 = main(["--log", str(log), "--out", str(absent_out)])
+            capsys.readouterr()
+            assert rc2 == 2 and not absent_out.exists()
+
+
+def test_direct_helpers_huge_integer_totality() -> None:
+    """Direct exported numerical APIs: oversized integers raise exactly
+    MetricsInputError, never raw OverflowError."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    for bad_call in (
+        lambda: boundary_persistence_pairwise(_HUGE, 0.3),
+        lambda: boundary_persistence_pairwise(0.3, _HUGE),
+        lambda: boundary_cv([_HUGE, 0.3]),
+        lambda: boundary_persistence_aggregate_clamped([_HUGE, 0.3]),
+        lambda: boundary_persistence_pairwise(0.3, 0.3, delta=_HUGE),
+        lambda: boundary_persistence_pairwise(0.3, 0.3, delta=-_HUGE),
+        lambda: boundary_cv([0.3, 0.4], delta=_HUGE),
+        lambda: smoothed_distribution({"void_static": 3}, smoothing=_HUGE),
+        lambda: smoothed_distribution({"void_static": _HUGE}, smoothing=0),
+        lambda: kl_divergence({"void_static": _HUGE}, {"void_static": 3}, smoothing=0),
+    ):
+        with pytest.raises(MetricsInputError):
+            bad_call()
+
+
+def test_compute_run_metrics_huge_parameters_typed_prewrite(tmp_path) -> None:
+    """compute_run_metrics with oversized smoothing / boundary_delta:
+    typed MetricsInputError BEFORE any destination modification; input
+    unchanged."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "ok.jsonl"
+    _write_log(log, [_make_entry(generation=1, snapshot_file="a.npz"),
+                     _make_entry(generation=2, snapshot_file="b.npz")])
+    before = log.read_bytes()
+    out = tmp_path / "d.jsonl"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    dest_before = out.read_bytes()
+    with pytest.raises(MetricsInputError):
+        compute_run_metrics(log, out, smoothing=_HUGE)
+    with pytest.raises(MetricsInputError):
+        compute_run_metrics(log, out, boundary_delta=_HUGE)
+    assert log.read_bytes() == before
+    assert out.read_bytes() == dest_before

@@ -224,8 +224,11 @@ def smoothed_distribution(
     algorithm; the result vector always has length ``len(TOKEN_NAMES)``
     and sums to 1.0 (within float precision).
     """
-    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
-            or not math.isfinite(smoothing) or smoothing < 0):
+    if isinstance(smoothing, bool) or not isinstance(smoothing, (int, float)):
+        raise MetricsInputError(
+            f"smoothing must be finite and non-negative, got {smoothing!r}"
+        )
+    if _finite_float(smoothing) is None or smoothing < 0:
         raise MetricsInputError(
             f"smoothing must be finite and non-negative, got {smoothing!r}"
         )
@@ -236,7 +239,7 @@ def smoothed_distribution(
             "token counts are too large for finite arithmetic"
         ) from e
     total = sum(raw)
-    if not all(math.isfinite(v) for v in raw) or not math.isfinite(total):
+    if any(_finite_float(v) is None for v in raw) or _finite_float(total) is None:
         raise MetricsInputError(
             "token counts and smoothing produce non-finite arithmetic"
         )
@@ -454,6 +457,20 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 _UNIT_FIELDS = ("boundary_rate", "entropy_normalized", "void_compute_balance")
 
 
+def _finite_float(value: Any) -> float | None:
+    """Finite-computability conversion for an already type-accepted
+    int/float (§9.4 totality — NOT a semantic magnitude cap): returns
+    the finite float, or ``None`` when the value cannot participate in
+    finite float arithmetic (conversion overflow, e.g. an integer of
+    magnitude 10**400, or a non-finite result). Catches ONLY the
+    expected conversion ``OverflowError``."""
+    try:
+        converted = float(value)
+    except OverflowError:
+        return None
+    return converted if math.isfinite(converted) else None
+
+
 def _reject_json_constant(name: str) -> float:
     """json.loads parse_constant hook: NaN/Infinity/-Infinity are refused."""
     raise MetricsInputError(f"non-standard JSON constant {name} is not allowed")
@@ -461,13 +478,14 @@ def _reject_json_constant(name: str) -> float:
 
 def _require_rate(value: Any, name: str) -> float:
     """A rate/unit value must be a real, non-boolean JSON number, finite
-    and within [0, 1]."""
+    and within [0, 1] (finite-computability totality: an oversized
+    integer is a typed rejection, never a raw ``OverflowError``)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MetricsInputError(
             f"{name} must be a JSON number in [0, 1], got {value!r}"
         )
-    v = float(value)
-    if not math.isfinite(v) or not 0.0 <= v <= 1.0:
+    v = _finite_float(value)
+    if v is None or not 0.0 <= v <= 1.0:
         raise MetricsInputError(
             f"{name} must be finite and within [0, 1], got {value!r}"
         )
@@ -475,11 +493,14 @@ def _require_rate(value: Any, name: str) -> float:
 
 
 def _require_delta(delta: Any) -> float:
-    """delta must be a real, non-boolean, finite, strictly positive number."""
-    if (isinstance(delta, bool) or not isinstance(delta, (int, float))
-            or not math.isfinite(delta) or delta <= 0):
+    """delta must be a real, non-boolean, finite, strictly positive
+    number (finite-computability totality on oversized integers)."""
+    if isinstance(delta, bool) or not isinstance(delta, (int, float)):
         raise MetricsInputError(f"delta must be positive and finite, got {delta!r}")
-    return float(delta)
+    v = _finite_float(delta)
+    if v is None or v <= 0:
+        raise MetricsInputError(f"delta must be positive and finite, got {delta!r}")
+    return v
 
 
 def _validate_entry(entry: Any, log_path: pathlib.Path, line_no: int) -> None:
@@ -505,7 +526,8 @@ def _validate_entry(entry: Any, log_path: pathlib.Path, line_no: int) -> None:
                 f"{field} must be a JSON number in [0, 1], "
                 f"got {value!r} at {log_path}:{line_no}"
             )
-        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        converted = _finite_float(value)
+        if converted is None or not 0.0 <= converted <= 1.0:
             raise MetricsInputError(
                 f"{field} must be finite and within [0, 1], "
                 f"got {value!r} at {log_path}:{line_no}"
@@ -606,14 +628,19 @@ def compute_run_metrics(
     _validate_metrics_output_path(out_path, log_path)
 
     # §9.4 strict numeric parameters (typed, before any read work).
-    if (isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
-            or not math.isfinite(smoothing) or smoothing < 0):
+    if isinstance(smoothing, bool) or not isinstance(smoothing, (int, float)):
         raise MetricsInputError(
             f"smoothing must be finite and non-negative, got {smoothing!r}"
         )
-    if (isinstance(boundary_delta, bool)
-            or not isinstance(boundary_delta, (int, float))
-            or not math.isfinite(boundary_delta) or boundary_delta <= 0):
+    if _finite_float(smoothing) is None or smoothing < 0:
+        raise MetricsInputError(
+            f"smoothing must be finite and non-negative, got {smoothing!r}"
+        )
+    if isinstance(boundary_delta, bool) or not isinstance(boundary_delta, (int, float)):
+        raise MetricsInputError(
+            f"boundary_delta must be finite and positive, got {boundary_delta!r}"
+        )
+    if _finite_float(boundary_delta) is None or boundary_delta <= 0:
         raise MetricsInputError(
             f"boundary_delta must be finite and positive, got {boundary_delta!r}"
         )
