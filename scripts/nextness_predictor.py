@@ -127,6 +127,16 @@ class InsufficientHistoryError(RuntimeError):
     """Too few accepted rows to form a train/holdout split."""
 
 
+class PredictorInputError(ValueError):
+    """Out-of-bounds public configuration (typed input boundary).
+
+    Subclasses ``ValueError`` so direct-Python callers catching the base
+    class remain compatible; the CLI's exit-2 catch names exactly this
+    class, so a plain internal ``ValueError`` propagates instead of
+    masquerading as an input failure (predictor typed-boundary pilot).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Defensive row parsing
 # ---------------------------------------------------------------------------
@@ -198,9 +208,13 @@ def read_dominant_sequence(
     ``out_of_order_generation``. Neither is silently reordered.
     """
     if not 0 < max_rows <= MAX_ROWS_CEILING:
-        raise ValueError(f"max_rows must be in (0, {MAX_ROWS_CEILING}], got {max_rows}")
+        raise PredictorInputError(
+            f"max_rows must be in (0, {MAX_ROWS_CEILING}], got {max_rows}"
+        )
     if max_line_bytes <= 0:
-        raise ValueError(f"max_line_bytes must be positive, got {max_line_bytes}")
+        raise PredictorInputError(
+            f"max_line_bytes must be positive, got {max_line_bytes}"
+        )
 
     sequence: list[str] = []
     rejections: dict[str, int] = {reason: 0 for reason in REJECT_REASONS}
@@ -418,9 +432,11 @@ def run_evaluation(
     see a holdout token before predicting it, and nothing is shuffled.
     """
     if not 0.0 < smoothing <= SMOOTHING_MAX:
-        raise ValueError(f"smoothing must be in (0, {SMOOTHING_MAX}], got {smoothing}")
+        raise PredictorInputError(
+            f"smoothing must be in (0, {SMOOTHING_MAX}], got {smoothing}"
+        )
     if not HOLDOUT_FRACTION_MIN <= holdout_fraction <= HOLDOUT_FRACTION_MAX:
-        raise ValueError(
+        raise PredictorInputError(
             f"holdout_fraction must be in [{HOLDOUT_FRACTION_MIN}, "
             f"{HOLDOUT_FRACTION_MAX}], got {holdout_fraction}"
         )
@@ -633,9 +649,17 @@ def main(argv: list[str] | None = None) -> int:
     - ``5`` report exceeds MAX_REPORT_BYTES (fail closed)
 
     Every expected failure prints one concise ``error:`` line to stderr —
-    never a traceback. Only the expected error types above are caught;
-    unexpected programming errors propagate loudly rather than
-    masquerade as clean exits.
+    never a traceback. The documented catch set is exactly
+    ``WriteOutsideLogDirError``, ``InsufficientHistoryError``,
+    ``ReportTooLargeError``, the typed ``PredictorInputError`` (the
+    exit-2 lane — out-of-bounds configuration raises it directly) and
+    the write-lane ``OSError``. Exceptions outside it — including plain
+    ``ValueError`` — propagate (predictor typed-boundary pilot;
+    test-pinned). Direct-Python note: callers catching ``ValueError``
+    remain compatible because ``PredictorInputError`` subclasses it, but
+    the exact exception type at the four reclassified validation sites
+    (max_rows, max_line_bytes, smoothing, holdout_fraction) is now
+    ``PredictorInputError``.
     """
     args = _build_parser().parse_args(argv)
     if not args.log_path.is_file():
@@ -660,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     except ReportTooLargeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 5
-    except ValueError as e:
+    except PredictorInputError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     serialized = serialize_report(report)

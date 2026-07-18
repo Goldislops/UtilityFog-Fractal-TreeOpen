@@ -770,3 +770,239 @@ def test_cli_identity_inspection_failure_fails_closed_exit_4(
     assert log.read_bytes() == log_before
     assert out.read_bytes() == out_before
     assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+# ---------------------------------------------------------------------------
+# Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
+# 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
+# the expected exit-4 operational-write lane — distinct from PUBLIC
+# filesystem behavior and never a public-reachability claim. Stage counters
+# assert the intended operation (open/write/close) actually fired, so no pin
+# can pass by triggering the wrong stage.
+# ---------------------------------------------------------------------------
+
+
+class _StageProxy:
+    def __init__(self, raw, fail_write_at=None, fail_close=False):
+        self._raw = raw
+        self._fail_at = fail_write_at
+        self._fail_close = fail_close
+        self.writes_ok = 0
+        self.close_attempted = False
+
+    def write(self, data):
+        if self._fail_at is not None and self.writes_ok + 1 >= self._fail_at:
+            raise OSError(28, "injected write failure")
+        n = self._raw.write(data)
+        self.writes_ok += 1
+        return n
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close_attempted = True
+        self._raw.__exit__(*exc)
+        if self._fail_close and exc[0] is None:
+            raise OSError(5, "injected close failure")
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def _patch_output_stage(monkeypatch, victim_resolved, *, deny_open=False,
+                        fail_write_at=None, fail_close=False):
+    """Patch ONLY the victim path's binary-write open; returns stage state."""
+    state = {"opens": 0, "proxy": None}
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        if "w" in mode and "b" in mode and self.resolve() == victim_resolved:
+            state["opens"] += 1
+            if deny_open:
+                raise PermissionError(13, "injected open denial")
+            raw = real_open(self, mode, *args, **kwargs)
+            state["proxy"] = _StageProxy(raw, fail_write_at, fail_close)
+            return state["proxy"]
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    return state
+
+
+def _stage_exit4_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in captured.err
+
+
+def test_cli_output_open_denial_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Open denial: no truncation ever happened — existing destination,
+    inputs and directory inventory all byte-identical; exit 4, one line."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    out = tmp_path / "stage_pin.out"
+    out.write_text("pre-existing destination\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [log] + [out]}
+    inv = sorted(p.name for p in tmp_path.iterdir())
+    state = _patch_output_stage(monkeypatch, out.resolve(), deny_open=True)
+    assert main([str(log), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is None  # failed AT open
+    for p, b in before.items():
+        assert p.read_bytes() == b
+    assert sorted(p.name for p in tmp_path.iterdir()) == inv
+
+
+def test_cli_post_open_write_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Post-open failure of the FIRST whole-buffer write: open succeeded,
+    zero writes completed, destination truncated to empty; inputs
+    unchanged; exit 4 with one concise line."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    out = tmp_path / "stage_pin.out"
+    out.write_text("stale bytes to observe truncation\n", encoding="utf-8")
+    before = {p: p.read_bytes() for p in [log]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_write_at=1)
+    assert main([str(log), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None  # open SUCCEEDED
+    assert state["proxy"].writes_ok == 0                       # first write failed
+    assert out.exists() and out.stat().st_size == 0            # truncated-empty
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
+    """Close-time failure: every write succeeded, the context exit raised —
+    the destination holds the COMPLETE canonical serialized bytes although
+    the run reports exit 4."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    canon = tmp_path / "canonical.out"
+    assert main([str(log), "--output", str(canon)]) == 0          # capture canonical success bytes
+    capsys.readouterr()
+    canonical = canon.read_bytes()
+    out = tmp_path / "stage_pin.out"
+    before = {p: p.read_bytes() for p in [log]}
+    state = _patch_output_stage(monkeypatch, out.resolve(), fail_close=True)
+    assert main([str(log), "--output", str(out)]) == 4
+    _stage_exit4_receipt(capsys)
+    assert state["opens"] == 1 and state["proxy"] is not None
+    assert state["proxy"].writes_ok == 1                       # whole buffer written
+    assert state["proxy"].close_attempted                      # failure was AT close
+    assert out.read_bytes() == canonical                       # complete bytes present
+    for p, b in before.items():
+        assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Predictor typed-input-boundary pilot (gated; docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md).
+# Failing-first target: a sentinel plain ValueError escaping the
+# post-validation evaluation core must PROPAGATE, never convert to the
+# documented exit-2 input lane. Preservation controls pin every genuine
+# public lane byte-for-byte.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the post-validation
+    evaluation core (run_evaluation) is an unexpected programming error
+    and must propagate — not masquerade as a concise exit-2 failure."""
+    import scripts.nextness_predictor as predictor_module
+
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(predictor_module, "run_evaluation", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main([str(log)])
+    assert log.read_bytes() == before
+
+
+def test_cli_config_bounds_exact_public_behavior(tmp_path, capsys) -> None:
+    """The four reclassified validation lanes keep their public behavior
+    byte-for-byte: exact message, single stderr line, exit 2, no
+    traceback, input untouched."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    for argv, expected in (
+        ([str(log), "--max-rows", "0"],
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), "--max-line-bytes", "0"],
+         "error: max_line_bytes must be positive, got 0"),
+        ([str(log), "--smoothing", "0.0"],
+         "error: smoothing must be in (0, 1000.0], got 0.0"),
+        ([str(log), "--holdout-fraction", "0.9"],
+         "error: holdout_fraction must be in [0.05, 0.5], got 0.9"),
+    ):
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert lines == [expected]
+        assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_insufficient_history_still_exit_3_pilot(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows([A, B]))
+    before = log.read_bytes()
+    assert main([str(log)]) == 3
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_output_alias_refusal_still_exit_4_pilot(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    assert main([str(log), "--output", str(log)]) == 4
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_report_ceiling_still_exit_5_pilot(tmp_path, monkeypatch, capsys) -> None:
+    import scripts.nextness_predictor as predictor_module
+
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    monkeypatch.setattr(predictor_module, "MAX_REPORT_BYTES", 8)
+    assert main([str(log)]) == 5
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_typed_identity_at_the_four_reclassified_sites(tmp_path) -> None:
+    """Direct-API pin: the four reclassified sites now raise
+    PredictorInputError (a ValueError subclass — base-class catchers
+    remain compatible); the evaluation core's equal-length/non-empty
+    invariant stays a PLAIN ValueError and is NOT part of the typed
+    input lane."""
+    from scripts.nextness_predictor import (
+        PredictorInputError,
+        evaluate_predictions,
+        run_evaluation,
+    )
+
+    assert issubclass(PredictorInputError, ValueError)
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_rows=0)
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_line_bytes=0)
+    with pytest.raises(PredictorInputError):
+        run_evaluation([A, B] * 6, smoothing=0.0)
+    with pytest.raises(PredictorInputError):
+        run_evaluation([A, B] * 6, holdout_fraction=0.9)
+    with pytest.raises(ValueError) as excinfo:
+        evaluate_predictions([], [])
+    assert type(excinfo.value) is ValueError  # plain, deliberately untyped
