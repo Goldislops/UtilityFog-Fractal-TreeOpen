@@ -1305,3 +1305,49 @@ def test_typed_identity_at_the_five_reclassified_sites(tmp_path) -> None:
     bad.write_text("{not json" + chr(10), encoding="utf-8")
     with pytest.raises(MetricsInputError, match="malformed JSONL"):
         compute_run_metrics(bad, tmp_path / "d.jsonl")
+
+
+# ---------------------------------------------------------------------------
+# Invalid-UTF-8 input lane (regression vs the pre-#381 contract; see the
+# late review thread on merged #381). An undecodable log is genuine bad
+# input: pre-#381 the broad catch reported it as concise exit 2; the typed
+# narrowing let UnicodeDecodeError (a ValueError subclass) escape. Restored
+# by a narrow UnicodeDecodeError wrapping boundary around the text-reading
+# region only — message preserved byte-for-byte via str(e).
+# ---------------------------------------------------------------------------
+
+_BAD_UTF8 = b'\xff\xfe{"generation": 1}\n'
+
+
+def test_cli_invalid_utf8_log_is_concise_exit_2(tmp_path, capsys) -> None:
+    """Regression pin: invalid-UTF-8 log -> exit 2 with the exact
+    pre-#381 stderr bytes, one line, no traceback, input untouched,
+    no output created."""
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    before = log.read_bytes()
+    out = tmp_path / "derived.jsonl"
+    with pytest.raises(UnicodeDecodeError) as exc_info:
+        _BAD_UTF8.decode("utf-8")
+    expected = f"error: {exc_info.value}"
+    assert main(["--log", str(log), "--out", str(out)]) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == [expected]
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+    assert not out.exists()
+
+
+def test_invalid_utf8_direct_api_typed_with_cause(tmp_path) -> None:
+    """Direct-API pin: compute_run_metrics raises MetricsInputError whose
+    __cause__ is the original UnicodeDecodeError; message equals str(e)
+    with no added inner prefix."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "bad_utf8.jsonl"
+    log.write_bytes(_BAD_UTF8)
+    with pytest.raises(MetricsInputError) as exc_info:
+        compute_run_metrics(log, tmp_path / "d.jsonl")
+    assert isinstance(exc_info.value.__cause__, UnicodeDecodeError)
+    assert str(exc_info.value) == str(exc_info.value.__cause__)
