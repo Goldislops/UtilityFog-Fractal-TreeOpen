@@ -641,14 +641,16 @@ def main(argv: list[str] | None = None) -> int:
     none provided) · ``4`` output-path failure · ``5`` packet over the
     ceiling. One concise ``error:`` line per expected failure — never a
     traceback. The documented catch set is exactly
-    ``WriteOutsideLogDirError``, ``PacketTooLargeError``, plain
-    ``ValueError`` (the exit-2 lane, which includes ``PacketInputError``
-    and wrapped validator errors) and the write-lane ``OSError``;
-    exceptions outside it propagate — ``build_packet``'s self-check
-    deliberately re-raises its internal validation failure as
-    ``RuntimeError`` for exactly that reason. Because the base
-    ``ValueError`` class is part of the catch set, no claim is made that
-    every programming error propagates.
+    ``WriteOutsideLogDirError``, ``PacketTooLargeError``, the typed
+    ``PacketInputError`` (the exit-2 lane — every wrapped validator
+    error arrives as ``PacketInputError`` at the existing wrapping
+    boundaries) and the write-lane ``OSError``. Exceptions outside it —
+    including plain ``ValueError`` — propagate (evidence-packet
+    typed-boundary pilot; test-pinned), consistent with
+    ``build_packet``'s self-check deliberately re-raising its internal
+    validation failure as ``RuntimeError``. Direct-Python note:
+    ``build_packet`` and its existing typed failures are unchanged; no
+    raise was retyped and no new exception class was introduced.
     """
     args = _build_parser().parse_args(argv)
     paths = {
@@ -672,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     except PacketTooLargeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 5
-    except ValueError as e:  # includes PacketInputError and wrapped validators
+    except PacketInputError as e:  # wrapped validators arrive as PacketInputError
         print(f"error: {e}", file=sys.stderr)
         return 2
     serialized = serialize_packet(packet)

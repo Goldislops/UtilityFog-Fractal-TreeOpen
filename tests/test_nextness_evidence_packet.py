@@ -854,6 +854,47 @@ def test_cli_unexpected_errors_are_not_hidden(chain, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Evidence-packet typed-input-boundary pilot (gated;
+# docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md). Failing-first target: a sentinel
+# plain ValueError escaping the internal build seam must PROPAGATE through
+# public main(), never convert to the documented exit-2 input lane. Uses the
+# same build_packet monkeypatch seam as the sentinel-RuntimeError pin above.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(chain, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the packet's build
+    seam is an unexpected programming error and must propagate — not
+    masquerade as a concise exit-2 input failure. (PacketInputError and
+    the wrapped validator errors remain the documented exit-2 lane.)"""
+    import scripts.nextness_evidence_packet as packet_module
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(packet_module, "build_packet", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main(_chain_args(chain))
+
+
+def test_cli_packet_input_error_still_exit_2(chain, monkeypatch, capsys) -> None:
+    """Typed PacketInputError remains the documented exit-2 lane: one
+    concise error: line, byte-identical message shape, no traceback."""
+    import scripts.nextness_evidence_packet as packet_module
+    from scripts.nextness_evidence_packet import PacketInputError
+
+    def typed_boom(*args, **kwargs):
+        raise PacketInputError("sentinel typed input failure")
+
+    monkeypatch.setattr(packet_module, "build_packet", typed_boom)
+    assert main(_chain_args(chain)) == 2
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert lines == ["error: sentinel typed input failure"]
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
 # Output-write STAGE pins (see docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md and the
 # 2026-07-17 output-write audit). INJECTED deterministic branch exercises of
 # the expected exit-4 operational-write lane — distinct from PUBLIC
