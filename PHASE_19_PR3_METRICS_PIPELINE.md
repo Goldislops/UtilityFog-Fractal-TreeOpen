@@ -390,8 +390,9 @@ other module's map): the CLI's **exit-2 catch is exactly the typed
 lane** (the pre-checked missing-log lane remains exit 1). The five
 genuine input/configuration raises carry the typed class with their
 message text byte-identical: malformed JSONL (the `json.JSONDecodeError`
-wrapper), negative smoothing, negative boundary rates, non-positive
-pairwise delta, and non-positive CV delta. A plain `ValueError` — like
+wrapper), negative smoothing, **the existing negative-rate guard in
+`boundary_persistence_pairwise`**, non-positive pairwise delta, and
+non-positive CV delta. A plain `ValueError` — like
 any exception outside the documented catch classes — **propagates**
 rather than being reported as a concise data failure (test-pinned
 alongside the standing read-side-OSError propagation pin). Locally
@@ -402,6 +403,17 @@ is exported through `__all__`. Direct-Python note: callers catching
 it, but exact class identity, repr and traceback text change at the five
 reclassified sites. Exit codes, messages, output bytes and the §9.1/§9.2
 contracts are unchanged.
+
+**Separate observation — `boundary_cv` rate validation (recorded, not
+changed here)**: `boundary_cv` currently performs **no**
+non-negative-rate validation of its own — direct calls may accept
+negative rates or reach an invalid denominator, and a one-entry CLI log
+bypasses the pairwise guard entirely (no pair row is computed, so the
+`boundary_persistence_pairwise` guard never runs). This is a **future,
+independently gated behavior candidate**: adding validation would be a
+separately observable production/API change. It is **not a defect
+repaired by the typed-boundary pilot** and no `boundary_cv` production
+behavior changed in it.
 
 ## 10. Open questions for AURA + Jack
 

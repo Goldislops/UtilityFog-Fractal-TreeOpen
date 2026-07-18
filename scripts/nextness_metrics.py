@@ -650,8 +650,9 @@ def main(argv: list[str] | None = None) -> int:
     (test-pinned). Direct-Python note: callers catching ``ValueError``
     remain compatible because ``MetricsInputError`` subclasses it, but
     the exact exception type at the five reclassified sites (malformed
-    JSONL, negative smoothing, negative boundary rates, non-positive
-    pairwise delta, non-positive CV delta) is now ``MetricsInputError``.
+    JSONL, negative smoothing, the existing negative-rate guard in
+    ``boundary_persistence_pairwise``, non-positive pairwise delta,
+    non-positive CV delta) is now ``MetricsInputError``.
     """
     args = _build_parser().parse_args(argv)
     log_path = pathlib.Path(args.log)

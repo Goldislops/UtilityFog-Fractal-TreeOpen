@@ -1206,10 +1206,9 @@ def test_cli_five_input_lanes_exact_public_behavior(tmp_path, capsys) -> None:
         json.dumps(_make_entry(generation=1, snapshot_file="a.npz"),
                    sort_keys=True) + "\n" + bad_payload + "\n",
         encoding="utf-8")
-    try:
+    with pytest.raises(json.JSONDecodeError) as exc_info:
         json.loads(bad_payload)
-    except json.JSONDecodeError as e:
-        json_err = str(e)
+    json_err = str(exc_info.value)
     cases = (
         (bad, [], f"error: malformed JSONL at {bad}:2: {json_err}"),
         (two, ["--smoothing", "-1"],
