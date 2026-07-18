@@ -892,3 +892,117 @@ def test_cli_close_time_failure_pinned(tmp_path, capsys, monkeypatch) -> None:
     assert out.read_bytes() == canonical                       # complete bytes present
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Predictor typed-input-boundary pilot (gated; docs/NEXTNESS_CLI_FAILURE_CONTRACTS.md).
+# Failing-first target: a sentinel plain ValueError escaping the
+# post-validation evaluation core must PROPAGATE, never convert to the
+# documented exit-2 input lane. Preservation controls pin every genuine
+# public lane byte-for-byte.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_internal_plain_valueerror_propagates(tmp_path, monkeypatch) -> None:
+    """Pilot pin: an internal plain ValueError from the post-validation
+    evaluation core (run_evaluation) is an unexpected programming error
+    and must propagate — not masquerade as a concise exit-2 failure."""
+    import scripts.nextness_predictor as predictor_module
+
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+
+    def boom(*args, **kwargs):
+        raise ValueError("sentinel plain ValueError probe")
+
+    monkeypatch.setattr(predictor_module, "run_evaluation", boom)
+    with pytest.raises(ValueError, match="sentinel plain ValueError probe"):
+        main([str(log)])
+    assert log.read_bytes() == before
+
+
+def test_cli_config_bounds_exact_public_behavior(tmp_path, capsys) -> None:
+    """The four reclassified validation lanes keep their public behavior
+    byte-for-byte: exact message, single stderr line, exit 2, no
+    traceback, input untouched."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    for argv, expected in (
+        ([str(log), "--max-rows", "0"],
+         "error: max_rows must be in (0, 1000000], got 0"),
+        ([str(log), "--max-line-bytes", "0"],
+         "error: max_line_bytes must be positive, got 0"),
+        ([str(log), "--smoothing", "0.0"],
+         "error: smoothing must be in (0, 1000.0], got 0.0"),
+        ([str(log), "--holdout-fraction", "0.9"],
+         "error: holdout_fraction must be in [0.05, 0.5], got 0.9"),
+    ):
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        lines = [l for l in err.strip().splitlines() if l.strip()]
+        assert lines == [expected]
+        assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_insufficient_history_still_exit_3_pilot(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows([A, B]))
+    before = log.read_bytes()
+    assert main([str(log)]) == 3
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_output_alias_refusal_still_exit_4_pilot(tmp_path, capsys) -> None:
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    assert main([str(log), "--output", str(log)]) == 4
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_cli_report_ceiling_still_exit_5_pilot(tmp_path, monkeypatch, capsys) -> None:
+    import scripts.nextness_predictor as predictor_module
+
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    monkeypatch.setattr(predictor_module, "MAX_REPORT_BYTES", 8)
+    assert main([str(log)]) == 5
+    err = capsys.readouterr().err
+    lines = [l for l in err.strip().splitlines() if l.strip()]
+    assert len(lines) == 1 and lines[0].startswith("error:")
+    assert "Traceback" not in err
+    assert log.read_bytes() == before
+
+
+def test_typed_identity_at_the_four_reclassified_sites(tmp_path) -> None:
+    """Direct-API pin: the four reclassified sites now raise
+    PredictorInputError (a ValueError subclass — base-class catchers
+    remain compatible); the evaluation core's equal-length/non-empty
+    invariant stays a PLAIN ValueError and is NOT part of the typed
+    input lane."""
+    from scripts.nextness_predictor import (
+        PredictorInputError,
+        evaluate_predictions,
+        run_evaluation,
+    )
+
+    assert issubclass(PredictorInputError, ValueError)
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_rows=0)
+    with pytest.raises(PredictorInputError):
+        read_dominant_sequence(log, max_line_bytes=0)
+    with pytest.raises(PredictorInputError):
+        run_evaluation([A, B] * 6, smoothing=0.0)
+    with pytest.raises(PredictorInputError):
+        run_evaluation([A, B] * 6, holdout_fraction=0.9)
+    with pytest.raises(ValueError) as excinfo:
+        evaluate_predictions([], [])
+    assert type(excinfo.value) is ValueError  # plain, deliberately untyped
