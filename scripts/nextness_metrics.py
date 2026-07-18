@@ -676,6 +676,16 @@ def compute_run_metrics(
                     raise MetricsInputError(
                         f"malformed JSONL at {log_path}:{line_no}: {e}"
                     ) from e
+                except RecursionError as e:
+                    # Parser depth limit hit inside the byte ceiling —
+                    # metrics is fatal-typed (not row-contained), so this
+                    # decode-boundary RecursionError becomes a located
+                    # typed rejection. RecursionError outside this seam
+                    # is not swallowed anywhere and still propagates.
+                    raise MetricsInputError(
+                        f"malformed JSONL at {log_path}:{line_no}: "
+                        f"nesting exceeds the parser's depth limit"
+                    ) from e
                 _validate_entry(entry, log_path, line_no)
                 entries.append(entry)
     except UnicodeDecodeError as e:

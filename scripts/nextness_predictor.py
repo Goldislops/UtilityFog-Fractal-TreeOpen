@@ -248,7 +248,15 @@ def read_dominant_sequence(
                 continue
             try:
                 row = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                # RecursionError: a row nested beyond the parser's depth
+                # limit (still inside the byte ceilings). It follows the
+                # EXISTING malformed-row containment policy — counted and
+                # skipped like any other unparseable row; this is the
+                # reader's own row policy, not a family-wide convention.
+                # Recursion depth recovers fully once the parser unwinds;
+                # RecursionError raised OUTSIDE this decode call is not
+                # caught anywhere and still propagates.
                 rejections["malformed_json"] += 1
                 continue
             # Built-in dict rows only — json.loads only ever produces

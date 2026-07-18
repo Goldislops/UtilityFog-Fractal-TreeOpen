@@ -90,6 +90,15 @@ fallback is visible.
   `max_rows × (max_line_bytes + 2)` bytes.
 - Every rejection is accounted by a fixed reason vocabulary; the report
   carries **counts only** — row payloads are never copied anywhere.
+- **Parser depth totality**: a row nested beyond the JSON parser's
+  recursion limit (while inside the byte ceilings) follows the same
+  malformed-row containment policy — its ``RecursionError`` is caught
+  at the row decode only, counted ``malformed_json``, and the run
+  continues (recursion depth recovers when the parser unwinds). This is
+  the reader's own row policy, not a family-wide convention; a
+  ``RecursionError`` outside the row-decode seam still propagates.
+  Consumers of the shared reader (NP2 monitor, NP6 replay-lab log path)
+  inherit the containment.
 
 ## Report contract
 
