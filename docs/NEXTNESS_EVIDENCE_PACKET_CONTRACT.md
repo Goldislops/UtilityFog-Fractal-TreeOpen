@@ -62,10 +62,13 @@ verification.
 **Self-check**: the emitted packet is validated against NP9's
 `validate_evidence_packet` before serialization. A failure there is an
 **internal programming/contract failure, not user input**: it is
-re-raised as a plain `RuntimeError` at the boundary (never the
-documented exit-2 input lane, which `ArtifactValidationError`'s
-`ValueError` ancestry would otherwise trigger) and propagates loudly.
-Malformed **external** artifacts keep the concise exit-2 contract.
+re-raised as a plain `RuntimeError` — retained as a **stable
+internal-failure classification independent of exception ancestry**.
+Both a raw `ArtifactValidationError` and the converted `RuntimeError`
+lie outside `main()`'s typed `PacketInputError` catch, so the internal
+failure propagates loudly either way. Malformed **external** artifacts
+are wrapped as `PacketInputError` at validation and keep the concise
+exit-2 contract.
 Provenance links remain independently recomputed by this module;
 structural validation never converts a broken link into success.
 
@@ -136,6 +139,21 @@ preservation on these lanes is bounded by the existing validation-to-write
 unknown-variant artifact, or none provided) · `4` output-path failure ·
 `5` packet over the ceiling. One concise `error:` line per expected
 failure, never a traceback.
+
+**Typed input boundary (evidence-packet pilot)**: the exit-2 catch is
+exactly the typed `PacketInputError` — **not arbitrary `ValueError`**.
+Every established input failure already arrives as `PacketInputError`
+through the existing wrapping boundaries (bounded JSON loading; the
+`EvaluatorInputError`/`LabInputError` conversion; the NP9
+`ArtifactValidationError` conversion), so **established input failures
+retain byte-identical messages and exit 2**. A plain `ValueError` — like
+any exception outside the documented catch classes — now **propagates**
+through public `main()` (test-pinned beside the standing
+sentinel-`RuntimeError` pin), consistent with the self-check's existing
+`RuntimeError` re-raise. No raise was retyped, no new exception class
+was introduced, no validator behavior changed; `build_packet`'s
+direct-Python behavior and its existing typed failures are unchanged.
+This is a packet-only decision; no family-wide convention is implied.
 
 ## Safety
 

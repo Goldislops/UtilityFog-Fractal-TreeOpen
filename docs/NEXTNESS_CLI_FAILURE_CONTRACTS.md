@@ -20,7 +20,7 @@ test suites named per row.
 | `nextness_monitor` | **0/2/3** | 0 (receipt → stdout; writes no files on any path) | 2 missing log, typed `MonitorInputError` (plain `ValueError` propagates — monitor typed-boundary pilot) | — (no output lane exists) | — | — | `error:` |
 | `nextness_evaluator` | **0/2/4/5** | 0 (evaluation → stdout or `--output`) | 2 missing/oversized/malformed/unknown-variant artifact, `EvaluatorInputError` | 4 (`WriteOutsideLogDirError`: primary-dir containment, `data/` tree, alias of ANY supplied role, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`EvaluationTooLargeError`) | `error:` |
 | `nextness_replay_lab` | **0/2/3/4/5** | 0 (lab report → stdout or `--output`) | 2 missing input, malformed/oversized protocol (`LabInputError`), or out-of-bounds reader configuration (`PredictorInputError` from the imported reader, carried by this CLI's documented broad `ValueError` catch) · 3 insufficient history | 4 (`WriteOutsideLogDirError`: containment, both-input alias, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`LabReportTooLargeError`) | `error:` |
-| `nextness_evidence_packet` | **0/2/4/5** | 0 (packet → stdout or `--output`) | 2 none/missing/oversized artifact, `PacketInputError`, wrapped validators | 4 (`WriteOutsideLogDirError`: primary-dir containment, alias of any of the six roles, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`PacketTooLargeError`) | `error:` |
+| `nextness_evidence_packet` | **0/2/4/5** | 0 (packet → stdout or `--output`) | 2 none/missing/oversized artifact — typed `PacketInputError`, incl. wrapped validators (plain `ValueError` propagates — evidence-packet typed-boundary pilot) | 4 (`WriteOutsideLogDirError`: primary-dir containment, alias of any of the six roles, fail-closed identity) | 4 (write-lane `OSError`) | 5 (`PacketTooLargeError`) | `error:` |
 
 Monitor's exit 3 is `InsufficientHistoryError` — the same *insufficiency*
 semantics as predictor and replay lab. The evaluator **deliberately has no
@@ -74,32 +74,34 @@ focused suites assert code 2, the `usage:` prefix, and no traceback.
 ## Unexpected-error propagation (bounded by each catch set)
 
 Each CLI's `main()` catches its **documented catch classes**; exceptions
-outside those classes propagate. The catch sets differ, and in two of the
-six they are broader than the typed subclasses alone:
+outside those classes propagate. The catch sets differ, and in one of the
+six — the replay lab — the catch is broader than the typed subclasses
+alone:
 
-- **Plain `ValueError` is broadly mapped to exit 2** in replay lab and
-  evidence packet: the catch clause names the base class (both catch it as
-  the base of their typed subclasses), so a plain `ValueError` escaping a
-  call inside the `try` region takes the documented data-failure lane
-  rather than propagating. The replay lab's broad lane also carries the
-  predictor's typed reader-bound errors (`PredictorInputError`, a
-  `ValueError` subclass) from the imported `read_dominant_sequence` —
-  same exit, same messages (test-pinned).
+- **Plain `ValueError` is broadly mapped to exit 2 in the replay lab
+  only**: its catch clause names the base class (`LabInputError`'s
+  parent), so a plain `ValueError` escaping a call inside its `try`
+  region takes the documented data-failure lane rather than propagating.
+  That broad lane also carries the predictor's typed reader-bound errors
+  (`PredictorInputError`, a `ValueError` subclass) from the imported
+  `read_dominant_sequence` — same exit, same messages (test-pinned).
 - The **evaluator catches its typed `EvaluatorInputError`**, and — via
   their typed-boundary pilots — the **monitor catches its typed
   `MonitorInputError`**, the **predictor its typed
-  `PredictorInputError`**, and **metrics its typed `MetricsInputError`
-  (plus the `FileNotFoundError` validation-to-read race lane)** — each
-  alongside its other typed classes, **not arbitrary plain
-  `ValueError`**; in all four, a plain `ValueError` raised inside the
-  `try` region propagates. Each is that module's own decision, per this
-  document's non-harmonizing rule.
+  `PredictorInputError`**, **metrics its typed `MetricsInputError`
+  (plus the `FileNotFoundError` validation-to-read race lane)**, and the
+  **evidence packet its typed `PacketInputError`** (whose existing
+  wrapping boundaries deliver every wrapped validator error as that
+  class) — each alongside its other typed classes, **not arbitrary
+  plain `ValueError`**; in all five, a plain `ValueError` raised inside
+  the `try` region propagates. Each is that module's own decision, per
+  this document's non-harmonizing rule.
 - The focused propagation pins prove **their exact lanes only**: a sentinel
   `RuntimeError` propagating in predictor, monitor, evaluator, replay lab
   and evidence packet, a read-side `OSError` propagating in metrics
   (PR #372's pin), and a sentinel plain `ValueError` propagating in the
-  monitor, the predictor and metrics (the pilots' pins). They establish
-  those lanes, not a general theorem.
+  monitor, the predictor, metrics and the evidence packet (the pilots'
+  pins). They establish those lanes, not a general theorem.
 
 **No claim is made that every possible programming error propagates**;
 propagation is exactly the complement of each CLI's documented catch set,
