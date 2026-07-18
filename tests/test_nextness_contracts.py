@@ -25,8 +25,12 @@ The guard is discovered by the existing pytest configuration
 (pytest.ini testpaths = tests); no workflow or required-check change is
 needed or made. LIMITATION (honest scope): the guard runs when the test
 suite runs - it detects drift at CI time, not at artifact-read time,
-and it guards these four packages only, not the observer's own log
-format beyond what read_dominant_sequence consumes.
+and it guards these four packages' contracts with each other plus, via
+the live producer->consumer seam guard below, the EXPLICIT
+observer->metrics consumer fields (exact built-in containers,
+non-boolean non-negative integer counts, unit fields real/finite/[0,1])
+- not the observer's entire log format beyond those pinned fields and
+what read_dominant_sequence consumes.
 
 If a test here fails because a contract was CHANGED DELIBERATELY,
 regenerate the goldens with the documented procedure in
@@ -992,7 +996,7 @@ def test_observer_rows_satisfy_strict_metrics_consumer_contract(tmp_path) -> Non
     out_a = log_dir / "derived_a.jsonl"
     compute_run_metrics(log_file, out_a)
     derived = [l for l in out_a.read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert derived  # one pair row + one aggregate row expected
+    assert len(derived) == 2  # exactly one pair row + one aggregate row
     for line in derived:
         json.loads(line, parse_constant=_reject_constant)  # strict JSON
 
@@ -1018,6 +1022,21 @@ def test_metrics_historical_absent_unit_fields_compatibility(tmp_path) -> None:
     out = tmp_path / "derived.jsonl"
     aggregate = compute_run_metrics(log, out)
     assert aggregate["n_snapshots"] == 2
-    for line in out.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            json.loads(line, parse_constant=_reject_constant)
+    lines = [l for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2  # exactly one pair row + one aggregate row
+    pair, agg = (json.loads(l, parse_constant=_reject_constant) for l in lines)
+    # The authorized absent -> 0.0 policy, pinned exactly: zeroed unit
+    # fields give zero CCIs, identical (zero) rates give full pairwise
+    # persistence, zero variance gives zero CV and a fully-clamped
+    # aggregate persistence of 1.0.
+    assert pair["summary_type"] == "pair"
+    assert pair["cci_prev"] == 0.0
+    assert pair["cci_curr"] == 0.0
+    assert pair["boundary_persistence_pairwise"] == 1.0
+    assert agg["summary_type"] == "run_aggregate"
+    assert agg["mean_cci"] == 0.0
+    assert agg["std_cci"] == 0.0
+    assert agg["min_cci"] == 0.0
+    assert agg["max_cci"] == 0.0
+    assert agg["boundary_cv"] == 0.0
+    assert agg["boundary_persistence_aggregate_clamped"] == 1.0

@@ -7,8 +7,9 @@
 ## What this is
 
 A test-owned compatibility layer that makes **silent** schema or
-metric-contract drift among the Nextness instruments **loud**. Four
-mechanisms:
+metric-contract drift among the Nextness instruments **loud**. Six
+mechanisms (the old "four" undercounted — the correction-semantics
+locks were already a fifth):
 
 1. **Golden byte-stability.** Canonical artifacts recorded from the
    live emitters over a small non-trivial synthetic log (12 accepted
@@ -49,6 +50,10 @@ mechanisms:
    (spy-verified non-invocation of `replay_observations`), and a
    hard-link output alias to an input is refused with the input
    byte-intact.
+6. **Observer → metrics seam guard** (added 2026-07-18): the live
+   producer→consumer guard described in its own section below — it pins
+   the **explicit consumer fields** the metrics strict domain consumes,
+   not the observer's entire log format.
 
 ## Drift-detection receipts (failing-first)
 
@@ -83,8 +88,12 @@ mutation matrix is not duplicated here.
   detects drift at test time, not at artifact-read time. Read-time
   fail-closed behavior lives in the instruments themselves (NP5/NP6
   validators) — the guard checks that behavior stays present.
-- It guards these packages' contracts with **each other**; it does not
-  guard the observer's log format beyond what `read_dominant_sequence`
+- It guards these packages' contracts with **each other**, plus — via
+  the observer→metrics seam guard — the **explicit consumer fields**
+  the strict metrics domain reads (exact built-in containers;
+  non-boolean, non-negative integer counts; unit fields real, finite,
+  within [0, 1]). It does **not** guard the observer's entire log
+  format beyond those pinned fields and what `read_dominant_sequence`
   consumes, and it cannot see drift in packages it does not import.
 - Pytest discovery (`pytest.ini` `testpaths = tests`) already collects
   the guard; **no workflow, required-check or configuration change is
