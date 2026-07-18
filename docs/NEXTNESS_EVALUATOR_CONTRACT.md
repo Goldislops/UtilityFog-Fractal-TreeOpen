@@ -246,6 +246,19 @@ write. The guard defends against aliases that exist when it validates —
 it does not claim to eliminate the validation-to-write (TOCTOU)
 interval.
 
+**Destination boundary on operational write failure** (audited 2026-07-17;
+stage-pinned in the focused tests): a failure **at or before the binary
+open** — an unwritable or read-only destination, an absent or invalid
+parent — preserves any existing destination byte-identically and creates
+no output. **After a successful direct non-atomic open**, a later failure
+may truncate the destination or leave partial output (the whole-buffer
+write truncates on open, so a failed write leaves an empty file). A
+**close-time failure** may leave the complete canonical evaluation bytes
+in place even though the run reports the operational-failure exit —
+a present file does not imply a successful run. Supplied-input
+preservation on these lanes is bounded by the existing validation-to-write
+(TOCTOU) non-claim. No atomic-write behavior is provided or implied.
+
 ## CLI exit codes
 
 | Code | Meaning |
