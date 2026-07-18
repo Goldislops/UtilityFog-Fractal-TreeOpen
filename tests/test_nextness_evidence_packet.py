@@ -748,8 +748,9 @@ def test_self_validation_failure_is_internal_not_input_error(chain, monkeypatch,
     # A failure while validating the packet NP8 JUST EMITTED is an
     # internal programming/contract failure — it must propagate loudly,
     # never masquerade as the documented exit-2 "malformed user input"
-    # lane (ArtifactValidationError inherits ValueError, which main
-    # catches for external artifacts).
+    # lane. External validator failures are wrapped as PacketInputError
+    # at _validate_role (that is the exit-2 lane); the emitted-packet
+    # self-check deliberately becomes RuntimeError instead.
     import scripts.nextness_artifact_validation as validation_module
     from scripts.nextness_artifact_validation import ArtifactValidationError
 

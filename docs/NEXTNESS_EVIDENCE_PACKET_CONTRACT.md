@@ -62,10 +62,13 @@ verification.
 **Self-check**: the emitted packet is validated against NP9's
 `validate_evidence_packet` before serialization. A failure there is an
 **internal programming/contract failure, not user input**: it is
-re-raised as a plain `RuntimeError` at the boundary (never the
-documented exit-2 input lane, which `ArtifactValidationError`'s
-`ValueError` ancestry would otherwise trigger) and propagates loudly.
-Malformed **external** artifacts keep the concise exit-2 contract.
+re-raised as a plain `RuntimeError` — retained as a **stable
+internal-failure classification independent of exception ancestry**.
+Both a raw `ArtifactValidationError` and the converted `RuntimeError`
+lie outside `main()`'s typed `PacketInputError` catch, so the internal
+failure propagates loudly either way. Malformed **external** artifacts
+are wrapped as `PacketInputError` at validation and keep the concise
+exit-2 contract.
 Provenance links remain independently recomputed by this module;
 structural validation never converts a broken link into success.
 

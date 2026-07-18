@@ -523,11 +523,12 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
     }
     # Self-check: the emitted packet must satisfy its own public
     # structural validator before serialization. A failure here is an
-    # internal programming/contract failure, NOT malformed user input —
-    # and ArtifactValidationError inherits ValueError, which the CLI
-    # catches as the documented exit-2 input lane. Re-raise as a plain
-    # RuntimeError at this boundary so the internal failure propagates
-    # loudly instead of masquerading as a concise input error.
+    # internal programming/contract failure, NOT malformed user input.
+    # The explicit conversion to a plain RuntimeError is retained as a
+    # stable internal-failure classification independent of exception
+    # ancestry: both a raw ArtifactValidationError and the converted
+    # RuntimeError lie outside main()'s typed PacketInputError catch,
+    # so the internal failure propagates loudly either way.
     validation = _np9()
     try:
         validation.validate_evidence_packet(packet)
