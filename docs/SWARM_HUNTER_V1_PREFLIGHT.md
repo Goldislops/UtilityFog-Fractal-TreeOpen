@@ -321,13 +321,18 @@ immutable inputs to a findings artifact.
   types are proven at the direct-Python boundary before any caller `len`/iteration/
   `keys`/`.get`/subscript hook can run, so a `list`/`tuple`/`dict` subclass with a
   hostile hook is refused (existing `invalid_input`/`invalid_provenance`/
-  `invalid_sha256_format`) without executing it. **Inside each exact dict, every
-  key is proven an exact built-in `str`** (via hash-free iteration) before any
-  `set(...keys())`/membership/lookup hashes or compares it, and the provenance
-  **`source` discriminator is proven an exact built-in `str`** before the
-  `!= "synthetic"` comparison — so a hostile *stored key* `__hash__`/`__eq__` or a
-  hostile *scalar* `__eq__` cannot execute (a non-str key or non-str source →
-  `invalid_input`). Each snapshot is in-memory arrays —
+  `invalid_sha256_format`) without executing it. **Each exact dict's cardinality
+  is checked first** (hook-free `len()` on a proven exact dict): a dict exceeding
+  its closed key budget (snapshot 4, provenance 7, `sha256_triple` 3) is refused
+  in O(1) *before* key traversal or `set(...)` allocation, so arbitrarily many
+  junk keys cannot force unbounded per-object work (`MAX_SNAPSHOTS` bounds the
+  outer sequence but not this nested cardinality). **Then, inside each exact
+  dict, every key is proven an exact built-in `str`** (via hash-free iteration)
+  before any `set(...keys())`/membership/lookup hashes or compares it, and the
+  provenance **`source` discriminator is proven an exact built-in `str`** before
+  the `!= "synthetic"` comparison — so a hostile *stored key* `__hash__`/`__eq__`
+  or a hostile *scalar* `__eq__` cannot execute (a non-str key or non-str source
+  → `invalid_input`). Each snapshot is in-memory arrays —
   `states: u8[N³]` (5-state,
   `memory.rs:19–24` semantics), optional `memory: f32[8][N³]` channel-first, optional
   `inactivity_steps: i16[N³]` (source-exact name, `voxel_lattice.rs:18`) — plus a

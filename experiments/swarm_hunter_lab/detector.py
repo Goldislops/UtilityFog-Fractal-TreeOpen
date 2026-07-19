@@ -171,6 +171,14 @@ def _validate_snapshot(item, ctx):
     # SUBCLASS with a hostile keys()/__getitem__ cannot execute its hooks here.
     if type(item) is not dict:
         raise _Refusal("invalid_input")
+    # cardinality gate BEFORE any key traversal / set allocation: len() is
+    # hook-free on a proven exact dict, and a closed snapshot has at most
+    # len(_ALLOWED_SNAPSHOT_KEYS) keys — so an over-size dict (arbitrarily many
+    # ordinary junk str keys) is refused here in O(1) rather than traversed and
+    # copied into a temporary set. Over-cardinality, not equality: smaller
+    # dicts stay bounded and flow to the exact-str + closed-key checks below.
+    if len(item) > len(_ALLOWED_SNAPSHOT_KEYS):
+        raise _Refusal("invalid_input")
     # then prove every stored key is an exact str before set(item.keys()) hashes
     # them — a hostile key inside an exact dict would otherwise fire __hash__.
     _require_str_keys(item, "invalid_input")
@@ -182,6 +190,8 @@ def _validate_snapshot(item, ctx):
     # exact built-in dict proven first (subclass -> invalid_provenance), then
     # every stored key proven exact str before set(prov.keys()) hashes them.
     if type(prov) is not dict:
+        raise _Refusal("invalid_provenance")
+    if len(prov) > len(_PROVENANCE_KEYS):
         raise _Refusal("invalid_provenance")
     _require_str_keys(prov, "invalid_input")
     if set(prov.keys()) != _PROVENANCE_KEYS:
@@ -236,6 +246,8 @@ def _validate_snapshot(item, ctx):
     # exact built-in dict proven first (subclass -> invalid_sha256_format), then
     # every stored key proven exact str before set(supplied.keys()) hashes them.
     if type(supplied) is not dict:
+        raise _Refusal("invalid_sha256_format", sid)
+    if len(supplied) > len(schema.SHA256_TRIPLE_KEYS):
         raise _Refusal("invalid_sha256_format", sid)
     _require_str_keys(supplied, "invalid_input", sid)
     if set(supplied.keys()) != schema.SHA256_TRIPLE_KEYS:
