@@ -184,6 +184,26 @@ Gate precedence (the typed reason names the first failed gate):
   invoked; non-finite and overflow-scale numbers are rejected;
   **exact key sets** (unknown keys = unknown variant = rejected;
   missing keys = rejected); unknown `schema` strings rejected.
+- **Hook-free refusal diagnostics (DIRECT Python API included).** A
+  refusal never reads an attribute of the rejected value or of its
+  class — in particular never `type(value).__name__`, since `__name__`
+  is an overridable **metaclass** property whose getter would run
+  caller-controlled code from inside error formatting and escape the
+  typed `EvaluatorInputError`. Builtin type names come from a literal
+  identity table; anything else is described as `non-builtin value`.
+  Public CLI/artifact messages are unaffected: `json.loads` yields only
+  builtins, so every reachable-lane diagnostic is byte-identical to
+  before.
+- **Exact-string key partition.** A proven-exact `dict` is iterated
+  *without* hashing, comparing, stringifying or representing an
+  unproven key; only exact builtin `str` keys enter a set, and set
+  membership, difference, comparison and sorting run on those strings
+  alone. Non-string keys are reported as `<non-builtin value>` and
+  always force a mismatch. This closes a **soundness** hole as well as
+  a hook path: a non-string key whose `__hash__` collides with an
+  expected name previously had its `__eq__` invoked by the key-set
+  comparison, and an `__eq__` returning `True` let that key *satisfy* a
+  required name and pass validation.
 - NP1 internal-accounting identities re-checked (rejections sum,
   row-count inequality, split arithmetic): an artifact violating them
   is not a v1 report, whatever its schema string says.
