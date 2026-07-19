@@ -1199,8 +1199,9 @@ def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
     with pytest.raises(PredictorInputError) as excinfo:
         read_dominant_sequence(log, max_line_bytes=_SubInt(65_536))
     assert type(excinfo.value) is PredictorInputError
-    # hook-free diagnostic: safe type NAME only, never the object
-    assert str(excinfo.value) == "max_line_bytes must be a builtin int, got _SubInt"
+    # hook-free generic diagnostic: nothing of the object or its
+    # class is inspected or reported
+    assert str(excinfo.value) == "max_line_bytes must be a builtin int"
 
     # lower inclusive boundary: parameter accepted, reading proceeds
     seq, rej, rows = read_dominant_sequence(log, max_line_bytes=1)
@@ -1269,21 +1270,21 @@ def test_max_rows_exact_builtin_type_totality(tmp_path, monkeypatch) -> None:
         with pytest.raises(PredictorInputError) as excinfo:
             read_dominant_sequence(log, max_rows=bad)
         assert type(excinfo.value) is PredictorInputError
-        assert "must be a builtin int, got" in str(excinfo.value)
+        assert str(excinfo.value) == "max_rows must be a builtin int"
     monkeypatch.undo()
     assert opened == []          # refusals fire before the log opens
     assert _HostileHooks.ran is False  # zero hostile hooks executed
-    # safe type-name-only diagnostic
+    # generic supplied-type-free diagnostic
     with pytest.raises(PredictorInputError) as excinfo:
         read_dominant_sequence(log, max_rows=_HostileHooks())
-    assert str(excinfo.value) == "max_rows must be a builtin int, got _HostileHooks"
+    assert str(excinfo.value) == "max_rows must be a builtin int"
     assert _HostileHooks.ran is False
 
 
 def test_max_line_bytes_diagnostic_is_hook_free(tmp_path) -> None:
     """Finding F3 closed: an object whose __repr__ raises is refused
-    with the exact typed exception — the diagnostic renders only the
-    safe type name and never invokes the representation hook."""
+    with the exact typed exception — the generic diagnostic never
+    invokes the representation hook."""
     from scripts.nextness_predictor import PredictorInputError
 
     _HostileHooks.ran = False
@@ -1291,9 +1292,60 @@ def test_max_line_bytes_diagnostic_is_hook_free(tmp_path) -> None:
     with pytest.raises(PredictorInputError) as excinfo:
         read_dominant_sequence(log, max_line_bytes=_HostileHooks())
     assert type(excinfo.value) is PredictorInputError
-    assert str(excinfo.value) == (
-        "max_line_bytes must be a builtin int, got _HostileHooks")
+    assert str(excinfo.value) == "max_line_bytes must be a builtin int"
     assert _HostileHooks.ran is False
+
+
+class _RaisingMeta(type):
+    """Metaclass whose __name__ property raises — even
+    type(value).__name__ is a user-controlled hook."""
+    ran = False
+
+    @property
+    def __name__(cls):
+        _RaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _MetaBomb(metaclass=_RaisingMeta):
+    pass
+
+
+def test_bound_diagnostics_never_touch_the_metaclass(
+    tmp_path, monkeypatch
+) -> None:
+    """Metaclass-__name__ repair: refusing a non-builtin-int must not
+    inspect the rejected object OR its class beyond the identity test —
+    an object whose metaclass raises on __name__ access still receives
+    the exact typed exception with the generic message, without opening
+    the input or creating output."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    log = _write_log(tmp_path, _dominant_rows([A, B, A]))
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for param, message in (("max_rows", "max_rows must be a builtin int"),
+                           ("max_line_bytes",
+                            "max_line_bytes must be a builtin int")):
+        _RaisingMeta.ran = False
+        with pytest.raises(PredictorInputError) as excinfo:
+            read_dominant_sequence(log, **{param: _MetaBomb()})
+        assert type(excinfo.value) is PredictorInputError
+        assert str(excinfo.value) == message
+        assert _RaisingMeta.ran is False  # the metaclass was never asked
+    monkeypatch.undo()
+    assert opened == []
 
 
 def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:

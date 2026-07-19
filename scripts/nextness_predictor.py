@@ -218,25 +218,22 @@ def read_dominant_sequence(
     """
     # Exact-type integer bounds (Jack policy 2026-07-19): parameters
     # that bound reads or loops must be exact builtin ints, refused
-    # WITHOUT invoking their comparison, conversion, indexing, string
-    # or representation hooks. Type and range are validated SPLIT: a
-    # non-builtin-int is reported by its safe type NAME only (the
-    # object is never interpolated, stringified or repr'd); the
-    # numeric value is rendered only after exact builtin-int identity
-    # is established. Both refusals fire BEFORE the input is opened.
+    # WITHOUT invoking any hook of the rejected object OR its class.
+    # Type and range are validated SPLIT, and the type refusal carries
+    # a GENERIC supplied-type-free message — nothing of the object is
+    # inspected beyond the identity test itself (even
+    # type(value).__name__ can execute a hostile metaclass property);
+    # the numeric value is rendered only after exact builtin-int
+    # identity is established. Both refusals fire BEFORE the input is
+    # opened.
     if type(max_rows) is not int:
-        raise PredictorInputError(
-            f"max_rows must be a builtin int, got {type(max_rows).__name__}"
-        )
+        raise PredictorInputError("max_rows must be a builtin int")
     if not 1 <= max_rows <= MAX_ROWS_CEILING:
         raise PredictorInputError(
             f"max_rows must be in (0, {MAX_ROWS_CEILING}], got {max_rows}"
         )
     if type(max_line_bytes) is not int:
-        raise PredictorInputError(
-            f"max_line_bytes must be a builtin int, "
-            f"got {type(max_line_bytes).__name__}"
-        )
+        raise PredictorInputError("max_line_bytes must be a builtin int")
     # Ceiling keeps the bounded readline's max_line_bytes + 2 safely
     # index-representable (the OverflowError is unreachable, not
     # caught).

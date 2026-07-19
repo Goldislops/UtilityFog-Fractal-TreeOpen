@@ -680,26 +680,22 @@ def compute_run_metrics(
 
     # Input-work bounds: exact-type integer parameters (Jack policy
     # 2026-07-19), validated typed BEFORE any input reading. Type and
-    # range are SPLIT: a non-builtin-int (bool and custom int
-    # subclasses included) is reported by its safe type NAME only —
-    # the object is never interpolated, stringified or repr'd, so no
-    # comparison/conversion/indexing/string/representation hook can
-    # execute; the numeric value is rendered only after exact
-    # builtin-int identity is established.
+    # range are SPLIT, and the type refusal carries a GENERIC
+    # supplied-type-free message — nothing of the rejected object or
+    # its class is inspected beyond the identity test itself (even
+    # type(value).__name__ can execute a hostile metaclass property),
+    # so no comparison/conversion/indexing/string/representation/
+    # metaclass hook can run; the numeric value is rendered only after
+    # exact builtin-int identity is established.
     if type(max_rows) is not int:
-        raise MetricsInputError(
-            f"max_rows must be a builtin int, got {type(max_rows).__name__}"
-        )
+        raise MetricsInputError("max_rows must be a builtin int")
     if not 1 <= max_rows <= MAX_ROWS_CEILING:
         raise MetricsInputError(
             f"max_rows must be a non-boolean integer in "
             f"(0, {MAX_ROWS_CEILING}], got {max_rows!r}"
         )
     if type(max_line_bytes) is not int:
-        raise MetricsInputError(
-            f"max_line_bytes must be a builtin int, "
-            f"got {type(max_line_bytes).__name__}"
-        )
+        raise MetricsInputError("max_line_bytes must be a builtin int")
     # Ceiling keeps the bounded readline's max_line_bytes + 2 safely
     # index-representable (the OverflowError is unreachable, not
     # caught).
