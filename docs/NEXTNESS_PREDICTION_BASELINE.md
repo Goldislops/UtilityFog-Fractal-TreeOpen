@@ -81,7 +81,11 @@ fallback is visible.
   accepted-observation count.
 - Bounded line size (pre-allocation guard): records are `\n`-delimited
   and read via bounded `readline` calls of at most `max_line_bytes + 2`
-  bytes (default `max_line_bytes` 65 536), so an oversized or
+  bytes (default `max_line_bytes` 65 536; the parameter itself accepts
+  only a non-boolean built-in integer in **[1, 16 777 216]**
+  (`MAX_LINE_BYTES_CEILING`), validated before the log is opened, so
+  the probe arithmetic can never overflow an index-sized integer —
+  arbitrary positive integers are NOT accepted), so an oversized or
   unterminated record is **never materialized in full**. A record whose
   content (raw bytes; LF or CRLF terminator excluded) exceeds
   `max_line_bytes` is counted `oversized_line` and **terminates
@@ -173,7 +177,9 @@ exits.
 **Typed input boundary (predictor pilot)**: the exit-2 catch is exactly
 the typed `PredictorInputError` — the four CLI-reachable validation
 raises (`max_rows`, `max_line_bytes`, `smoothing`, `holdout_fraction`
-bounds) raise it with their message text unchanged. A plain
+bounds) raise it (the `max_line_bytes` message states the
+`[1, 16777216]` acceptance range since the boundary-totality repair;
+the other three message texts are unchanged). A plain
 `ValueError` — like any exception outside the documented catch
 classes — **propagates** rather than being reported as a concise input
 failure (test-pinned); `evaluate_predictions`' equal-length/non-empty

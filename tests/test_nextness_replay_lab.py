@@ -1043,7 +1043,8 @@ def test_cli_pilot_preservation_controls(tmp_path, capsys) -> None:
         ([str(log), str(protocol), "--max-rows", "0"], 2,
          "error: max_rows must be in (0, 1000000], got 0"),
         ([str(log), str(protocol), "--max-line-bytes", "0"], 2,
-         "error: max_line_bytes must be positive, got 0"),
+         "error: max_line_bytes must be a non-boolean integer in "
+         "[1, 16777216], got 0"),
         ([str(tiny), str(protocol)], 3, None),
     )
     for argv, code, expected in cases:
@@ -1212,7 +1213,8 @@ def test_cli_reader_bound_public_lanes_exit_2(tmp_path, capsys) -> None:
         ([str(log), str(protocol), "--max-rows", "0"],
          "error: max_rows must be in (0, 1000000], got 0"),
         ([str(log), str(protocol), "--max-line-bytes", "0"],
-         "error: max_line_bytes must be positive, got 0"),
+         "error: max_line_bytes must be a non-boolean integer in "
+         "[1, 16777216], got 0"),
     ):
         assert main(argv) == 2
         err = capsys.readouterr().err
@@ -1345,5 +1347,25 @@ def test_cli_deeply_nested_log_row_is_contained_malformed(tmp_path, capsys) -> N
     assert captured.err == ""
     report = json.loads(captured.out)
     assert report["input"]["rejections"]["malformed_json"] == 1
+    for p_, b_ in before.items():
+        assert p_.read_bytes() == b_
+
+
+def test_cli_huge_max_line_bytes_translated_typed_exit_2(tmp_path, capsys) -> None:
+    """Boundary totality via the shared reader: an index-overflowing
+    --max-line-bytes is the reader's typed refusal, translated
+    byte-identically into LabInputError — exit 2, one line, no
+    traceback (the failing-first OverflowError lane, inverted)."""
+    log = _write_log(tmp_path, [A, B] * 30)
+    protocol = _write_protocol(tmp_path, [_config_entry("a", min_history=5)])
+    before = {p: p.read_bytes() for p in (log, protocol)}
+    assert main([str(log), str(protocol),
+                 "--max-line-bytes", "9223372036854775806"]) == 2
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert lines == [
+        "error: max_line_bytes must be a non-boolean integer in "
+        "[1, 16777216], got 9223372036854775806"]
+    assert "Traceback" not in captured.err
     for p_, b_ in before.items():
         assert p_.read_bytes() == b_

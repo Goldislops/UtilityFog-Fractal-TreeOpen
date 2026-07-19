@@ -81,6 +81,7 @@ from scripts.nextness_evaluator import (
 from scripts.nextness_monitor import RECEIPT_SCHEMA
 from scripts.nextness_observer import WriteOutsideLogDirError
 from scripts.nextness_predictor import (
+    MAX_LINE_BYTES_CEILING,
     MAX_LINE_BYTES_DEFAULT,
     MAX_ROWS_CEILING,
     MAX_ROWS_DEFAULT,
@@ -408,9 +409,13 @@ def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
         raise PacketInputError(
             f"lab.config.max_line_bytes: expected builtin int, got {type(max_line_bytes).__name__}"
         )
-    if max_line_bytes <= 0:
+    if not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING:
+        # Defensive ceiling: enforced here at extraction even if
+        # upstream validation changes later, so the reader replay below
+        # can never receive an index-overflowing bound.
         raise PacketInputError(
-            f"lab.config.max_line_bytes: {max_line_bytes} must be positive"
+            f"lab.config.max_line_bytes: {max_line_bytes} outside "
+            f"[1, {MAX_LINE_BYTES_CEILING}]"
         )
     return max_rows, max_line_bytes
 

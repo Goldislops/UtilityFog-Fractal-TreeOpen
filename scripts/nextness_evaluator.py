@@ -87,6 +87,7 @@ from scripts.nextness_predictor import (
     ECE_BINS,
     HOLDOUT_FRACTION_MAX,
     HOLDOUT_FRACTION_MIN,
+    MAX_LINE_BYTES_CEILING,
     MAX_ROWS_CEILING,
     REJECT_REASONS,
     REPORT_SCHEMA,
@@ -381,7 +382,10 @@ def validate_report(obj: Any) -> dict[str, Any]:
         HOLDOUT_FRACTION_MIN, HOLDOUT_FRACTION_MAX,
     )
     max_rows = _exact_int(cfg["max_rows"], "report.config.max_rows", 1, MAX_ROWS_CEILING)
-    max_line_bytes = _exact_int(cfg["max_line_bytes"], "report.config.max_line_bytes", 1)
+    max_line_bytes = _exact_int(
+        cfg["max_line_bytes"], "report.config.max_line_bytes",
+        1, MAX_LINE_BYTES_CEILING,
+    )
     ece_bins = _exact_int(cfg["ece_bins"], "report.config.ece_bins", 1)
     if ece_bins != ECE_BINS:
         raise EvaluatorInputError(

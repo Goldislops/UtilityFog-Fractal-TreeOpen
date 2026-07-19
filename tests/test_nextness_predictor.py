@@ -20,6 +20,7 @@ from scripts.nextness_observer import TOKEN_NAMES, WriteOutsideLogDirError
 from scripts.nextness_predictor import (
     ECE_BINS,
     InsufficientHistoryError,
+    MAX_LINE_BYTES_CEILING,
     MAX_LINE_BYTES_DEFAULT,
     MAX_REPORT_BYTES,
     REJECT_REASONS,
@@ -931,7 +932,8 @@ def test_cli_config_bounds_exact_public_behavior(tmp_path, capsys) -> None:
         ([str(log), "--max-rows", "0"],
          "error: max_rows must be in (0, 1000000], got 0"),
         ([str(log), "--max-line-bytes", "0"],
-         "error: max_line_bytes must be positive, got 0"),
+         "error: max_line_bytes must be a non-boolean integer in "
+         "[1, 16777216], got 0"),
         ([str(log), "--smoothing", "0.0"],
          "error: smoothing must be in (0, 1000.0], got 0.0"),
         ([str(log), "--holdout-fraction", "0.9"],
@@ -1134,4 +1136,91 @@ def test_post_decode_recursionerror_propagates(
     assert captured.out == ""  # the CLI emitted nothing
     assert captured.err == ""  # no misleading concise conversion
     assert not out.exists()
+    assert log.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Line-bound arithmetic totality: max_line_bytes accepts ONLY a
+# non-boolean builtin int in [1, MAX_LINE_BYTES_CEILING] (16 MiB), so
+# the bounded probe arithmetic (max_line_bytes + 2) can never overflow
+# an index-sized integer. The OverflowError is made unreachable through
+# validation, never caught. Refusal precedes opening the input.
+# ---------------------------------------------------------------------------
+
+
+def test_max_line_bytes_ceiling_totality(tmp_path, monkeypatch) -> None:
+    from scripts.nextness_predictor import PredictorInputError
+
+    log = _write_log(tmp_path, _dominant_rows([A, B, A]))
+    # At-ceiling accepted on a TINY input: the bounded readline probes
+    # lazily, so no 16 MiB allocation is needed to prove acceptance.
+    seq, rej, rows = read_dominant_sequence(
+        log, max_line_bytes=MAX_LINE_BYTES_CEILING)
+    assert seq == [A, B, A] and rows == 3 and sum(rej.values()) == 0
+
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    class _SubInt(int):
+        """A custom int subclass — must be refused despite comparing
+        like its integer value (exact-type contract)."""
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806,
+                0, -1, True, False, 2.5, "64", None, _SubInt(200)):
+        with pytest.raises(PredictorInputError):
+            read_dominant_sequence(log, max_line_bytes=bad)
+    monkeypatch.undo()
+    assert opened == []  # every refusal fired before the log was opened
+
+
+def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
+    """Exact-type pins (#392 review repair): a custom int subclass is
+    refused with the module's exact typed exception even when its value
+    is in range, while builtin ints at BOTH inclusive boundaries are
+    accepted on tiny fixtures (max_line_bytes=1 accepts the parameter —
+    the oversized fixture rows then follow the ordinary counted
+    oversized_line lane, proving reading began)."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    class _SubInt(int):
+        pass
+
+    log = _write_log(tmp_path, _dominant_rows([A, B, A]))
+    with pytest.raises(PredictorInputError) as excinfo:
+        read_dominant_sequence(log, max_line_bytes=_SubInt(65_536))
+    assert type(excinfo.value) is PredictorInputError
+    assert "non-boolean integer" in str(excinfo.value)
+
+    # lower inclusive boundary: parameter accepted, reading proceeds
+    seq, rej, rows = read_dominant_sequence(log, max_line_bytes=1)
+    assert rej["oversized_line"] == 1 and rows == 1  # ordinary lane
+    # upper inclusive boundary: accepted (tiny input, lazy probe)
+    seq, rej, rows = read_dominant_sequence(
+        log, max_line_bytes=MAX_LINE_BYTES_CEILING)
+    assert seq == [A, B, A]
+
+
+def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:
+    """The failing-first OverflowError lane, inverted: an index-
+    overflowing --max-line-bytes is a concise typed exit 2 — one line,
+    no traceback, input unchanged."""
+    log = _write_log(tmp_path, _dominant_rows(_FIXTURE_SEQUENCE))
+    before = log.read_bytes()
+    assert main([str(log), "--max-line-bytes", "9223372036854775806"]) == 2
+    captured = capsys.readouterr()
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert lines == [
+        "error: max_line_bytes must be a non-boolean integer in "
+        "[1, 16777216], got 9223372036854775806"]
+    assert "Traceback" not in captured.err
     assert log.read_bytes() == before

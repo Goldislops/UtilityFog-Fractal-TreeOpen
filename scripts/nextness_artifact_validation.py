@@ -79,6 +79,7 @@ from scripts.nextness_monitor import ABSTAIN_REASONS, MODEL_ALLOWLIST, RECEIPT_S
 from scripts.nextness_predictor import (
     HOLDOUT_FRACTION_MAX,
     HOLDOUT_FRACTION_MIN,
+    MAX_LINE_BYTES_CEILING,
     MAX_LINE_BYTES_DEFAULT,
     MAX_ROWS_CEILING,
     MAX_ROWS_DEFAULT,
@@ -1182,7 +1183,7 @@ def validate_lab_artifact(artifact: Any) -> dict[str, Any]:
         "max_lab_configs": _const(config["max_lab_configs"], "lab.config.max_lab_configs", MAX_LAB_CONFIGS),
         "max_replay_steps": _const(config["max_replay_steps"], "lab.config.max_replay_steps", MAX_REPLAY_STEPS),
         "max_rows": _exact_int(config["max_rows"], "lab.config.max_rows", 1, MAX_ROWS_CEILING),
-        "max_line_bytes": _exact_int(config["max_line_bytes"], "lab.config.max_line_bytes", 1),
+        "max_line_bytes": _exact_int(config["max_line_bytes"], "lab.config.max_line_bytes", 1, MAX_LINE_BYTES_CEILING),
         "model": _enum(config["model"], "lab.config.model", MODEL_ALLOWLIST),
         "smoothing": _exact_float(config["smoothing"], "lab.config.smoothing", 0.0, SMOOTHING_MAX, low_open=True),
         "holdout_fraction": _exact_float(config["holdout_fraction"], "lab.config.holdout_fraction", HOLDOUT_FRACTION_MIN, HOLDOUT_FRACTION_MAX),
@@ -1357,7 +1358,7 @@ def _validate_packet_link(value: Any, field: str, with_reader_bounds: bool) -> d
             bounds = _exact_dict(value["reader_bounds"], f"{field}.reader_bounds", ("max_rows", "max_line_bytes"))
             out["reader_bounds"] = {
                 "max_rows": _exact_int(bounds["max_rows"], f"{field}.reader_bounds.max_rows", 1, MAX_ROWS_CEILING),
-                "max_line_bytes": _exact_int(bounds["max_line_bytes"], f"{field}.reader_bounds.max_line_bytes", 1),
+                "max_line_bytes": _exact_int(bounds["max_line_bytes"], f"{field}.reader_bounds.max_line_bytes", 1, MAX_LINE_BYTES_CEILING),
             }
         return out
     raise ArtifactValidationError(f"{field}.status: unknown variant")

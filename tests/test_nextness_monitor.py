@@ -784,3 +784,68 @@ def test_cli_deeply_nested_row_is_contained_malformed(tmp_path, capsys) -> None:
     assert "Traceback" not in captured.err
     assert captured.err == ""
     assert log.read_bytes() == before
+
+
+def test_direct_reader_use_gets_shared_typed_exception(tmp_path) -> None:
+    """Boundary totality: an index-overflowing max_line_bytes through
+    the monitor's bridge raises the shared reader's typed
+    PredictorInputError — never raw OverflowError (the failing-first
+    inherited-overflow lane, inverted)."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text(
+        "\n".join(
+            json.dumps({"generation": i, "token_counts": {t: 3}})
+            for i, t in enumerate([A, B] * 30)
+        ) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PredictorInputError) as excinfo:
+        observations_from_log(
+            log, "first_order", max_line_bytes=9223372036854775806)
+    assert type(excinfo.value) is PredictorInputError
+    assert "16777216" in str(excinfo.value)
+
+
+def test_cli_receipt_ceiling_exit_5_injected(tmp_path, monkeypatch, capsys) -> None:
+    """Defensive receipt-ceiling completion (INJECTED: the ceiling is
+    lowered — the current fixed public receipt shape cannot naturally
+    reach 64 KiB and this test claims NO public reachability): the CLI
+    maps build_receipt's fail-closed ReceiptTooLargeError to exactly
+    one concise error: line and exit 5; direct build_receipt callers
+    still receive the typed exception."""
+    import scripts.nextness_monitor as monitor_module
+    from scripts.nextness_monitor import ReceiptTooLargeError
+
+    log = tmp_path / "nextness_runs.jsonl"
+    log.write_text(
+        "\n".join(
+            json.dumps({"generation": i, "token_counts": {t: 3}})
+            for i, t in enumerate([A, B] * 30)
+        ) + "\n",
+        encoding="utf-8",
+    )
+    before = log.read_bytes()
+    monkeypatch.setattr(monitor_module, "MAX_RECEIPT_BYTES", 64)
+    rc = monitor_module.main([str(log)])
+    captured = capsys.readouterr()
+    assert rc == 5
+    assert captured.out == ""  # nothing oversized is ever emitted
+    lines = [l for l in captured.err.strip().splitlines() if l.strip()]
+    assert lines == ["error: receipt would exceed 64 bytes; refusing to emit"]
+    assert "Traceback" not in captured.err
+    assert log.read_bytes() == before
+
+    # Direct build_receipt behavior preserved under the same ceiling.
+    observations, reference, recent = monitor_module.observations_from_log(
+        log, "first_order", window=monitor_module.MonitorConfig().window)
+    with pytest.raises(ReceiptTooLargeError):
+        monitor_module.build_receipt(
+            model="first_order",
+            observations=observations,
+            reference_counts=reference,
+            recent_counts=recent,
+            config=monitor_module.MonitorConfig(),
+        )
+    monkeypatch.undo()

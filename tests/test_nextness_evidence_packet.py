@@ -510,6 +510,15 @@ def test_recorded_bounds_exact_boundaries_accepted(chain, tmp_path) -> None:
     boundary = _write(tmp_path / "boundary_lab.json", json.dumps(payload))
     packet = build_packet({"lab": boundary, "log": chain["log"]})
     assert packet["links"]["lab_sequence_sha256"]["status"] in ("verified", "broken")
+    # boundary totality: exactly at the shared 16 MiB line-bytes ceiling
+    # is accepted (tiny log — the bounded reader allocates lazily)
+    from scripts.nextness_predictor import MAX_LINE_BYTES_CEILING
+
+    payload = json.loads(chain["lab"].read_text(encoding="utf-8"))
+    payload["config"]["max_line_bytes"] = MAX_LINE_BYTES_CEILING
+    at_ceiling = _write(tmp_path / "at_ceiling_lab.json", json.dumps(payload))
+    packet = build_packet({"lab": at_ceiling, "log": chain["log"]})
+    assert packet["links"]["lab_sequence_sha256"]["status"] in ("verified", "broken")
 
 
 @pytest.mark.parametrize(
@@ -526,6 +535,10 @@ def test_recorded_bounds_exact_boundaries_accepted(chain, tmp_path) -> None:
         ("max_line_bytes", False),
         ("max_line_bytes", 65536.0),
         ("max_line_bytes", None),
+        # boundary totality: the defensive extraction ceiling refuses an
+        # index-overflowing recorded bound before the reader replay
+        ("max_line_bytes", 16_777_217),
+        ("max_line_bytes", 9223372036854775806),
     ],
 )
 def test_malformed_recorded_bounds_rejected(chain, tmp_path, field, value) -> None:

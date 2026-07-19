@@ -82,6 +82,7 @@ from scripts.nextness_predictor import (
     HOLDOUT_FRACTION_DEFAULT,
     HOLDOUT_FRACTION_MAX,
     HOLDOUT_FRACTION_MIN,
+    MAX_LINE_BYTES_CEILING,
     MAX_LINE_BYTES_DEFAULT,
     MAX_ROWS_CEILING,
     MAX_ROWS_DEFAULT,
@@ -661,7 +662,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--max-rows", type=int, default=MAX_ROWS_DEFAULT)
-    parser.add_argument("--max-line-bytes", type=int, default=MAX_LINE_BYTES_DEFAULT)
+    parser.add_argument(
+        "--max-line-bytes", type=int, default=MAX_LINE_BYTES_DEFAULT,
+        help=(
+            f"per-record content-byte bound, validated by the shared "
+            f"reader (default {MAX_LINE_BYTES_DEFAULT}; ceiling "
+            f"{MAX_LINE_BYTES_CEILING})"
+        ),
+    )
     return parser
 
 
