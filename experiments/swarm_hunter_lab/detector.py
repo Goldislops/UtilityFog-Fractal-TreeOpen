@@ -23,7 +23,7 @@ import dataclasses
 import hashlib
 import json
 import struct
-from typing import Mapping, Optional, Sequence
+from typing import Optional
 
 import numpy as np
 
@@ -34,6 +34,14 @@ DETECTOR_VERSION = "s1.0.0"
 SCHEMA_ID = schema.SCHEMA_ID
 
 MAX_N = 64
+#: Fixed invocation ceiling: detect_structures accepts 1..MAX_SNAPSHOTS
+#: snapshots per call. This is a hard resource control (S0 §4 risks 12-13,
+#: §5 bounded-resource contract, §7 bounded output): the deterministic
+#: op-budget scales with snapshot count and so can never truncate on count
+#: alone, so the ceiling is enforced explicitly. Exceeding it is
+#: unsupported/malformed input (existing ``invalid_input`` refusal), not a
+#: truncation. Deliberately equal to MAX_N; the two bounds are independent.
+MAX_SNAPSHOTS = 64
 MAX_GENERATION = 2 ** 64 - 1
 LEANCTX_MAX_BYTES = 64 * 1024
 LEANCTX_MAX_RECORDS = 200
@@ -146,14 +154,17 @@ def _validate_states(arr, sid: Optional[str]) -> int:
 
 def _validate_snapshot(item, ctx):
     """Stages 3a-3h for one snapshot. Returns the validated snapshot dict."""
-    if not isinstance(item, Mapping):
+    # exact built-in dict proven before item.keys()/subscript/get, so a dict
+    # SUBCLASS with a hostile keys()/__getitem__ cannot execute its hooks here.
+    if type(item) is not dict:
         raise _Refusal("invalid_input")
     keys = set(item.keys())
     if not keys <= _ALLOWED_SNAPSHOT_KEYS or "states" not in keys or "provenance" not in keys:
         raise _Refusal("invalid_input")
 
     prov = item["provenance"]
-    if not isinstance(prov, Mapping) or set(prov.keys()) != _PROVENANCE_KEYS:
+    # exact built-in dict proven (short-circuit) before prov.keys()/subscript.
+    if type(prov) is not dict or set(prov.keys()) != _PROVENANCE_KEYS:
         raise _Refusal("invalid_provenance")
 
     sid = _validate_identifier(prov["snapshot_id"])
@@ -197,7 +208,8 @@ def _validate_snapshot(item, ctx):
             raise _Refusal("invalid_optional_data", sid)
 
     supplied = prov["sha256_triple"]
-    if (not isinstance(supplied, Mapping)
+    # exact built-in dict proven (short-circuit) before supplied.keys()/subscript.
+    if (type(supplied) is not dict
             or set(supplied.keys()) != schema.SHA256_TRIPLE_KEYS):
         raise _Refusal("invalid_sha256_format", sid)
     for slot in sorted(schema.SHA256_TRIPLE_KEYS):
@@ -390,9 +402,20 @@ def detect_structures(snapshots, config: DetectorConfig = DetectorConfig()) -> F
     try:
         _validate_config(config)                                   # stage 1
         config_valid = True
-        if (isinstance(snapshots, (str, bytes, Mapping))
-                or not isinstance(snapshots, Sequence) or len(snapshots) == 0):
-            raise _Refusal("invalid_input")                        # stage 2
+        # stage 2 — exact built-in container + invocation ceiling, all proven
+        # before any caller-controlled len/iteration/item hook can run. type()
+        # identity rejects list/tuple SUBCLASSES (whose __len__/__iter__ could
+        # be hostile) up front, so the builtin len() calls below are hook-free.
+        # The 1..MAX_SNAPSHOTS domain is public input policy: an over-limit or
+        # empty sequence is unsupported/malformed input (existing invalid_input
+        # refusal), decided before iteration or item validation — never a
+        # truncation and never partial processing.
+        if type(snapshots) is not list and type(snapshots) is not tuple:
+            raise _Refusal("invalid_input")                        # stage 2a
+        if len(snapshots) == 0:
+            raise _Refusal("invalid_input")                        # stage 2b
+        if len(snapshots) > MAX_SNAPSHOTS:
+            raise _Refusal("invalid_input")                        # stage 2c
         validated = [_validate_snapshot(item, ctx) for item in snapshots]  # 3
 
         ids = [s["snapshot_id"] for s in validated]                # stage 4

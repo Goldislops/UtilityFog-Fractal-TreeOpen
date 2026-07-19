@@ -14,7 +14,16 @@ asserted by tests **in both directions**.
 
 ## Contract (frozen)
 
-- Input: an ordered sequence of snapshots — `states: uint8 (N,N,N)`
+- Input: an ordered sequence of **1 to `MAX_SNAPSHOTS` (= 64)** snapshots.
+  At the direct-Python boundary the top-level container must be an **exact
+  built-in `list` or `tuple`**, and each snapshot, its provenance, and its
+  supplied `sha256_triple` must be **exact built-in `dict`s** — subclasses are
+  refused (with the existing `invalid_input` / `invalid_provenance` /
+  `invalid_sha256_format` reasons) before any `len`/iteration/`keys`/`.get`/
+  subscript hook runs, so a hostile container cannot execute code at the
+  boundary. An empty sequence or more than 64 snapshots is unsupported input
+  → the existing `invalid_input` structured refusal (decided before any item
+  is inspected; **not** a truncation). Each snapshot is `states: uint8 (N,N,N)`
   (`[z][y][x]`, flat convention `z·N²+y·N+x`), optional
   `memory: float32 (8,N,N,N)`, optional `inactivity_steps: int16 (N,N,N)`,
   and a closed provenance dict (`source="synthetic"` only; caller-supplied

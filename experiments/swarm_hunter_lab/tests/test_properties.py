@@ -12,7 +12,7 @@ from swarm_hunter_lab import (
     DetectorConfig, FindingsArtifact, compute_sha256_triple,
     detect_structures, fixtures, leanctx_summary, lp, schema,
 )
-from swarm_hunter_lab.detector import _axis_interval
+from swarm_hunter_lab.detector import MAX_SNAPSHOTS, _axis_interval
 
 
 def refusal_of(snaps, config=DetectorConfig()):
@@ -525,3 +525,167 @@ def test_max_lattice_64_cubed_measured():
     warnings.warn(
         f"S1-64cubed-observation: runtime={elapsed:.3f}s "
         f"tracemalloc_peak={peak / 1e6:.1f}MB (observation, not a promise)")
+
+
+# ---------------------------------------------------------------------------
+# S1 Amendment 3 — snapshot invocation ceiling (F1) + hook-free exact-container
+# input boundary (F2). MAX_SNAPSHOTS=64 is public input policy: 1..64 is the
+# accepted domain; >64, empty, non-list/tuple top-levels, and container
+# subclasses with hostile hooks all yield the EXISTING structured invalid_input
+# refusal (no new reason) BEFORE any caller-controlled len/iter/keys/get/subscript
+# hook runs. Accepted-input bytes are unchanged (the fixture + determinism tests
+# above still pass byte-for-byte). Hook-execution is proven zero via a counter
+# whose hooks also raise if ever reached; no broad exception catching is used.
+# ---------------------------------------------------------------------------
+
+
+def _tiny_snap(i):
+    states = fixtures.block(fixtures.empty_lattice(4), 1, 1, 1, 2, 2, 2)
+    return fixtures.snapshot(states, f"amd3-s{i}", i + 1)
+
+
+class _HookFlag:
+    def __init__(self):
+        self.n = 0
+
+
+def test_amd3_exactly_64_snapshots_accepted():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS)]  # 64
+    header = detect_structures(snaps).records()[0]
+    assert header["kind"] == "header"
+    assert header["counts"]["refusals"] == 0
+    assert header["run"]["snapshot_count"] == 64
+
+
+def test_amd3_65_snapshots_refused_invalid_input_deterministically():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS + 1)]  # 65
+    _, refusal = refusal_of(snaps)
+    assert refusal["reason"] == "invalid_input"
+    assert detect_structures(snaps).jsonl == detect_structures(snaps).jsonl
+
+
+def test_amd3_over_limit_decided_before_item_inspection():
+    flag = _HookFlag()
+
+    class _HostileFirst(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran despite over-limit ceiling")
+
+        def __getitem__(self, k):
+            flag.n += 1
+            raise AssertionError("__getitem__ ran despite over-limit ceiling")
+
+    snaps = [_HostileFirst(_tiny_snap(0))] + [_tiny_snap(i)
+                                              for i in range(1, MAX_SNAPSHOTS + 1)]
+    assert len(snaps) == MAX_SNAPSHOTS + 1
+    _, refusal = refusal_of(snaps)
+    assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0  # ceiling refused before the hostile first item was touched
+
+
+def test_amd3_invalid_config_wins_over_container_and_count():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS + 1)]  # over-limit
+    _, refusal = refusal_of(snaps, DetectorConfig(component_cap=0))
+    assert refusal["reason"] == "invalid_config"
+
+
+def test_amd3_exact_list_and_tuple_accepted():
+    for ctor in (list, tuple):
+        header = detect_structures(ctor([_tiny_snap(0)])).records()[0]
+        assert header["kind"] == "header"
+
+
+def test_amd3_list_tuple_subclass_hostile_hooks_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HLenList(list):
+        def __len__(self):
+            flag.n += 1
+            raise AssertionError("__len__ ran")
+
+    class _HIterTuple(tuple):
+        def __iter__(self):
+            flag.n += 1
+            raise AssertionError("__iter__ ran")
+
+    for hostile in (_HLenList([_tiny_snap(0)]), _HIterTuple((_tiny_snap(0),))):
+        _, refusal = refusal_of(hostile)
+        assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0
+
+
+def test_amd3_snapshot_dict_subclass_hostile_hooks_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HKeys(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran")
+
+    class _HGet(dict):
+        def __getitem__(self, k):
+            flag.n += 1
+            raise AssertionError("__getitem__ ran")
+
+    for hostile in (_HKeys(_tiny_snap(0)), _HGet(_tiny_snap(0))):
+        _, refusal = refusal_of([hostile])
+        assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0
+
+
+def test_amd3_nested_provenance_and_triple_subclass_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HKeys(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran")
+
+    # provenance dict subclass -> invalid_provenance at its structured stage
+    s = _tiny_snap(0)
+    s["provenance"] = _HKeys(s["provenance"])
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_provenance"
+    # supplied sha256_triple dict subclass -> invalid_sha256_format at its stage
+    s2 = _tiny_snap(0)
+    s2["provenance"]["sha256_triple"] = _HKeys(s2["provenance"]["sha256_triple"])
+    _, refusal2 = refusal_of([s2])
+    assert refusal2["reason"] == "invalid_sha256_format"
+    assert flag.n == 0
+
+
+def test_amd3_ordinary_malformed_containers_keep_reasons_and_precedence():
+    for bad in ("xx", {"a": 1}, (x for x in [1])):
+        _, refusal = refusal_of(bad)
+        assert refusal["reason"] == "invalid_input"
+    _, refusal = refusal_of([])
+    assert refusal["reason"] == "invalid_input"
+    s = _tiny_snap(0)
+    del s["provenance"]["sha256_triple"]
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_provenance"
+
+
+def test_amd3_no_input_mutation_or_io(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("file I/O attempted")
+    monkeypatch.setattr(builtins, "open", boom)
+    snaps = [_tiny_snap(i) for i in range(3)]
+    before = [s["states"].copy() for s in snaps]
+    detect_structures(snaps)
+    for s, b in zip(snaps, before):
+        assert np.array_equal(s["states"], b)
+
+
+def test_amd3_valid_kinds_and_leanctx_still_accepted():
+    cases = (
+        detect_structures(fixtures.fx_single()),
+        detect_structures(fixtures.fx_malformed_provenance()),
+        detect_structures(fixtures.fx_checkerboard(),
+                          DetectorConfig(min_component_size=1, component_cap=64)),
+        detect_structures(fixtures.fx_single(), DetectorConfig(op_budget_multiplier=1)),
+    )
+    for art in cases:
+        assert schema.validate_records(list(art.records())) == []
+        assert b"leanctx-header" in leanctx_summary(art, "run-1")
