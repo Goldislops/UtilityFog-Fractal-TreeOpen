@@ -206,12 +206,62 @@ def _load_bounded_json(path: pathlib.Path) -> tuple[Any, str, int]:
     return parsed, hashlib.sha256(raw).hexdigest(), len(raw)
 
 
+_BUILTIN_TYPE_NAMES: Final[tuple[tuple[type, str], ...]] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description for error messages.
+
+    ``type(value).__name__`` consults the metaclass — a hostile class can
+    override ``__name__`` so that reading it raises from inside error
+    formatting, escaping the validator's typed-error promise. Identity
+    comparison against builtin types runs no user code, and anything that
+    is not one of these builtins is described generically instead of
+    executing a hook merely to improve a message.
+    """
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
+
+
 def _exact_dict_field(container: Any, field: str, context: str) -> Any:
+    """Fetch ``field`` from a proven-exact builtin dict, hook-free.
+
+    The container is proven an exact builtin ``dict`` first, then traversed
+    by ITEM ITERATION only: an unproven key is never hashed, compared,
+    stringified or represented, and only exact builtin ``str`` keys are
+    compared against ``field``. The matched value comes straight out of the
+    iteration — never from a second subscript, which would re-enter the hash
+    table and could meet a colliding hostile key.
+
+    This is a soundness boundary, not only a hook boundary. Previously
+    ``field not in container`` hashed ``field`` and compared it against
+    whatever shared its bucket, so a non-str key whose ``__hash__`` collided
+    with a required name had its ``__eq__`` invoked — and an ``__eq__``
+    returning True let that hostile key SATISFY the required field and
+    supply its own value as the field's content.
+    """
     if type(container) is not dict:
-        raise PacketInputError(f"{context}: expected builtin dict, got {type(container).__name__}")
-    if field not in container:
-        raise PacketInputError(f"{context}: missing field {field!r}")
-    return container[field]
+        raise PacketInputError(f"{context}: expected builtin dict, got {_describe_type(container)}")
+    for key, value in container.items():
+        # Identity test first: a foreign key short-circuits before any
+        # comparison, so no caller-controlled hook can run.
+        if type(key) is str and key == field:
+            return value
+    raise PacketInputError(f"{context}: missing field {field!r}")
 
 
 def _exact_sha256(value: Any, context: str) -> str:
@@ -368,7 +418,7 @@ def _evaluation_link(
     if type(provided) is not bool:
         raise PacketInputError(
             f"evaluation.artifacts.{counterpart_role}.provided: expected "
-            f"builtin bool, got {type(provided).__name__}"
+            f"builtin bool, got {_describe_type(provided)}"
         )
     if provided is False:
         return _not_computable_link(
@@ -398,7 +448,7 @@ def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
     max_rows = _exact_dict_field(cfg, "max_rows", "lab.config")
     if type(max_rows) is not int:
         raise PacketInputError(
-            f"lab.config.max_rows: expected builtin int, got {type(max_rows).__name__}"
+            f"lab.config.max_rows: expected builtin int, got {_describe_type(max_rows)}"
         )
     if not 0 < max_rows <= MAX_ROWS_CEILING:
         raise PacketInputError(
@@ -407,7 +457,7 @@ def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
     max_line_bytes = _exact_dict_field(cfg, "max_line_bytes", "lab.config")
     if type(max_line_bytes) is not int:
         raise PacketInputError(
-            f"lab.config.max_line_bytes: expected builtin int, got {type(max_line_bytes).__name__}"
+            f"lab.config.max_line_bytes: expected builtin int, got {_describe_type(max_line_bytes)}"
         )
     if not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING:
         # Defensive ceiling: enforced here at extraction even if

@@ -1066,3 +1066,218 @@ def test_cli_read_side_oserror_propagates(chain, tmp_path, monkeypatch, capsys) 
     assert not out.exists()
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Batch 3 — hook-free type diagnostics + exact-string field lookup
+# (Option-B family policy). Refusals must be typed PacketInputError whose
+# formatting reads NO attribute of the rejected value or of its class, and
+# _exact_dict_field must never run a hook of an unproven key — nor let a
+# hash-colliding foreign key satisfy a required string field.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingMeta(type):
+    """Metaclass whose __name__ property raises — even type(x).__name__ is a
+    user-controlled hook."""
+
+    ran = False
+
+    @property
+    def __name__(cls):
+        _RaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _MetaBomb(metaclass=_RaisingMeta):
+    pass
+
+
+class _StrictCollisionKey(metaclass=_RaisingMeta):
+    """A non-str key hashing EXACTLY like a target str, every hook armed.
+
+    ``__hash__`` is inert only until armed, permitting the single hash needed
+    to plant the collision in a dict; after arming the lookup must not hash,
+    compare or represent it either.
+    """
+
+    fired: list[str] = []
+    armed = False
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        if _StrictCollisionKey.armed:
+            _StrictCollisionKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return self._h
+
+    def __eq__(self, other):
+        _StrictCollisionKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _StrictCollisionKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _SoftCollisionKey:
+    """Hash-collides with a target str AND compares equal — the soundness
+    variant that used to satisfy a required field and supply its value."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+def _packet_arm() -> None:
+    _RaisingMeta.ran = False
+    _StrictCollisionKey.fired.clear()
+    _StrictCollisionKey.armed = False
+
+
+def test_packet_hostile_metaclass_never_consulted_at_any_site() -> None:
+    """All four supplied-value diagnostics refuse with the exact typed error
+    and the generic description, without consulting the metaclass."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        _evaluation_link,
+        _exact_dict_field,
+        _recorded_reader_bounds,
+    )
+
+    cases = [
+        (lambda: _exact_dict_field(_MetaBomb(), "x", "ctx"),
+         "ctx: expected builtin dict, got non-builtin value"),
+        (lambda: _evaluation_link({"artifacts": {"lab": {"provided": _MetaBomb()}}}, "lab", None),
+         "evaluation.artifacts.lab.provided: expected builtin bool, "
+         "got non-builtin value"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": _MetaBomb(),
+                                                     "max_line_bytes": 1}}),
+         "lab.config.max_rows: expected builtin int, got non-builtin value"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1,
+                                                     "max_line_bytes": _MetaBomb()}}),
+         "lab.config.max_line_bytes: expected builtin int, got non-builtin value"),
+    ]
+    for call, expected in cases:
+        _packet_arm()
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == expected
+        assert _RaisingMeta.ran is False
+
+
+def test_packet_strict_collision_key_runs_no_hook_at_all() -> None:
+    """A foreign key colliding with a required field name must never have
+    __hash__/__eq__/__repr__/metaclass __name__ invoked by the lookup."""
+    from scripts.nextness_evidence_packet import PacketInputError, _exact_dict_field
+
+    _packet_arm()
+    container = {_StrictCollisionKey("schema"): 1}
+    _StrictCollisionKey.armed = True  # planted: no further hash allowed
+    try:
+        with pytest.raises(PacketInputError) as excinfo:
+            _exact_dict_field(container, "schema", "ctx")
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == "ctx: missing field 'schema'"
+        assert _StrictCollisionKey.fired == []
+        assert _RaisingMeta.ran is False
+    finally:
+        _StrictCollisionKey.armed = False
+
+
+def test_packet_collision_key_can_never_satisfy_a_required_field() -> None:
+    """Soundness: a colliding key whose __eq__ returns True previously
+    satisfied the field AND supplied its own value as the field's content."""
+    from scripts.nextness_evidence_packet import PacketInputError, _exact_dict_field
+
+    container = {_SoftCollisionKey("schema"): "HOSTILE-VALUE"}
+    with pytest.raises(PacketInputError) as excinfo:
+        _exact_dict_field(container, "schema", "ctx")
+    assert str(excinfo.value) == "ctx: missing field 'schema'"
+
+
+def test_packet_genuine_field_wins_beside_a_foreign_key() -> None:
+    """A container carrying both a hostile foreign key and the genuine exact
+    string field returns the genuine value, firing no hook."""
+    from scripts.nextness_evidence_packet import _exact_dict_field
+
+    _packet_arm()
+    container = {_MetaBomb(): "HOSTILE", "schema": "GENUINE"}
+    assert _exact_dict_field(container, "schema", "ctx") == "GENUINE"
+    assert _RaisingMeta.ran is False
+    assert _StrictCollisionKey.fired == []
+
+
+def test_packet_builtin_lane_diagnostics_are_byte_identical() -> None:
+    """PUBLIC/ARTIFACT lane keeps every message, exception type and range
+    message byte-for-byte."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        _evaluation_link,
+        _exact_dict_field,
+        _recorded_reader_bounds,
+    )
+
+    matrix = [
+        (lambda: _exact_dict_field([], "x", "ctx"),
+         "ctx: expected builtin dict, got list"),
+        (lambda: _exact_dict_field({}, "x", "ctx"),
+         "ctx: missing field 'x'"),
+        (lambda: _evaluation_link({"artifacts": {"lab": {"provided": 1}}}, "lab", None),
+         "evaluation.artifacts.lab.provided: expected builtin bool, got int"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": "x", "max_line_bytes": 1}}),
+         "lab.config.max_rows: expected builtin int, got str"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 0, "max_line_bytes": 1}}),
+         "lab.config.max_rows: 0 outside (0, 1000000]"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1, "max_line_bytes": "x"}}),
+         "lab.config.max_line_bytes: expected builtin int, got str"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1, "max_line_bytes": 0}}),
+         "lab.config.max_line_bytes: 0 outside [1, 16777216]"),
+    ]
+    for call, expected in matrix:
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == expected
+
+
+def test_packet_exact_dict_field_returns_the_value_unchanged() -> None:
+    """Accepted lookups are unaffected and return the stored object itself."""
+    from scripts.nextness_evidence_packet import _exact_dict_field
+
+    sentinel = {"nested": 1}
+    container = {"a": 0, "x": sentinel}
+    assert _exact_dict_field(container, "x", "ctx") is sentinel
+
+
+def test_packet_describe_type_is_hook_free_and_names_builtins() -> None:
+    """Identity table only: builtins by literal name, everything else generic."""
+    from scripts.nextness_evidence_packet import _describe_type
+
+    assert _describe_type(True) == "bool"  # before int
+    assert _describe_type(1) == "int"
+    assert _describe_type(1.0) == "float"
+    assert _describe_type("s") == "str"
+    assert _describe_type([]) == "list"
+    assert _describe_type({}) == "dict"
+    assert _describe_type(()) == "tuple"
+    assert _describe_type(set()) == "set"
+    assert _describe_type(b"") == "bytes"
+    assert _describe_type(None) == "NoneType"
+
+    class _IntSub(int):
+        pass
+
+    assert _describe_type(_IntSub(1)) == "non-builtin value"
+    assert _describe_type(int) == "non-builtin value"
+    _packet_arm()
+    assert _describe_type(_MetaBomb()) == "non-builtin value"
+    assert _RaisingMeta.ran is False

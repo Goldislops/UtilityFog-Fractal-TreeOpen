@@ -114,6 +114,33 @@ timestamps, no random identifiers, no absolute paths; byte-identical
 across repeated runs; manifest order is the fixed role order regardless
 of invocation order.
 
+**Hook-free refusal diagnostics (DIRECT Python API included).** A refusal
+never reads an attribute of the rejected value or of its class — in
+particular never `type(value).__name__`, since `__name__` is an
+overridable **metaclass** property whose getter would run
+caller-controlled code from inside error formatting and escape the typed
+`PacketInputError`. Builtin type names come from a literal identity
+table; anything else is described as `non-builtin value`. Public
+CLI/artifact messages, exception types and range messages are
+unaffected: `json.loads` yields only builtins, so every reachable-lane
+diagnostic is byte-identical to before.
+
+**Exact-string field lookup.** A required field is fetched from a
+proven-exact builtin `dict` by **item iteration only**: an unproven key
+is never hashed, compared, stringified or represented, only exact
+builtin `str` keys are compared against the field name, and the matched
+value is taken **straight from the iteration** — never from a second
+subscript, which would re-enter the hash table and could meet a
+colliding hostile key. This is a **soundness** boundary, not only a hook
+boundary: the previous `field not in container` / `container[field]`
+pair hashed the field name and compared it against whatever shared its
+bucket, so a non-string key whose `__hash__` collided with a required
+name had its `__eq__` invoked — and an `__eq__` returning `True` let
+that hostile key **satisfy the required field and supply its own value
+as the field's content**. A foreign key can now never satisfy a
+required string field, and a container holding both a foreign key and
+the genuine string field returns the genuine value.
+
 ## Write boundary
 
 Default output is **stdout**. `--output` must resolve inside the
