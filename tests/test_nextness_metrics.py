@@ -2431,9 +2431,10 @@ def test_max_rows_exact_builtin_type_totality(tmp_path, monkeypatch) -> None:
     """Exact-type max_rows (Jack policy 2026-07-19): the isinstance
     form admitted int subclasses whose comparison hooks executed inside
     the row-budget loop (audit receipts MET-DIR-MAXROWS-06/07). Now:
-    every non-builtin-int is exactly MetricsInputError with a safe
-    type-name-only diagnostic, before the log is opened, zero hostile
-    hooks executed; builtin boundaries and pinned refusals unchanged."""
+    every non-builtin-int is exactly MetricsInputError with a generic
+    supplied-type-free diagnostic, before the log is opened, zero
+    hostile hooks executed; builtin boundaries and pinned refusals
+    unchanged."""
     from scripts.nextness_metrics import MetricsInputError
 
     class _SubInt(int):
