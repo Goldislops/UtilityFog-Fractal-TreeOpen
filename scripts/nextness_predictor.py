@@ -216,23 +216,31 @@ def read_dominant_sequence(
     counted ``duplicate_generation``; a smaller one is counted
     ``out_of_order_generation``. Neither is silently reordered.
     """
-    if not 0 < max_rows <= MAX_ROWS_CEILING:
+    # Exact-type integer bounds (Jack policy 2026-07-19): parameters
+    # that bound reads or loops must be exact builtin ints, refused
+    # WITHOUT invoking any hook of the rejected object OR its class.
+    # Type and range are validated SPLIT, and the type refusal carries
+    # a GENERIC supplied-type-free message — nothing of the object is
+    # inspected beyond the identity test itself (even
+    # type(value).__name__ can execute a hostile metaclass property);
+    # the numeric value is rendered only after exact builtin-int
+    # identity is established. Both refusals fire BEFORE the input is
+    # opened.
+    if type(max_rows) is not int:
+        raise PredictorInputError("max_rows must be a builtin int")
+    if not 1 <= max_rows <= MAX_ROWS_CEILING:
         raise PredictorInputError(
             f"max_rows must be in (0, {MAX_ROWS_CEILING}], got {max_rows}"
         )
-    # Total line-bound validation: only a non-boolean builtin int in
-    # [1, MAX_LINE_BYTES_CEILING] reaches the bounded readline call, so
-    # the probe arithmetic (max_line_bytes + 2) can never overflow an
-    # index-sized integer — the OverflowError is made unreachable, not
-    # caught. Raised BEFORE the input is opened.
-    if (type(max_line_bytes) is not int
-            or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
-        # Exact builtin type: bool AND custom int subclasses are both
-        # refused (an isinstance check would admit subclasses whose
-        # overridden hooks the bounded reader must never execute).
+    if type(max_line_bytes) is not int:
+        raise PredictorInputError("max_line_bytes must be a builtin int")
+    # Ceiling keeps the bounded readline's max_line_bytes + 2 safely
+    # index-representable (the OverflowError is unreachable, not
+    # caught).
+    if not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING:
         raise PredictorInputError(
             f"max_line_bytes must be a non-boolean integer in "
-            f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"
+            f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes}"
         )
 
     sequence: list[str] = []

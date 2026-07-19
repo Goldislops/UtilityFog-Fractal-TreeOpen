@@ -678,21 +678,28 @@ def compute_run_metrics(
             f"boundary_delta must be finite and positive, got {boundary_delta!r}"
         )
 
-    # Input-work bounds: validated typed BEFORE any input reading (the
-    # log is never opened for an invalid bound).
-    if (isinstance(max_rows, bool) or not isinstance(max_rows, int)
-            or not 0 < max_rows <= MAX_ROWS_CEILING):
+    # Input-work bounds: exact-type integer parameters (Jack policy
+    # 2026-07-19), validated typed BEFORE any input reading. Type and
+    # range are SPLIT, and the type refusal carries a GENERIC
+    # supplied-type-free message — nothing of the rejected object or
+    # its class is inspected beyond the identity test itself (even
+    # type(value).__name__ can execute a hostile metaclass property),
+    # so no comparison/conversion/indexing/string/representation/
+    # metaclass hook can run; the numeric value is rendered only after
+    # exact builtin-int identity is established.
+    if type(max_rows) is not int:
+        raise MetricsInputError("max_rows must be a builtin int")
+    if not 1 <= max_rows <= MAX_ROWS_CEILING:
         raise MetricsInputError(
             f"max_rows must be a non-boolean integer in "
             f"(0, {MAX_ROWS_CEILING}], got {max_rows!r}"
         )
-    if (type(max_line_bytes) is not int
-            or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
-        # Exact builtin type (bool and custom int subclasses both
-        # refused — matching the family's exact-type pattern); ceiling
-        # included so the bounded readline's max_line_bytes + 2 can
-        # never overflow an index-sized integer (the OverflowError is
-        # made unreachable, not caught); raised before any read.
+    if type(max_line_bytes) is not int:
+        raise MetricsInputError("max_line_bytes must be a builtin int")
+    # Ceiling keeps the bounded readline's max_line_bytes + 2 safely
+    # index-representable (the OverflowError is unreachable, not
+    # caught).
+    if not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING:
         raise MetricsInputError(
             f"max_line_bytes must be a non-boolean integer in "
             f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"

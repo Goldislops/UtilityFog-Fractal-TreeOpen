@@ -586,6 +586,23 @@ decision, metrics now enforces explicit per-invocation JSONL bounds:
 
 This closes §9's previously unenforced "both are small" assumption.
 
+**Exact-type integer bounds (direct-API policy amendment,
+2026-07-19)**: `max_rows` and `max_line_bytes` accept only **exact
+builtin `int`** values — bool and custom `int` subclasses are refused.
+Type and range validation are split; a non-builtin-int is refused with
+a **generic supplied-type-free message** (`max_rows must be a builtin
+int`) — **no attribute of the rejected object or its class is
+inspected or reported** beyond the `type(value) is int` identity test:
+the object is never compared, converted, indexed, stringified or
+repr'd, and not even the class `__name__` is read (a hostile metaclass
+property can sit behind it), so no user-controlled hook (comparison,
+conversion, `__index__`, `__str__`, `__repr__`, metaclass) can execute
+during validation or its diagnostic. **Public-CLI qualification**:
+this is direct-API hardening only — argparse's `type=int` already
+delivers builtin ints, so public CLI behavior and the pinned
+builtin-integer messages are unchanged. Defaults, ceilings, exit codes
+and output bytes are untouched.
+
 ## 10. Open questions for AURA + Jack
 
 1. **CCI composition**: I've defined it as a product of three factors in $[0, 1]$. An alternative is a weighted geometric mean, $\text{CCI} = (B^{w_1} \cdot R^{w_2} \cdot (1-H)^{w_3})^{1/(w_1+w_2+w_3)}$. The product is simpler and has the right "any factor zero → CCI zero" property. Weighted GM lets us emphasize boundary rate over balance if calibration suggests we should. Recommend starting with the simple product; revisit in PR #4 if calibration shows it's miscalibrated.

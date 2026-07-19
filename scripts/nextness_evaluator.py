@@ -250,24 +250,63 @@ def _not_computable(reason: str, requires: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Exact-type validators (hostile input boundary; no conversion hooks,
 # no stringification, no traversal before the type is proven)
+#
+# Diagnostics are hook-free on the DIRECT Python API as well as on the public
+# CLI/artifact lanes: a refusal never reads an attribute of the rejected value
+# or of its class. In particular it never reads ``type(value).__name__`` —
+# ``__name__`` is an overridable METACLASS property, so reading it merely to
+# improve a message can execute caller-controlled code and escape the typed
+# refusal. Type names come from an identity table of builtins; anything else
+# is described generically.
 # ---------------------------------------------------------------------------
+
+
+_BUILTIN_TYPE_NAMES: Final[tuple[tuple[type, str], ...]] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description for error messages.
+
+    ``type(value).__name__`` consults the metaclass — a hostile class can
+    override ``__name__`` so that reading it raises from inside error
+    formatting, escaping the validator's typed-error promise. Identity
+    comparison against builtin types runs no user code, and anything that
+    is not one of these builtins is described generically instead of
+    executing a hook merely to improve a message.
+    """
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
 
 
 def _exact_str(value: Any, field: str) -> str:
     if type(value) is not str:
-        raise EvaluatorInputError(f"{field}: expected builtin str, got {type(value).__name__}")
+        raise EvaluatorInputError(f"{field}: expected builtin str, got {_describe_type(value)}")
     return value
 
 
 def _exact_bool(value: Any, field: str) -> bool:
     if type(value) is not bool:
-        raise EvaluatorInputError(f"{field}: expected builtin bool, got {type(value).__name__}")
+        raise EvaluatorInputError(f"{field}: expected builtin bool, got {_describe_type(value)}")
     return value
 
 
 def _exact_int(value: Any, field: str, low: int, high: int | None = None) -> int:
     if type(value) is not int:
-        raise EvaluatorInputError(f"{field}: expected builtin int, got {type(value).__name__}")
+        raise EvaluatorInputError(f"{field}: expected builtin int, got {_describe_type(value)}")
     if value < low or (high is not None and value > high):
         bound = f"[{low}, {high}]" if high is not None else f">= {low}"
         raise EvaluatorInputError(f"{field}: {value} outside {bound}")
@@ -287,7 +326,7 @@ def _exact_float(
     """
     if type(value) is not int and type(value) is not float:
         raise EvaluatorInputError(
-            f"{field}: expected a builtin real number, got {type(value).__name__}"
+            f"{field}: expected a builtin real number, got {_describe_type(value)}"
         )
     try:
         as_float = float(value)
@@ -302,15 +341,33 @@ def _exact_float(
 
 def _exact_dict(value: Any, field: str, keys: frozenset[str]) -> dict[str, Any]:
     """Builtin dict with EXACTLY the given key set (unknown keys are an
-    unknown variant; missing keys are missing evidence — both fail closed)."""
+    unknown variant; missing keys are missing evidence — both fail closed).
+
+    The proven-exact dict is iterated WITHOUT hashing, comparing,
+    stringifying or representing an unproven key, and only exact builtin
+    ``str`` keys ever enter a set. This matters beyond message formatting:
+    a non-str key whose ``__hash__`` collides with an expected name would
+    otherwise have its ``__eq__`` invoked by the set comparison — executing
+    caller-controlled code, and, were that ``__eq__`` to return True,
+    letting the hostile key SATISFY a required name and pass validation.
+    Non-str keys are described by the hook-free ``_describe_type`` and
+    always force a mismatch.
+    """
     if type(value) is not dict:
-        raise EvaluatorInputError(f"{field}: expected builtin dict, got {type(value).__name__}")
-    present = set(value)
-    if present != keys:
-        # Non-str keys are named by type only — never repr'd/str'd, so a
-        # hostile key's __repr__ can never run in the error path.
-        unknown = sorted(k if type(k) is str else f"<{type(k).__name__}>" for k in present - keys)
-        missing = sorted(keys - present)
+        raise EvaluatorInputError(f"{field}: expected builtin dict, got {_describe_type(value)}")
+    # Iteration alone: no hash, no comparison, no str/repr of any key.
+    str_keys: set[str] = set()
+    foreign: list[str] = []
+    for key in value:
+        if type(key) is str:
+            str_keys.add(key)
+        else:
+            foreign.append(f"<{_describe_type(key)}>")
+    if foreign or str_keys != keys:
+        # Set algebra and sorting run on exact builtin strings only; the
+        # foreign placeholders are already plain strings.
+        unknown = sorted(list(str_keys - keys) + foreign)
+        missing = sorted(keys - str_keys)
         raise EvaluatorInputError(
             f"{field}: key set mismatch (unknown={unknown}, missing={missing})"
         )
@@ -554,7 +611,7 @@ def validate_receipt_series(obj: Any) -> list[dict[str, Any]]:
     if type(obj) is not list:
         raise EvaluatorInputError(
             f"receipts: expected a receipt object or an array of receipts, "
-            f"got {type(obj).__name__}"
+            f"got {_describe_type(obj)}"
         )
     if not obj:
         raise EvaluatorInputError("receipts: series is empty (no evidence to evaluate)")
