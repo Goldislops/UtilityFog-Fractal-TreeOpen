@@ -1739,15 +1739,26 @@ class _MetaBomb(metaclass=_RaisingMeta):
 
 class _ArmedCollisionKey(metaclass=_RaisingMeta):
     """A non-str key hashing EXACTLY like a target str, with every comparison
-    and representation hook armed. Only __hash__ is inert, so the collision
-    can be planted at all."""
+    and representation hook armed.
+
+    ``__hash__`` is inert *only* until the key is armed, which permits the
+    single hash needed to plant the collision in a dict. Once armed — after
+    construction — the validator is held to the stricter promise that it must
+    not hash the key either: any further ``__hash__`` records itself and
+    raises, alongside the already-armed ``__eq__``, ``__repr__`` and
+    metaclass ``__name__``.
+    """
 
     fired: list[str] = []
+    armed = False
 
     def __init__(self, target: str) -> None:
         self._h = hash(target)
 
     def __hash__(self) -> int:
+        if _ArmedCollisionKey.armed:
+            _ArmedCollisionKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
         return self._h
 
     def __eq__(self, other):
@@ -1779,6 +1790,7 @@ _KEYS = frozenset({"alpha", "beta"})
 def _arm() -> None:
     _RaisingMeta.ran = False
     _ArmedCollisionKey.fired.clear()
+    _ArmedCollisionKey.armed = False
 
 
 def test_hostile_metaclass_never_consulted_at_any_evaluator_site() -> None:
@@ -1821,20 +1833,30 @@ def test_hostile_metaclass_never_consulted_at_any_evaluator_site() -> None:
 
 def test_armed_collision_key_runs_no_comparison_or_representation_hook() -> None:
     """A non-str key whose hash collides with an expected name must never have
-    __eq__/__repr__/metaclass __name__ invoked: the proven-exact dict is
-    partitioned by identity and only builtin strings ever enter a set."""
+    __hash__/__eq__/__repr__/metaclass __name__ invoked by the validator: the
+    proven-exact dict is partitioned by identity and only builtin strings ever
+    enter a set.
+
+    The key is armed *after* the dict is built, so the one hash needed to
+    plant the collision is permitted and every hook the validator might reach
+    thereafter — hashing included — is forbidden.
+    """
     from scripts.nextness_evaluator import _exact_dict
 
     _arm()
     payload = {_ArmedCollisionKey("alpha"): 1, "beta": 2}
-    with pytest.raises(EvaluatorInputError) as excinfo:
-        _exact_dict(payload, "f", _KEYS)
-    assert type(excinfo.value) is EvaluatorInputError
-    assert str(excinfo.value) == (
-        "f: key set mismatch (unknown=['<non-builtin value>'], missing=['alpha'])"
-    )
-    assert _ArmedCollisionKey.fired == []
-    assert _RaisingMeta.ran is False
+    _ArmedCollisionKey.armed = True  # construction done: no further hash allowed
+    try:
+        with pytest.raises(EvaluatorInputError) as excinfo:
+            _exact_dict(payload, "f", _KEYS)
+        assert type(excinfo.value) is EvaluatorInputError
+        assert str(excinfo.value) == (
+            "f: key set mismatch (unknown=['<non-builtin value>'], missing=['alpha'])"
+        )
+        assert _ArmedCollisionKey.fired == []
+        assert _RaisingMeta.ran is False
+    finally:
+        _ArmedCollisionKey.armed = False
 
 
 def test_collision_key_can_never_satisfy_a_required_key_name() -> None:
