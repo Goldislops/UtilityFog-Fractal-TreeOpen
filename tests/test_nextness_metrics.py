@@ -2398,7 +2398,9 @@ def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
     with pytest.raises(MetricsInputError) as excinfo:
         compute_run_metrics(log, out, max_line_bytes=_SubInt(65_536))
     assert type(excinfo.value) is MetricsInputError
-    assert "non-boolean integer" in str(excinfo.value)
+    # hook-free generic diagnostic: nothing of the object or its
+    # class is inspected or reported
+    assert str(excinfo.value) == "max_line_bytes must be a builtin int"
 
     # lower inclusive boundary: parameter accepted -> the LINE lane
     # fires (located message), not the parameter lane
@@ -2409,6 +2411,144 @@ def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
     # upper inclusive boundary: accepted end-to-end (tiny input)
     compute_run_metrics(log, out, max_line_bytes=MAX_LINE_BYTES_CEILING)
     assert out.exists()
+
+
+class _HostileHooks:
+    """Every observable hook raises — comparison, conversion, indexing,
+    string AND representation. The exact-type refusal must complete
+    without executing any of them (Jack policy 2026-07-19)."""
+    ran = False
+
+    def _boom(self, *args):
+        type(self).ran = True
+        raise RuntimeError("hostile hook executed")
+
+    __lt__ = __le__ = __gt__ = __ge__ = _boom
+    __index__ = __int__ = __str__ = __repr__ = _boom
+
+
+def test_max_rows_exact_builtin_type_totality(tmp_path, monkeypatch) -> None:
+    """Exact-type max_rows (Jack policy 2026-07-19): the isinstance
+    form admitted int subclasses whose comparison hooks executed inside
+    the row-budget loop (audit receipts MET-DIR-MAXROWS-06/07). Now:
+    every non-builtin-int is exactly MetricsInputError with a generic
+    supplied-type-free diagnostic, before the log is opened, zero
+    hostile hooks executed; builtin boundaries and pinned refusals
+    unchanged."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    class _SubInt(int):
+        pass
+
+    log = tmp_path / "rows_exact.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    out = tmp_path / "rows_exact_out.jsonl"
+    # builtin boundaries accepted (tiny fixture; max_rows=1 fits it)
+    compute_run_metrics(log, out, max_rows=1)
+    assert out.exists()
+    compute_run_metrics(log, out, max_rows=1_000_000)
+
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    _HostileHooks.ran = False
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for bad in (True, False, 2.5, "10", None, _SubInt(3), _HostileHooks()):
+        with pytest.raises(MetricsInputError) as excinfo:
+            compute_run_metrics(log, tmp_path / "n2.jsonl", max_rows=bad)
+        assert type(excinfo.value) is MetricsInputError
+        assert str(excinfo.value) == "max_rows must be a builtin int"
+    # builtin out-of-range keep the pinned concise refusals
+    for bad in (0, -1, 1_000_001):
+        with pytest.raises(MetricsInputError) as excinfo:
+            compute_run_metrics(log, tmp_path / "n2.jsonl", max_rows=bad)
+        assert "non-boolean integer in (0, 1000000]" in str(excinfo.value)
+    monkeypatch.undo()
+    assert opened == []  # every refusal fired before the log was opened
+    assert _HostileHooks.ran is False
+    assert not (tmp_path / "n2.jsonl").exists()
+
+
+def test_max_line_bytes_diagnostic_is_hook_free(tmp_path) -> None:
+    """Finding F3 closed: a repr-raiser is refused with exactly
+    MetricsInputError — the generic diagnostic never invokes the
+    representation hook."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    _HostileHooks.ran = False
+    log = tmp_path / "f3.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, tmp_path / "f3_out.jsonl",
+                            max_line_bytes=_HostileHooks())
+    assert type(excinfo.value) is MetricsInputError
+    assert str(excinfo.value) == "max_line_bytes must be a builtin int"
+    assert _HostileHooks.ran is False
+    assert not (tmp_path / "f3_out.jsonl").exists()
+
+
+class _RaisingMeta(type):
+    """Metaclass whose __name__ property raises — even
+    type(value).__name__ is a user-controlled hook."""
+    ran = False
+
+    @property
+    def __name__(cls):
+        _RaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _MetaBomb(metaclass=_RaisingMeta):
+    pass
+
+
+def test_bound_diagnostics_never_touch_the_metaclass(
+    tmp_path, monkeypatch
+) -> None:
+    """Metaclass-__name__ repair: refusing a non-builtin-int must not
+    inspect the rejected object OR its class beyond the identity test —
+    a hostile-metaclass object receives exactly MetricsInputError with
+    the generic message, without opening the input or creating
+    output."""
+    from scripts.nextness_metrics import MetricsInputError
+
+    log = tmp_path / "meta.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    out = tmp_path / "meta_out.jsonl"
+    victim = log.resolve()
+    opened: list[str] = []
+    real_open = pathlib.Path.open
+
+    def patched(self, mode="r", *args, **kwargs):
+        try:
+            if self.resolve() == victim:
+                opened.append(mode)
+        except OSError:
+            pass
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", patched)
+    for param, message in (("max_rows", "max_rows must be a builtin int"),
+                           ("max_line_bytes",
+                            "max_line_bytes must be a builtin int")):
+        _RaisingMeta.ran = False
+        with pytest.raises(MetricsInputError) as excinfo:
+            compute_run_metrics(log, out, **{param: _MetaBomb()})
+        assert type(excinfo.value) is MetricsInputError
+        assert str(excinfo.value) == message
+        assert _RaisingMeta.ran is False  # the metaclass was never asked
+    monkeypatch.undo()
+    assert opened == []
+    assert not out.exists()
 
 
 def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:
