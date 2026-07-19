@@ -1369,3 +1369,213 @@ def test_cli_huge_max_line_bytes_translated_typed_exit_2(tmp_path, capsys) -> No
     assert "Traceback" not in captured.err
     for p_, b_ in before.items():
         assert p_.read_bytes() == b_
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — hook-free type diagnostics + exact-string key partition
+# (Option-B family policy, following the audited evaluator pattern). Every
+# refusal below must be a typed LabInputError whose formatting reads NO
+# attribute of the rejected value or of its class, and no key hook may run
+# inside _exact_dict.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingMeta(type):
+    """Metaclass whose __name__ property raises — even type(x).__name__ is a
+    user-controlled hook."""
+
+    ran = False
+
+    @property
+    def __name__(cls):
+        _RaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _MetaBomb(metaclass=_RaisingMeta):
+    pass
+
+
+class _StrictCollisionKey(metaclass=_RaisingMeta):
+    """A non-str key hashing EXACTLY like a target str, with every hook armed.
+
+    ``__hash__`` is inert only until the key is armed, which permits the single
+    hash needed to plant the collision in a dict. Once armed — after
+    construction — the validator must not hash the key either: any further
+    ``__hash__`` records itself and raises, alongside the armed ``__eq__``,
+    ``__repr__`` and metaclass ``__name__``.
+    """
+
+    fired: list[str] = []
+    armed = False
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        if _StrictCollisionKey.armed:
+            _StrictCollisionKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return self._h
+
+    def __eq__(self, other):
+        _StrictCollisionKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _StrictCollisionKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _SoftCollisionKey:
+    """Hash-collides with a target str AND compares equal — the soundness
+    variant that used to SATISFY a required key name."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+_LAB_KEYS = frozenset({"alpha", "beta"})
+
+
+def _lab_arm() -> None:
+    _RaisingMeta.ran = False
+    _StrictCollisionKey.fired.clear()
+    _StrictCollisionKey.armed = False
+
+
+def test_lab_hostile_metaclass_never_consulted_at_any_site() -> None:
+    """All five supplied-value diagnostics refuse with the exact typed error
+    and the generic description, without consulting the metaclass."""
+    from scripts.nextness_replay_lab import (
+        LabInputError,
+        _exact_dict,
+        _exact_int,
+        _exact_real,
+        _exact_str,
+    )
+
+    cases = [
+        (lambda: _exact_str(_MetaBomb(), "f"),
+         "f: expected builtin str, got non-builtin value"),
+        (lambda: _exact_int(_MetaBomb(), "f"),
+         "f: expected builtin int, got non-builtin value"),
+        (lambda: _exact_real(_MetaBomb(), "f"),
+         "f: expected a builtin real number, got non-builtin value"),
+        (lambda: _exact_dict(_MetaBomb(), "f", _LAB_KEYS),
+         "f: expected builtin dict, got non-builtin value"),
+        (lambda: _exact_dict({_MetaBomb(): 1}, "f", _LAB_KEYS),
+         "f: key set mismatch (unknown=['<non-builtin value>'], "
+         "missing=['alpha', 'beta'])"),
+    ]
+    for call, expected in cases:
+        _lab_arm()
+        with pytest.raises(LabInputError) as excinfo:
+            call()
+        assert type(excinfo.value) is LabInputError
+        assert str(excinfo.value) == expected
+        assert _RaisingMeta.ran is False
+
+
+def test_lab_strict_collision_key_runs_no_hook_at_all() -> None:
+    """A non-str key whose hash collides with an expected name must never have
+    __hash__/__eq__/__repr__/metaclass __name__ invoked by the validator. The
+    key is armed AFTER dict construction, so the one hash needed to plant the
+    collision is permitted and everything thereafter is forbidden."""
+    from scripts.nextness_replay_lab import LabInputError, _exact_dict
+
+    _lab_arm()
+    payload = {_StrictCollisionKey("alpha"): 1, "beta": 2}
+    _StrictCollisionKey.armed = True  # construction done: no further hash allowed
+    try:
+        with pytest.raises(LabInputError) as excinfo:
+            _exact_dict(payload, "f", _LAB_KEYS)
+        assert type(excinfo.value) is LabInputError
+        assert str(excinfo.value) == (
+            "f: key set mismatch (unknown=['<non-builtin value>'], missing=['alpha'])"
+        )
+        assert _StrictCollisionKey.fired == []
+        assert _RaisingMeta.ran is False
+    finally:
+        _StrictCollisionKey.armed = False
+
+
+def test_lab_collision_key_can_never_satisfy_a_required_key_name() -> None:
+    """Soundness: a hash-colliding key whose __eq__ returns True was ACCEPTED
+    as the expected name before this repair. It must now be refused."""
+    from scripts.nextness_replay_lab import LabInputError, _exact_dict
+
+    payload = {_SoftCollisionKey("alpha"): 1, "beta": 2}
+    with pytest.raises(LabInputError) as excinfo:
+        _exact_dict(payload, "f", _LAB_KEYS)
+    assert str(excinfo.value) == (
+        "f: key set mismatch (unknown=['<non-builtin value>'], missing=['alpha'])"
+    )
+
+
+def test_lab_builtin_lane_diagnostics_are_byte_identical() -> None:
+    """PUBLIC/ARTIFACT lane (json.loads yields only builtins) keeps every
+    pre-existing message byte-for-byte, unknown/missing formatting included."""
+    from scripts.nextness_replay_lab import (
+        LabInputError,
+        _exact_dict,
+        _exact_int,
+        _exact_real,
+        _exact_str,
+    )
+
+    matrix = [
+        (lambda: _exact_str(123, "f"), "f: expected builtin str, got int"),
+        (lambda: _exact_int("x", "f"), "f: expected builtin int, got str"),
+        (lambda: _exact_real("x", "f"), "f: expected a builtin real number, got str"),
+        (lambda: _exact_dict([], "f", _LAB_KEYS), "f: expected builtin dict, got list"),
+        (lambda: _exact_dict({"alpha": 1, "zeta": 2}, "f", _LAB_KEYS),
+         "f: key set mismatch (unknown=['zeta'], missing=['beta'])"),
+        (lambda: _exact_dict({"alpha": 1, "beta": 2, "zz": 3}, "f", _LAB_KEYS),
+         "f: key set mismatch (unknown=['zz'], missing=[])"),
+        (lambda: _exact_dict({"alpha": 1}, "f", _LAB_KEYS),
+         "f: key set mismatch (unknown=[], missing=['beta'])"),
+    ]
+    for call, expected in matrix:
+        with pytest.raises(LabInputError) as excinfo:
+            call()
+        assert str(excinfo.value) == expected
+
+
+def test_lab_describe_type_is_hook_free_and_names_builtins() -> None:
+    """Identity table only: builtins by literal name, everything else generic."""
+    from scripts.nextness_replay_lab import _describe_type
+
+    assert _describe_type(True) == "bool"  # before int: bool subclasses int
+    assert _describe_type(1) == "int"
+    assert _describe_type(1.0) == "float"
+    assert _describe_type("s") == "str"
+    assert _describe_type([]) == "list"
+    assert _describe_type({}) == "dict"
+    assert _describe_type(()) == "tuple"
+    assert _describe_type(set()) == "set"
+    assert _describe_type(b"") == "bytes"
+    assert _describe_type(None) == "NoneType"
+
+    class _IntSub(int):
+        pass
+
+    assert _describe_type(_IntSub(1)) == "non-builtin value"
+    assert _describe_type(int) == "non-builtin value"  # a class object itself
+    _lab_arm()
+    assert _describe_type(_MetaBomb()) == "non-builtin value"
+    assert _RaisingMeta.ran is False
+
+
+def test_lab_exact_dict_still_accepts_the_exact_builtin_key_set() -> None:
+    """Accepted inputs are unchanged and the caller's dict is returned as-is."""
+    from scripts.nextness_replay_lab import _exact_dict
+
+    payload = {"alpha": 1, "beta": 2}
+    assert _exact_dict(payload, "f", _LAB_KEYS) is payload
