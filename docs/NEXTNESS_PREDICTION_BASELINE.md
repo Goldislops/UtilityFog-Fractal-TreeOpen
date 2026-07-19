@@ -179,7 +179,19 @@ the typed `PredictorInputError` — the four CLI-reachable validation
 raises (`max_rows`, `max_line_bytes`, `smoothing`, `holdout_fraction`
 bounds) raise it (the `max_line_bytes` message states the
 `[1, 16777216]` acceptance range since the boundary-totality repair;
-the other three message texts are unchanged). A plain
+the builtin-integer out-of-range message texts are unchanged).
+
+**Exact-type integer bounds (direct-API policy, 2026-07-19)**:
+`max_rows` and `max_line_bytes` accept only **exact builtin `int`**
+values — bool and custom `int` subclasses included in the refusal.
+Type and range are validated split, and the type refusal renders only
+the safe type NAME (`max_rows must be a builtin int, got bool`) — the
+rejected object is never compared, converted, indexed, stringified or
+repr'd, so **no user-controlled hook can execute** during validation
+or its diagnostic. **Public-CLI qualification**: this hardening is
+reachable only through the direct Python API — argparse's `type=int`
+already delivers builtin ints, so public CLI behavior and its pinned
+messages are unchanged. A plain
 `ValueError` — like any exception outside the documented catch
 classes — **propagates** rather than being reported as a concise input
 failure (test-pinned); `evaluate_predictions`' equal-length/non-empty
