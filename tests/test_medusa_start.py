@@ -18,7 +18,11 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from scripts.medusa_start import PROJECT_ROOT, PYTHON, SERVICES, build_command
+
+_EXACTLY_ONE = "Service configuration must define exactly one of 'module' or 'script'."
 
 
 def test_api_launches_as_a_package_module() -> None:
@@ -94,3 +98,41 @@ def test_api_usage_text_documents_the_module_invocation() -> None:
     src = (PROJECT_ROOT / "scripts" / "medusa_api.py").read_text(encoding="utf-8")
     assert "python -m scripts.medusa_api" in src
     assert "python scripts/medusa_api.py" not in src
+
+
+def test_build_command_rejects_a_configuration_declaring_neither() -> None:
+    """A config with no launch form must not surface as a bare KeyError."""
+    with pytest.raises(ValueError) as excinfo:
+        build_command({"marker": "x", "description": "d"})
+    assert type(excinfo.value) is ValueError
+    assert str(excinfo.value) == _EXACTLY_ONE
+
+
+def test_build_command_rejects_a_configuration_declaring_both() -> None:
+    """Declaring both would silently pick a form the author did not choose."""
+    with pytest.raises(ValueError) as excinfo:
+        build_command(
+            {"module": "scripts.x", "script": "scripts/x.py", "marker": "x"}
+        )
+    assert type(excinfo.value) is ValueError
+    assert str(excinfo.value) == _EXACTLY_ONE
+
+
+def test_launch_form_refusal_reports_no_supplied_value() -> None:
+    """The message is generic: it names neither the module nor the script."""
+    for config in (
+        {},
+        {"module": "scripts.secret", "script": "scripts/secret.py"},
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            build_command(config)
+        message = str(excinfo.value)
+        assert message == _EXACTLY_ONE
+        assert "secret" not in message
+
+
+def test_every_real_service_declares_exactly_one_launch_form() -> None:
+    """The shipped registry satisfies the invariant the guard enforces."""
+    for name, config in SERVICES.items():
+        assert ("module" in config) != ("script" in config), name
+        build_command(config)  # constructs without raising

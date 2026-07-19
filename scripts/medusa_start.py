@@ -79,8 +79,20 @@ def build_command(config: dict) -> list:
     (``python -u -m pkg.mod``) so the repository root stays importable;
     a service declaring ``script`` keeps the file-path form. The API needs
     the module form because it imports ``scripts.*`` at import time.
+
+    Exactly one of the two must be declared. A configuration carrying
+    NEITHER would otherwise surface as a bare ``KeyError: 'script'``, and
+    one carrying BOTH would silently pick a launch form the author did not
+    choose. Both are configuration errors, refused with one generic message
+    that reports no supplied value.
     """
-    if "module" in config:
+    has_module = "module" in config
+    has_script = "script" in config
+    if has_module == has_script:  # neither, or both
+        raise ValueError(
+            "Service configuration must define exactly one of 'module' or 'script'."
+        )
+    if has_module:
         args = [PYTHON, "-u", "-m", config["module"]]
     else:
         args = [PYTHON, "-u", str(PROJECT_ROOT / config["script"])]
