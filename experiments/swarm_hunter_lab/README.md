@@ -14,7 +14,26 @@ asserted by tests **in both directions**.
 
 ## Contract (frozen)
 
-- Input: an ordered sequence of snapshots — `states: uint8 (N,N,N)`
+- Input: an ordered sequence of **1 to `MAX_SNAPSHOTS` (= 64)** snapshots.
+  At the direct-Python boundary the top-level container must be an **exact
+  built-in `list` or `tuple`**, and each snapshot, its provenance, and its
+  supplied `sha256_triple` must be **exact built-in `dict`s** — subclasses are
+  refused (with the existing `invalid_input` / `invalid_provenance` /
+  `invalid_sha256_format` reasons) before any `len`/iteration/`keys`/`.get`/
+  subscript hook runs, so a hostile container cannot execute code at the
+  boundary. Each exact dict's **cardinality is checked first** (hook-free
+  `len()`): a dict with more than its closed key budget (snapshot 4, provenance
+  7, `sha256_triple` 3) is refused in O(1) *before* any key traversal or set
+  allocation, so arbitrarily many junk keys cannot force unbounded work. Then
+  inside each exact dict, **every key is proven an exact built-in `str`** (by
+  hash-free iteration) before any `set(...keys())`/membership/lookup hashes or
+  compares it, and the provenance **`source` discriminator is proven an exact
+  built-in `str`** before it is compared with `"synthetic"` — so a hostile
+  stored key's `__hash__`/`__eq__` or a hostile scalar's `__eq__` never runs (a
+  non-str key or non-str source → the existing `invalid_input` refusal).
+  An empty sequence or more than 64 snapshots is unsupported input
+  → the existing `invalid_input` structured refusal (decided before any item
+  is inspected; **not** a truncation). Each snapshot is `states: uint8 (N,N,N)`
   (`[z][y][x]`, flat convention `z·N²+y·N+x`), optional
   `memory: float32 (8,N,N,N)`, optional `inactivity_steps: int16 (N,N,N)`,
   and a closed provenance dict (`source="synthetic"` only; caller-supplied
