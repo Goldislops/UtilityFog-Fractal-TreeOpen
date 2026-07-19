@@ -686,11 +686,13 @@ def compute_run_metrics(
             f"max_rows must be a non-boolean integer in "
             f"(0, {MAX_ROWS_CEILING}], got {max_rows!r}"
         )
-    if (isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
+    if (type(max_line_bytes) is not int
             or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
-        # Ceiling included so the bounded readline's max_line_bytes + 2
-        # can never overflow an index-sized integer (the OverflowError
-        # is made unreachable, not caught); raised before any read.
+        # Exact builtin type (bool and custom int subclasses both
+        # refused — matching the family's exact-type pattern); ceiling
+        # included so the bounded readline's max_line_bytes + 2 can
+        # never overflow an index-sized integer (the OverflowError is
+        # made unreachable, not caught); raised before any read.
         raise MetricsInputError(
             f"max_line_bytes must be a non-boolean integer in "
             f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"

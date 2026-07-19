@@ -2367,13 +2367,48 @@ def test_max_line_bytes_ceiling_totality(tmp_path, monkeypatch) -> None:
             pass
         return real_open(self, mode, *args, **kwargs)
 
+    class _SubInt(int):
+        """Custom int subclass — refused by the exact-type contract."""
+
     monkeypatch.setattr(pathlib.Path, "open", patched)
-    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806):
+    for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806,
+                _SubInt(200)):
         with pytest.raises(MetricsInputError):
             compute_run_metrics(log, tmp_path / "n.jsonl", max_line_bytes=bad)
     monkeypatch.undo()
     assert opened == []  # refused before the log was opened
     assert not (tmp_path / "n.jsonl").exists()
+
+
+def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
+    """Exact-type pins (#392 review repair): a custom int subclass is
+    refused with exactly MetricsInputError even when in range; builtin
+    ints at both inclusive boundaries are accepted as PARAMETERS on
+    tiny fixtures (at max_line_bytes=1 the parameter passes validation
+    and reading begins — the fixture row then rides the ordinary
+    located line-bound refusal, whose message proves the lane)."""
+    from scripts.nextness_metrics import MAX_LINE_BYTES_CEILING, MetricsInputError
+
+    class _SubInt(int):
+        pass
+
+    log = tmp_path / "exact.jsonl"
+    log.write_bytes((_bounds_row(1, 120) + "\n").encode())
+    out = tmp_path / "exact_out.jsonl"
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, out, max_line_bytes=_SubInt(65_536))
+    assert type(excinfo.value) is MetricsInputError
+    assert "non-boolean integer" in str(excinfo.value)
+
+    # lower inclusive boundary: parameter accepted -> the LINE lane
+    # fires (located message), not the parameter lane
+    with pytest.raises(MetricsInputError) as excinfo:
+        compute_run_metrics(log, out, max_line_bytes=1)
+    assert "line exceeds 1 bytes" in str(excinfo.value)
+    assert f"{log}:1" in str(excinfo.value)
+    # upper inclusive boundary: accepted end-to-end (tiny input)
+    compute_run_metrics(log, out, max_line_bytes=MAX_LINE_BYTES_CEILING)
+    assert out.exists()
 
 
 def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:

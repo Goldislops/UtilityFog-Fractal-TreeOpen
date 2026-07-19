@@ -1170,13 +1170,44 @@ def test_max_line_bytes_ceiling_totality(tmp_path, monkeypatch) -> None:
             pass
         return real_open(self, mode, *args, **kwargs)
 
+    class _SubInt(int):
+        """A custom int subclass — must be refused despite comparing
+        like its integer value (exact-type contract)."""
+
     monkeypatch.setattr(pathlib.Path, "open", patched)
     for bad in (MAX_LINE_BYTES_CEILING + 1, 9223372036854775806,
-                0, -1, True, False, 2.5, "64", None):
+                0, -1, True, False, 2.5, "64", None, _SubInt(200)):
         with pytest.raises(PredictorInputError):
             read_dominant_sequence(log, max_line_bytes=bad)
     monkeypatch.undo()
     assert opened == []  # every refusal fired before the log was opened
+
+
+def test_max_line_bytes_exact_builtin_type_pins(tmp_path) -> None:
+    """Exact-type pins (#392 review repair): a custom int subclass is
+    refused with the module's exact typed exception even when its value
+    is in range, while builtin ints at BOTH inclusive boundaries are
+    accepted on tiny fixtures (max_line_bytes=1 accepts the parameter —
+    the oversized fixture rows then follow the ordinary counted
+    oversized_line lane, proving reading began)."""
+    from scripts.nextness_predictor import PredictorInputError
+
+    class _SubInt(int):
+        pass
+
+    log = _write_log(tmp_path, _dominant_rows([A, B, A]))
+    with pytest.raises(PredictorInputError) as excinfo:
+        read_dominant_sequence(log, max_line_bytes=_SubInt(65_536))
+    assert type(excinfo.value) is PredictorInputError
+    assert "non-boolean integer" in str(excinfo.value)
+
+    # lower inclusive boundary: parameter accepted, reading proceeds
+    seq, rej, rows = read_dominant_sequence(log, max_line_bytes=1)
+    assert rej["oversized_line"] == 1 and rows == 1  # ordinary lane
+    # upper inclusive boundary: accepted (tiny input, lazy probe)
+    seq, rej, rows = read_dominant_sequence(
+        log, max_line_bytes=MAX_LINE_BYTES_CEILING)
+    assert seq == [A, B, A]
 
 
 def test_cli_huge_max_line_bytes_typed_exit_2(tmp_path, capsys) -> None:

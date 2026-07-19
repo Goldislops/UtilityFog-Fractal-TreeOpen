@@ -225,8 +225,11 @@ def read_dominant_sequence(
     # the probe arithmetic (max_line_bytes + 2) can never overflow an
     # index-sized integer — the OverflowError is made unreachable, not
     # caught. Raised BEFORE the input is opened.
-    if (isinstance(max_line_bytes, bool) or not isinstance(max_line_bytes, int)
+    if (type(max_line_bytes) is not int
             or not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING):
+        # Exact builtin type: bool AND custom int subclasses are both
+        # refused (an isinstance check would admit subclasses whose
+        # overridden hooks the bounded reader must never execute).
         raise PredictorInputError(
             f"max_line_bytes must be a non-boolean integer in "
             f"[1, {MAX_LINE_BYTES_CEILING}], got {max_line_bytes!r}"
