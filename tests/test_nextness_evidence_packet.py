@@ -1281,3 +1281,198 @@ def test_packet_describe_type_is_hook_free_and_names_builtins() -> None:
     _packet_arm()
     assert _describe_type(_MetaBomb()) == "non-builtin value"
     assert _RaisingMeta.ran is False
+
+
+# ---------------------------------------------------------------------------
+# Outer role-map boundary (DIRECT API only — the public CLI builds this map
+# itself with exact builtin str roles). build_packet() and
+# validate_output_path() previously consumed the caller's mapping directly
+# via set(), `in`, subscript and list rendering.
+# ---------------------------------------------------------------------------
+
+
+_ROLE_MAP_NOT_DICT = "artifact role map: expected a builtin dict"
+_ROLE_MAP_FOREIGN_KEY = "artifact role map: role keys must be builtin strings"
+
+
+class _ReprBombKey:
+    """Foreign role key whose __repr__ raises — the unknown-roles message
+    rendered the key list, which repr()s every element."""
+
+    fired: list[str] = []
+
+    def __repr__(self):
+        _ReprBombKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _SoftCollidingRole:
+    """Collides with a real role AND compares equal: used to satisfy that
+    role and supply its own value."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+class _HardCollidingRole:
+    """Collides with a real role; every comparison/representation raises."""
+
+    fired: list[str] = []
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        _HardCollidingRole.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _HardCollidingRole.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _HostileRoleDict(dict):
+    """An exact-dict SUBCLASS whose iteration hooks are armed."""
+
+    fired: list[str] = []
+
+    def items(self):
+        _HostileRoleDict.fired.append("items")
+        raise RuntimeError("items hook executed")
+
+    def keys(self):
+        _HostileRoleDict.fired.append("keys")
+        raise RuntimeError("keys hook executed")
+
+    def __iter__(self):
+        _HostileRoleDict.fired.append("__iter__")
+        raise RuntimeError("__iter__ hook executed")
+
+
+def _role_map_arm() -> None:
+    _ReprBombKey.fired.clear()
+    _HardCollidingRole.fired.clear()
+    _HostileRoleDict.fired.clear()
+
+
+def test_role_map_foreign_key_repr_never_runs(chain) -> None:
+    """A foreign role key whose __repr__ raises used to escape from
+    build_packet() when the unknown-roles message rendered the key list."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    _role_map_arm()
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_ReprBombKey(): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _ReprBombKey.fired == []
+
+
+def test_role_map_collision_cannot_satisfy_a_role_in_build_packet(chain) -> None:
+    """A key colliding with 'report' and comparing equal used to satisfy that
+    role and supply its own value as the artifact."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_SoftCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+
+
+def test_role_map_hard_collision_runs_no_hook_in_validate_output_path(chain, tmp_path) -> None:
+    """Primary-role selection used to hash and compare caller keys."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    _role_map_arm()
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {_HardCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _HardCollidingRole.fired == []
+
+
+def test_role_map_collision_cannot_supply_the_primary_input(chain) -> None:
+    """A soft-colliding key used to be ACCEPTED by validate_output_path and
+    supply the primary input that anchors the whole write boundary."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {_SoftCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+
+
+def test_role_map_foreign_key_is_rejected_beside_a_genuine_role(chain) -> None:
+    """A foreign key must be refused, never silently ignored, even when a
+    genuine role is present in the same mapping."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    _role_map_arm()
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_ReprBombKey(): chain["report"], "report": chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _ReprBombKey.fired == []
+
+
+def test_role_map_dict_subclass_iteration_hooks_never_run(chain) -> None:
+    """Only an exact builtin dict is accepted, so a subclass is refused
+    before any of its iteration hooks can interpose."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        build_packet,
+        validate_output_path,
+    )
+
+    out = chain["report"].parent / "packet.json"
+    for call in (
+        lambda: build_packet(_HostileRoleDict({"report": chain["report"]})),
+        lambda: validate_output_path(out, _HostileRoleDict({"report": chain["report"]})),
+    ):
+        _role_map_arm()
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert str(excinfo.value) == _ROLE_MAP_NOT_DICT
+        assert _HostileRoleDict.fired == []
+
+
+def test_role_map_refusals_report_no_supplied_type_name(chain) -> None:
+    """Both refusals are generic: neither names the supplied type."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    for bad in ([("report", chain["report"])], ("report",), None):
+        with pytest.raises(PacketInputError) as excinfo:
+            build_packet(bad)
+        message = str(excinfo.value)
+        assert message == _ROLE_MAP_NOT_DICT
+        for leaked in ("list", "tuple", "NoneType", "non-builtin"):
+            assert leaked not in message
+
+
+def test_role_map_preserves_public_messages_and_valid_inputs(chain) -> None:
+    """Valid exact-dict DIRECT inputs and every pre-existing public message
+    are unchanged."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        build_packet,
+        validate_output_path,
+    )
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({})
+    assert str(excinfo.value) == "no artifacts provided: nothing to package"
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({"bogus": chain["report"]})
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+
+    # A valid exact dict still builds, and the write boundary still accepts.
+    packet = build_packet(chain)
+    assert packet["schema"] == PACKET_SCHEMA
+    validate_output_path(chain["report"].parent / "packet.json", chain)

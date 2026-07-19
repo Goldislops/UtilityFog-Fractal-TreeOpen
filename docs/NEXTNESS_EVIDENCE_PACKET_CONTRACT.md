@@ -141,6 +141,47 @@ as the field's content**. A foreign key can now never satisfy a
 required string field, and a container holding both a foreign key and
 the genuine string field returns the genuine value.
 
+**Exact role-map boundary (top level).** The same class of defect existed
+one level up, in the **outer role map** passed to `build_packet()` and
+`validate_output_path()`. Both consumed the caller's mapping directly —
+`set(paths)`, `role in paths`, `paths[role]`, `inputs[role]` and, in the
+unknown-roles message, list rendering that `repr`'d every key.
+
+**Reachability**: the **PUBLIC CLI is unaffected** — it constructs this
+map itself with exact builtin `str` roles, so none of the hazards below
+are reachable from the command line. They are **DIRECT-Python-API only**.
+
+Failing-first evidence (Jack's outer-role-map audit), all reproduced
+against the pre-repair tree:
+
+| probe | pre-repair |
+|---|---|
+| foreign role key whose `__repr__` raises | escaped `build_packet()` as a raw `RuntimeError` |
+| key colliding with `"report"`, `__eq__` → `True` | **satisfied the role and supplied its own value** — reached `_validate_role` and parsed the file |
+| colliding key whose `__eq__` raises | escaped `validate_output_path()` |
+| soft-colliding key in `validate_output_path()` | **accepted**, supplying the primary input that anchors the whole write boundary |
+| `dict` **subclass** with armed iteration hooks | `__iter__` executed in `build_packet()`; accepted outright by `validate_output_path()` |
+
+Both entry points now normalize through **one shared private boundary**
+before any membership test, lookup or key rendering. It accepts only an
+exact builtin `dict` (refusing anything else generically, naming no
+supplied type), inspects a rejected mapping or key no further than exact
+type identity, traverses by item iteration only, admits a key solely on
+exact builtin `str` identity — never hashing, comparing, stringifying or
+representing a foreign key — and returns a **fresh exact dict** that is
+the only thing later membership, lookup, `.get()` and primary-role
+selection ever see. A foreign key is **rejected even when a genuine role
+is also present**, never silently dropped. Messages for no artifacts, the
+artifact ceiling and unknown exact-string roles are unchanged, as is
+behavior for valid CLI inputs and valid exact-dict direct inputs.
+
+**Correction of record.** An earlier note accompanying the field-lookup
+repair stated that it removed *"the only mechanism by which a hostile key
+could raise anything here."* That claim was **too strong**: it accounted
+for the per-container field lookup but not for this outer role map, which
+remained a live DIRECT-API hole. The claim is withdrawn and superseded by
+this section.
+
 ## Write boundary
 
 Default output is **stdout**. `--output` must resolve inside the

@@ -264,6 +264,46 @@ def _exact_dict_field(container: Any, field: str, context: str) -> Any:
     raise PacketInputError(f"{context}: missing field {field!r}")
 
 
+def _exact_role_map(mapping: Any) -> dict[str, Any]:
+    """Normalize the TOP-LEVEL role map once, at the DIRECT-API boundary.
+
+    The public CLI always builds this map itself with exact builtin ``str``
+    roles, so every hazard below is DIRECT-API-only. A direct caller,
+    however, may pass any mapping, and the outer map used to be consumed
+    with ``set(paths)``, ``role in paths``, ``paths[role]`` and
+    ``inputs[role]`` — each of which hashes and compares caller-controlled
+    keys, while the unknown-roles message rendered them inside a list and
+    therefore ``repr``'d them.
+
+    Three things could follow: a foreign key's ``__hash__``/``__eq__``/
+    ``__repr__`` could execute and escape; a foreign key colliding with a
+    real role and comparing equal could SATISFY that role and supply its
+    own value as the artifact (or as the primary input); and a ``dict``
+    subclass could interpose its own iteration hooks.
+
+    This boundary refuses anything that is not an exact builtin ``dict``
+    without inspecting it beyond that identity test, traverses by item
+    iteration only, admits a key only on exact builtin ``str`` identity —
+    never hashing, comparing, stringifying or representing a foreign key —
+    and returns a FRESH exact dict. Every later membership test, lookup,
+    ``.get()`` and primary-role selection uses only that normalized dict.
+    A foreign key is rejected even when a genuine role is also present; it
+    is never silently dropped.
+    """
+    if type(mapping) is not dict:
+        raise PacketInputError("artifact role map: expected a builtin dict")
+    normalized: dict[str, Any] = {}
+    foreign = False
+    for key, value in mapping.items():
+        if type(key) is str:
+            normalized[key] = value
+        else:
+            foreign = True
+    if foreign:
+        raise PacketInputError("artifact role map: role keys must be builtin strings")
+    return normalized
+
+
 def _exact_sha256(value: Any, context: str) -> str:
     if type(value) is not str or len(value) != 64 or not set(value) <= _HEX64:
         raise PacketInputError(f"{context}: expected a 64-char lowercase hex sha256")
@@ -533,6 +573,10 @@ def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
     Manifest order is the fixed ROLES order regardless of invocation
     order — determinism over convenience.
     """
+    # Normalize the outer role map ONCE, before any membership test,
+    # lookup or key rendering: every check below then operates on a fresh
+    # exact dict whose keys are proven exact builtin strings.
+    paths = _exact_role_map(paths)
     unknown = sorted(set(paths) - set(ROLES))
     if unknown:
         raise PacketInputError(f"unknown artifact roles: {unknown}")
@@ -622,6 +666,10 @@ def validate_output_path(
     by file identity (hard links included). Identity is verified at
     validation time only; the same residual filesystem race as the NP6
     lab applies and no stronger claim is made."""
+    # Same normalization as build_packet: primary-role selection below
+    # must never hash, compare or render a caller-controlled key, and a
+    # foreign key must never be able to supply the primary input.
+    inputs = _exact_role_map(inputs)
     primary = next(inputs[role] for role in ROLES if role in inputs)
     primary_dir = primary.resolve().parent
     out_resolved = out_path.resolve()
