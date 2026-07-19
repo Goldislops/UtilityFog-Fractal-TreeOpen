@@ -21,7 +21,13 @@ asserted by tests **in both directions**.
   refused (with the existing `invalid_input` / `invalid_provenance` /
   `invalid_sha256_format` reasons) before any `len`/iteration/`keys`/`.get`/
   subscript hook runs, so a hostile container cannot execute code at the
-  boundary. An empty sequence or more than 64 snapshots is unsupported input
+  boundary. Inside each exact dict, **every key is proven an exact built-in
+  `str`** (by hash-free iteration) before any `set(...keys())`/membership/lookup
+  hashes or compares it, and the provenance **`source` discriminator is proven
+  an exact built-in `str`** before it is compared with `"synthetic"` — so a
+  hostile stored key's `__hash__`/`__eq__` or a hostile scalar's `__eq__` never
+  runs (a non-str key or non-str source → the existing `invalid_input` refusal).
+  An empty sequence or more than 64 snapshots is unsupported input
   → the existing `invalid_input` structured refusal (decided before any item
   is inspected; **not** a truncation). Each snapshot is `states: uint8 (N,N,N)`
   (`[z][y][x]`, flat convention `z·N²+y·N+x`), optional

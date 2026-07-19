@@ -152,26 +152,51 @@ def _validate_states(arr, sid: Optional[str]) -> int:
     return n
 
 
+def _require_str_keys(mapping, reason, sid=None):
+    """Prove every key of an exact built-in ``dict`` is itself an exact built-in
+    ``str`` BEFORE any set construction / membership / lookup / ``.get`` hashes
+    or compares those keys. Plain dict iteration yields keys WITHOUT hashing
+    them, so a hostile stored key's ``__hash__``/``__eq__`` never runs here (the
+    exact-container guard alone does not cover keys *inside* an exact dict). A
+    non-str key is structurally malformed JSON-shaped input -> the caller's
+    reason (``invalid_input`` at every level)."""
+    for k in mapping:
+        if type(k) is not str:
+            raise _Refusal(reason, sid)
+
+
 def _validate_snapshot(item, ctx):
     """Stages 3a-3h for one snapshot. Returns the validated snapshot dict."""
     # exact built-in dict proven before item.keys()/subscript/get, so a dict
     # SUBCLASS with a hostile keys()/__getitem__ cannot execute its hooks here.
     if type(item) is not dict:
         raise _Refusal("invalid_input")
+    # then prove every stored key is an exact str before set(item.keys()) hashes
+    # them — a hostile key inside an exact dict would otherwise fire __hash__.
+    _require_str_keys(item, "invalid_input")
     keys = set(item.keys())
     if not keys <= _ALLOWED_SNAPSHOT_KEYS or "states" not in keys or "provenance" not in keys:
         raise _Refusal("invalid_input")
 
     prov = item["provenance"]
-    # exact built-in dict proven (short-circuit) before prov.keys()/subscript.
-    if type(prov) is not dict or set(prov.keys()) != _PROVENANCE_KEYS:
+    # exact built-in dict proven first (subclass -> invalid_provenance), then
+    # every stored key proven exact str before set(prov.keys()) hashes them.
+    if type(prov) is not dict:
+        raise _Refusal("invalid_provenance")
+    _require_str_keys(prov, "invalid_input")
+    if set(prov.keys()) != _PROVENANCE_KEYS:
         raise _Refusal("invalid_provenance")
 
     sid = _validate_identifier(prov["snapshot_id"])
     ctx["ids_seen"].append(sid)
     clv = _validate_identifier(prov["channel_layout_version"])
 
-    if prov["source"] != "synthetic":
+    source = prov["source"]
+    # prove exact str before the "synthetic" comparison, so a hostile scalar's
+    # __eq__ cannot run at this discriminator.
+    if type(source) is not str:
+        raise _Refusal("invalid_input", sid)
+    if source != "synthetic":
         raise _Refusal("s2_gated", sid)
 
     states = item["states"]
@@ -208,9 +233,12 @@ def _validate_snapshot(item, ctx):
             raise _Refusal("invalid_optional_data", sid)
 
     supplied = prov["sha256_triple"]
-    # exact built-in dict proven (short-circuit) before supplied.keys()/subscript.
-    if (type(supplied) is not dict
-            or set(supplied.keys()) != schema.SHA256_TRIPLE_KEYS):
+    # exact built-in dict proven first (subclass -> invalid_sha256_format), then
+    # every stored key proven exact str before set(supplied.keys()) hashes them.
+    if type(supplied) is not dict:
+        raise _Refusal("invalid_sha256_format", sid)
+    _require_str_keys(supplied, "invalid_input", sid)
+    if set(supplied.keys()) != schema.SHA256_TRIPLE_KEYS:
         raise _Refusal("invalid_sha256_format", sid)
     for slot in sorted(schema.SHA256_TRIPLE_KEYS):
         if not schema.is_hex64(supplied[slot]):

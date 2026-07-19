@@ -689,3 +689,125 @@ def test_amd3_valid_kinds_and_leanctx_still_accepted():
     for art in cases:
         assert schema.validate_records(list(art.records())) == []
         assert b"leanctx-header" in leanctx_summary(art, "run-1")
+
+
+# ---------------------------------------------------------------------------
+# S1 Amendment 3 follow-up (Jack P2) — hostile KEYS stored inside an exact
+# built-in dict, and a hostile provenance `source` scalar. The exact-container
+# guards prove the container type but not the safety of keys/values inside it:
+# set(dict.keys()) hashes stored keys, and `source != "synthetic"` compares the
+# stored value, so an armed hostile `__hash__`/`__eq__` could fire. Every stored
+# key is now proven an exact built-in str (via hash-free dict iteration) and the
+# source is proven an exact str before those operations, all yielding the
+# existing invalid_input refusal with the hostile hook executing ZERO times.
+# ---------------------------------------------------------------------------
+
+
+class _ArmedKey:
+    """Hashable while disarmed (constant hash); once armed, both __hash__ and
+    __eq__ raise. Inserted into a dict while benign, then armed — exactly the
+    Jack-described attack. A boundary that hashes/compares it after arming
+    trips the AssertionError; a correct boundary refuses via type() first."""
+    armed = False
+
+    def __hash__(self):
+        if _ArmedKey.armed:
+            raise AssertionError("__hash__ ran on an armed hostile key")
+        return 0
+
+    def __eq__(self, other):
+        if _ArmedKey.armed:
+            raise AssertionError("__eq__ ran on an armed hostile key")
+        return self is other
+
+
+class _ArmedEq:
+    """Hashable scalar whose __eq__ raises once armed (a hostile `source`)."""
+    armed = False
+
+    def __eq__(self, other):
+        if _ArmedEq.armed:
+            raise AssertionError("__eq__ ran on an armed hostile source")
+        return False
+
+    def __hash__(self):
+        return 0
+
+
+def _amd3_tiny():
+    return fixtures.snapshot(
+        fixtures.block(fixtures.empty_lattice(4), 1, 1, 1, 2, 2, 2), "amd3b-s", 1)
+
+
+def test_amd3_snapshot_dict_armed_hostile_key_refused_no_hash():
+    key = _ArmedKey()
+    item = dict(_amd3_tiny())
+    item[key] = 1              # inserted while benign
+    _ArmedKey.armed = True     # armed afterward
+    try:
+        _, refusal = refusal_of([item])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_provenance_dict_armed_hostile_key_refused_no_hash():
+    s = _amd3_tiny()
+    key = _ArmedKey()
+    s["provenance"] = dict(s["provenance"])
+    s["provenance"][key] = 1
+    _ArmedKey.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_supplied_triple_dict_armed_hostile_key_refused_no_hash():
+    s = _amd3_tiny()
+    key = _ArmedKey()
+    s["provenance"]["sha256_triple"] = dict(s["provenance"]["sha256_triple"])
+    s["provenance"]["sha256_triple"][key] = 1
+    _ArmedKey.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_provenance_source_hostile_eq_refused_no_compare():
+    s = _amd3_tiny()
+    s["provenance"]["source"] = _ArmedEq()
+    _ArmedEq.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedEq.armed = False
+
+
+def test_amd3_str_subclass_key_and_source_refused():
+    # adjacent audit cases: a str SUBCLASS key/source (which could carry hostile
+    # __hash__/__eq__) is rejected by the exact-str type identity check.
+    class _S(str):
+        pass
+    item = dict(_amd3_tiny())
+    item[_S("extra")] = 1
+    _, refusal = refusal_of([item])
+    assert refusal["reason"] == "invalid_input"
+    s = _amd3_tiny()
+    s["provenance"]["source"] = _S("synthetic")
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_input"
+
+
+def test_amd3_valid_string_source_discriminator_preserved():
+    # the source proof must not change the existing str-source behavior:
+    # a valid non-synthetic string still yields s2_gated, synthetic still runs.
+    s = _amd3_tiny()
+    s["provenance"]["source"] = "snapshot"
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "s2_gated"
+    assert detect_structures([_amd3_tiny()]).records()[0]["kind"] == "header"
