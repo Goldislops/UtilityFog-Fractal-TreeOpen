@@ -300,8 +300,8 @@ production physics; using confidence scores as authorization.
 | 9 | Missed structure | thresholds too tight | known-cluster fixture recall | report absence honestly; no "clean" claim beyond fixtures | single-cluster fixture | medium — inherent | no |
 | 10 | Repeated-event double counting | same structure found each snapshot | stable finding IDs + dedup (§5) | dedup by (region-hash, persistence chain) | two-snapshot same-cluster fixture | low | no |
 | 11 | Toroidal-boundary mistakes | treating wrapped cluster as two | periodic-aware components (§6) | torus fixtures mandatory | wraparound-cluster fixture | low | no |
-| 12 | Unbounded memory | pathological component counts | hard caps (§5) | truncate + explicit truncation flag | worst-case checkerboard fixture | low | no |
-| 13 | Unbounded runtime | quadratic pair scans | complexity budget; caps | abort + partial-result flag | resource-bound fixture | low | no |
+| 12 | Unbounded memory | pathological component counts **or unbounded snapshot count** | hard caps + **1–64 snapshot invocation ceiling** (§5) | component cap → truncate + flag; over-ceiling → `invalid_input` refusal (not a truncation) | worst-case checkerboard fixture; **65-snapshot fixture** | low | **closed (Amendment 3)** |
+| 13 | Unbounded runtime | quadratic pair scans **or unbounded snapshot count** | complexity budget; caps; **1–64 snapshot invocation ceiling** (§5) | budget → truncate + flag; over-ceiling → `invalid_input` refusal | resource-bound fixture; **65-snapshot fixture** | low | **closed (Amendment 3)** |
 | 14 | Active-region bias | analyzing only "interesting" regions | whole-lattice pass in v1 (no sampling) | if sampling ever added: deterministic keying (§9) | — | deferred | no |
 | 15 | Threshold overfitting | tuning thresholds to one organism epoch | thresholds recorded per finding; S3 cross-validation | evidence classes; no generalization claim | disjoint-epoch fixtures (S2+) | medium | no |
 | 16 | Accidental canonical claims | excited prose | keyword sweep (Pass 12 discipline); Jack audit | evidence-class labels mandatory | doc grep | low | no |
@@ -315,7 +315,25 @@ No risk blocks a **toy-only** v1; several (7, 15) shape the S2/S3 gates. `[PROP]
 **Shape:** an offline candidate detector (per §2 resolution): a pure function from
 immutable inputs to a findings artifact.
 
-- **Allowed inputs (v1/S1, toy-only):** in-memory arrays — `states: u8[N³]` (5-state,
+- **Allowed inputs (v1/S1, toy-only):** an **exact built-in `list` or `tuple` of 1
+  to `MAX_SNAPSHOTS` (= 64)** snapshots; each snapshot, its provenance, and its
+  supplied `sha256_triple` are **exact built-in `dict`s** — these exact-container
+  types are proven at the direct-Python boundary before any caller `len`/iteration/
+  `keys`/`.get`/subscript hook can run, so a `list`/`tuple`/`dict` subclass with a
+  hostile hook is refused (existing `invalid_input`/`invalid_provenance`/
+  `invalid_sha256_format`) without executing it. **Each exact dict's cardinality
+  is checked first** (hook-free `len()` on a proven exact dict): a dict exceeding
+  its closed key budget (snapshot 4, provenance 7, `sha256_triple` 3) is refused
+  in O(1) *before* key traversal or `set(...)` allocation, so arbitrarily many
+  junk keys cannot force unbounded per-object work (`MAX_SNAPSHOTS` bounds the
+  outer sequence but not this nested cardinality). **Then, inside each exact
+  dict, every key is proven an exact built-in `str`** (via hash-free iteration)
+  before any `set(...keys())`/membership/lookup hashes or compares it, and the
+  provenance **`source` discriminator is proven an exact built-in `str`** before
+  the `!= "synthetic"` comparison — so a hostile *stored key* `__hash__`/`__eq__`
+  or a hostile *scalar* `__eq__` cannot execute (a non-str key or non-str source
+  → `invalid_input`). Each snapshot is in-memory arrays —
+  `states: u8[N³]` (5-state,
   `memory.rs:19–24` semantics), optional `memory: f32[8][N³]` channel-first, optional
   `inactivity_steps: i16[N³]` (source-exact name, `voxel_lattice.rs:18`) — plus a
   provenance dict. **No file, network, API, or `data/` access in S1.** S2 (real
@@ -327,9 +345,18 @@ immutable inputs to a findings artifact.
 - **Deterministic ordering:** cells row-major (`z·N²+y·N+x`, matching
   `voxel_lattice.rs:56–62`); components labeled by minimum member index; findings
   sorted by (label, first-seen generation); no hash-map iteration order may leak.
-- **Bounded resources:** ≤ 64³ lattices in S1; component count cap (default 4,096) and
-  runtime budget with **explicit truncation flags** when hit — truncation is a
-  reported result, not an error.
+- **Bounded resources:** a **fixed 1–64 snapshot invocation ceiling**
+  (`MAX_SNAPSHOTS = 64`) bounds validation, discovery, `run.snapshot_ids`,
+  `run.generations`, persistence observation lists and serialization — exceeding
+  it is unsupported input yielding the existing `invalid_input` structured refusal
+  (decided before item inspection; **not** a truncation and **not** partial
+  processing); ≤ 64³ lattices in S1; component count cap (default 4,096) and
+  runtime budget with **explicit truncation flags** when hit — cap/budget
+  truncation is a reported result, not an error. **Honesty note (unchanged):** the
+  deterministic per-invocation operation counter is an input-size proxy for the
+  cap/budget mechanism, **not** a wall-clock or adversarial-runtime security bound;
+  because it scales with snapshot count it cannot bound count on its own, which is
+  precisely why the explicit `MAX_SNAPSHOTS` ceiling exists (Amendment 3).
 - **Output schema (JSONL, one finding per line):** `{finding_id, detector: {name,
   version}, snapshot: provenance, label: <deterministic component label — the
   minimum row-major member cell index, the same key used for ordering>, region:
@@ -392,7 +419,10 @@ Fixtures (all synthetic arrays, ≤ 32³ unless stated; expectations labeled
 Property tests: input-order independence (fixture dict order shuffled); replay identity
 (byte-equal artifacts); **translation invariance on the torus** (same cluster shifted ⇒
 same counts/shape, different absolute bbox, `wraps` consistent); stable IDs across
-runs; dedup across snapshot chains; bounded output size; input hashes unchanged; no
+runs; dedup across snapshot chains; bounded output size (the `MAX_SNAPSHOTS` = 64
+invocation ceiling bounds header `snapshot_ids`/`generations` and observation lists,
+alongside the component cap; over-ceiling input is an `invalid_input` refusal — see §5);
+input hashes unchanged; no
 network (no socket imports); no filesystem writes outside the explicit artifact.
 
 ## 8. LeanCTX artifact contract (Pass 7) `[PROP]` — metaphor → engineering

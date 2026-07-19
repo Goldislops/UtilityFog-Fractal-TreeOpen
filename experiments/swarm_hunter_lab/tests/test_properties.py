@@ -12,7 +12,7 @@ from swarm_hunter_lab import (
     DetectorConfig, FindingsArtifact, compute_sha256_triple,
     detect_structures, fixtures, leanctx_summary, lp, schema,
 )
-from swarm_hunter_lab.detector import _axis_interval
+from swarm_hunter_lab.detector import MAX_SNAPSHOTS, _axis_interval
 
 
 def refusal_of(snaps, config=DetectorConfig()):
@@ -525,3 +525,375 @@ def test_max_lattice_64_cubed_measured():
     warnings.warn(
         f"S1-64cubed-observation: runtime={elapsed:.3f}s "
         f"tracemalloc_peak={peak / 1e6:.1f}MB (observation, not a promise)")
+
+
+# ---------------------------------------------------------------------------
+# S1 Amendment 3 — snapshot invocation ceiling (F1) + hook-free exact-container
+# input boundary (F2). MAX_SNAPSHOTS=64 is public input policy: 1..64 is the
+# accepted domain; >64, empty, non-list/tuple top-levels, and container
+# subclasses with hostile hooks all yield the EXISTING structured invalid_input
+# refusal (no new reason) BEFORE any caller-controlled len/iter/keys/get/subscript
+# hook runs. Accepted-input bytes are unchanged (the fixture + determinism tests
+# above still pass byte-for-byte). Hook-execution is proven zero via a counter
+# whose hooks also raise if ever reached; no broad exception catching is used.
+# ---------------------------------------------------------------------------
+
+
+def _tiny_snap(i):
+    states = fixtures.block(fixtures.empty_lattice(4), 1, 1, 1, 2, 2, 2)
+    return fixtures.snapshot(states, f"amd3-s{i}", i + 1)
+
+
+class _HookFlag:
+    def __init__(self):
+        self.n = 0
+
+
+def test_amd3_exactly_64_snapshots_accepted():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS)]  # 64
+    header = detect_structures(snaps).records()[0]
+    assert header["kind"] == "header"
+    assert header["counts"]["refusals"] == 0
+    assert header["run"]["snapshot_count"] == 64
+
+
+def test_amd3_65_snapshots_refused_invalid_input_deterministically():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS + 1)]  # 65
+    _, refusal = refusal_of(snaps)
+    assert refusal["reason"] == "invalid_input"
+    assert detect_structures(snaps).jsonl == detect_structures(snaps).jsonl
+
+
+def test_amd3_over_limit_decided_before_item_inspection():
+    flag = _HookFlag()
+
+    class _HostileFirst(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran despite over-limit ceiling")
+
+        def __getitem__(self, k):
+            flag.n += 1
+            raise AssertionError("__getitem__ ran despite over-limit ceiling")
+
+    snaps = [_HostileFirst(_tiny_snap(0))] + [_tiny_snap(i)
+                                              for i in range(1, MAX_SNAPSHOTS + 1)]
+    assert len(snaps) == MAX_SNAPSHOTS + 1
+    _, refusal = refusal_of(snaps)
+    assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0  # ceiling refused before the hostile first item was touched
+
+
+def test_amd3_invalid_config_wins_over_container_and_count():
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS + 1)]  # over-limit
+    _, refusal = refusal_of(snaps, DetectorConfig(component_cap=0))
+    assert refusal["reason"] == "invalid_config"
+
+
+def test_amd3_exact_list_and_tuple_accepted():
+    for ctor in (list, tuple):
+        header = detect_structures(ctor([_tiny_snap(0)])).records()[0]
+        assert header["kind"] == "header"
+
+
+def test_amd3_list_tuple_subclass_hostile_hooks_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HLenList(list):
+        def __len__(self):
+            flag.n += 1
+            raise AssertionError("__len__ ran")
+
+    class _HIterTuple(tuple):
+        def __iter__(self):
+            flag.n += 1
+            raise AssertionError("__iter__ ran")
+
+    for hostile in (_HLenList([_tiny_snap(0)]), _HIterTuple((_tiny_snap(0),))):
+        _, refusal = refusal_of(hostile)
+        assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0
+
+
+def test_amd3_snapshot_dict_subclass_hostile_hooks_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HKeys(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran")
+
+    class _HGet(dict):
+        def __getitem__(self, k):
+            flag.n += 1
+            raise AssertionError("__getitem__ ran")
+
+    for hostile in (_HKeys(_tiny_snap(0)), _HGet(_tiny_snap(0))):
+        _, refusal = refusal_of([hostile])
+        assert refusal["reason"] == "invalid_input"
+    assert flag.n == 0
+
+
+def test_amd3_nested_provenance_and_triple_subclass_refused_no_execution():
+    flag = _HookFlag()
+
+    class _HKeys(dict):
+        def keys(self):
+            flag.n += 1
+            raise AssertionError("keys() ran")
+
+    # provenance dict subclass -> invalid_provenance at its structured stage
+    s = _tiny_snap(0)
+    s["provenance"] = _HKeys(s["provenance"])
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_provenance"
+    # supplied sha256_triple dict subclass -> invalid_sha256_format at its stage
+    s2 = _tiny_snap(0)
+    s2["provenance"]["sha256_triple"] = _HKeys(s2["provenance"]["sha256_triple"])
+    _, refusal2 = refusal_of([s2])
+    assert refusal2["reason"] == "invalid_sha256_format"
+    assert flag.n == 0
+
+
+def test_amd3_ordinary_malformed_containers_keep_reasons_and_precedence():
+    for bad in ("xx", {"a": 1}, (x for x in [1])):
+        _, refusal = refusal_of(bad)
+        assert refusal["reason"] == "invalid_input"
+    _, refusal = refusal_of([])
+    assert refusal["reason"] == "invalid_input"
+    s = _tiny_snap(0)
+    del s["provenance"]["sha256_triple"]
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_provenance"
+
+
+def test_amd3_no_input_mutation_or_io(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("file I/O attempted")
+    monkeypatch.setattr(builtins, "open", boom)
+    snaps = [_tiny_snap(i) for i in range(3)]
+    before = [s["states"].copy() for s in snaps]
+    detect_structures(snaps)
+    for s, b in zip(snaps, before):
+        assert np.array_equal(s["states"], b)
+
+
+def test_amd3_valid_kinds_and_leanctx_still_accepted():
+    cases = (
+        detect_structures(fixtures.fx_single()),
+        detect_structures(fixtures.fx_malformed_provenance()),
+        detect_structures(fixtures.fx_checkerboard(),
+                          DetectorConfig(min_component_size=1, component_cap=64)),
+        detect_structures(fixtures.fx_single(), DetectorConfig(op_budget_multiplier=1)),
+    )
+    for art in cases:
+        assert schema.validate_records(list(art.records())) == []
+        assert b"leanctx-header" in leanctx_summary(art, "run-1")
+
+
+# ---------------------------------------------------------------------------
+# S1 Amendment 3 follow-up (Jack resource-bound P2) — per-object dictionary
+# CARDINALITY gate. `len()` on a proven exact dict is hook-free, and each closed
+# dict has a fixed key budget (snapshot 4, provenance 7, sha256_triple 3), so an
+# over-size exact dict (arbitrarily many ordinary str junk keys) is refused in
+# O(1) BEFORE `_require_str_keys()` traverses it or `set(...keys())` copies it.
+# The spy records the identity of every dict handed to `_require_str_keys`; an
+# over-size dict must NOT appear (it was refused by the cardinality gate first).
+# Small over-size inputs + a spy are used, not manufactured enormous inputs.
+# ---------------------------------------------------------------------------
+
+
+def _spy_require_str_keys(monkeypatch, seen):
+    import swarm_hunter_lab.detector as _d
+    real = _d._require_str_keys
+
+    def spy(mapping, reason, sid=None):
+        seen.append(id(mapping))
+        return real(mapping, reason, sid)
+
+    monkeypatch.setattr(_d, "_require_str_keys", spy)
+
+
+def test_amd3_over_cardinality_snapshot_refused_before_traversal(monkeypatch):
+    seen = []
+    _spy_require_str_keys(monkeypatch, seen)
+    item = dict(_amd3_tiny())          # 2 keys
+    for i in range(50):
+        item[f"junk{i}"] = i           # 52 keys > 4
+    _, refusal = refusal_of([item])
+    assert refusal["reason"] == "invalid_input"
+    assert id(item) not in seen        # gate refused before _require_str_keys / set
+
+
+def test_amd3_over_cardinality_provenance_refused_before_traversal(monkeypatch):
+    seen = []
+    _spy_require_str_keys(monkeypatch, seen)
+    s = _amd3_tiny()
+    s["provenance"] = dict(s["provenance"])
+    for i in range(50):
+        s["provenance"][f"junk{i}"] = i    # 57 keys > 7
+    prov_id = id(s["provenance"])
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_provenance"
+    assert prov_id not in seen             # prov gate before its traversal/allocation
+    assert id(s) in seen                   # the in-bound snapshot dict was traversed
+
+
+def test_amd3_over_cardinality_supplied_triple_refused_before_traversal(monkeypatch):
+    seen = []
+    _spy_require_str_keys(monkeypatch, seen)
+    s = _amd3_tiny()
+    s["provenance"]["sha256_triple"] = dict(s["provenance"]["sha256_triple"])
+    for i in range(50):
+        s["provenance"]["sha256_triple"][f"junk{i}"] = i   # 53 keys > 3
+    triple_id = id(s["provenance"]["sha256_triple"])
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_sha256_format"
+    assert triple_id not in seen           # triple gate before its traversal/allocation
+
+
+def test_amd3_boundary_cardinalities_pass_to_normal_validation():
+    # exactly 4 snapshot keys (states, provenance, memory, inactivity_steps) is
+    # the boundary (not > 4) -> flows to normal validation and is accepted; the
+    # standard 7-key provenance and 3-key sha256_triple are likewise == the bound.
+    n = 4
+    states = fixtures.block(fixtures.empty_lattice(n), 1, 1, 1, 2, 2, 2)
+    memory = np.zeros((8, n, n, n), dtype=np.float32)
+    inactivity = np.zeros((n, n, n), dtype=np.int16)
+    snap = fixtures.snapshot(states, "amd3c-4key", 1,
+                             memory=memory, inactivity_steps=inactivity)
+    assert len(snap) == 4
+    assert len(snap["provenance"]) == 7
+    assert len(snap["provenance"]["sha256_triple"]) == 3
+    header = detect_structures([snap]).records()[0]
+    assert header["kind"] == "header" and header["counts"]["refusals"] == 0
+
+
+# ---------------------------------------------------------------------------
+# S1 Amendment 3 follow-up (Jack P2) — hostile KEYS stored inside an exact
+# built-in dict, and a hostile provenance `source` scalar. The exact-container
+# guards prove the container type but not the safety of keys/values inside it:
+# set(dict.keys()) hashes stored keys, and `source != "synthetic"` compares the
+# stored value, so an armed hostile `__hash__`/`__eq__` could fire. Every stored
+# key is now proven an exact built-in str (via hash-free dict iteration) and the
+# source is proven an exact str before those operations, all yielding the
+# existing invalid_input refusal with the hostile hook executing ZERO times.
+# ---------------------------------------------------------------------------
+
+
+class _ArmedKey:
+    """Hashable while disarmed (constant hash); once armed, both __hash__ and
+    __eq__ raise. Inserted into a dict while benign, then armed — exactly the
+    Jack-described attack. A boundary that hashes/compares it after arming
+    trips the AssertionError; a correct boundary refuses via type() first."""
+    armed = False
+
+    def __hash__(self):
+        if _ArmedKey.armed:
+            raise AssertionError("__hash__ ran on an armed hostile key")
+        return 0
+
+    def __eq__(self, other):
+        if _ArmedKey.armed:
+            raise AssertionError("__eq__ ran on an armed hostile key")
+        return self is other
+
+
+class _ArmedEq:
+    """Hashable scalar whose __eq__ raises once armed (a hostile `source`)."""
+    armed = False
+
+    def __eq__(self, other):
+        if _ArmedEq.armed:
+            raise AssertionError("__eq__ ran on an armed hostile source")
+        return False
+
+    def __hash__(self):
+        return 0
+
+
+def _amd3_tiny():
+    return fixtures.snapshot(
+        fixtures.block(fixtures.empty_lattice(4), 1, 1, 1, 2, 2, 2), "amd3b-s", 1)
+
+
+def test_amd3_snapshot_dict_armed_hostile_key_refused_no_hash():
+    key = _ArmedKey()
+    item = dict(_amd3_tiny())
+    item[key] = 1              # inserted while benign
+    _ArmedKey.armed = True     # armed afterward
+    try:
+        _, refusal = refusal_of([item])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_provenance_dict_armed_hostile_key_refused_no_hash():
+    # WITHIN the 7-key cardinality bound (replace, don't add), so the hostile
+    # key is caught by _require_str_keys (not the cardinality gate) -> proves the
+    # hash-free exact-str key proof still refuses invalid_input with zero hooks.
+    s = _amd3_tiny()
+    key = _ArmedKey()
+    s["provenance"] = dict(s["provenance"])
+    del s["provenance"]["num_states"]
+    s["provenance"][key] = 1
+    assert len(s["provenance"]) == 7
+    _ArmedKey.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_supplied_triple_dict_armed_hostile_key_refused_no_hash():
+    # WITHIN the 3-key cardinality bound (replace, don't add).
+    s = _amd3_tiny()
+    key = _ArmedKey()
+    s["provenance"]["sha256_triple"] = dict(s["provenance"]["sha256_triple"])
+    del s["provenance"]["sha256_triple"]["inactivity_steps"]
+    s["provenance"]["sha256_triple"][key] = 1
+    assert len(s["provenance"]["sha256_triple"]) == 3
+    _ArmedKey.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedKey.armed = False
+
+
+def test_amd3_provenance_source_hostile_eq_refused_no_compare():
+    s = _amd3_tiny()
+    s["provenance"]["source"] = _ArmedEq()
+    _ArmedEq.armed = True
+    try:
+        _, refusal = refusal_of([s])
+        assert refusal["reason"] == "invalid_input"
+    finally:
+        _ArmedEq.armed = False
+
+
+def test_amd3_str_subclass_key_and_source_refused():
+    # adjacent audit cases: a str SUBCLASS key/source (which could carry hostile
+    # __hash__/__eq__) is rejected by the exact-str type identity check.
+    class _S(str):
+        pass
+    item = dict(_amd3_tiny())
+    item[_S("extra")] = 1
+    _, refusal = refusal_of([item])
+    assert refusal["reason"] == "invalid_input"
+    s = _amd3_tiny()
+    s["provenance"]["source"] = _S("synthetic")
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "invalid_input"
+
+
+def test_amd3_valid_string_source_discriminator_preserved():
+    # the source proof must not change the existing str-source behavior:
+    # a valid non-synthetic string still yields s2_gated, synthetic still runs.
+    s = _amd3_tiny()
+    s["provenance"]["source"] = "snapshot"
+    _, refusal = refusal_of([s])
+    assert refusal["reason"] == "s2_gated"
+    assert detect_structures([_amd3_tiny()]).records()[0]["kind"] == "header"
