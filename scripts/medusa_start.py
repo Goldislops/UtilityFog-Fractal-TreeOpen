@@ -38,12 +38,20 @@ SERVICES = {
     # The API must be launched as a PACKAGE MODULE. Running it by absolute
     # file path leaves the repository root off sys.path, so its
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
-    # and the service exits immediately. The marker matches the module form
-    # of the command line so detection/status stay coherent.
+    # and the service exits immediately.
+    #
+    # The marker is the COMMON substring "medusa_api", which deliberately
+    # matches BOTH launch forms during migration: the new module command
+    # (``-m scripts.medusa_api``) and the legacy file-path command
+    # (``.../scripts/medusa_api.py``) an already-running process may still
+    # be using. A module-form-only marker such as "scripts.medusa_api"
+    # does not appear in the legacy command line, so status, stop and
+    # duplicate-start detection would all miss a legacy process — and a
+    # second API would be started alongside it.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": "scripts.medusa_api",
+        "marker": "medusa_api",
         "description": "REST API (Phase 16a)",
     },
     "geometry": {

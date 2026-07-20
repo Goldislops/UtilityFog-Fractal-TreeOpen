@@ -42,7 +42,7 @@ def test_api_command_carries_no_file_path_form() -> None:
 def test_api_marker_matches_the_module_command() -> None:
     """Process detection/status must be able to find the module-form process."""
     marker = SERVICES["api"]["marker"]
-    assert marker == "scripts.medusa_api"
+    assert marker == "medusa_api"
     assert marker in " ".join(build_command(SERVICES["api"]))
 
 
@@ -136,3 +136,124 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
     for name, config in SERVICES.items():
         assert ("module" in config) != ("script" in config), name
         build_command(config)  # constructs without raising
+
+
+# ---------------------------------------------------------------------------
+# Legacy-process compatibility during migration.
+#
+# The API's launch form changed from an absolute file path to a package
+# module. A process started under the OLD form may still be running, and its
+# command line contains ".../scripts/medusa_api.py" — which does NOT contain
+# the module-form string "scripts.medusa_api". A module-form-only marker
+# therefore makes a legacy process invisible to status, stop and
+# duplicate-start detection, and a second API would be started beside it.
+#
+# The marker is the common substring "medusa_api", which matches both forms.
+#
+# Nothing here inspects, starts, stops, restarts or kills a real process,
+# binds port 8080, deploys the API, or touches live telemetry: process
+# detection and Popen are both replaced.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_command() -> str:
+    """A representative pre-migration command line."""
+    return " ".join(
+        [PYTHON, "-u", str(PROJECT_ROOT / "scripts" / "medusa_api.py"), "--port", "8080"]
+    )
+
+
+def test_marker_matches_the_module_launch_command() -> None:
+    marker = SERVICES["api"]["marker"]
+    assert marker == "medusa_api"
+    assert marker in " ".join(build_command(SERVICES["api"]))
+
+
+def test_marker_matches_a_representative_legacy_command() -> None:
+    """The failing-first fact, pinned: the module-form-only marker does not
+    appear in the legacy command line, but the common marker does."""
+    legacy = _legacy_command()
+    assert legacy.endswith("--port 8080")
+    assert "medusa_api.py" in legacy
+
+    assert SERVICES["api"]["marker"] in legacy      # common marker: matches
+    assert "scripts.medusa_api" not in legacy       # module-form-only: misses
+
+
+def test_marker_matches_both_launch_forms_simultaneously() -> None:
+    marker = SERVICES["api"]["marker"]
+    module_command = " ".join(build_command(SERVICES["api"]))
+    assert marker in module_command and marker in _legacy_command()
+
+
+def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
+    """A still-running legacy process must be detected, so start_service
+    reports it and never launches a second API."""
+    import scripts.medusa_start as ms
+
+    def _detect(marker):
+        # Only the API marker resolves, and only to a mocked legacy PID.
+        return [4321] if marker == "medusa_api" else []
+
+    def _never_popen(*args, **kwargs):
+        raise AssertionError("Popen must not run while a process is already detected")
+
+    monkeypatch.setattr(ms, "find_process", _detect)
+    monkeypatch.setattr(ms.subprocess, "Popen", _never_popen)
+
+    pid = ms.start_service("api", ms.SERVICES["api"])
+    assert pid == 4321
+    assert "Already running" in capsys.readouterr().out
+
+
+def test_status_and_stop_pass_the_common_marker_to_detection(monkeypatch, capsys) -> None:
+    """status() and stop_service() both look the API up by the same common
+    marker, so a legacy process is visible to them too."""
+    import urllib.request
+
+    import scripts.medusa_start as ms
+
+    seen: list[str] = []
+
+    def _record(marker):
+        seen.append(marker)
+        return []  # nothing running: no taskkill path is ever entered
+
+    def _no_network(*args, **kwargs):
+        raise OSError("network disabled in tests")
+
+    monkeypatch.setattr(ms, "find_process", _record)
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+
+    ms.status()
+    capsys.readouterr()
+    assert "medusa_api" in seen
+
+    seen.clear()
+    ms.stop_service("api", ms.SERVICES["api"])
+    capsys.readouterr()
+    assert seen == ["medusa_api"]
+
+
+def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys) -> None:
+    """Guard the guard: with no detected PID, no kill command is issued."""
+    import scripts.medusa_start as ms
+
+    def _never_run(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called with no detected PID")
+
+    monkeypatch.setattr(ms, "find_process", lambda marker: [])
+    monkeypatch.setattr(ms.subprocess, "run", _never_run)
+
+    ms.stop_service("api", ms.SERVICES["api"])
+    assert "Not running" in capsys.readouterr().out
+
+
+def test_watchdog_and_geometry_markers_are_unchanged() -> None:
+    """Only the API marker widens; the others keep their exact file names."""
+    assert SERVICES["watchdog"]["marker"] == "watchdog.py"
+    assert SERVICES["geometry"]["marker"] == "geometry_daemon.py"
+    for name in ("watchdog", "geometry"):
+        config = SERVICES[name]
+        assert config["marker"] in " ".join(build_command(config))
+        assert "medusa_api" not in config["marker"]
