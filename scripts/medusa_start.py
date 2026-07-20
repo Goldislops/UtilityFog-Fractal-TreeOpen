@@ -38,12 +38,39 @@ SERVICES = {
     # The API must be launched as a PACKAGE MODULE. Running it by absolute
     # file path leaves the repository root off sys.path, so its
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
-    # and the service exits immediately. The marker matches the module form
-    # of the command line so detection/status stay coherent.
+    # and the service exits immediately.
+    #
+    # Detection must select the SERVICE, and only the service. Several launch
+    # forms exist during the migration, so the marker is a BOUNDED TUPLE of
+    # actual launch signatures rather than a single broad substring:
+    #
+    #   "-m scripts.medusa_api"     the new module command
+    #   "\\scripts\\medusa_api.py"  a legacy path command as the orchestrator
+    #                               itself built it (pathlib renders Windows
+    #                               separators)
+    #   "/scripts/medusa_api.py"    the same legacy launch hand-typed with
+    #                               forward slashes, which Windows accepts
+    #
+    # Both legacy separators are covered because the orchestrator-built and
+    # hand-typed forms are equally likely to still be running, and missing
+    # either one starts a SECOND API beside the first.
+    #
+    # Every signature stays bounded to a real launch fragment. Each legacy
+    # form carries its LEADING separator, so the signature is the
+    # "/scripts/medusa_api.py" path segment rather than a bare filename:
+    # ``python -m pytest tests/test_medusa_api.py`` and
+    # ``pytest scripts/medusa_api.py`` both fail to match. A bare substring
+    # such as "medusa_api" would select those, and ``--stop`` would kill an
+    # ordinary test run; a module-form-only marker has the opposite fault of
+    # missing every legacy process.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": "scripts.medusa_api",
+        "marker": (
+            "-m scripts.medusa_api",
+            "\\scripts\\medusa_api.py",
+            "/scripts/medusa_api.py",
+        ),
         "description": "REST API (Phase 16a)",
     },
     "geometry": {
@@ -54,19 +81,49 @@ SERVICES = {
 }
 
 
-def find_process(marker: str) -> list:
-    """Find running processes matching a marker string."""
+def _signatures(marker) -> tuple:
+    """Normalize a marker to a tuple of launch signatures.
+
+    A plain string is a single signature (engine, watchdog and geometry all
+    use that form and are unaffected); a tuple is used verbatim.
+    """
+    return (marker,) if isinstance(marker, str) else tuple(marker)
+
+
+def build_process_filter(marker) -> str:
+    """PowerShell ``Where-Object`` predicate for a service's launch signatures.
+
+    Shape: ``python.exe AND (matches A OR matches B OR ...)`` — one query
+    however many signatures a service declares. The alternatives are
+    PARENTHESIZED so the process-name test applies to all of them — without
+    the parentheses, ``-and`` would bind to the first alternative only and
+    every later signature would match any process of any name.
+    """
+    alternatives = " -or ".join(
+        f"$_.CommandLine -like '*{signature}*'" for signature in _signatures(marker)
+    )
+    return f"$_.Name -eq 'python.exe' -and ({alternatives})"
+
+
+def find_process(marker) -> list:
+    """Find running python.exe processes matching any of the launch signatures.
+
+    ``marker`` is a single signature string or a tuple of them. All
+    signatures are combined into ONE query, so a process matching more than
+    one is still reported once; the result is de-duplicated in order anyway.
+    """
     try:
         result = subprocess.run(
             ["powershell", "-Command",
-             f"Get-CimInstance Win32_Process | Where-Object {{$_.CommandLine -like '*{marker}*' -and $_.Name -eq 'python.exe'}} | Select-Object ProcessId | Format-List"],
+             f"Get-CimInstance Win32_Process | Where-Object {{{build_process_filter(marker)}}} | Select-Object ProcessId | Format-List"],
             capture_output=True, text=True, timeout=10,
         )
         pids = []
         for line in result.stdout.strip().split("\n"):
             if line.strip().startswith("ProcessId"):
                 pid = int(line.split(":")[-1].strip())
-                pids.append(pid)
+                if pid not in pids:
+                    pids.append(pid)
         return pids
     except Exception:
         return []

@@ -41,9 +41,10 @@ def test_api_command_carries_no_file_path_form() -> None:
 
 def test_api_marker_matches_the_module_command() -> None:
     """Process detection/status must be able to find the module-form process."""
-    marker = SERVICES["api"]["marker"]
-    assert marker == "scripts.medusa_api"
-    assert marker in " ".join(build_command(SERVICES["api"]))
+    from scripts.medusa_start import _signatures
+
+    module_command = " ".join(build_command(SERVICES["api"]))
+    assert any(s in module_command for s in _signatures(SERVICES["api"]["marker"]))
 
 
 def test_watchdog_and_geometry_launch_behaviour_unchanged() -> None:
@@ -63,9 +64,12 @@ def test_watchdog_and_geometry_launch_behaviour_unchanged() -> None:
 
 
 def test_every_service_marker_appears_in_its_own_command() -> None:
-    """Status/stop rely on the marker matching the launched command line."""
+    """Status/stop rely on at least one signature matching the launch command."""
+    from scripts.medusa_start import _signatures
+
     for name, config in SERVICES.items():
-        assert config["marker"] in " ".join(build_command(config)), name
+        command = " ".join(build_command(config))
+        assert any(s in command for s in _signatures(config["marker"])), name
 
 
 def test_api_module_help_resolves_imports() -> None:
@@ -136,3 +140,234 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
     for name, config in SERVICES.items():
         assert ("module" in config) != ("script" in config), name
         build_command(config)  # constructs without raising
+
+
+# ---------------------------------------------------------------------------
+# Process selection during the launch migration.
+#
+# Three launch forms may be running while the migration completes:
+#   new             : python -u -m scripts.medusa_api --port 8080
+#   legacy (win)    : python -u C:\UtilityFog\scripts\medusa_api.py --port 8080
+#   legacy (posix)  : python -u C:/UtilityFog/scripts/medusa_api.py --port 8080
+#
+# The orchestrator itself built the backslash form (pathlib renders Windows
+# separators); the forward-slash form is the same launch hand-typed, which
+# Windows accepts. Missing either legacy form starts a SECOND API beside the
+# first, so both separators are covered.
+#
+# A module-form-only marker misses every legacy process. A broad substring
+# like "medusa_api" has the opposite fault: it also selects unrelated
+# commands that merely mention the module — notably
+# `python -m pytest tests/test_medusa_api.py` — which `--stop` would kill.
+#
+# Detection therefore uses a BOUNDED TUPLE of launch signatures, each legacy
+# entry carrying its LEADING separator so the signature is the
+# "/scripts/medusa_api.py" path segment rather than a bare filename. One
+# PowerShell predicate is built, of the shape:
+#     python.exe AND (matches A OR matches B OR matches C)
+#
+# `-like '*X*'` is plain substring containment for wildcard-free X, which is
+# what every signature here is, so these tests model it with `in`.
+#
+# Command strings below are explicit synthetic literals, NOT built from the
+# host filesystem: the signatures are Windows path forms, and the CI runner
+# is not Windows.
+#
+# No test inspects, starts, stops or kills a real process, binds port 8080,
+# deploys the API, queries live telemetry, or reads the live data directory:
+# process detection, Popen, subprocess.run, urlopen and Path.glob are all
+# replaced.
+# ---------------------------------------------------------------------------
+
+
+_MODULE_SIGNATURE = "-m scripts.medusa_api"
+_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py"
+_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py"
+
+_EXPECTED_SIGNATURES = (
+    _MODULE_SIGNATURE,
+    _WIN_LEGACY_SIGNATURE,
+    _POSIX_LEGACY_SIGNATURE,
+)
+
+#: Synthetic legacy command lines — deliberately literal, host-independent.
+_WIN_LEGACY_COMMAND = "python.exe -u C:\\UtilityFog\\scripts\\medusa_api.py --port 8080"
+_POSIX_LEGACY_COMMAND = "python.exe -u C:/UtilityFog/scripts/medusa_api.py --port 8080"
+
+#: Commands that merely MENTION the module and must never be selected.
+_UNRELATED_COMMANDS = (
+    "python.exe -m pytest tests/test_medusa_api.py",
+    "python.exe -m pytest tests\\test_medusa_api.py",
+    "python.exe -m pytest -k medusa_api",
+    'python.exe -c "import scripts.medusa_api"',
+    # A relative path has no leading separator, so it is not a launch
+    # signature either.
+    "python.exe -m pytest scripts/medusa_api.py",
+)
+
+
+def _module_command() -> str:
+    return " ".join(build_command(SERVICES["api"]))
+
+
+def _matching(command: str, marker) -> list[str]:
+    from scripts.medusa_start import _signatures
+
+    return [s for s in _signatures(marker) if s in command]
+
+
+def test_api_marker_is_a_bounded_tuple_of_launch_signatures() -> None:
+    marker = SERVICES["api"]["marker"]
+    assert isinstance(marker, tuple)
+    assert marker == _EXPECTED_SIGNATURES
+
+
+def test_module_command_matches_only_the_module_signature() -> None:
+    assert _matching(_module_command(), SERVICES["api"]["marker"]) == [_MODULE_SIGNATURE]
+
+
+def test_windows_legacy_command_matches_only_the_backslash_signature() -> None:
+    assert _matching(_WIN_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
+        _WIN_LEGACY_SIGNATURE
+    ]
+
+
+def test_forward_slash_legacy_command_matches_only_that_signature() -> None:
+    """A hand-typed forward-slash launch on Windows is still the service."""
+    assert _matching(_POSIX_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
+        _POSIX_LEGACY_SIGNATURE
+    ]
+
+
+def test_unrelated_commands_match_no_signature() -> None:
+    """The false positive that made the broad marker dangerous: `--stop`
+    would have killed an ordinary test run."""
+    marker = SERVICES["api"]["marker"]
+    for command in _UNRELATED_COMMANDS:
+        assert _matching(command, marker) == [], command
+        assert "medusa_api" in command  # it DOES mention the module...
+        # ...but mentioning it is not a launch signature.
+
+
+def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
+    """python.exe AND (A OR B OR C) — the parentheses are load-bearing:
+    without them `-and` binds to the first alternative only."""
+    from scripts.medusa_start import build_process_filter
+
+    predicate = build_process_filter(SERVICES["api"]["marker"])
+    assert predicate.startswith("$_.Name -eq 'python.exe' -and (")
+    assert predicate.endswith(")")
+    assert predicate.count("$_.CommandLine -like") == 3
+    assert predicate.count(" -or ") == 2
+    assert predicate.count("(") == 1 and predicate.count(")") == 1
+    for signature in _EXPECTED_SIGNATURES:
+        assert signature in predicate
+
+
+def test_single_string_marker_behaviour_is_unchanged(monkeypatch) -> None:
+    """Engine, watchdog and geometry keep their plain-string markers and the
+    original one-alternative predicate."""
+    import scripts.medusa_start as ms
+
+    assert (
+        ms.build_process_filter("watchdog.py")
+        == "$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*watchdog.py*')"
+    )
+    assert (
+        ms.build_process_filter("run_v070_engine")
+        == "$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*run_v070_engine*')"
+    )
+
+    class _Result:
+        stdout = "ProcessId : 77\n"
+
+    monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Result())
+    assert ms.find_process("watchdog.py") == [77]
+
+
+def test_find_process_returns_no_duplicate_pids(monkeypatch) -> None:
+    """One process can satisfy more than one signature; it is reported once."""
+    import scripts.medusa_start as ms
+
+    class _Result:
+        stdout = "ProcessId : 111\nProcessId : 111\nProcessId : 222\nProcessId : 111\n"
+
+    monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Result())
+    assert ms.find_process(SERVICES["api"]["marker"]) == [111, 222]
+
+
+def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
+    """A still-running legacy process must be detected, so start_service
+    reports it and never launches a second API."""
+    import scripts.medusa_start as ms
+
+    def _detect(marker):
+        return [4321] if marker == SERVICES["api"]["marker"] else []
+
+    def _never_popen(*args, **kwargs):
+        raise AssertionError("Popen must not run while a process is already detected")
+
+    monkeypatch.setattr(ms, "find_process", _detect)
+    monkeypatch.setattr(ms.subprocess, "Popen", _never_popen)
+
+    pid = ms.start_service("api", ms.SERVICES["api"])
+    assert pid == 4321
+    assert "Already running" in capsys.readouterr().out
+
+
+def test_status_and_stop_pass_the_exact_signature_collection(monkeypatch, capsys) -> None:
+    """status() and stop_service() hand process detection the exact
+    three-signature collection, so every launch form is visible to them."""
+    import urllib.request
+    from pathlib import Path
+
+    import scripts.medusa_start as ms
+
+    seen: list = []
+
+    def _record(marker):
+        seen.append(marker)
+        return []  # nothing running: no taskkill path is ever entered
+
+    def _no_network(*args, **kwargs):
+        raise OSError("network disabled in tests")
+
+    monkeypatch.setattr(ms, "find_process", _record)
+    monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    # Test isolation: never read the real snapshot directory.
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: [])
+
+    ms.status()
+    capsys.readouterr()
+    assert _EXPECTED_SIGNATURES in seen
+
+    seen.clear()
+    ms.stop_service("api", ms.SERVICES["api"])
+    capsys.readouterr()
+    assert seen == [_EXPECTED_SIGNATURES]
+
+
+def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys) -> None:
+    """Guard the guard: with no detected PID, no kill command is issued."""
+    import scripts.medusa_start as ms
+
+    def _never_run(*args, **kwargs):
+        raise AssertionError("subprocess.run must not be called with no detected PID")
+
+    monkeypatch.setattr(ms, "find_process", lambda marker: [])
+    monkeypatch.setattr(ms.subprocess, "run", _never_run)
+
+    ms.stop_service("api", ms.SERVICES["api"])
+    assert "Not running" in capsys.readouterr().out
+
+
+def test_watchdog_and_geometry_markers_are_unchanged() -> None:
+    """Only the API marker becomes a signature tuple; the others are untouched
+    plain strings matching their own launch commands."""
+    assert SERVICES["watchdog"]["marker"] == "watchdog.py"
+    assert SERVICES["geometry"]["marker"] == "geometry_daemon.py"
+    for name in ("watchdog", "geometry"):
+        config = SERVICES[name]
+        assert isinstance(config["marker"], str)
+        assert config["marker"] in " ".join(build_command(config))
+        assert "medusa_api" not in config["marker"]
