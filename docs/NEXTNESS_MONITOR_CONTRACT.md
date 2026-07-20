@@ -113,12 +113,21 @@ four required fields were substitutable this way; a colliding key whose
 `__eq__` raised escaped instead. A genuine field coexisting with a
 colliding foreign key now wins, and the foreign key is discarded.
 
-**Refusal diagnostics are hook-free** on both lanes: a refusal never
-reads an attribute of the rejected value or of its class — in particular
-never `type(value).__name__`, an overridable **metaclass** property whose
-getter would run caller code from inside error formatting. Builtin type
-names come from a literal identity table; anything else is described as
-`non-builtin value`.
+**The two supplied-value type-refusal diagnostics repaired in this batch
+are hook-free**: they inspect the rejected value no further than exact
+type identity and never inspect its class. This is **not** a module-wide
+hook-free-totality claim; other DIRECT-API validation surfaces and the
+caller-controlled outer `records` sequence remain outside Batch 4.
+
+Reading `type(value).__name__` is what made those two unsafe: `__name__`
+is an overridable **metaclass** property, so its getter can run
+caller-controlled code from inside error formatting and escape the typed
+refusal. Builtin type names now come from a bounded literal identity
+table scanned by `is` comparison; anything not on it is described as
+`non-builtin value`. The scan is deliberately **not** a dictionary
+lookup — `mapping.get(type(value))` would hash the caller's class object
+and could itself execute a hostile metaclass `__hash__`, reopening the
+hole this repair closes.
 
 ## CLI expected-failure contract (inherited from NP1)
 

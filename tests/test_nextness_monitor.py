@@ -921,19 +921,31 @@ class _HardFieldKey:
 
 
 class _DistinctCollidingKey:
-    """Hash-collides with a field name but compares UNEQUAL, so it coexists
-    with the genuine key instead of merging at construction."""
+    """Hash-collides with a field name but compares UNEQUAL while disarmed,
+    so it coexists with the genuine key instead of merging at construction.
+
+    Once armed, EVERY hook — ``__hash__``, ``__eq__`` and ``__repr__`` —
+    records itself and raises, so the validator is held to touching none of
+    them. Construction-time observations are cleared before arming.
+    """
 
     fired: list[str] = []
+    armed = False
 
     def __init__(self, target: str) -> None:
         self._h = hash(target)
 
     def __hash__(self) -> int:
+        if _DistinctCollidingKey.armed:
+            _DistinctCollidingKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
         return self._h
 
     def __eq__(self, other):
-        return False
+        if _DistinctCollidingKey.armed:
+            _DistinctCollidingKey.fired.append("__eq__")
+            raise RuntimeError("__eq__ hook executed")
+        return False  # distinct from the genuine key while disarmed
 
     def __repr__(self):
         _DistinctCollidingKey.fired.append("__repr__")
@@ -945,6 +957,7 @@ def _obs_arm() -> None:
     _HardFieldKey.fired.clear()
     _HardFieldKey.armed = False
     _DistinctCollidingKey.fired.clear()
+    _DistinctCollidingKey.armed = False
 
 
 def _without(field: str) -> dict:
@@ -1014,11 +1027,19 @@ def test_genuine_field_wins_beside_a_foreign_colliding_key() -> None:
     record[_DistinctCollidingKey("confidence")] = 0.99
     assert len(record) == len(_GOOD_OBS) + 1  # genuinely two separate entries
 
-    observations, discarded = validate_observations([record])
+    # Construction is done; drop anything the dict build observed, then arm
+    # so that ANY hook the validator might reach records itself and raises.
+    _DistinctCollidingKey.fired.clear()
+    _DistinctCollidingKey.armed = True
+    try:
+        observations, discarded = validate_observations([record])
+    finally:
+        _DistinctCollidingKey.armed = False
+
     assert observations == [_GOOD_OBS]
     assert observations[0]["confidence"] == 0.5   # genuine value, not 0.99
-    assert discarded == 1
-    assert _DistinctCollidingKey.fired == []
+    assert discarded == 1                          # foreign key counted once
+    assert _DistinctCollidingKey.fired == []       # zero hooks fired
 
 
 def test_hostile_metaclass_never_consulted_by_either_diagnostic() -> None:
