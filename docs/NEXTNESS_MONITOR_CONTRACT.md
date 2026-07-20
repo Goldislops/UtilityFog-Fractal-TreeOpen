@@ -87,6 +87,39 @@ float thresholds ∈ (0, 1)).
   the bridge's inherited NP1 options (`smoothing`, `holdout_fraction`)
   keep NP1's exact bounds and fail closed on violation.
 
+### Exact-string field boundary (reachability stated separately)
+
+**PUBLIC CLI lane** — observations reach the monitor from the JSONL log
+via NP1's bounded reader, so every record key is a `json`-produced
+builtin `str`. **No CLI-reachable behavior changes**, and every public
+diagnostic is byte-identical.
+
+**DIRECT Python-API lane** — a caller may pass records built in memory,
+whose keys are arbitrary objects. A proven-exact record is therefore
+traversed by **item iteration only**: just the exact builtin `str` keys
+on the allowlist are copied into a **fresh owned dict**, and every
+required field is read from that dict alone. A foreign key is never
+hashed, compared, stringified or represented, and counts as exactly one
+discarded field under the existing discard-and-count policy.
+
+This is a **soundness** boundary, not only a hook boundary. The previous
+`set(record)` / `record["confidence"]` / `record.get("hit")` /
+`"prev_seen" in record` sequence hashed the field names and compared them
+against whatever shared their buckets, so a non-`str` key whose
+`__hash__` collided with a field name had its `__eq__` invoked — and an
+`__eq__` returning `True` let that foreign key **satisfy the field and
+supply its own value as the reading the receipt is computed from**. All
+four required fields were substitutable this way; a colliding key whose
+`__eq__` raised escaped instead. A genuine field coexisting with a
+colliding foreign key now wins, and the foreign key is discarded.
+
+**Refusal diagnostics are hook-free** on both lanes: a refusal never
+reads an attribute of the rejected value or of its class — in particular
+never `type(value).__name__`, an overridable **metaclass** property whose
+getter would run caller code from inside error formatting. Builtin type
+names come from a literal identity table; anything else is described as
+`non-builtin value`.
+
 ## CLI expected-failure contract (inherited from NP1)
 
 `0` success · `2` validation failure (missing log file or out-of-bounds
