@@ -35,10 +35,15 @@ SERVICES = {
         "marker": "watchdog.py",
         "description": "Watchdog Daemon (Phase 14d)",
     },
+    # The API must be launched as a PACKAGE MODULE. Running it by absolute
+    # file path leaves the repository root off sys.path, so its
+    # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
+    # and the service exits immediately. The marker matches the module form
+    # of the command line so detection/status stay coherent.
     "api": {
-        "script": "scripts/medusa_api.py",
+        "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": "medusa_api.py",
+        "marker": "scripts.medusa_api",
         "description": "REST API (Phase 16a)",
     },
     "geometry": {
@@ -67,6 +72,34 @@ def find_process(marker: str) -> list:
         return []
 
 
+def build_command(config: dict) -> list:
+    """Build the launch argv for one service.
+
+    A service declaring ``module`` is launched as a package module
+    (``python -u -m pkg.mod``) so the repository root stays importable;
+    a service declaring ``script`` keeps the file-path form. The API needs
+    the module form because it imports ``scripts.*`` at import time.
+
+    Exactly one of the two must be declared. A configuration carrying
+    NEITHER would otherwise surface as a bare ``KeyError: 'script'``, and
+    one carrying BOTH would silently pick a launch form the author did not
+    choose. Both are configuration errors, refused with one generic message
+    that reports no supplied value.
+    """
+    has_module = "module" in config
+    has_script = "script" in config
+    if has_module == has_script:  # neither, or both
+        raise ValueError(
+            "Service configuration must define exactly one of 'module' or 'script'."
+        )
+    if has_module:
+        args = [PYTHON, "-u", "-m", config["module"]]
+    else:
+        args = [PYTHON, "-u", str(PROJECT_ROOT / config["script"])]
+    args.extend(config.get("args", []))
+    return args
+
+
 def start_service(name: str, config: dict) -> int:
     """Start a service as a hidden background process."""
     # Check if already running
@@ -75,8 +108,7 @@ def start_service(name: str, config: dict) -> int:
         print(f"  [{name}] Already running (PID {existing[0]})")
         return existing[0]
 
-    args = [PYTHON, "-u", str(PROJECT_ROOT / config["script"])]
-    args.extend(config.get("args", []))
+    args = build_command(config)
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
