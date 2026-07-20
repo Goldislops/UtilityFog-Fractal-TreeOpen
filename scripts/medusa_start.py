@@ -41,47 +41,68 @@ SERVICES = {
     # and the service exits immediately.
     #
     # Detection must select the SERVICE, and only the service. Each signature
-    # therefore describes a LAUNCH SHAPE — a path segment together with the
-    # service's own argument list — not merely a path that happens to name
-    # the module:
+    # therefore describes a LAUNCH SHAPE whose every element is COMPLETE: it
+    # begins at an argument boundary — a space or a path separator — and ends
+    # with the service's own ``--port`` argument plus the separator that
+    # follows it:
     #
-    #   "-m scripts.medusa_api"             the new module command
-    #   "\\scripts\\medusa_api.py --port"   legacy launch, Windows separators
-    #   "/scripts/medusa_api.py --port"     legacy launch, forward slashes
-    #   "\\scripts\\medusa_api.py\" --port" the same, path quoted for spaces
-    #   "/scripts/medusa_api.py\" --port"   the same, quoted, forward slashes
+    #   " -m scripts.medusa_api --port "     the new module command
+    #   "\\scripts\\medusa_api.py --port "   legacy launch, Windows separators
+    #   "/scripts/medusa_api.py --port "     legacy launch, forward slashes
+    #   "\\scripts\\medusa_api.py\" --port " the same, path quoted for spaces
+    #   "/scripts/medusa_api.py\" --port "   the same, quoted, forward slashes
+    #   " scripts\\medusa_api.py --port "    explicit relative launch, Windows
+    #   " scripts/medusa_api.py --port "     explicit relative launch, POSIX
+    #
+    # Bounding BOTH sides is what stops a prefix from posing as a word.
+    # ``-m scripts.medusa_api_tests`` embeds the module name but not the
+    # module ELEMENT; ``-m scripts.medusa_api --help`` names the module
+    # without the service's argument list; ``--portability`` embeds
+    # ``--port`` but is a different argument, so a nested unrelated path
+    # handed to another tool (``tool.py C:\\...\\scripts\\medusa_api.py
+    # --portability``) is refused too. The trailing space also asserts the
+    # separate-value form ``--port <value>`` — the only form any launcher
+    # here has ever produced. Absolute-path test runs
+    # (``python -m pytest C:\\UtilityFog\\scripts\\medusa_api.py``),
+    # ``tests/test_medusa_api.py``, ``-k medusa_api`` and
+    # ``-c "import scripts.medusa_api"`` all remain refused: this is a
+    # positive test for the launch shape, NOT an exclusion of the word
+    # "pytest"; nothing here enumerates test runners.
     #
     # Both separators are covered because the orchestrator built the Windows
     # form while a hand-typed launch may use forward slashes, and missing
     # either one starts a SECOND API beside the first. The quoted variants
     # cover an install path containing spaces, where Windows wraps the script
     # path in double quotes so the closing quote sits between the path and
-    # the arguments.
+    # the arguments. The relative variants are EXPLICIT complete forms
+    # anchored by the argument boundary before ``scripts`` — relative support
+    # is NOT obtained by removing the leading separator from the absolute
+    # forms, which would let any longer word ending in ``scripts``
+    # (``my_scripts\\medusa_api.py --port 8080``) match as the service.
     #
-    # Requiring the trailing " --port" is what makes a path segment alone
-    # insufficient. A test invocation names the same file but never passes
-    # the service's arguments, so absolute-path runs like
-    # ``python -m pytest C:\\UtilityFog\\scripts\\medusa_api.py`` are refused
-    # — as are the relative form, ``tests/test_medusa_api.py``, ``-k
-    # medusa_api`` and ``-c "import scripts.medusa_api"``. This is a positive
-    # test for the launch shape, NOT an exclusion of the word "pytest";
-    # nothing here enumerates test runners.
-    #
-    # Residual, stated honestly: a command that both targets the file AND
-    # passes ``--port`` is indistinguishable from a launch by command-line
-    # substring alone. No real test runner does that (pytest rejects
-    # ``--port``), and narrowing further would need adjacency matching that
-    # PowerShell ``-like`` cannot express without wildcards the portable
-    # tests could not faithfully model.
+    # Residual, stated honestly: a command that names the file as a complete
+    # ``scripts`` element AND carries ``--port <value>`` in launch position
+    # is indistinguishable from a launch by command-line substring alone. No
+    # real test runner does that (pytest rejects ``--port``), and narrowing
+    # further would need adjacency matching that PowerShell ``-like`` cannot
+    # express without wildcards the portable tests could not faithfully
+    # model. The boundary also cuts the other way: a hand launch that omits
+    # ``--port`` (relying on the argparse default) or reorders it behind
+    # ``--host`` shows no recognized shape and goes undetected. The bare
+    # miss is forced, not chosen — the bare command line is a strict prefix
+    # of the ``--help`` command line, so any substring matching one matches
+    # both — and the orchestrator itself always passes ``--port``.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
         "marker": (
-            "-m scripts.medusa_api",
-            "\\scripts\\medusa_api.py --port",
-            "/scripts/medusa_api.py --port",
-            "\\scripts\\medusa_api.py\" --port",
-            "/scripts/medusa_api.py\" --port",
+            " -m scripts.medusa_api --port ",
+            "\\scripts\\medusa_api.py --port ",
+            "/scripts/medusa_api.py --port ",
+            "\\scripts\\medusa_api.py\" --port ",
+            "/scripts/medusa_api.py\" --port ",
+            " scripts\\medusa_api.py --port ",
+            " scripts/medusa_api.py --port ",
         ),
         "description": "REST API (Phase 16a)",
     },

@@ -143,23 +143,32 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process selection: LAUNCH SHAPES, not paths.
+# Process selection: LAUNCH SHAPES built from COMPLETE elements.
 #
 # Detection must select the API service and nothing else. A signature that is
 # only a path segment is insufficient, because a test invocation names the
-# same file:
+# same file — and a signature whose elements can end MID-WORD is insufficient
+# too, because a prefix then poses as the element:
 #
-#   service : python.exe -u C:\UtilityFog\scripts\medusa_api.py --port 8080
-#   pytest  : python.exe -m pytest C:\UtilityFog\scripts\medusa_api.py
+#   service : python.exe -u -m scripts.medusa_api --port 8080
+#   tests   : python.exe -m scripts.medusa_api_tests
+#   help    : python.exe -m scripts.medusa_api --help
+#   nested  : python.exe tool.py C:\UtilityFog\scripts\medusa_api.py --portability
 #
-# Both contain "\scripts\medusa_api.py". What distinguishes them is that the
-# service carries its own ARGUMENT LIST, so every legacy signature requires
-# the trailing " --port". That is a positive test for the launch shape, NOT
-# an exclusion of the word "pytest" — nothing here enumerates test runners.
+# Only the first is the service: it names the complete module element AND the
+# service's own argument list. The others embed the module name or ``--port``
+# as a prefix of a longer word, or without the argument list. Every signature
+# therefore begins at an argument boundary (a space or a path separator) and
+# ends with " --port " — the complete argument plus its trailing separator.
+# That is a positive test for the launch shape, NOT an exclusion of the word
+# "pytest" — nothing here enumerates test runners.
 #
 # Quoted variants cover an install path containing spaces, where Windows
 # wraps the script path in double quotes and the closing quote lands between
-# the path and the arguments.
+# the path and the arguments. Relative launches are supported ONLY through
+# explicit complete forms anchored by the space before ``scripts`` — not by
+# removing the leading separator from the absolute forms, which would let
+# ``my_scripts\medusa_api.py --port`` match as the service.
 #
 # Signatures are deliberately WILDCARD-FREE, so `-like '*sig*'` is plain
 # substring containment and these portable tests model it faithfully with
@@ -173,11 +182,13 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 # ---------------------------------------------------------------------------
 
 
-_MODULE_SIGNATURE = "-m scripts.medusa_api"
-_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py --port"
-_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py --port"
-_WIN_QUOTED_SIGNATURE = "\\scripts\\medusa_api.py\" --port"
-_POSIX_QUOTED_SIGNATURE = "/scripts/medusa_api.py\" --port"
+_MODULE_SIGNATURE = " -m scripts.medusa_api --port "
+_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py --port "
+_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py --port "
+_WIN_QUOTED_SIGNATURE = "\\scripts\\medusa_api.py\" --port "
+_POSIX_QUOTED_SIGNATURE = "/scripts/medusa_api.py\" --port "
+_WIN_RELATIVE_SIGNATURE = " scripts\\medusa_api.py --port "
+_POSIX_RELATIVE_SIGNATURE = " scripts/medusa_api.py --port "
 
 _EXPECTED_SIGNATURES = (
     _MODULE_SIGNATURE,
@@ -185,6 +196,8 @@ _EXPECTED_SIGNATURES = (
     _POSIX_LEGACY_SIGNATURE,
     _WIN_QUOTED_SIGNATURE,
     _POSIX_QUOTED_SIGNATURE,
+    _WIN_RELATIVE_SIGNATURE,
+    _POSIX_RELATIVE_SIGNATURE,
 )
 
 #: Real service command lines — literal, host-independent.
@@ -196,6 +209,8 @@ _WIN_QUOTED_COMMAND = (
 _POSIX_QUOTED_COMMAND = (
     'python.exe -u "C:/Program Files/UtilityFog/scripts/medusa_api.py" --port 8080'
 )
+_WIN_RELATIVE_COMMAND = "python.exe -u scripts\\medusa_api.py --port 8080"
+_POSIX_RELATIVE_COMMAND = "python.exe -u scripts/medusa_api.py --port 8080"
 
 #: Commands that name or mention the module but are NOT the service.
 _UNRELATED_COMMANDS = (
@@ -212,6 +227,15 @@ _UNRELATED_COMMANDS = (
     # Mentions rather than launches.
     "python.exe -m pytest -k medusa_api",
     'python.exe -c "import scripts.medusa_api"',
+    # Partial words: the module name or ``--port`` appears only as a PREFIX
+    # of a longer element, or without the service's argument list.
+    "python.exe -m scripts.medusa_api_tests",
+    "python.exe -m scripts.medusa_api --help",
+    "python.exe tool.py C:\\UtilityFog\\scripts\\medusa_api.py --portability",
+    # A longer module name carrying the service's own option.
+    "python.exe -m scripts.medusa_api_tests --port 9000",
+    # A ``scripts`` path element that is itself the suffix of a longer word.
+    "python.exe -u C:\\Backup\\my_scripts\\medusa_api.py --port 8080",
 )
 
 
@@ -264,6 +288,86 @@ def test_quoted_install_path_with_spaces_is_detected() -> None:
     assert _matching(_POSIX_QUOTED_COMMAND, marker) == [_POSIX_QUOTED_SIGNATURE]
 
 
+def test_explicit_relative_launches_match_only_their_own_signature() -> None:
+    """Relative-launch support comes from EXPLICIT complete forms anchored at
+    the argument boundary before ``scripts`` — not from removing the leading
+    separator from the absolute signatures."""
+    marker = SERVICES["api"]["marker"]
+    for command, expected in (
+        (_WIN_RELATIVE_COMMAND, _WIN_RELATIVE_SIGNATURE),
+        (_POSIX_RELATIVE_COMMAND, _POSIX_RELATIVE_SIGNATURE),
+    ):
+        assert _matching(command, marker) == [expected], command
+
+
+def test_module_name_is_a_complete_element_not_a_prefix() -> None:
+    """``scripts.medusa_api_tests`` embeds the module name as a prefix; the
+    boundary after the complete module element refuses it — even when the
+    longer module carries the service's own option."""
+    marker = SERVICES["api"]["marker"]
+    for command in (
+        "python.exe -m scripts.medusa_api_tests",
+        "python.exe -m scripts.medusa_api_tests --port 9000",
+    ):
+        assert "-m scripts.medusa_api" in command  # the old signature IS inside
+        assert _matching(command, marker) == [], command
+
+
+def test_module_help_invocation_is_refused() -> None:
+    """This suite itself runs ``-m scripts.medusa_api --help`` as a
+    subprocess; ``--stop`` during a test run must not select it. The
+    discriminator is the service's own argument list, and --help is not
+    it."""
+    command = "python.exe -m scripts.medusa_api --help"
+    assert "-m scripts.medusa_api" in command  # the old signature IS inside
+    assert _matching(command, SERVICES["api"]["marker"]) == [], command
+
+
+def test_option_prefix_on_a_nested_unrelated_path_is_refused() -> None:
+    """``--portability`` embeds ``--port`` as a prefix. The trailing boundary
+    makes ``--port`` a complete argument, so a nested unrelated path handed
+    to another tool is refused."""
+    command = "python.exe tool.py C:\\UtilityFog\\scripts\\medusa_api.py --portability"
+    assert "\\scripts\\medusa_api.py --port" in command  # the old signature IS inside
+    assert _matching(command, SERVICES["api"]["marker"]) == [], command
+
+
+def test_scripts_element_is_complete_not_a_word_suffix() -> None:
+    """De-anchoring the absolute signatures (dropping the leading separator)
+    would let a longer word ending in ``scripts`` match. The retained left
+    boundary refuses it."""
+    command = "python.exe -u C:\\Backup\\my_scripts\\medusa_api.py --port 8080"
+    assert "scripts\\medusa_api.py --port " in command  # the de-anchored form IS inside
+    assert _matching(command, SERVICES["api"]["marker"]) == [], command
+
+
+def test_undetected_hand_launches_are_a_stated_residual() -> None:
+    """The false-NEGATIVE side of the boundary, pinned deliberately: a hand
+    launch relying on the argparse default port, or reordering ``--host``
+    before ``--port``, shows no recognized shape. The bare miss is forced,
+    not chosen — the bare command line is a strict prefix of the refused
+    ``--help`` command line, so under substring matching any signature
+    catching one catches both. The orchestrator itself always passes
+    ``--port``, so no orchestrator-built launch is ever missed."""
+    marker = SERVICES["api"]["marker"]
+    bare = "python.exe -u -m scripts.medusa_api"
+    assert (bare + " --help").startswith(bare)  # the forcing prefix relation
+    for command in (
+        bare,
+        "python.exe -u -m scripts.medusa_api --host 0.0.0.0 --port 8080",
+    ):
+        assert _matching(command, marker) == [], command
+
+
+def test_every_signature_is_bounded_on_both_sides() -> None:
+    """Each signature begins at an argument boundary — a space or a path
+    separator — and ends with the complete ``--port`` argument plus its
+    trailing separator, so no element can extend into a longer word."""
+    for signature in _EXPECTED_SIGNATURES:
+        assert signature[0] in (" ", "\\", "/"), signature
+        assert signature.endswith(" --port "), signature
+
+
 def test_absolute_path_pytest_invocations_are_refused() -> None:
     """The surviving false positive: an absolute-path test run contains the
     whole path segment, leading separator included, yet is not the service."""
@@ -291,8 +395,7 @@ def test_selection_does_not_depend_on_excluding_test_runners() -> None:
     for signature in _EXPECTED_SIGNATURES:
         assert "pytest" not in signature
         assert "test" not in signature
-    for signature in _EXPECTED_SIGNATURES[1:]:
-        assert signature.endswith(" --port")
+        assert signature.endswith(" --port ")
 
 
 def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
@@ -303,8 +406,8 @@ def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
     predicate = build_process_filter(SERVICES["api"]["marker"])
     assert predicate.startswith("$_.Name -eq 'python.exe' -and (")
     assert predicate.endswith(")")
-    assert predicate.count("$_.CommandLine -like") == 5
-    assert predicate.count(" -or ") == 4
+    assert predicate.count("$_.CommandLine -like") == 7
+    assert predicate.count(" -or ") == 6
     assert predicate.count("(") == 1 and predicate.count(")") == 1
     for signature in _EXPECTED_SIGNATURES:
         assert signature in predicate
