@@ -255,10 +255,12 @@ retain byte-identical messages and exit 2**. A plain `ValueError` — like
 any exception outside the documented catch classes — now **propagates**
 through public `main()` (test-pinned beside the standing
 sentinel-`RuntimeError` pin), consistent with the self-check's existing
-`RuntimeError` re-raise. No raise was retyped, no new exception class
-was introduced, no validator behavior changed; `build_packet`'s
-direct-Python behavior and its existing typed failures are unchanged.
-This is a packet-only decision; no family-wide convention is implied.
+`RuntimeError` re-raise. That exception-boundary change retyped no
+raise, introduced no new exception class, and left the established
+typed failures byte-identical. The later outer role-map hardening above
+deliberately changes malformed DIRECT-API behavior; valid exact-dict
+direct input remains byte-identical. This is a packet-only decision; no
+family-wide convention is implied.
 
 ## Safety
 
