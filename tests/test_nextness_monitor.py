@@ -849,3 +849,279 @@ def test_cli_receipt_ceiling_exit_5_injected(tmp_path, monkeypatch, capsys) -> N
             config=monitor_module.MonitorConfig(),
         )
     monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# Batch 4 — exact-string field boundary + hook-free diagnostics.
+#
+# Reachability: the PUBLIC CLI feeds observations parsed from the JSONL log,
+# whose object keys are always builtin str, so none of the hazards below are
+# CLI-reachable. They are DIRECT-Python-API only — a caller passing records
+# built in memory. The repair is defensive totality on that lane.
+# ---------------------------------------------------------------------------
+
+
+_GOOD_OBS = {"confidence": 0.5, "p_actual": 0.5, "hit": True, "prev_seen": True}
+_SUBSTITUTE = {"confidence": 0.99, "p_actual": 0.01, "hit": False, "prev_seen": False}
+_REQUIRED_FIELDS = ("confidence", "p_actual", "hit", "prev_seen")
+
+
+class _ObsRaisingMeta(type):
+    """Metaclass whose __name__ property raises."""
+
+    ran = False
+
+    @property
+    def __name__(cls):
+        _ObsRaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _ObsMetaBomb(metaclass=_ObsRaisingMeta):
+    pass
+
+
+class _SoftFieldKey:
+    """Hash-collides with a field name AND compares equal — used to satisfy
+    that field and supply its own value."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+class _HardFieldKey:
+    """Hash-collides with a field name; comparison/representation armed.
+    __hash__ is inert until armed so the collision can be planted."""
+
+    fired: list[str] = []
+    armed = False
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        if _HardFieldKey.armed:
+            _HardFieldKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return self._h
+
+    def __eq__(self, other):
+        _HardFieldKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _HardFieldKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _DistinctCollidingKey:
+    """Hash-collides with a field name but compares UNEQUAL while disarmed,
+    so it coexists with the genuine key instead of merging at construction.
+
+    Once armed, EVERY hook — ``__hash__``, ``__eq__`` and ``__repr__`` —
+    records itself and raises, so the validator is held to touching none of
+    them. Construction-time observations are cleared before arming.
+    """
+
+    fired: list[str] = []
+    armed = False
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        if _DistinctCollidingKey.armed:
+            _DistinctCollidingKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return self._h
+
+    def __eq__(self, other):
+        if _DistinctCollidingKey.armed:
+            _DistinctCollidingKey.fired.append("__eq__")
+            raise RuntimeError("__eq__ hook executed")
+        return False  # distinct from the genuine key while disarmed
+
+    def __repr__(self):
+        _DistinctCollidingKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+def _obs_arm() -> None:
+    _ObsRaisingMeta.ran = False
+    _HardFieldKey.fired.clear()
+    _HardFieldKey.armed = False
+    _DistinctCollidingKey.fired.clear()
+    _DistinctCollidingKey.armed = False
+
+
+def _without(field: str) -> dict:
+    return {k: v for k, v in _GOOD_OBS.items() if k != field}
+
+
+def test_soft_colliding_key_cannot_substitute_any_required_field() -> None:
+    """A foreign key colliding with a field name and comparing equal used to
+    SATISFY that field and supply the value the receipt is computed from."""
+    from scripts.nextness_monitor import MonitorInputError, validate_observations
+
+    expected = {
+        "confidence": "observation 0: missing field 'confidence'",
+        "p_actual": "observation 0: missing field 'p_actual'",
+        "hit": "observation 0: hit must be a builtin bool",
+        "prev_seen": "observation 0: missing field 'prev_seen'",
+    }
+    for field in _REQUIRED_FIELDS:
+        record = _without(field)
+        record[_SoftFieldKey(field)] = _SUBSTITUTE[field]
+        with pytest.raises(MonitorInputError) as excinfo:
+            validate_observations([record])
+        assert str(excinfo.value) == expected[field], field
+
+
+def test_hard_colliding_key_runs_no_hook_for_any_required_field() -> None:
+    """The record is traversed by item iteration, so a colliding foreign key
+    is never hashed, compared or represented by the validator."""
+    from scripts.nextness_monitor import MonitorInputError, validate_observations
+
+    for field in _REQUIRED_FIELDS:
+        _obs_arm()
+        record = _without(field)
+        record[_HardFieldKey(field)] = _SUBSTITUTE[field]
+        _HardFieldKey.armed = True          # planted; nothing may touch it now
+        try:
+            with pytest.raises(MonitorInputError):
+                validate_observations([record])
+            assert _HardFieldKey.fired == [], field
+        finally:
+            _HardFieldKey.armed = False
+
+
+def test_absent_required_field_keeps_the_established_refusal() -> None:
+    """With no genuine key at all, the established typed refusals stand."""
+    from scripts.nextness_monitor import MonitorInputError, validate_observations
+
+    for field, message in (
+        ("confidence", "observation 0: missing field 'confidence'"),
+        ("p_actual", "observation 0: missing field 'p_actual'"),
+        ("hit", "observation 0: hit must be a builtin bool"),
+        ("prev_seen", "observation 0: missing field 'prev_seen'"),
+    ):
+        with pytest.raises(MonitorInputError) as excinfo:
+            validate_observations([_without(field)])
+        assert str(excinfo.value) == message
+
+
+def test_genuine_field_wins_beside_a_foreign_colliding_key() -> None:
+    """A genuine exact-string field coexisting with a colliding foreign key
+    is used; the foreign key is counted once as a discarded field and none
+    of its hooks run."""
+    from scripts.nextness_monitor import validate_observations
+
+    _obs_arm()
+    record = dict(_GOOD_OBS)
+    record[_DistinctCollidingKey("confidence")] = 0.99
+    assert len(record) == len(_GOOD_OBS) + 1  # genuinely two separate entries
+
+    # Construction is done; drop anything the dict build observed, then arm
+    # so that ANY hook the validator might reach records itself and raises.
+    _DistinctCollidingKey.fired.clear()
+    _DistinctCollidingKey.armed = True
+    try:
+        observations, discarded = validate_observations([record])
+    finally:
+        _DistinctCollidingKey.armed = False
+
+    assert observations == [_GOOD_OBS]
+    assert observations[0]["confidence"] == 0.5   # genuine value, not 0.99
+    assert discarded == 1                          # foreign key counted once
+    assert _DistinctCollidingKey.fired == []       # zero hooks fired
+
+
+def test_hostile_metaclass_never_consulted_by_either_diagnostic() -> None:
+    """Both raw type(value).__name__ diagnostics could execute a hostile
+    metaclass property from inside error formatting."""
+    from scripts.nextness_monitor import (
+        MonitorInputError,
+        _bounded_float,
+        _require_exact_int,
+    )
+
+    _obs_arm()
+    with pytest.raises(ValueError) as excinfo:
+        _require_exact_int("n", _ObsMetaBomb())
+    assert str(excinfo.value) == "n must be a builtin int, got non-builtin value"
+    assert _ObsRaisingMeta.ran is False
+
+    _obs_arm()
+    with pytest.raises(MonitorInputError) as excinfo:
+        _bounded_float(_ObsMetaBomb(), "f", 0.0, 1.0)
+    assert str(excinfo.value) == "f: expected a builtin real number, got non-builtin value"
+    assert _ObsRaisingMeta.ran is False
+
+
+def test_builtin_diagnostic_messages_are_byte_identical() -> None:
+    """Builtin supplied values keep their exact pre-existing messages."""
+    from scripts.nextness_monitor import (
+        MonitorInputError,
+        _bounded_float,
+        _require_exact_int,
+    )
+
+    for value, name in (("x", "str"), (1.5, "float"), ([], "list"), (None, "NoneType")):
+        with pytest.raises(ValueError) as excinfo:
+            _require_exact_int("n", value)
+        assert str(excinfo.value) == f"n must be a builtin int, got {name}"
+
+    for value, name in (("x", "str"), ([], "list"), (None, "NoneType"), (True, "bool")):
+        with pytest.raises(MonitorInputError) as excinfo:
+            _bounded_float(value, "f", 0.0, 1.0)
+        assert str(excinfo.value) == f"f: expected a builtin real number, got {name}"
+
+
+def test_describe_type_names_builtins_and_falls_back_generically() -> None:
+    from scripts.nextness_monitor import _describe_type
+
+    assert _describe_type(True) == "bool"  # before int
+    assert _describe_type(1) == "int"
+    assert _describe_type(1.0) == "float"
+    assert _describe_type("s") == "str"
+    assert _describe_type([]) == "list"
+    assert _describe_type({}) == "dict"
+    assert _describe_type(()) == "tuple"
+    assert _describe_type(set()) == "set"
+    assert _describe_type(b"") == "bytes"
+    assert _describe_type(None) == "NoneType"
+
+    class _IntSub(int):
+        pass
+
+    assert _describe_type(_IntSub(1)) == "non-builtin value"
+    _obs_arm()
+    assert _describe_type(_ObsMetaBomb()) == "non-builtin value"
+    assert _ObsRaisingMeta.ran is False
+
+
+def test_valid_direct_input_and_discard_policy_unchanged() -> None:
+    """Valid DIRECT records normalize exactly as before, and the documented
+    discard-and-count policy for unknown string fields is preserved."""
+    from scripts.nextness_monitor import MonitorInputError, validate_observations
+
+    observations, discarded = validate_observations([dict(_GOOD_OBS)])
+    assert observations == [_GOOD_OBS]
+    assert discarded == 0
+
+    observations, discarded = validate_observations(
+        [{**_GOOD_OBS, "zzz": 1, "extra": 2}]
+    )
+    assert observations == [_GOOD_OBS]
+    assert discarded == 2
+
+    # The record guard itself is unchanged.
+    with pytest.raises(MonitorInputError) as excinfo:
+        validate_observations([["not", "a", "dict"]])
+    assert str(excinfo.value) == "observation 0: expected builtin dict"
