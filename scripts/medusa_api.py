@@ -18,7 +18,12 @@ Endpoints:
   GET /api/health          — Simple health check
 
 Usage:
-  python scripts/medusa_api.py [--port 8080]
+  python -m scripts.medusa_api [--port 8080]
+
+Must be launched as a package module from the repository root: this module
+imports ``scripts.tuning_api`` / ``scripts.event_bus`` at import time, and
+running it by file path leaves the repository root off ``sys.path``, which
+fails with ``ModuleNotFoundError: No module named 'scripts'``.
 """
 
 from __future__ import annotations
