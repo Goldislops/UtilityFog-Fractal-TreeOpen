@@ -145,22 +145,33 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 # ---------------------------------------------------------------------------
 # Process selection during the launch migration.
 #
-# Two launch forms exist while the migration completes:
-#   new    : python -u -m scripts.medusa_api --port 8080
-#   legacy : python -u <root>\scripts\medusa_api.py --port 8080
+# Three launch forms may be running while the migration completes:
+#   new             : python -u -m scripts.medusa_api --port 8080
+#   legacy (win)    : python -u C:\UtilityFog\scripts\medusa_api.py --port 8080
+#   legacy (posix)  : python -u C:/UtilityFog/scripts/medusa_api.py --port 8080
 #
-# A module-form-only marker misses the legacy process entirely (status says
-# DOWN, stop never kills it, and a SECOND API is started beside it). A broad
-# substring like "medusa_api" has the opposite fault: it also selects
-# unrelated commands that merely mention the module — notably
+# The orchestrator itself built the backslash form (pathlib renders Windows
+# separators); the forward-slash form is the same launch hand-typed, which
+# Windows accepts. Missing either legacy form starts a SECOND API beside the
+# first, so both separators are covered.
+#
+# A module-form-only marker misses every legacy process. A broad substring
+# like "medusa_api" has the opposite fault: it also selects unrelated
+# commands that merely mention the module — notably
 # `python -m pytest tests/test_medusa_api.py` — which `--stop` would kill.
 #
-# Detection therefore uses a BOUNDED TUPLE of actual launch signatures, and
-# one PowerShell predicate of the shape:
-#     python.exe AND (matches A OR matches B)
+# Detection therefore uses a BOUNDED TUPLE of launch signatures, each legacy
+# entry carrying its LEADING separator so the signature is the
+# "/scripts/medusa_api.py" path segment rather than a bare filename. One
+# PowerShell predicate is built, of the shape:
+#     python.exe AND (matches A OR matches B OR matches C)
 #
 # `-like '*X*'` is plain substring containment for wildcard-free X, which is
 # what every signature here is, so these tests model it with `in`.
+#
+# Command strings below are explicit synthetic literals, NOT built from the
+# host filesystem: the signatures are Windows path forms, and the CI runner
+# is not Windows.
 #
 # No test inspects, starts, stops or kills a real process, binds port 8080,
 # deploys the API, queries live telemetry, or reads the live data directory:
@@ -170,28 +181,33 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 _MODULE_SIGNATURE = "-m scripts.medusa_api"
-_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py"
+_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py"
+_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py"
+
+_EXPECTED_SIGNATURES = (
+    _MODULE_SIGNATURE,
+    _WIN_LEGACY_SIGNATURE,
+    _POSIX_LEGACY_SIGNATURE,
+)
+
+#: Synthetic legacy command lines — deliberately literal, host-independent.
+_WIN_LEGACY_COMMAND = "python.exe -u C:\\UtilityFog\\scripts\\medusa_api.py --port 8080"
+_POSIX_LEGACY_COMMAND = "python.exe -u C:/UtilityFog/scripts/medusa_api.py --port 8080"
+
+#: Commands that merely MENTION the module and must never be selected.
+_UNRELATED_COMMANDS = (
+    "python.exe -m pytest tests/test_medusa_api.py",
+    "python.exe -m pytest tests\\test_medusa_api.py",
+    "python.exe -m pytest -k medusa_api",
+    'python.exe -c "import scripts.medusa_api"',
+    # A relative path has no leading separator, so it is not a launch
+    # signature either.
+    "python.exe -m pytest scripts/medusa_api.py",
+)
 
 
 def _module_command() -> str:
     return " ".join(build_command(SERVICES["api"]))
-
-
-def _legacy_command() -> str:
-    """A representative pre-migration command line (Windows separators)."""
-    return " ".join(
-        [PYTHON, "-u", str(PROJECT_ROOT / "scripts" / "medusa_api.py"), "--port", "8080"]
-    )
-
-
-def _unrelated_pytest_commands() -> list[str]:
-    """Commands that merely MENTION the module and must never be selected."""
-    return [
-        f"{PYTHON} -m pytest tests/test_medusa_api.py",
-        f"{PYTHON} -m pytest tests{os.sep}test_medusa_api.py",
-        f"{PYTHON} -m pytest -k medusa_api",
-        f"{PYTHON} -c \"import scripts.medusa_api\"",
-    ]
 
 
 def _matching(command: str, marker) -> list[str]:
@@ -203,38 +219,49 @@ def _matching(command: str, marker) -> list[str]:
 def test_api_marker_is_a_bounded_tuple_of_launch_signatures() -> None:
     marker = SERVICES["api"]["marker"]
     assert isinstance(marker, tuple)
-    assert marker == (_MODULE_SIGNATURE, _LEGACY_SIGNATURE)
+    assert marker == _EXPECTED_SIGNATURES
 
 
 def test_module_command_matches_only_the_module_signature() -> None:
     assert _matching(_module_command(), SERVICES["api"]["marker"]) == [_MODULE_SIGNATURE]
 
 
-def test_legacy_command_matches_only_the_legacy_signature() -> None:
-    assert _matching(_legacy_command(), SERVICES["api"]["marker"]) == [_LEGACY_SIGNATURE]
+def test_windows_legacy_command_matches_only_the_backslash_signature() -> None:
+    assert _matching(_WIN_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
+        _WIN_LEGACY_SIGNATURE
+    ]
 
 
-def test_unrelated_pytest_command_matches_no_signature() -> None:
+def test_forward_slash_legacy_command_matches_only_that_signature() -> None:
+    """A hand-typed forward-slash launch on Windows is still the service."""
+    assert _matching(_POSIX_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
+        _POSIX_LEGACY_SIGNATURE
+    ]
+
+
+def test_unrelated_commands_match_no_signature() -> None:
     """The false positive that made the broad marker dangerous: `--stop`
     would have killed an ordinary test run."""
     marker = SERVICES["api"]["marker"]
-    for command in _unrelated_pytest_commands():
+    for command in _UNRELATED_COMMANDS:
         assert _matching(command, marker) == [], command
         assert "medusa_api" in command  # it DOES mention the module...
         # ...but mentioning it is not a launch signature.
 
 
 def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
-    """python.exe AND (A OR B) — the parentheses are load-bearing: without
-    them `-and` binds to the first alternative only."""
+    """python.exe AND (A OR B OR C) — the parentheses are load-bearing:
+    without them `-and` binds to the first alternative only."""
     from scripts.medusa_start import build_process_filter
 
     predicate = build_process_filter(SERVICES["api"]["marker"])
     assert predicate.startswith("$_.Name -eq 'python.exe' -and (")
     assert predicate.endswith(")")
-    assert " -or " in predicate
-    assert predicate.count("$_.CommandLine -like") == 2
-    assert _MODULE_SIGNATURE in predicate and _LEGACY_SIGNATURE in predicate
+    assert predicate.count("$_.CommandLine -like") == 3
+    assert predicate.count(" -or ") == 2
+    assert predicate.count("(") == 1 and predicate.count(")") == 1
+    for signature in _EXPECTED_SIGNATURES:
+        assert signature in predicate
 
 
 def test_single_string_marker_behaviour_is_unchanged(monkeypatch) -> None:
@@ -289,8 +316,8 @@ def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
 
 
 def test_status_and_stop_pass_the_exact_signature_collection(monkeypatch, capsys) -> None:
-    """status() and stop_service() hand process detection the exact two-signature
-    collection, so both launch forms are visible to them."""
+    """status() and stop_service() hand process detection the exact
+    three-signature collection, so every launch form is visible to them."""
     import urllib.request
     from pathlib import Path
 
@@ -312,12 +339,12 @@ def test_status_and_stop_pass_the_exact_signature_collection(monkeypatch, capsys
 
     ms.status()
     capsys.readouterr()
-    assert (_MODULE_SIGNATURE, _LEGACY_SIGNATURE) in seen
+    assert _EXPECTED_SIGNATURES in seen
 
     seen.clear()
     ms.stop_service("api", ms.SERVICES["api"])
     capsys.readouterr()
-    assert seen == [(_MODULE_SIGNATURE, _LEGACY_SIGNATURE)]
+    assert seen == [_EXPECTED_SIGNATURES]
 
 
 def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys) -> None:

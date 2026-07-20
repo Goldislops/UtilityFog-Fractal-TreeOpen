@@ -40,26 +40,36 @@ SERVICES = {
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
     # and the service exits immediately.
     #
-    # Detection must select the SERVICE, and only the service. Two launch
+    # Detection must select the SERVICE, and only the service. Several launch
     # forms exist during the migration, so the marker is a BOUNDED TUPLE of
     # actual launch signatures rather than a single broad substring:
     #
     #   "-m scripts.medusa_api"     the new module command
-    #   "\\scripts\\medusa_api.py"  a legacy orchestrator path command that
-    #                               an already-running process may still use
+    #   "\\scripts\\medusa_api.py"  a legacy path command as the orchestrator
+    #                               itself built it (pathlib renders Windows
+    #                               separators)
+    #   "/scripts/medusa_api.py"    the same legacy launch hand-typed with
+    #                               forward slashes, which Windows accepts
     #
-    # A bare substring such as "medusa_api" would also select unrelated
-    # commands that merely mention the module — notably
-    # ``python -m pytest tests/test_medusa_api.py`` — which ``--stop``
-    # would then kill. A module-form-only marker has the opposite fault:
-    # it misses a legacy process entirely, so status/stop/duplicate-start
-    # detection would start a second API beside the first.
+    # Both legacy separators are covered because the orchestrator-built and
+    # hand-typed forms are equally likely to still be running, and missing
+    # either one starts a SECOND API beside the first.
+    #
+    # Every signature stays bounded to a real launch fragment. Each legacy
+    # form carries its LEADING separator, so the signature is the
+    # "/scripts/medusa_api.py" path segment rather than a bare filename:
+    # ``python -m pytest tests/test_medusa_api.py`` and
+    # ``pytest scripts/medusa_api.py`` both fail to match. A bare substring
+    # such as "medusa_api" would select those, and ``--stop`` would kill an
+    # ordinary test run; a module-form-only marker has the opposite fault of
+    # missing every legacy process.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
         "marker": (
             "-m scripts.medusa_api",
             "\\scripts\\medusa_api.py",
+            "/scripts/medusa_api.py",
         ),
         "description": "REST API (Phase 16a)",
     },
@@ -83,7 +93,8 @@ def _signatures(marker) -> tuple:
 def build_process_filter(marker) -> str:
     """PowerShell ``Where-Object`` predicate for a service's launch signatures.
 
-    Shape: ``python.exe AND (matches A OR matches B)``. The alternatives are
+    Shape: ``python.exe AND (matches A OR matches B OR ...)`` — one query
+    however many signatures a service declares. The alternatives are
     PARENTHESIZED so the process-name test applies to all of them — without
     the parentheses, ``-and`` would bind to the first alternative only and
     every later signature would match any process of any name.
