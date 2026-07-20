@@ -171,16 +171,49 @@ exact builtin `str` identity — never hashing, comparing, stringifying or
 representing a foreign key — and returns a **fresh exact dict** that is
 the only thing later membership, lookup, `.get()` and primary-role
 selection ever see. A foreign key is **rejected even when a genuine role
-is also present**, never silently dropped. Messages for no artifacts, the
-artifact ceiling and unknown exact-string roles are unchanged, as is
-behavior for valid CLI inputs and valid exact-dict direct inputs.
+is also present**, never silently dropped.
 
-**Correction of record.** An earlier note accompanying the field-lookup
-repair stated that it removed *"the only mechanism by which a hostile key
-could raise anything here."* That claim was **too strong**: it accounted
-for the per-container field lookup but not for this outer role map, which
-remained a live DIRECT-API hole. The claim is withdrawn and superseded by
-this section.
+**The boundary enforces the COMPLETE role-map grammar**, in this order:
+
+1. exact builtin `dict` identity;
+2. **emptiness**, using the established no-artifacts message;
+3. the **artifact-count ceiling**, using the established count message —
+   decided with exact-dict operations **before any key is traversed**;
+4. item iteration admitting **exact builtin `str` keys only**;
+5. **unknown exact-string roles**, refused with the established sorted
+   unknown-role message;
+6. a **fresh dict containing only proven known roles**.
+
+`build_packet()` and `validate_output_path()` rely on this boundary
+**exclusively** and repeat none of its checks.
+
+A second round of failing-first evidence drove steps 2–6:
+
+| probe | pre-repair | post-repair |
+|---|---|---|
+| 9 exact-string unknown roles | traversed and listed: `unknown artifact roles: [...]` (78 chars) | `9 artifacts exceed the 8 bound` (30 chars) |
+| 10 000 exact-string unknown roles | an **88 914-character** diagnostic naming every key | 34 characters, no key listing |
+| `validate_output_path(out, {"report": …, "bogus": out})` | **returned successfully** — the alias sweep walks only ROLES, so an unknown role naming the output path was skipped entirely, defeating the alias boundary | `unknown artifact roles: ['bogus']` |
+| output validation with no known role | escaped as bare **`StopIteration`** | typed `PacketInputError` |
+| output validation with an empty map | escaped as bare **`StopIteration`** | `no artifacts provided: nothing to package` |
+
+**PUBLIC CLI behavior is unchanged** — it builds this map itself from
+known roles, so no CLI-reachable path changes. **DIRECT-API behavior is
+deliberately CHANGED, not preserved**: a direct caller that previously
+received an unknown-role listing for an oversized map now receives the
+short ceiling refusal, and one that previously reached `StopIteration`,
+or silently skipped an unknown role while validating an output path, now
+receives a typed refusal. Valid exact-dict direct input is unaffected and
+still produces byte-identical packets.
+
+**Correction of record.** The note accompanying the field-lookup repair
+claimed it removed *"the only mechanism by which a hostile key could
+raise anything here."* That was **false as written**: it accounted for
+the per-container field lookup but not for this outer role map, which
+remained a live DIRECT-API hole — and the role map turned out to carry
+both a hook-escape and two data-substitution defects. The claim is
+withdrawn, and the accompanying assertion that direct behavior was
+"unchanged" is withdrawn with it.
 
 ## Write boundary
 

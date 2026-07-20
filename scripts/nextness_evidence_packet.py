@@ -289,9 +289,33 @@ def _exact_role_map(mapping: Any) -> dict[str, Any]:
     ``.get()`` and primary-role selection uses only that normalized dict.
     A foreign key is rejected even when a genuine role is also present; it
     is never silently dropped.
+
+    This boundary enforces the COMPLETE role-map grammar, in order: exact
+    builtin ``dict`` identity · emptiness · the artifact-count ceiling
+    (both decided with exact-dict operations BEFORE any key is traversed)
+    · item iteration admitting exact builtin ``str`` keys only · unknown
+    exact-string roles · a fresh dict containing only proven known roles.
+    Both public entry points rely on it exclusively and repeat none of it.
+
+    DIRECT-API behavior is therefore deliberately CHANGED, not preserved:
+    a direct caller that previously got an unknown-role listing for an
+    oversized map now gets the short ceiling refusal, and one that
+    previously reached ``StopIteration`` (or silently skipped an unknown
+    role while validating an output path) now gets a typed refusal. The
+    PUBLIC CLI is unaffected — it builds this map itself from known roles.
     """
     if type(mapping) is not dict:
         raise PacketInputError("artifact role map: expected a builtin dict")
+    # Emptiness and the artifact ceiling are decided with exact-dict
+    # operations BEFORE any key is traversed, so an oversized map can
+    # never be iterated, rendered, or reach a hostile key's hooks — and
+    # its diagnostic stays short instead of listing every supplied key.
+    if not mapping:
+        raise PacketInputError("no artifacts provided: nothing to package")
+    if len(mapping) > MAX_PACKET_ARTIFACTS:
+        raise PacketInputError(
+            f"{len(mapping)} artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+        )
     normalized: dict[str, Any] = {}
     foreign = False
     for key, value in mapping.items():
@@ -301,6 +325,10 @@ def _exact_role_map(mapping: Any) -> dict[str, Any]:
             foreign = True
     if foreign:
         raise PacketInputError("artifact role map: role keys must be builtin strings")
+    # Unknown roles are decided on proven exact strings only.
+    unknown = sorted(set(normalized) - set(ROLES))
+    if unknown:
+        raise PacketInputError(f"unknown artifact roles: {unknown}")
     return normalized
 
 
@@ -566,26 +594,19 @@ def _lab_sequence_link(
 # ---------------------------------------------------------------------------
 
 
-def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
+def build_packet(paths: dict[str, pathlib.Path]) -> dict[str, Any]:
     """One deterministic ``nextness-evidence-packet-v1`` manifest.
 
-    ``paths`` maps roles (subset of ROLES, at least one) to files.
-    Manifest order is the fixed ROLES order regardless of invocation
-    order — determinism over convenience.
+    ``paths`` must be an EXACT builtin ``dict`` mapping known roles
+    (subset of ROLES, at least one, at most ``MAX_PACKET_ARTIFACTS``) to
+    files. Manifest order is the fixed ROLES order regardless of
+    invocation order — determinism over convenience.
+
+    The whole role-map grammar — exact-dict identity, emptiness, the
+    artifact ceiling, exact-string keys and known roles — is enforced by
+    ``_exact_role_map`` and is NOT repeated here.
     """
-    # Normalize the outer role map ONCE, before any membership test,
-    # lookup or key rendering: every check below then operates on a fresh
-    # exact dict whose keys are proven exact builtin strings.
     paths = _exact_role_map(paths)
-    unknown = sorted(set(paths) - set(ROLES))
-    if unknown:
-        raise PacketInputError(f"unknown artifact roles: {unknown}")
-    if not paths:
-        raise PacketInputError("no artifacts provided: nothing to package")
-    if len(paths) > MAX_PACKET_ARTIFACTS:
-        raise PacketInputError(
-            f"{len(paths)} artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
-        )
 
     entries: dict[str, dict[str, Any]] = {}
     parsed_by_role: dict[str, Any] = {}
@@ -658,17 +679,25 @@ def _repo_data_dir() -> pathlib.Path:
 
 
 def validate_output_path(
-    out_path: pathlib.Path, inputs: Mapping[str, pathlib.Path]
+    out_path: pathlib.Path, inputs: dict[str, pathlib.Path]
 ) -> None:
     """--output must resolve inside the primary input's directory (first
     provided role in ROLES order), never inside the repository data/
     tree, and never on a path aliasing ANY input — by resolved path or
     by file identity (hard links included). Identity is verified at
     validation time only; the same residual filesystem race as the NP6
-    lab applies and no stronger claim is made."""
-    # Same normalization as build_packet: primary-role selection below
-    # must never hash, compare or render a caller-controlled key, and a
-    # foreign key must never be able to supply the primary input.
+    lab applies and no stronger claim is made.
+
+    ``inputs`` must be an EXACT builtin ``dict`` of known roles: the same
+    complete grammar ``build_packet`` uses. That matters here beyond hook
+    safety — the alias sweep below only walks ROLES, so an UNKNOWN role
+    key used to be skipped entirely and could name the output path
+    itself, defeating the alias boundary; and a map with no known role
+    used to fall out of the primary-role selection as ``StopIteration``.
+    Both are now typed refusals from the shared boundary."""
+    # Same complete normalization as build_packet: primary-role selection
+    # below must never hash, compare or render a caller-controlled key,
+    # and no unknown or foreign key may reach the alias sweep.
     inputs = _exact_role_map(inputs)
     primary = next(inputs[role] for role in ROLES if role in inputs)
     primary_dir = primary.resolve().parent

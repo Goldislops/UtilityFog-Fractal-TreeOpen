@@ -1476,3 +1476,133 @@ def test_role_map_preserves_public_messages_and_valid_inputs(chain) -> None:
     packet = build_packet(chain)
     assert packet["schema"] == PACKET_SCHEMA
     validate_output_path(chain["report"].parent / "packet.json", chain)
+
+
+# ---------------------------------------------------------------------------
+# Complete role-map grammar: exact-dict identity, emptiness and the artifact
+# ceiling are decided BEFORE any key is traversed; unknown roles are refused
+# on proven exact strings. Both entry points rely on this boundary alone.
+# ---------------------------------------------------------------------------
+
+
+class _ArmableRoleKey:
+    """A foreign key that can be planted (inert hash) and then armed, so a
+    test can prove the ceiling refuses before ANY key hook executes."""
+
+    fired: list[str] = []
+    armed = False
+
+    def __hash__(self) -> int:
+        if _ArmableRoleKey.armed:
+            _ArmableRoleKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return 0
+
+    def __eq__(self, other):
+        _ArmableRoleKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _ArmableRoleKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+def test_role_map_ceiling_refuses_before_any_key_hook(chain) -> None:
+    """A nine-entry map is refused by the exact-dict ceiling before the map
+    is traversed, so a hostile key planted inside it is never touched."""
+    from scripts.nextness_evidence_packet import (
+        MAX_PACKET_ARTIFACTS,
+        PacketInputError,
+        build_packet,
+    )
+
+    _ArmableRoleKey.fired.clear()
+    _ArmableRoleKey.armed = False
+    payload = {f"r{i}": chain["report"] for i in range(8)}
+    payload[_ArmableRoleKey()] = chain["report"]  # planted while inert
+    _ArmableRoleKey.armed = True
+    try:
+        assert len(payload) == MAX_PACKET_ARTIFACTS + 1
+        with pytest.raises(PacketInputError) as excinfo:
+            build_packet(payload)
+        assert str(excinfo.value) == f"9 artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+        assert _ArmableRoleKey.fired == []
+    finally:
+        _ArmableRoleKey.armed = False
+
+
+def test_role_map_large_map_diagnostic_stays_short(chain) -> None:
+    """An oversized map must not be rendered: the refusal names a count, not
+    ten thousand keys."""
+    from scripts.nextness_evidence_packet import (
+        MAX_PACKET_ARTIFACTS,
+        PacketInputError,
+        build_packet,
+    )
+
+    payload = {f"r{i}": chain["report"] for i in range(10_000)}
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet(payload)
+    message = str(excinfo.value)
+    assert message == f"10000 artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+    assert len(message) < 64
+    assert "r0" not in message and "r9999" not in message
+
+
+def test_output_alias_refused_for_an_unknown_role(chain) -> None:
+    """The alias sweep only walks ROLES, so an UNKNOWN role naming the output
+    path used to slip past it entirely and validate successfully."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    out.write_bytes(b"PRE-EXISTING")
+    before_out = out.read_bytes()
+    before_report = chain["report"].read_bytes()
+
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {"report": chain["report"], "bogus": out})
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+    assert out.read_bytes() == before_out
+    assert chain["report"].read_bytes() == before_report
+
+
+def test_output_validation_unknown_only_is_typed_not_stopiteration(chain) -> None:
+    """A map with no known role used to fall out of primary-role selection as
+    a bare StopIteration."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {"bogus": chain["report"]})
+    assert type(excinfo.value) is PacketInputError
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+
+    with pytest.raises(PacketInputError):  # never StopIteration
+        validate_output_path(out, {"nope": chain["report"], "alsonope": chain["report"]})
+
+
+def test_output_validation_empty_map_uses_the_no_artifacts_message(chain) -> None:
+    """An empty map reaches the established no-artifacts refusal, not
+    StopIteration."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {})
+    assert str(excinfo.value) == "no artifacts provided: nothing to package"
+
+
+def test_valid_exact_dict_behaviour_is_unchanged(chain) -> None:
+    """Valid exact-dict input still builds identically and still validates."""
+    from scripts.nextness_evidence_packet import (
+        build_packet,
+        serialize_packet,
+        validate_output_path,
+    )
+
+    first = serialize_packet(build_packet(chain))
+    second = serialize_packet(build_packet(dict(chain)))
+    assert first == second  # byte-identical across repeated runs
+    validate_output_path(chain["report"].parent / "packet.json", chain)
+    # A single-role exact dict remains acceptable.
+    assert build_packet({"log": chain["log"]})["schema"] == PACKET_SCHEMA
