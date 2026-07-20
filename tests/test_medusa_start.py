@@ -41,9 +41,10 @@ def test_api_command_carries_no_file_path_form() -> None:
 
 def test_api_marker_matches_the_module_command() -> None:
     """Process detection/status must be able to find the module-form process."""
-    marker = SERVICES["api"]["marker"]
-    assert marker == "medusa_api"
-    assert marker in " ".join(build_command(SERVICES["api"]))
+    from scripts.medusa_start import _signatures
+
+    module_command = " ".join(build_command(SERVICES["api"]))
+    assert any(s in module_command for s in _signatures(SERVICES["api"]["marker"]))
 
 
 def test_watchdog_and_geometry_launch_behaviour_unchanged() -> None:
@@ -63,9 +64,12 @@ def test_watchdog_and_geometry_launch_behaviour_unchanged() -> None:
 
 
 def test_every_service_marker_appears_in_its_own_command() -> None:
-    """Status/stop rely on the marker matching the launched command line."""
+    """Status/stop rely on at least one signature matching the launch command."""
+    from scripts.medusa_start import _signatures
+
     for name, config in SERVICES.items():
-        assert config["marker"] in " ".join(build_command(config)), name
+        command = " ".join(build_command(config))
+        assert any(s in command for s in _signatures(config["marker"])), name
 
 
 def test_api_module_help_resolves_imports() -> None:
@@ -139,51 +143,130 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Legacy-process compatibility during migration.
+# Process selection during the launch migration.
 #
-# The API's launch form changed from an absolute file path to a package
-# module. A process started under the OLD form may still be running, and its
-# command line contains ".../scripts/medusa_api.py" — which does NOT contain
-# the module-form string "scripts.medusa_api". A module-form-only marker
-# therefore makes a legacy process invisible to status, stop and
-# duplicate-start detection, and a second API would be started beside it.
+# Two launch forms exist while the migration completes:
+#   new    : python -u -m scripts.medusa_api --port 8080
+#   legacy : python -u <root>\scripts\medusa_api.py --port 8080
 #
-# The marker is the common substring "medusa_api", which matches both forms.
+# A module-form-only marker misses the legacy process entirely (status says
+# DOWN, stop never kills it, and a SECOND API is started beside it). A broad
+# substring like "medusa_api" has the opposite fault: it also selects
+# unrelated commands that merely mention the module — notably
+# `python -m pytest tests/test_medusa_api.py` — which `--stop` would kill.
 #
-# Nothing here inspects, starts, stops, restarts or kills a real process,
-# binds port 8080, deploys the API, or touches live telemetry: process
-# detection and Popen are both replaced.
+# Detection therefore uses a BOUNDED TUPLE of actual launch signatures, and
+# one PowerShell predicate of the shape:
+#     python.exe AND (matches A OR matches B)
+#
+# `-like '*X*'` is plain substring containment for wildcard-free X, which is
+# what every signature here is, so these tests model it with `in`.
+#
+# No test inspects, starts, stops or kills a real process, binds port 8080,
+# deploys the API, queries live telemetry, or reads the live data directory:
+# process detection, Popen, subprocess.run, urlopen and Path.glob are all
+# replaced.
 # ---------------------------------------------------------------------------
 
 
+_MODULE_SIGNATURE = "-m scripts.medusa_api"
+_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py"
+
+
+def _module_command() -> str:
+    return " ".join(build_command(SERVICES["api"]))
+
+
 def _legacy_command() -> str:
-    """A representative pre-migration command line."""
+    """A representative pre-migration command line (Windows separators)."""
     return " ".join(
         [PYTHON, "-u", str(PROJECT_ROOT / "scripts" / "medusa_api.py"), "--port", "8080"]
     )
 
 
-def test_marker_matches_the_module_launch_command() -> None:
+def _unrelated_pytest_commands() -> list[str]:
+    """Commands that merely MENTION the module and must never be selected."""
+    return [
+        f"{PYTHON} -m pytest tests/test_medusa_api.py",
+        f"{PYTHON} -m pytest tests{os.sep}test_medusa_api.py",
+        f"{PYTHON} -m pytest -k medusa_api",
+        f"{PYTHON} -c \"import scripts.medusa_api\"",
+    ]
+
+
+def _matching(command: str, marker) -> list[str]:
+    from scripts.medusa_start import _signatures
+
+    return [s for s in _signatures(marker) if s in command]
+
+
+def test_api_marker_is_a_bounded_tuple_of_launch_signatures() -> None:
     marker = SERVICES["api"]["marker"]
-    assert marker == "medusa_api"
-    assert marker in " ".join(build_command(SERVICES["api"]))
+    assert isinstance(marker, tuple)
+    assert marker == (_MODULE_SIGNATURE, _LEGACY_SIGNATURE)
 
 
-def test_marker_matches_a_representative_legacy_command() -> None:
-    """The failing-first fact, pinned: the module-form-only marker does not
-    appear in the legacy command line, but the common marker does."""
-    legacy = _legacy_command()
-    assert legacy.endswith("--port 8080")
-    assert "medusa_api.py" in legacy
-
-    assert SERVICES["api"]["marker"] in legacy      # common marker: matches
-    assert "scripts.medusa_api" not in legacy       # module-form-only: misses
+def test_module_command_matches_only_the_module_signature() -> None:
+    assert _matching(_module_command(), SERVICES["api"]["marker"]) == [_MODULE_SIGNATURE]
 
 
-def test_marker_matches_both_launch_forms_simultaneously() -> None:
+def test_legacy_command_matches_only_the_legacy_signature() -> None:
+    assert _matching(_legacy_command(), SERVICES["api"]["marker"]) == [_LEGACY_SIGNATURE]
+
+
+def test_unrelated_pytest_command_matches_no_signature() -> None:
+    """The false positive that made the broad marker dangerous: `--stop`
+    would have killed an ordinary test run."""
     marker = SERVICES["api"]["marker"]
-    module_command = " ".join(build_command(SERVICES["api"]))
-    assert marker in module_command and marker in _legacy_command()
+    for command in _unrelated_pytest_commands():
+        assert _matching(command, marker) == [], command
+        assert "medusa_api" in command  # it DOES mention the module...
+        # ...but mentioning it is not a launch signature.
+
+
+def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
+    """python.exe AND (A OR B) — the parentheses are load-bearing: without
+    them `-and` binds to the first alternative only."""
+    from scripts.medusa_start import build_process_filter
+
+    predicate = build_process_filter(SERVICES["api"]["marker"])
+    assert predicate.startswith("$_.Name -eq 'python.exe' -and (")
+    assert predicate.endswith(")")
+    assert " -or " in predicate
+    assert predicate.count("$_.CommandLine -like") == 2
+    assert _MODULE_SIGNATURE in predicate and _LEGACY_SIGNATURE in predicate
+
+
+def test_single_string_marker_behaviour_is_unchanged(monkeypatch) -> None:
+    """Engine, watchdog and geometry keep their plain-string markers and the
+    original one-alternative predicate."""
+    import scripts.medusa_start as ms
+
+    assert (
+        ms.build_process_filter("watchdog.py")
+        == "$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*watchdog.py*')"
+    )
+    assert (
+        ms.build_process_filter("run_v070_engine")
+        == "$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*run_v070_engine*')"
+    )
+
+    class _Result:
+        stdout = "ProcessId : 77\n"
+
+    monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Result())
+    assert ms.find_process("watchdog.py") == [77]
+
+
+def test_find_process_returns_no_duplicate_pids(monkeypatch) -> None:
+    """One process can satisfy more than one signature; it is reported once."""
+    import scripts.medusa_start as ms
+
+    class _Result:
+        stdout = "ProcessId : 111\nProcessId : 111\nProcessId : 222\nProcessId : 111\n"
+
+    monkeypatch.setattr(ms.subprocess, "run", lambda *a, **k: _Result())
+    assert ms.find_process(SERVICES["api"]["marker"]) == [111, 222]
 
 
 def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
@@ -192,8 +275,7 @@ def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
     import scripts.medusa_start as ms
 
     def _detect(marker):
-        # Only the API marker resolves, and only to a mocked legacy PID.
-        return [4321] if marker == "medusa_api" else []
+        return [4321] if marker == SERVICES["api"]["marker"] else []
 
     def _never_popen(*args, **kwargs):
         raise AssertionError("Popen must not run while a process is already detected")
@@ -206,14 +288,15 @@ def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
     assert "Already running" in capsys.readouterr().out
 
 
-def test_status_and_stop_pass_the_common_marker_to_detection(monkeypatch, capsys) -> None:
-    """status() and stop_service() both look the API up by the same common
-    marker, so a legacy process is visible to them too."""
+def test_status_and_stop_pass_the_exact_signature_collection(monkeypatch, capsys) -> None:
+    """status() and stop_service() hand process detection the exact two-signature
+    collection, so both launch forms are visible to them."""
     import urllib.request
+    from pathlib import Path
 
     import scripts.medusa_start as ms
 
-    seen: list[str] = []
+    seen: list = []
 
     def _record(marker):
         seen.append(marker)
@@ -224,15 +307,17 @@ def test_status_and_stop_pass_the_common_marker_to_detection(monkeypatch, capsys
 
     monkeypatch.setattr(ms, "find_process", _record)
     monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    # Test isolation: never read the real snapshot directory.
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: [])
 
     ms.status()
     capsys.readouterr()
-    assert "medusa_api" in seen
+    assert (_MODULE_SIGNATURE, _LEGACY_SIGNATURE) in seen
 
     seen.clear()
     ms.stop_service("api", ms.SERVICES["api"])
     capsys.readouterr()
-    assert seen == ["medusa_api"]
+    assert seen == [(_MODULE_SIGNATURE, _LEGACY_SIGNATURE)]
 
 
 def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys) -> None:
@@ -250,10 +335,12 @@ def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys
 
 
 def test_watchdog_and_geometry_markers_are_unchanged() -> None:
-    """Only the API marker widens; the others keep their exact file names."""
+    """Only the API marker becomes a signature tuple; the others are untouched
+    plain strings matching their own launch commands."""
     assert SERVICES["watchdog"]["marker"] == "watchdog.py"
     assert SERVICES["geometry"]["marker"] == "geometry_daemon.py"
     for name in ("watchdog", "geometry"):
         config = SERVICES[name]
+        assert isinstance(config["marker"], str)
         assert config["marker"] in " ".join(build_command(config))
         assert "medusa_api" not in config["marker"]

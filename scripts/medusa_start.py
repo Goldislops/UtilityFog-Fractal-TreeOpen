@@ -40,18 +40,27 @@ SERVICES = {
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
     # and the service exits immediately.
     #
-    # The marker is the COMMON substring "medusa_api", which deliberately
-    # matches BOTH launch forms during migration: the new module command
-    # (``-m scripts.medusa_api``) and the legacy file-path command
-    # (``.../scripts/medusa_api.py``) an already-running process may still
-    # be using. A module-form-only marker such as "scripts.medusa_api"
-    # does not appear in the legacy command line, so status, stop and
-    # duplicate-start detection would all miss a legacy process — and a
-    # second API would be started alongside it.
+    # Detection must select the SERVICE, and only the service. Two launch
+    # forms exist during the migration, so the marker is a BOUNDED TUPLE of
+    # actual launch signatures rather than a single broad substring:
+    #
+    #   "-m scripts.medusa_api"     the new module command
+    #   "\\scripts\\medusa_api.py"  a legacy orchestrator path command that
+    #                               an already-running process may still use
+    #
+    # A bare substring such as "medusa_api" would also select unrelated
+    # commands that merely mention the module — notably
+    # ``python -m pytest tests/test_medusa_api.py`` — which ``--stop``
+    # would then kill. A module-form-only marker has the opposite fault:
+    # it misses a legacy process entirely, so status/stop/duplicate-start
+    # detection would start a second API beside the first.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": "medusa_api",
+        "marker": (
+            "-m scripts.medusa_api",
+            "\\scripts\\medusa_api.py",
+        ),
         "description": "REST API (Phase 16a)",
     },
     "geometry": {
@@ -62,19 +71,48 @@ SERVICES = {
 }
 
 
-def find_process(marker: str) -> list:
-    """Find running processes matching a marker string."""
+def _signatures(marker) -> tuple:
+    """Normalize a marker to a tuple of launch signatures.
+
+    A plain string is a single signature (engine, watchdog and geometry all
+    use that form and are unaffected); a tuple is used verbatim.
+    """
+    return (marker,) if isinstance(marker, str) else tuple(marker)
+
+
+def build_process_filter(marker) -> str:
+    """PowerShell ``Where-Object`` predicate for a service's launch signatures.
+
+    Shape: ``python.exe AND (matches A OR matches B)``. The alternatives are
+    PARENTHESIZED so the process-name test applies to all of them — without
+    the parentheses, ``-and`` would bind to the first alternative only and
+    every later signature would match any process of any name.
+    """
+    alternatives = " -or ".join(
+        f"$_.CommandLine -like '*{signature}*'" for signature in _signatures(marker)
+    )
+    return f"$_.Name -eq 'python.exe' -and ({alternatives})"
+
+
+def find_process(marker) -> list:
+    """Find running python.exe processes matching any of the launch signatures.
+
+    ``marker`` is a single signature string or a tuple of them. All
+    signatures are combined into ONE query, so a process matching more than
+    one is still reported once; the result is de-duplicated in order anyway.
+    """
     try:
         result = subprocess.run(
             ["powershell", "-Command",
-             f"Get-CimInstance Win32_Process | Where-Object {{$_.CommandLine -like '*{marker}*' -and $_.Name -eq 'python.exe'}} | Select-Object ProcessId | Format-List"],
+             f"Get-CimInstance Win32_Process | Where-Object {{{build_process_filter(marker)}}} | Select-Object ProcessId | Format-List"],
             capture_output=True, text=True, timeout=10,
         )
         pids = []
         for line in result.stdout.strip().split("\n"):
             if line.strip().startswith("ProcessId"):
                 pid = int(line.split(":")[-1].strip())
-                pids.append(pid)
+                if pid not in pids:
+                    pids.append(pid)
         return pids
     except Exception:
         return []
