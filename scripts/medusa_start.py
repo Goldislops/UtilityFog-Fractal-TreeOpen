@@ -40,36 +40,48 @@ SERVICES = {
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
     # and the service exits immediately.
     #
-    # Detection must select the SERVICE, and only the service. Several launch
-    # forms exist during the migration, so the marker is a BOUNDED TUPLE of
-    # actual launch signatures rather than a single broad substring:
+    # Detection must select the SERVICE, and only the service. Each signature
+    # therefore describes a LAUNCH SHAPE — a path segment together with the
+    # service's own argument list — not merely a path that happens to name
+    # the module:
     #
-    #   "-m scripts.medusa_api"     the new module command
-    #   "\\scripts\\medusa_api.py"  a legacy path command as the orchestrator
-    #                               itself built it (pathlib renders Windows
-    #                               separators)
-    #   "/scripts/medusa_api.py"    the same legacy launch hand-typed with
-    #                               forward slashes, which Windows accepts
+    #   "-m scripts.medusa_api"             the new module command
+    #   "\\scripts\\medusa_api.py --port"   legacy launch, Windows separators
+    #   "/scripts/medusa_api.py --port"     legacy launch, forward slashes
+    #   "\\scripts\\medusa_api.py\" --port" the same, path quoted for spaces
+    #   "/scripts/medusa_api.py\" --port"   the same, quoted, forward slashes
     #
-    # Both legacy separators are covered because the orchestrator-built and
-    # hand-typed forms are equally likely to still be running, and missing
-    # either one starts a SECOND API beside the first.
+    # Both separators are covered because the orchestrator built the Windows
+    # form while a hand-typed launch may use forward slashes, and missing
+    # either one starts a SECOND API beside the first. The quoted variants
+    # cover an install path containing spaces, where Windows wraps the script
+    # path in double quotes so the closing quote sits between the path and
+    # the arguments.
     #
-    # Every signature stays bounded to a real launch fragment. Each legacy
-    # form carries its LEADING separator, so the signature is the
-    # "/scripts/medusa_api.py" path segment rather than a bare filename:
-    # ``python -m pytest tests/test_medusa_api.py`` and
-    # ``pytest scripts/medusa_api.py`` both fail to match. A bare substring
-    # such as "medusa_api" would select those, and ``--stop`` would kill an
-    # ordinary test run; a module-form-only marker has the opposite fault of
-    # missing every legacy process.
+    # Requiring the trailing " --port" is what makes a path segment alone
+    # insufficient. A test invocation names the same file but never passes
+    # the service's arguments, so absolute-path runs like
+    # ``python -m pytest C:\\UtilityFog\\scripts\\medusa_api.py`` are refused
+    # — as are the relative form, ``tests/test_medusa_api.py``, ``-k
+    # medusa_api`` and ``-c "import scripts.medusa_api"``. This is a positive
+    # test for the launch shape, NOT an exclusion of the word "pytest";
+    # nothing here enumerates test runners.
+    #
+    # Residual, stated honestly: a command that both targets the file AND
+    # passes ``--port`` is indistinguishable from a launch by command-line
+    # substring alone. No real test runner does that (pytest rejects
+    # ``--port``), and narrowing further would need adjacency matching that
+    # PowerShell ``-like`` cannot express without wildcards the portable
+    # tests could not faithfully model.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
         "marker": (
             "-m scripts.medusa_api",
-            "\\scripts\\medusa_api.py",
-            "/scripts/medusa_api.py",
+            "\\scripts\\medusa_api.py --port",
+            "/scripts/medusa_api.py --port",
+            "\\scripts\\medusa_api.py\" --port",
+            "/scripts/medusa_api.py\" --port",
         ),
         "description": "REST API (Phase 16a)",
     },

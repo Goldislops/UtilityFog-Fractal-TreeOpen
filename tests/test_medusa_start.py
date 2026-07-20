@@ -143,35 +143,28 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process selection during the launch migration.
+# Process selection: LAUNCH SHAPES, not paths.
 #
-# Three launch forms may be running while the migration completes:
-#   new             : python -u -m scripts.medusa_api --port 8080
-#   legacy (win)    : python -u C:\UtilityFog\scripts\medusa_api.py --port 8080
-#   legacy (posix)  : python -u C:/UtilityFog/scripts/medusa_api.py --port 8080
+# Detection must select the API service and nothing else. A signature that is
+# only a path segment is insufficient, because a test invocation names the
+# same file:
 #
-# The orchestrator itself built the backslash form (pathlib renders Windows
-# separators); the forward-slash form is the same launch hand-typed, which
-# Windows accepts. Missing either legacy form starts a SECOND API beside the
-# first, so both separators are covered.
+#   service : python.exe -u C:\UtilityFog\scripts\medusa_api.py --port 8080
+#   pytest  : python.exe -m pytest C:\UtilityFog\scripts\medusa_api.py
 #
-# A module-form-only marker misses every legacy process. A broad substring
-# like "medusa_api" has the opposite fault: it also selects unrelated
-# commands that merely mention the module — notably
-# `python -m pytest tests/test_medusa_api.py` — which `--stop` would kill.
+# Both contain "\scripts\medusa_api.py". What distinguishes them is that the
+# service carries its own ARGUMENT LIST, so every legacy signature requires
+# the trailing " --port". That is a positive test for the launch shape, NOT
+# an exclusion of the word "pytest" — nothing here enumerates test runners.
 #
-# Detection therefore uses a BOUNDED TUPLE of launch signatures, each legacy
-# entry carrying its LEADING separator so the signature is the
-# "/scripts/medusa_api.py" path segment rather than a bare filename. One
-# PowerShell predicate is built, of the shape:
-#     python.exe AND (matches A OR matches B OR matches C)
+# Quoted variants cover an install path containing spaces, where Windows
+# wraps the script path in double quotes and the closing quote lands between
+# the path and the arguments.
 #
-# `-like '*X*'` is plain substring containment for wildcard-free X, which is
-# what every signature here is, so these tests model it with `in`.
-#
-# Command strings below are explicit synthetic literals, NOT built from the
-# host filesystem: the signatures are Windows path forms, and the CI runner
-# is not Windows.
+# Signatures are deliberately WILDCARD-FREE, so `-like '*sig*'` is plain
+# substring containment and these portable tests model it faithfully with
+# `in`. Command strings are explicit synthetic literals, independent of the
+# CI runner: the signatures are Windows path forms and the runner is Linux.
 #
 # No test inspects, starts, stops or kills a real process, binds port 8080,
 # deploys the API, queries live telemetry, or reads the live data directory:
@@ -181,28 +174,44 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 _MODULE_SIGNATURE = "-m scripts.medusa_api"
-_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py"
-_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py"
+_WIN_LEGACY_SIGNATURE = "\\scripts\\medusa_api.py --port"
+_POSIX_LEGACY_SIGNATURE = "/scripts/medusa_api.py --port"
+_WIN_QUOTED_SIGNATURE = "\\scripts\\medusa_api.py\" --port"
+_POSIX_QUOTED_SIGNATURE = "/scripts/medusa_api.py\" --port"
 
 _EXPECTED_SIGNATURES = (
     _MODULE_SIGNATURE,
     _WIN_LEGACY_SIGNATURE,
     _POSIX_LEGACY_SIGNATURE,
+    _WIN_QUOTED_SIGNATURE,
+    _POSIX_QUOTED_SIGNATURE,
 )
 
-#: Synthetic legacy command lines — deliberately literal, host-independent.
+#: Real service command lines — literal, host-independent.
 _WIN_LEGACY_COMMAND = "python.exe -u C:\\UtilityFog\\scripts\\medusa_api.py --port 8080"
 _POSIX_LEGACY_COMMAND = "python.exe -u C:/UtilityFog/scripts/medusa_api.py --port 8080"
+_WIN_QUOTED_COMMAND = (
+    'python.exe -u "C:\\Program Files\\UtilityFog\\scripts\\medusa_api.py" --port 8080'
+)
+_POSIX_QUOTED_COMMAND = (
+    'python.exe -u "C:/Program Files/UtilityFog/scripts/medusa_api.py" --port 8080'
+)
 
-#: Commands that merely MENTION the module and must never be selected.
+#: Commands that name or mention the module but are NOT the service.
 _UNRELATED_COMMANDS = (
+    # Absolute-path test invocations: these contain the full path segment,
+    # leading separator included, and were the surviving false positives.
+    "python.exe -m pytest C:\\UtilityFog\\scripts\\medusa_api.py",
+    "python.exe -m pytest C:/UtilityFog/scripts/medusa_api.py",
+    'python.exe -m pytest "C:\\Program Files\\UtilityFog\\scripts\\medusa_api.py"',
+    # Relative form.
+    "python.exe -m pytest scripts/medusa_api.py",
+    # The module's own test file, both separators.
     "python.exe -m pytest tests/test_medusa_api.py",
     "python.exe -m pytest tests\\test_medusa_api.py",
+    # Mentions rather than launches.
     "python.exe -m pytest -k medusa_api",
     'python.exe -c "import scripts.medusa_api"',
-    # A relative path has no leading separator, so it is not a launch
-    # signature either.
-    "python.exe -m pytest scripts/medusa_api.py",
 )
 
 
@@ -222,43 +231,80 @@ def test_api_marker_is_a_bounded_tuple_of_launch_signatures() -> None:
     assert marker == _EXPECTED_SIGNATURES
 
 
+def test_signatures_are_wildcard_free() -> None:
+    """`-like '*sig*'` is substring containment only while signatures carry no
+    wildcards — which is what lets these portable tests model it with `in`."""
+    for signature in _EXPECTED_SIGNATURES:
+        assert "*" not in signature and "?" not in signature and "[" not in signature
+
+
 def test_module_command_matches_only_the_module_signature() -> None:
     assert _matching(_module_command(), SERVICES["api"]["marker"]) == [_MODULE_SIGNATURE]
 
 
-def test_windows_legacy_command_matches_only_the_backslash_signature() -> None:
-    assert _matching(_WIN_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
-        _WIN_LEGACY_SIGNATURE
-    ]
+def test_real_legacy_launches_match_only_their_own_signature() -> None:
+    """Every real orchestrator launch form is still detected: both separators,
+    quoted and unquoted."""
+    marker = SERVICES["api"]["marker"]
+    for command, expected in (
+        (_WIN_LEGACY_COMMAND, _WIN_LEGACY_SIGNATURE),
+        (_POSIX_LEGACY_COMMAND, _POSIX_LEGACY_SIGNATURE),
+        (_WIN_QUOTED_COMMAND, _WIN_QUOTED_SIGNATURE),
+        (_POSIX_QUOTED_COMMAND, _POSIX_QUOTED_SIGNATURE),
+    ):
+        assert _matching(command, marker) == [expected], command
 
 
-def test_forward_slash_legacy_command_matches_only_that_signature() -> None:
-    """A hand-typed forward-slash launch on Windows is still the service."""
-    assert _matching(_POSIX_LEGACY_COMMAND, SERVICES["api"]["marker"]) == [
-        _POSIX_LEGACY_SIGNATURE
-    ]
+def test_quoted_install_path_with_spaces_is_detected() -> None:
+    """A path containing spaces is quoted by Windows, so the closing quote
+    sits between the path and the arguments."""
+    marker = SERVICES["api"]["marker"]
+    assert "Program Files" in _WIN_QUOTED_COMMAND
+    assert _matching(_WIN_QUOTED_COMMAND, marker) == [_WIN_QUOTED_SIGNATURE]
+    assert _matching(_POSIX_QUOTED_COMMAND, marker) == [_POSIX_QUOTED_SIGNATURE]
+
+
+def test_absolute_path_pytest_invocations_are_refused() -> None:
+    """The surviving false positive: an absolute-path test run contains the
+    whole path segment, leading separator included, yet is not the service."""
+    marker = SERVICES["api"]["marker"]
+    for command in (
+        "python.exe -m pytest C:\\UtilityFog\\scripts\\medusa_api.py",
+        "python.exe -m pytest C:/UtilityFog/scripts/medusa_api.py",
+    ):
+        assert "\\scripts\\medusa_api.py" in command or "/scripts/medusa_api.py" in command
+        assert _matching(command, marker) == [], command
 
 
 def test_unrelated_commands_match_no_signature() -> None:
-    """The false positive that made the broad marker dangerous: `--stop`
-    would have killed an ordinary test run."""
+    """`--stop` must never select a command that merely names the module."""
     marker = SERVICES["api"]["marker"]
     for command in _UNRELATED_COMMANDS:
         assert _matching(command, marker) == [], command
-        assert "medusa_api" in command  # it DOES mention the module...
-        # ...but mentioning it is not a launch signature.
+        assert "medusa_api" in command  # it DOES name the module...
+        # ...but naming it is not a launch shape.
+
+
+def test_selection_does_not_depend_on_excluding_test_runners() -> None:
+    """No signature mentions pytest or any other runner: the discriminator is
+    the presence of the service's own argument list."""
+    for signature in _EXPECTED_SIGNATURES:
+        assert "pytest" not in signature
+        assert "test" not in signature
+    for signature in _EXPECTED_SIGNATURES[1:]:
+        assert signature.endswith(" --port")
 
 
 def test_process_filter_is_name_and_parenthesized_alternatives() -> None:
-    """python.exe AND (A OR B OR C) — the parentheses are load-bearing:
+    """python.exe AND (A OR B OR ...) — the parentheses are load-bearing:
     without them `-and` binds to the first alternative only."""
     from scripts.medusa_start import build_process_filter
 
     predicate = build_process_filter(SERVICES["api"]["marker"])
     assert predicate.startswith("$_.Name -eq 'python.exe' -and (")
     assert predicate.endswith(")")
-    assert predicate.count("$_.CommandLine -like") == 3
-    assert predicate.count(" -or ") == 2
+    assert predicate.count("$_.CommandLine -like") == 5
+    assert predicate.count(" -or ") == 4
     assert predicate.count("(") == 1 and predicate.count(")") == 1
     for signature in _EXPECTED_SIGNATURES:
         assert signature in predicate
@@ -316,8 +362,8 @@ def test_legacy_process_prevents_a_duplicate_start(monkeypatch, capsys) -> None:
 
 
 def test_status_and_stop_pass_the_exact_signature_collection(monkeypatch, capsys) -> None:
-    """status() and stop_service() hand process detection the exact
-    three-signature collection, so every launch form is visible to them."""
+    """status() and stop_service() hand process detection the exact signature
+    collection, so every launch form is visible to them."""
     import urllib.request
     from pathlib import Path
 
@@ -362,7 +408,7 @@ def test_stop_service_does_not_kill_when_nothing_is_detected(monkeypatch, capsys
 
 
 def test_watchdog_and_geometry_markers_are_unchanged() -> None:
-    """Only the API marker becomes a signature tuple; the others are untouched
+    """Only the API marker is a signature tuple; the others are untouched
     plain strings matching their own launch commands."""
     assert SERVICES["watchdog"]["marker"] == "watchdog.py"
     assert SERVICES["geometry"]["marker"] == "geometry_daemon.py"
