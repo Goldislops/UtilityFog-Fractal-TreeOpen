@@ -206,12 +206,130 @@ def _load_bounded_json(path: pathlib.Path) -> tuple[Any, str, int]:
     return parsed, hashlib.sha256(raw).hexdigest(), len(raw)
 
 
+_BUILTIN_TYPE_NAMES: Final[tuple[tuple[type, str], ...]] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description for error messages.
+
+    ``type(value).__name__`` consults the metaclass — a hostile class can
+    override ``__name__`` so that reading it raises from inside error
+    formatting, escaping the validator's typed-error promise. Identity
+    comparison against builtin types runs no user code, and anything that
+    is not one of these builtins is described generically instead of
+    executing a hook merely to improve a message.
+    """
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
+
+
 def _exact_dict_field(container: Any, field: str, context: str) -> Any:
+    """Fetch ``field`` from a proven-exact builtin dict, hook-free.
+
+    The container is proven an exact builtin ``dict`` first, then traversed
+    by ITEM ITERATION only: an unproven key is never hashed, compared,
+    stringified or represented, and only exact builtin ``str`` keys are
+    compared against ``field``. The matched value comes straight out of the
+    iteration — never from a second subscript, which would re-enter the hash
+    table and could meet a colliding hostile key.
+
+    This is a soundness boundary, not only a hook boundary. Previously
+    ``field not in container`` hashed ``field`` and compared it against
+    whatever shared its bucket, so a non-str key whose ``__hash__`` collided
+    with a required name had its ``__eq__`` invoked — and an ``__eq__``
+    returning True let that hostile key SATISFY the required field and
+    supply its own value as the field's content.
+    """
     if type(container) is not dict:
-        raise PacketInputError(f"{context}: expected builtin dict, got {type(container).__name__}")
-    if field not in container:
-        raise PacketInputError(f"{context}: missing field {field!r}")
-    return container[field]
+        raise PacketInputError(f"{context}: expected builtin dict, got {_describe_type(container)}")
+    for key, value in container.items():
+        # Identity test first: a foreign key short-circuits before any
+        # comparison, so no caller-controlled hook can run.
+        if type(key) is str and key == field:
+            return value
+    raise PacketInputError(f"{context}: missing field {field!r}")
+
+
+def _exact_role_map(mapping: Any) -> dict[str, Any]:
+    """Normalize the TOP-LEVEL role map once, at the DIRECT-API boundary.
+
+    The public CLI always builds this map itself with exact builtin ``str``
+    roles, so every hazard below is DIRECT-API-only. A direct caller,
+    however, may pass any mapping, and the outer map used to be consumed
+    with ``set(paths)``, ``role in paths``, ``paths[role]`` and
+    ``inputs[role]`` — each of which hashes and compares caller-controlled
+    keys, while the unknown-roles message rendered them inside a list and
+    therefore ``repr``'d them.
+
+    Three things could follow: a foreign key's ``__hash__``/``__eq__``/
+    ``__repr__`` could execute and escape; a foreign key colliding with a
+    real role and comparing equal could SATISFY that role and supply its
+    own value as the artifact (or as the primary input); and a ``dict``
+    subclass could interpose its own iteration hooks.
+
+    This boundary refuses anything that is not an exact builtin ``dict``
+    without inspecting it beyond that identity test, traverses by item
+    iteration only, admits a key only on exact builtin ``str`` identity —
+    never hashing, comparing, stringifying or representing a foreign key —
+    and returns a FRESH exact dict. Every later membership test, lookup,
+    ``.get()`` and primary-role selection uses only that normalized dict.
+    A foreign key is rejected even when a genuine role is also present; it
+    is never silently dropped.
+
+    This boundary enforces the COMPLETE role-map grammar, in order: exact
+    builtin ``dict`` identity · emptiness · the artifact-count ceiling
+    (both decided with exact-dict operations BEFORE any key is traversed)
+    · item iteration admitting exact builtin ``str`` keys only · unknown
+    exact-string roles · a fresh dict containing only proven known roles.
+    Both public entry points rely on it exclusively and repeat none of it.
+
+    DIRECT-API behavior is therefore deliberately CHANGED, not preserved:
+    a direct caller that previously got an unknown-role listing for an
+    oversized map now gets the short ceiling refusal, and one that
+    previously reached ``StopIteration`` (or silently skipped an unknown
+    role while validating an output path) now gets a typed refusal. The
+    PUBLIC CLI is unaffected — it builds this map itself from known roles.
+    """
+    if type(mapping) is not dict:
+        raise PacketInputError("artifact role map: expected a builtin dict")
+    # Emptiness and the artifact ceiling are decided with exact-dict
+    # operations BEFORE any key is traversed, so an oversized map can
+    # never be iterated, rendered, or reach a hostile key's hooks — and
+    # its diagnostic stays short instead of listing every supplied key.
+    if not mapping:
+        raise PacketInputError("no artifacts provided: nothing to package")
+    if len(mapping) > MAX_PACKET_ARTIFACTS:
+        raise PacketInputError(
+            f"{len(mapping)} artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+        )
+    normalized: dict[str, Any] = {}
+    foreign = False
+    for key, value in mapping.items():
+        if type(key) is str:
+            normalized[key] = value
+        else:
+            foreign = True
+    if foreign:
+        raise PacketInputError("artifact role map: role keys must be builtin strings")
+    # Unknown roles are decided on proven exact strings only.
+    unknown = sorted(set(normalized) - set(ROLES))
+    if unknown:
+        raise PacketInputError(f"unknown artifact roles: {unknown}")
+    return normalized
 
 
 def _exact_sha256(value: Any, context: str) -> str:
@@ -368,7 +486,7 @@ def _evaluation_link(
     if type(provided) is not bool:
         raise PacketInputError(
             f"evaluation.artifacts.{counterpart_role}.provided: expected "
-            f"builtin bool, got {type(provided).__name__}"
+            f"builtin bool, got {_describe_type(provided)}"
         )
     if provided is False:
         return _not_computable_link(
@@ -398,7 +516,7 @@ def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
     max_rows = _exact_dict_field(cfg, "max_rows", "lab.config")
     if type(max_rows) is not int:
         raise PacketInputError(
-            f"lab.config.max_rows: expected builtin int, got {type(max_rows).__name__}"
+            f"lab.config.max_rows: expected builtin int, got {_describe_type(max_rows)}"
         )
     if not 0 < max_rows <= MAX_ROWS_CEILING:
         raise PacketInputError(
@@ -407,7 +525,7 @@ def _recorded_reader_bounds(lab: Mapping[str, Any]) -> tuple[int, int]:
     max_line_bytes = _exact_dict_field(cfg, "max_line_bytes", "lab.config")
     if type(max_line_bytes) is not int:
         raise PacketInputError(
-            f"lab.config.max_line_bytes: expected builtin int, got {type(max_line_bytes).__name__}"
+            f"lab.config.max_line_bytes: expected builtin int, got {_describe_type(max_line_bytes)}"
         )
     if not 1 <= max_line_bytes <= MAX_LINE_BYTES_CEILING:
         # Defensive ceiling: enforced here at extraction even if
@@ -476,22 +594,19 @@ def _lab_sequence_link(
 # ---------------------------------------------------------------------------
 
 
-def build_packet(paths: Mapping[str, pathlib.Path]) -> dict[str, Any]:
+def build_packet(paths: dict[str, pathlib.Path]) -> dict[str, Any]:
     """One deterministic ``nextness-evidence-packet-v1`` manifest.
 
-    ``paths`` maps roles (subset of ROLES, at least one) to files.
-    Manifest order is the fixed ROLES order regardless of invocation
-    order — determinism over convenience.
+    ``paths`` must be an EXACT builtin ``dict`` mapping known roles
+    (subset of ROLES, at least one, at most ``MAX_PACKET_ARTIFACTS``) to
+    files. Manifest order is the fixed ROLES order regardless of
+    invocation order — determinism over convenience.
+
+    The whole role-map grammar — exact-dict identity, emptiness, the
+    artifact ceiling, exact-string keys and known roles — is enforced by
+    ``_exact_role_map`` and is NOT repeated here.
     """
-    unknown = sorted(set(paths) - set(ROLES))
-    if unknown:
-        raise PacketInputError(f"unknown artifact roles: {unknown}")
-    if not paths:
-        raise PacketInputError("no artifacts provided: nothing to package")
-    if len(paths) > MAX_PACKET_ARTIFACTS:
-        raise PacketInputError(
-            f"{len(paths)} artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
-        )
+    paths = _exact_role_map(paths)
 
     entries: dict[str, dict[str, Any]] = {}
     parsed_by_role: dict[str, Any] = {}
@@ -564,14 +679,26 @@ def _repo_data_dir() -> pathlib.Path:
 
 
 def validate_output_path(
-    out_path: pathlib.Path, inputs: Mapping[str, pathlib.Path]
+    out_path: pathlib.Path, inputs: dict[str, pathlib.Path]
 ) -> None:
     """--output must resolve inside the primary input's directory (first
     provided role in ROLES order), never inside the repository data/
     tree, and never on a path aliasing ANY input — by resolved path or
     by file identity (hard links included). Identity is verified at
     validation time only; the same residual filesystem race as the NP6
-    lab applies and no stronger claim is made."""
+    lab applies and no stronger claim is made.
+
+    ``inputs`` must be an EXACT builtin ``dict`` of known roles: the same
+    complete grammar ``build_packet`` uses. That matters here beyond hook
+    safety — the alias sweep below only walks ROLES, so an UNKNOWN role
+    key used to be skipped entirely and could name the output path
+    itself, defeating the alias boundary; and a map with no known role
+    used to fall out of the primary-role selection as ``StopIteration``.
+    Both are now typed refusals from the shared boundary."""
+    # Same complete normalization as build_packet: primary-role selection
+    # below must never hash, compare or render a caller-controlled key,
+    # and no unknown or foreign key may reach the alias sweep.
+    inputs = _exact_role_map(inputs)
     primary = next(inputs[role] for role in ROLES if role in inputs)
     primary_dir = primary.resolve().parent
     out_resolved = out_path.resolve()
