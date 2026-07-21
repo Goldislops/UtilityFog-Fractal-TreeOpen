@@ -18,6 +18,8 @@ later PRs as we gain confidence about their tuning semantics.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Final
@@ -174,7 +176,25 @@ class TunableParam:
                     error=ValidationError.WRONG_TYPE,
                     message=f"{self.name} requires float, got {_describe_type(value)}.",
                 )
-            value = float(value)
+            # Bounded normalization: float() of an exact builtin int can
+            # overflow, and NaN would sail through the inclusive bound
+            # comparisons below. The refusal message never carries the
+            # supplied value — an oversized int would copy hundreds of
+            # digits into results and proposal output.
+            try:
+                value = float(value)
+            except (OverflowError, ValueError):
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires a finite float value.",
+                )
+            if not math.isfinite(value):
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires a finite float value.",
+                )
         if self.min_value is not None and value < self.min_value:
             return ValidationResult(
                 ok=False,

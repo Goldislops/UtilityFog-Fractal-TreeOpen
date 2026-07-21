@@ -540,3 +540,111 @@ def test_validate_source_has_no_value_type_name_lookup():
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     assert "type(value).__name__" not in code
     assert "isinstance" not in code
+
+
+# -- follow-up: bounded float normalization (finite-value totality) -----------
+#
+# The exact-type gate proves a proposed float-param value is builtin int or
+# float — but float() of an oversized int raises OverflowError, and NaN
+# passes both inclusive bound comparisons. Normalization is now bounded:
+# conversion failures and non-finite results get WRONG_TYPE with the
+# supplied-value-free message "<name> requires a finite float value.";
+# only finite normalized values reach the bound comparisons.
+
+_OVERSIZED_INT = 10 ** 400
+_FINITE_REFUSAL = "x requires a finite float value."
+
+
+def test_float_param_refuses_oversized_int_without_raising():
+    p = _float_param()
+    for value in (_OVERSIZED_INT, -_OVERSIZED_INT):
+        result = p.validate(value)  # must not raise OverflowError
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == _FINITE_REFUSAL
+
+
+def test_float_param_refuses_nan_and_infinities():
+    p = _float_param()
+    for value in (float("nan"), float("inf"), float("-inf")):
+        result = p.validate(value)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == _FINITE_REFUSAL
+
+
+def test_finite_refusal_message_carries_no_supplied_value():
+    digits = str(_OVERSIZED_INT)
+    for value in (_OVERSIZED_INT, float("inf"), float("nan")):
+        result = _float_param().validate(value)
+        assert len(result.message) < 80
+        assert digits[:20] not in result.message
+        assert "inf" not in result.message
+        assert "nan" not in result.message
+
+
+def test_finite_int_conversion_and_bound_messages_unchanged():
+    p = _float_param(min_value=0.0, max_value=1.0)
+    assert p.validate(0.25).ok
+    assert p.validate(1).ok
+    assert p.validate(2).message == "x=2.0 above max 1.0."
+    assert p.validate(-1).message == "x=-1.0 below min 0.0."
+
+
+def test_validate_proposal_propagates_finite_refusals():
+    result = validate_proposal({
+        "magnon_coupling": _OVERSIZED_INT,       # float param, oversized int
+        "magnon_sage_age_min": float("nan"),     # float param, NaN
+        "signal_interval": 12,                   # valid alongside
+    })
+    assert not result.ok
+    assert set(result.errors) == {"magnon_coupling", "magnon_sage_age_min"}
+    for name in ("magnon_coupling", "magnon_sage_age_min"):
+        assert result.errors[name].error is ValidationError.WRONG_TYPE
+        assert result.errors[name].message == f"{name} requires a finite float value."
+    assert result.unknown_params == []
+    assert all(len(r.message) < 80 for r in result.errors.values())
+
+
+def test_public_proposal_path_returns_validation_not_server_error():
+    """POST /api/tuning/propose with an oversized int previously escaped as
+    HTTP 500, and a NaN literal was ACCEPTED (200). Both must now be ordinary
+    422 rejections whose bodies never carry the supplied value."""
+    pytest.importorskip("flask")
+    from flask import Flask
+
+    from scripts.tuning_api import TuningState, create_blueprint
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        state = TuningState(data_dir=Path(td), gen_getter=lambda: 1_000_000)
+        app = Flask(__name__)
+        app.register_blueprint(create_blueprint(state))
+        client = app.test_client()
+
+        oversized_body = (
+            '{"params": {"magnon_coupling": ' + str(_OVERSIZED_INT)
+            + '}, "source": "human:kevin", "justification": "pin"}'
+        )
+        resp = client.post("/api/tuning/propose", data=oversized_body,
+                           content_type="application/json")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert body["status"] == "rejected"
+        err = body["validation"]["errors"]["magnon_coupling"]
+        assert err["error"] == "wrong_type"
+        assert err["message"] == "magnon_coupling requires a finite float value."
+        assert str(_OVERSIZED_INT)[:20] not in resp.get_data(as_text=True)
+
+        nan_body = ('{"params": {"magnon_coupling": NaN}, '
+                    '"source": "human:kevin", "justification": "pin"}')
+        resp = client.post("/api/tuning/propose", data=nan_body,
+                           content_type="application/json")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert body["status"] == "rejected"
+        err = body["validation"]["errors"]["magnon_coupling"]
+        assert err["error"] == "wrong_type"
+        assert err["message"] == "magnon_coupling requires a finite float value."
