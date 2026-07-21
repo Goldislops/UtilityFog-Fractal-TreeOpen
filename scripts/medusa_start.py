@@ -30,53 +30,71 @@ PYTHON = sys.executable
 CREATE_NO_WINDOW = 0x08000000
 
 # ---------------------------------------------------------------------------
-# API launch recognition: COMPLETE ACCEPTED COMMAND FORMS.
+# API launch recognition: LAUNCH ENVELOPE + PUBLIC-CLI ARGUMENT MIRROR.
 #
 # Detection must select the SERVICE, and only the service. Earlier revisions
 # matched substring signatures, and a substring recognizes a FRAGMENT: it can
 # stop mid-word ("--port" inside "--portability"), start mid-word ("scripts"
 # inside "my_scripts"), or ignore what follows ("--help", trailing arguments,
-# a nested path handed to another tool). The recognizer below accepts a
-# complete command form instead, end to end:
+# a nested path handed to another tool). The recognizer below has two parts,
+# and the claims for each are deliberately different.
 #
-#   <interpreter> [-u] -m scripts.medusa_api            <accepted arguments>
-#   <interpreter> [-u] <path to scripts\medusa_api.py>  <accepted arguments>
+# Part one, the SUPPORTED PYTHON LAUNCH ENVELOPE:
 #
-# <accepted arguments> is the service's own option grammar — "--port" with a
-# value naming a real port (1..65535) and "--host" with a value, each at most
-# once, in either order, both optional — and nothing may follow: the grammar
-# must consume the command to its END. The end boundary is what a substring
-# can never assert, and it is what distinguishes the bare launch (recognized;
-# the port defaults) from "--help" (refused: not the service's grammar).
+#   <interpreter> [-u] -m scripts.medusa_api            <arguments>
+#   <interpreter> [-u] <path to scripts\medusa_api.py>  <arguments>
 #
 # The launch target must sit in LAUNCH POSITION, immediately after the
-# interpreter and its optional -u. A command that merely NAMES the file or
-# module elsewhere — a nested path argument to another tool, a quoted textual
-# mention, a runner invocation — is refused structurally, whatever options it
-# carries. That closes the substring design's stated residual:
-# "tool.py C:\...\scripts\medusa_api.py --port 8080" is refused because
-# "tool.py" occupies the launch position.
+# interpreter and its optional -u. This envelope is NARROW BY DESIGN: -u is
+# the only interpreter option modeled, because it is the only one any
+# launcher in this system uses. No claim of complete Python-interpreter
+# -option coverage is made — an exotic launch such as ``python -X utf8 -m
+# scripts.medusa_api`` is outside the envelope and goes unrecognized. What
+# the launch position buys is structural: a command that merely NAMES the
+# file or module elsewhere — a nested path argument to another tool, a
+# quoted textual mention, a runner invocation — is refused whatever
+# arguments it carries ("tool.py C:\...\scripts\medusa_api.py --port 8080"
+# is refused because "tool.py" occupies the launch position).
+#
+# Part two, the API ARGUMENT GRAMMAR, is not an independent grammar at all:
+# it is a silent, non-exiting MIRROR of the public CLI that
+# scripts/medusa_api.py actually exposes (argparse with --port type=int,
+# --host type=str, and the auto-added --help, abbreviations allowed). The
+# real parser is the authority on what launches: it accepts "--port=8080",
+# unique abbreviations like "--po 8080" and "--ho localhost", repeated
+# options with the last value winning, empty host values ("--host """ and
+# "--host="), and ANY int()-parsable port spelling ("+8080", "8_080", "0",
+# even negative numbers) — argparse-valid, not socket-valid, because a
+# process launched that way exists and must be visible to status, stop and
+# duplicate prevention. The mirror accepts exactly those. It refuses, all
+# silently: help in any spelling (that process prints usage and exits, so
+# it is never the running service), ambiguous options ("--h": help/host),
+# unknown options ("--portability"), invalid integers, missing values, and
+# extra positional arguments. parse_args consumes the ENTIRE trailing
+# list, which is the end-of-command boundary — and it is what a substring
+# could never assert.
 #
 # The path form accepts absolute and relative paths, both separator styles,
 # quoted or unquoted (Windows quotes a path containing spaces; element
 # splitting honors double quotes as grouping characters, and an empty
-# quoted group still yields an element — a real, empty argument the
-# grammar then refuses). Path and module elements compare
-# case-insensitively — Windows filesystem semantics, matching the old query's
-# behavior — but must be COMPLETE: the final path elements must be exactly
-# "scripts\medusa_api.py" and the module exactly "scripts.medusa_api", so a
-# longer word ("my_scripts", "medusa_api_tests", "medusa_api.pyc") never
-# matches. Option names stay exact: argparse itself is case-sensitive.
+# quoted group still yields an element — a real, empty argument the mirror
+# then refuses as positional). Path and module elements compare
+# case-insensitively — Windows filesystem semantics, matching the old
+# query's behavior — but must be COMPLETE: the final path elements must be
+# exactly "scripts\medusa_api.py" and the module exactly
+# "scripts.medusa_api", so a longer word ("my_scripts", "medusa_api_tests",
+# "medusa_api.pyc") never matches. Long-option names and abbreviations
+# stay case-sensitive, exactly as argparse treats them.
 #
-# Stated boundaries of the accepted grammar, honestly: only the separate
-# value form is a launch shape ("--port 8080" — the only form any launcher
-# here has ever produced); joined forms ("--port=8080", the fused
-# "-mscripts.medusa_api") and interpreter options other than -u are not
-# accepted commands. Quote handling is a deliberate simplification of the
-# full CommandLineToArgvW rules — backslash-escaped quotes are not
-# modeled, so an adversarially quote-crafted command line can parse
-# differently here than in the OS; every launcher and shell in this
-# system produces conventionally quoted commands. And recognition is by
+# Honest boundaries that remain: quote handling is a deliberate
+# simplification of the full CommandLineToArgvW rules — backslash-escaped
+# quotes are not modeled, so an adversarially quote-crafted command line
+# can parse differently here than in the OS; every launcher and shell in
+# this system produces conventionally quoted commands. The mirror parses
+# with the ORCHESTRATOR's own argparse — a service launched by a
+# different Python whose argparse semantics differ could in principle be
+# classified differently than its own parser classified it; every
+# launcher here uses the one seat interpreter. And recognition is by
 # command SHAPE: an identically shaped launch of another checkout's copy
 # of the script is indistinguishable — as in every prior design, the
 # shape is the contract.
@@ -112,45 +130,70 @@ def _split_command_elements(command: str) -> list:
     return elements
 
 
-def _is_valid_port_value(value: str) -> bool:
-    """A port value is decimal digits naming a real port: 1..65535."""
-    return value.isascii() and value.isdigit() and 0 < int(value) <= 65535
+class _ArgumentRefusal(Exception):
+    """Raised inside the mirror parser instead of printing or exiting."""
 
 
-def _is_accepted_argument_list(arguments: list) -> bool:
-    """Accept exactly the service's own option grammar, through to the end.
+class _SilentArgumentMirror(argparse.ArgumentParser):
+    """An ArgumentParser that can neither write output nor exit.
 
-    ``--port <valid value>`` and ``--host <value>``, each at most once, in
-    either order, both optional. Anything else — an unknown option, a
-    missing or invalid value, a duplicate, a trailing element — refuses the
-    whole command. Consuming every element IS the end-of-command boundary.
+    Every argparse refusal path funnels through ``error`` (which normally
+    prints usage to stderr and exits) or ``exit``; overriding both means
+    process scanning can never emit a byte or terminate the orchestrator.
     """
-    seen = set()
-    index = 0
-    while index < len(arguments):
-        option = arguments[index]
-        if option not in ("--port", "--host") or option in seen:
-            return False
-        if index + 1 >= len(arguments):
-            return False  # the option's value is missing
-        value = arguments[index + 1]
-        if option == "--port":
-            if not _is_valid_port_value(value):
-                return False
-        elif not value or value.startswith("-"):
-            return False
-        seen.add(option)
-        index += 2
-    return True
+
+    def error(self, message):
+        raise _ArgumentRefusal(message)
+
+    def exit(self, status=0, message=None):
+        raise _ArgumentRefusal(message or str(status))
+
+
+def _build_api_argument_mirror() -> argparse.ArgumentParser:
+    """The PUBLIC CLI of scripts/medusa_api.py, mirrored silently.
+
+    The same long-option table the real entry point exposes — ``--help``
+    (argparse auto-adds it there; declared here as a plain flag so it can
+    never print), ``--port`` ``type=int``, ``--host`` ``type=str`` — so
+    abbreviation and ambiguity resolve exactly as the real parser resolves
+    them. The short ``-h`` is deliberately absent: it refuses as unknown,
+    and the real ``-h`` process prints usage and exits, so the outcome is
+    the same refusal.
+    """
+    mirror = _SilentArgumentMirror(add_help=False)
+    mirror.add_argument("--help", action="store_true")
+    mirror.add_argument("--port", type=int, default=8080)
+    mirror.add_argument("--host", type=str, default="0.0.0.0")
+    return mirror
+
+
+_API_ARGUMENT_MIRROR = _build_api_argument_mirror()
+
+
+def _accepts_api_arguments(arguments: list) -> bool:
+    """True when the public CLI would accept ``arguments`` AND keep serving.
+
+    ``parse_args`` consumes the ENTIRE trailing list — ambiguous options,
+    unknown options, invalid integers, missing values and extra positional
+    arguments all refuse, silently. A parse that succeeds only to request
+    help is refused too: that process prints usage and exits, so it is
+    never the running service.
+    """
+    try:
+        namespace = _API_ARGUMENT_MIRROR.parse_args(list(arguments))
+    except _ArgumentRefusal:
+        return False
+    return not namespace.help
 
 
 def _is_api_launch_command(command: str) -> bool:
-    """True only for a complete accepted API launch command.
+    """True only for a supported API launch command.
 
     The launch target — the module element or the script path — must sit in
     launch position, immediately after the interpreter and its optional
-    ``-u``, and everything after it must satisfy the accepted argument
-    grammar to the end of the command.
+    ``-u`` (the supported launch envelope), and everything after it must be
+    an argument list the public CLI accepts, consumed to the end of the
+    command.
     """
     elements = _split_command_elements(command)
     rest = elements[1:]  # elements[0] is the interpreter, whatever its path
@@ -162,11 +205,11 @@ def _is_api_launch_command(command: str) -> bool:
         return (
             len(rest) >= 2
             and rest[1].lower() == _API_MODULE
-            and _is_accepted_argument_list(rest[2:])
+            and _accepts_api_arguments(rest[2:])
         )
     target = rest[0].replace("/", "\\").lower()
     if target == _API_SCRIPT or target.endswith("\\" + _API_SCRIPT):
-        return _is_accepted_argument_list(rest[1:])
+        return _accepts_api_arguments(rest[1:])
     return False
 
 
@@ -182,11 +225,12 @@ SERVICES = {
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
     # and the service exits immediately.
     #
-    # The marker is the RECOGNIZER of complete accepted launch commands
-    # defined above — not a substring collection. Selection requires the
-    # WHOLE command to be an accepted launch form: module or legacy script,
-    # bare or carrying the service's own options in either order, quoted or
-    # unquoted path, either separator style, and nothing trailing.
+    # The marker is the RECOGNIZER defined above — not a substring
+    # collection. Selection requires the WHOLE command to be a supported
+    # launch: module or legacy script in launch position, quoted or
+    # unquoted path, either separator style, followed by any argument list
+    # the PUBLIC CLI accepts (mirrored argparse semantics, nothing
+    # trailing).
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],

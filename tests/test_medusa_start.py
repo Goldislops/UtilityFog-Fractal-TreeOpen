@@ -150,27 +150,34 @@ def test_every_real_service_declares_exactly_one_launch_form() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Process selection: COMPLETE ACCEPTED COMMAND FORMS, not substrings.
+# Process selection: LAUNCH ENVELOPE + PUBLIC-CLI ARGUMENT MIRROR.
 #
 # A substring signature recognizes a fragment, and a fragment can stop
 # mid-word ("--port" inside "--portability"), start mid-word ("scripts"
 # inside "my_scripts"), or ignore what follows ("--help", trailing
-# arguments, a nested path handed to another tool). The recognizer accepts
-# a complete command instead:
+# arguments, a nested path handed to another tool). The recognizer has two
+# parts with deliberately different claims:
 #
-#   <interpreter> [-u] -m scripts.medusa_api            <accepted arguments>
-#   <interpreter> [-u] <path to scripts\medusa_api.py>  <accepted arguments>
+#   <interpreter> [-u] -m scripts.medusa_api            <arguments>
+#   <interpreter> [-u] <path to scripts\medusa_api.py>  <arguments>
 #
-# where the accepted arguments are the service's own option grammar —
-# "--port <1..65535>" and "--host <value>", each at most once, either
-# order, both optional — consumed to the END of the command. The end
-# boundary is what a substring can never assert: it recognizes the bare
-# launch (the port defaults) while refusing "--help", two commands one of
-# which is a strict prefix of the other. And because the launch target
-# must sit in launch position, a command that merely NAMES the file or
-# module — a nested path, a quoted mention, a runner invocation — is
-# refused structurally, even when the service's own options follow. That
-# closes the substring design's stated residual.
+# The SUPPORTED LAUNCH ENVELOPE is narrow by design — -u is the only
+# interpreter option modeled, and no claim of complete Python-interpreter
+# -option coverage is made. The ARGUMENT list is not an independent
+# grammar: it is a silent, non-exiting mirror of the public CLI that
+# scripts/medusa_api.py exposes (argparse: --port type=int, --host
+# type=str, auto --help, abbreviations allowed). The real parser is the
+# authority: "--port=8080", unique abbreviations, repeats (last wins),
+# empty host values and any int()-parsable port are ACCEPTED because a
+# process launched that way exists and must be visible to status, stop
+# and duplicate prevention; help in any spelling, ambiguous or unknown
+# options, invalid integers, missing values and extra positionals are
+# REFUSED, silently. parse_args consumes the ENTIRE trailing list — the
+# end-of-command boundary a substring could never assert; it recognizes
+# the bare launch while refusing "--help", a strict prefix pair. And the
+# launch position refuses a command that merely NAMES the file or module,
+# even when valid service arguments follow — the substring design's
+# stated residual, closed.
 #
 # The portable model is the recognizer itself: pure Python over fixed
 # command strings, identical on every host. The emitted host-shell side is
@@ -212,6 +219,23 @@ _ACCEPTED_COMMANDS = (
     'python.exe "C:\\Program Files\\UtilityFog\\scripts\\medusa_api.py" --host 0.0.0.0 --port 8080',
     # A quoted interpreter path containing spaces.
     '"C:\\Program Files\\Python\\python.exe" -u -m scripts.medusa_api --port 8080',
+    # The public CLI's own acceptances (Jack's audit matrix): = forms,
+    # unique abbreviations, repeats (last value wins), empty host values,
+    # and any int()-parsable port spelling — argparse-valid, not
+    # socket-valid, because a process launched that way exists and must be
+    # visible to status, stop and duplicate prevention.
+    "python.exe -m scripts.medusa_api --port=8080",
+    "python.exe -m scripts.medusa_api --host=localhost",
+    "python.exe -m scripts.medusa_api --po 8080",
+    "python.exe -m scripts.medusa_api --ho localhost",
+    "python.exe -m scripts.medusa_api --port 8080 --port 9090",
+    'python.exe -m scripts.medusa_api --host ""',
+    "python.exe -m scripts.medusa_api --host=",
+    "python.exe -m scripts.medusa_api --port +8080",
+    "python.exe -m scripts.medusa_api --port 8_080",
+    "python.exe -m scripts.medusa_api --port 0",
+    "python.exe -m scripts.medusa_api --port 65536",
+    "python.exe -u C:\\UtilityFog\\scripts\\medusa_api.py --port=8080",
 )
 
 #: Refused commands — fixed literals. Most name the module or the file;
@@ -221,18 +245,21 @@ _REFUSED_COMMANDS = (
     "python.exe -m scripts.medusa_api_tests",
     "python.exe -m scripts.medusa_api_tests --port 9000",
     "python.exe -m scripts.medusa_api2 --port 8080",
-    # --help and other unknown, invalid or incomplete options.
+    # Help in every spelling (that process prints usage and exits, so it
+    # is never the running service), ambiguous, unknown, invalid or
+    # incomplete options — exactly what the public CLI itself refuses.
     "python.exe -m scripts.medusa_api --help",
     "python.exe -u -m scripts.medusa_api --help",
+    "python.exe -m scripts.medusa_api -h",
+    "python.exe -m scripts.medusa_api --he",
+    "python.exe -m scripts.medusa_api --h 0.0.0.0",
     "python.exe -m scripts.medusa_api --port",
     "python.exe -m scripts.medusa_api --port 8o8o",
-    "python.exe -m scripts.medusa_api --port 0",
-    "python.exe -m scripts.medusa_api --port 65536",
-    "python.exe -m scripts.medusa_api --port=8080",
-    "python.exe -m scripts.medusa_api --port 8080 --port 9090",
+    "python.exe -m scripts.medusa_api --port 8080.0",
     "python.exe -m scripts.medusa_api --host",
     "python.exe -m scripts.medusa_api --host --port 8080",
     "python.exe -m scripts.medusa_api --portability",
+    "python.exe -m scripts.medusa_api --ports 8080",
     "python.exe -u C:\\UtilityFog\\scripts\\medusa_api.py --portability",
     # Extra trailing arguments beyond the accepted grammar.
     "python.exe -m scripts.medusa_api --port 8080 extra",
@@ -378,13 +405,60 @@ def test_element_splitting_honors_double_quotes() -> None:
     assert _split_command_elements('a "') == ["a", ""]
 
 
-def test_port_values_must_name_a_real_port() -> None:
-    from scripts.medusa_start import _is_valid_port_value
+def test_public_cli_argument_semantics_are_mirrored() -> None:
+    """Jack's audit matrix: recognition must match what the PUBLIC CLI
+    (scripts/medusa_api.py argparse) accepts — not a stricter private
+    grammar. A genuine running API launched with any of the accepted
+    forms must be visible to status, stop and duplicate prevention."""
+    recognize = SERVICES["api"]["marker"]
+    prefix = "python.exe -u -m scripts.medusa_api "
+    for tail in (
+        "--port=8080", "--host=localhost",
+        "--po 8080", "--ho localhost", "--po=8080", "--hos 127.0.0.1",
+        "--port 8080 --port 9090",
+        '--host ""', "--host=",
+        "--port +8080", "--port 8_080", "--port 0", "--port 65536",
+        "--port -1",  # argparse's negative-number rule: the real CLI parses it
+    ):
+        assert recognize(prefix + tail), tail
+    for tail in (
+        "--help", "-h", "--he", "--h 0.0.0.0", "--help=x",
+        "--port", "--port 8o8o", "--port 8080.0",
+        "--host", "--host --port 8080",
+        "--portability", "--ports 8080", "--port8080",
+        "extra", "--port 8080 extra", "-- --port 8080",
+    ):
+        assert not recognize(prefix + tail), tail
 
-    for value in ("1", "80", "8080", "65535"):
-        assert _is_valid_port_value(value), value
-    for value in ("", "0", "65536", "8o8o", "-1", "8080 ", "８０８０"):
-        assert not _is_valid_port_value(value), value
+
+def test_refusal_and_recognition_are_silent(capsys) -> None:
+    """Process scanning must never write a byte to stdout or stderr:
+    argparse's print-and-exit paths are overridden into silent refusals."""
+    recognize = SERVICES["api"]["marker"]
+    for command in _ACCEPTED_COMMANDS + _REFUSED_COMMANDS:
+        recognize(command)
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == ""
+
+
+def test_recognizer_mirror_matches_the_public_cli_source() -> None:
+    """The mirror must track the PUBLIC CLI, never the other way around.
+
+    Pin the real argparse configuration (scripts/medusa_api.py entry
+    point) at source level — exactly these two options and no others — so
+    a CLI change breaks this pin loudly instead of silently diverging
+    from the mirror. The public CLI file itself is never edited here."""
+    src = (PROJECT_ROOT / "scripts" / "medusa_api.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--port", type=int, default=8080)' in src
+    assert 'parser.add_argument("--host", type=str, default="0.0.0.0")' in src
+    assert src.count("parser.add_argument(") == 2
+    # The constructor too: kwargs like allow_abbrev=False would change
+    # abbreviation semantics without touching any add_argument line.
+    assert (
+        'parser = argparse.ArgumentParser(description="Medusa REST API (Phase 16a)")'
+        in src
+    )
 
 
 def test_recognition_is_a_positive_grammar_not_a_runner_blacklist() -> None:
@@ -395,9 +469,10 @@ def test_recognition_is_a_positive_grammar_not_a_runner_blacklist() -> None:
 
     source = (
         inspect.getsource(ms._is_api_launch_command)
-        + inspect.getsource(ms._is_accepted_argument_list)
+        + inspect.getsource(ms._accepts_api_arguments)
         + inspect.getsource(ms._split_command_elements)
-        + inspect.getsource(ms._is_valid_port_value)
+        + inspect.getsource(ms._build_api_argument_mirror)
+        + inspect.getsource(ms._SilentArgumentMirror)
     )
     assert "pytest" not in source
     assert "unittest" not in source
