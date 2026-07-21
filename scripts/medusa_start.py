@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 import time
 import subprocess
 import argparse
@@ -27,6 +28,147 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 CREATE_NO_WINDOW = 0x08000000
+
+# ---------------------------------------------------------------------------
+# API launch recognition: COMPLETE ACCEPTED COMMAND FORMS.
+#
+# Detection must select the SERVICE, and only the service. Earlier revisions
+# matched substring signatures, and a substring recognizes a FRAGMENT: it can
+# stop mid-word ("--port" inside "--portability"), start mid-word ("scripts"
+# inside "my_scripts"), or ignore what follows ("--help", trailing arguments,
+# a nested path handed to another tool). The recognizer below accepts a
+# complete command form instead, end to end:
+#
+#   <interpreter> [-u] -m scripts.medusa_api            <accepted arguments>
+#   <interpreter> [-u] <path to scripts\medusa_api.py>  <accepted arguments>
+#
+# <accepted arguments> is the service's own option grammar — "--port" with a
+# value naming a real port (1..65535) and "--host" with a value, each at most
+# once, in either order, both optional — and nothing may follow: the grammar
+# must consume the command to its END. The end boundary is what a substring
+# can never assert, and it is what distinguishes the bare launch (recognized;
+# the port defaults) from "--help" (refused: not the service's grammar).
+#
+# The launch target must sit in LAUNCH POSITION, immediately after the
+# interpreter and its optional -u. A command that merely NAMES the file or
+# module elsewhere — a nested path argument to another tool, a quoted textual
+# mention, a runner invocation — is refused structurally, whatever options it
+# carries. That closes the substring design's stated residual:
+# "tool.py C:\...\scripts\medusa_api.py --port 8080" is refused because
+# "tool.py" occupies the launch position.
+#
+# The path form accepts absolute and relative paths, both separator styles,
+# quoted or unquoted (Windows quotes a path containing spaces; element
+# splitting honors double quotes as grouping characters, and an empty
+# quoted group still yields an element — a real, empty argument the
+# grammar then refuses). Path and module elements compare
+# case-insensitively — Windows filesystem semantics, matching the old query's
+# behavior — but must be COMPLETE: the final path elements must be exactly
+# "scripts\medusa_api.py" and the module exactly "scripts.medusa_api", so a
+# longer word ("my_scripts", "medusa_api_tests", "medusa_api.pyc") never
+# matches. Option names stay exact: argparse itself is case-sensitive.
+#
+# Stated boundaries of the accepted grammar, honestly: only the separate
+# value form is a launch shape ("--port 8080" — the only form any launcher
+# here has ever produced); joined forms ("--port=8080", the fused
+# "-mscripts.medusa_api") and interpreter options other than -u are not
+# accepted commands. Quote handling is a deliberate simplification of the
+# full CommandLineToArgvW rules — backslash-escaped quotes are not
+# modeled, so an adversarially quote-crafted command line can parse
+# differently here than in the OS; every launcher and shell in this
+# system produces conventionally quoted commands. And recognition is by
+# command SHAPE: an identically shaped launch of another checkout's copy
+# of the script is indistinguishable — as in every prior design, the
+# shape is the contract.
+# ---------------------------------------------------------------------------
+
+_API_MODULE = "scripts.medusa_api"
+_API_SCRIPT = "scripts\\medusa_api.py"
+
+
+def _split_command_elements(command: str) -> list:
+    """Split a command line into its elements.
+
+    Whitespace separates elements; double quotes group — they bound an
+    element (or part of one) and are not characters of it. A quoted group
+    with nothing in it still yields an element: ``""`` (and a dangling
+    ``"``) is a real, empty argument to the process, so it must survive
+    splitting for the grammar to refuse it as a trailing element.
+    """
+    elements, current, quoted, grouped = [], [], False, False
+    for character in command:
+        if character == '"':
+            quoted = not quoted
+            grouped = True
+        elif character in " \t" and not quoted:
+            if current or grouped:
+                elements.append("".join(current))
+                current = []
+            grouped = False
+        else:
+            current.append(character)
+    if current or grouped:
+        elements.append("".join(current))
+    return elements
+
+
+def _is_valid_port_value(value: str) -> bool:
+    """A port value is decimal digits naming a real port: 1..65535."""
+    return value.isascii() and value.isdigit() and 0 < int(value) <= 65535
+
+
+def _is_accepted_argument_list(arguments: list) -> bool:
+    """Accept exactly the service's own option grammar, through to the end.
+
+    ``--port <valid value>`` and ``--host <value>``, each at most once, in
+    either order, both optional. Anything else — an unknown option, a
+    missing or invalid value, a duplicate, a trailing element — refuses the
+    whole command. Consuming every element IS the end-of-command boundary.
+    """
+    seen = set()
+    index = 0
+    while index < len(arguments):
+        option = arguments[index]
+        if option not in ("--port", "--host") or option in seen:
+            return False
+        if index + 1 >= len(arguments):
+            return False  # the option's value is missing
+        value = arguments[index + 1]
+        if option == "--port":
+            if not _is_valid_port_value(value):
+                return False
+        elif not value or value.startswith("-"):
+            return False
+        seen.add(option)
+        index += 2
+    return True
+
+
+def _is_api_launch_command(command: str) -> bool:
+    """True only for a complete accepted API launch command.
+
+    The launch target — the module element or the script path — must sit in
+    launch position, immediately after the interpreter and its optional
+    ``-u``, and everything after it must satisfy the accepted argument
+    grammar to the end of the command.
+    """
+    elements = _split_command_elements(command)
+    rest = elements[1:]  # elements[0] is the interpreter, whatever its path
+    if rest and rest[0] == "-u":
+        rest = rest[1:]
+    if not rest:
+        return False
+    if rest[0] == "-m":
+        return (
+            len(rest) >= 2
+            and rest[1].lower() == _API_MODULE
+            and _is_accepted_argument_list(rest[2:])
+        )
+    target = rest[0].replace("/", "\\").lower()
+    if target == _API_SCRIPT or target.endswith("\\" + _API_SCRIPT):
+        return _is_accepted_argument_list(rest[1:])
+    return False
+
 
 # Service definitions
 SERVICES = {
@@ -40,70 +182,15 @@ SERVICES = {
     # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
     # and the service exits immediately.
     #
-    # Detection must select the SERVICE, and only the service. Each signature
-    # therefore describes a LAUNCH SHAPE whose every element is COMPLETE: it
-    # begins at an argument boundary — a space or a path separator — and ends
-    # with the service's own ``--port`` argument plus the separator that
-    # follows it:
-    #
-    #   " -m scripts.medusa_api --port "     the new module command
-    #   "\\scripts\\medusa_api.py --port "   legacy launch, Windows separators
-    #   "/scripts/medusa_api.py --port "     legacy launch, forward slashes
-    #   "\\scripts\\medusa_api.py\" --port " the same, path quoted for spaces
-    #   "/scripts/medusa_api.py\" --port "   the same, quoted, forward slashes
-    #   " scripts\\medusa_api.py --port "    explicit relative launch, Windows
-    #   " scripts/medusa_api.py --port "     explicit relative launch, POSIX
-    #
-    # Bounding BOTH sides is what stops a prefix from posing as a word.
-    # ``-m scripts.medusa_api_tests`` embeds the module name but not the
-    # module ELEMENT; ``-m scripts.medusa_api --help`` names the module
-    # without the service's argument list; ``--portability`` embeds
-    # ``--port`` but is a different argument, so a nested unrelated path
-    # handed to another tool (``tool.py C:\\...\\scripts\\medusa_api.py
-    # --portability``) is refused too. The trailing space also asserts the
-    # separate-value form ``--port <value>`` — the only form any launcher
-    # here has ever produced. Absolute-path test runs
-    # (``python -m pytest C:\\UtilityFog\\scripts\\medusa_api.py``),
-    # ``tests/test_medusa_api.py``, ``-k medusa_api`` and
-    # ``-c "import scripts.medusa_api"`` all remain refused: this is a
-    # positive test for the launch shape, NOT an exclusion of the word
-    # "pytest"; nothing here enumerates test runners.
-    #
-    # Both separators are covered because the orchestrator built the Windows
-    # form while a hand-typed launch may use forward slashes, and missing
-    # either one starts a SECOND API beside the first. The quoted variants
-    # cover an install path containing spaces, where Windows wraps the script
-    # path in double quotes so the closing quote sits between the path and
-    # the arguments. The relative variants are EXPLICIT complete forms
-    # anchored by the argument boundary before ``scripts`` — relative support
-    # is NOT obtained by removing the leading separator from the absolute
-    # forms, which would let any longer word ending in ``scripts``
-    # (``my_scripts\\medusa_api.py --port 8080``) match as the service.
-    #
-    # Residual, stated honestly: a command that names the file as a complete
-    # ``scripts`` element AND carries ``--port <value>`` in launch position
-    # is indistinguishable from a launch by command-line substring alone. No
-    # real test runner does that (pytest rejects ``--port``), and narrowing
-    # further would need adjacency matching that PowerShell ``-like`` cannot
-    # express without wildcards the portable tests could not faithfully
-    # model. The boundary also cuts the other way: a hand launch that omits
-    # ``--port`` (relying on the argparse default) or reorders it behind
-    # ``--host`` shows no recognized shape and goes undetected. The bare
-    # miss is forced, not chosen — the bare command line is a strict prefix
-    # of the ``--help`` command line, so any substring matching one matches
-    # both — and the orchestrator itself always passes ``--port``.
+    # The marker is the RECOGNIZER of complete accepted launch commands
+    # defined above — not a substring collection. Selection requires the
+    # WHOLE command to be an accepted launch form: module or legacy script,
+    # bare or carrying the service's own options in either order, quoted or
+    # unquoted path, either separator style, and nothing trailing.
     "api": {
         "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": (
-            " -m scripts.medusa_api --port ",
-            "\\scripts\\medusa_api.py --port ",
-            "/scripts/medusa_api.py --port ",
-            "\\scripts\\medusa_api.py\" --port ",
-            "/scripts/medusa_api.py\" --port ",
-            " scripts\\medusa_api.py --port ",
-            " scripts/medusa_api.py --port ",
-        ),
+        "marker": _is_api_launch_command,
         "description": "REST API (Phase 16a)",
     },
     "geometry": {
@@ -114,38 +201,76 @@ SERVICES = {
 }
 
 
-def _signatures(marker) -> tuple:
-    """Normalize a marker to a tuple of launch signatures.
+def build_process_filter(marker: str) -> str:
+    """PowerShell ``Where-Object`` predicate for a plain-string marker.
 
-    A plain string is a single signature (engine, watchdog and geometry all
-    use that form and are unaffected); a tuple is used verbatim.
+    ``python.exe AND (CommandLine contains marker)`` — the engine, watchdog
+    and geometry selectors keep this exact substring form, unchanged.
     """
-    return (marker,) if isinstance(marker, str) else tuple(marker)
+    return f"$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*{marker}*')"
 
 
-def build_process_filter(marker) -> str:
-    """PowerShell ``Where-Object`` predicate for a service's launch signatures.
+#: Host-shell query for the recognizer path: enumerate every python.exe
+#: process with its PID and full command line, as JSON. Recognition happens
+#: in Python — the shell filters by PROCESS NAME only, so the emitted query
+#: carries no knowledge of any launch form.
+_PYTHON_PROCESS_QUERY = (
+    "Where-Object {$_.Name -eq 'python.exe'} | "
+    "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+)
 
-    Shape: ``python.exe AND (matches A OR matches B OR ...)`` — one query
-    however many signatures a service declares. The alternatives are
-    PARENTHESIZED so the process-name test applies to all of them — without
-    the parentheses, ``-and`` would bind to the first alternative only and
-    every later signature would match any process of any name.
+
+def _parse_process_rows(stdout: str) -> list:
+    """Rows from the JSON query: nothing, one bare object, or an array.
+
+    PowerShell emits a bare object (not a one-element array) when the
+    pipeline yields a single row, and nothing at all when it yields none.
     """
-    alternatives = " -or ".join(
-        f"$_.CommandLine -like '*{signature}*'" for signature in _signatures(marker)
-    )
-    return f"$_.Name -eq 'python.exe' -and ({alternatives})"
+    text = stdout.strip()
+    if not text:
+        return []
+    rows = json.loads(text)
+    return [rows] if isinstance(rows, dict) else rows
+
+
+def _select_recognized_pids(rows, recognizer) -> list:
+    """Ordered, de-duplicated PIDs of rows whose command is recognized.
+
+    A row without a PID is skipped; a row without a command line
+    (``CommandLine`` can be null) is refused. Order follows the query; a
+    PID appearing more than once is reported once.
+    """
+    pids = []
+    for row in rows:
+        pid = row.get("ProcessId")
+        if pid is None:
+            continue
+        pid = int(pid)
+        if recognizer(row.get("CommandLine") or "") and pid not in pids:
+            pids.append(pid)
+    return pids
 
 
 def find_process(marker) -> list:
-    """Find running python.exe processes matching any of the launch signatures.
+    """Find running python.exe processes selected by ``marker``.
 
-    ``marker`` is a single signature string or a tuple of them. All
-    signatures are combined into ONE query, so a process matching more than
-    one is still reported once; the result is de-duplicated in order anyway.
+    A plain-string marker keeps the original substring query, emitted and
+    parsed exactly as before (engine, watchdog, geometry). A callable
+    marker is a full-command recognizer: the shell enumerates python.exe
+    processes and Python classifies each command line, so the shell query
+    itself never encodes a launch form.
     """
     try:
+        if callable(marker):
+            # -NoProfile -NonInteractive keep stdout pure JSON: the strict
+            # parser is all-or-nothing, so a profile banner would otherwise
+            # read as "nothing running" (fail-safe, but a double-start risk).
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-CimInstance Win32_Process | " + _PYTHON_PROCESS_QUERY],
+                capture_output=True, text=True, timeout=10,
+            )
+            return _select_recognized_pids(_parse_process_rows(result.stdout), marker)
         result = subprocess.run(
             ["powershell", "-Command",
              f"Get-CimInstance Win32_Process | Where-Object {{{build_process_filter(marker)}}} | Select-Object ProcessId | Format-List"],
