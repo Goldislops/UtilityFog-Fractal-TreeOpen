@@ -11,6 +11,8 @@ Verifies the schema framework and the initial parameter registry:
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from scripts.params_schema import (
@@ -271,3 +273,378 @@ def test_schema_dict_param_entries_have_required_keys():
                 "min_value", "max_value"}
     for name, entry in schema["params"].items():
         assert required <= set(entry), f"{name} missing keys: {required - set(entry)}"
+
+
+# -- Batch 5 — exact-value totality: hostile proposed values ------------------
+#
+# validate() must decide a proposed value by exact type(value) identity alone.
+# A rejected value's methods, properties and metaclass must never run: not
+# isinstance() (reads __class__), not type(value).__name__ (reads the
+# metaclass), not bounds/float() on a subclass (runs __lt__/__float__).
+# Each hostile below records every hook invocation; a passing test asserts
+# the typed WRONG_TYPE result AND an empty call log.
+
+
+def _int_param(**kwargs) -> TunableParam:
+    defaults = dict(
+        name="n",
+        value_type=int,
+        default=1,
+        category=Category.AUTO,
+        group="test",
+        description="n",
+        min_value=0,
+        max_value=10,
+    )
+    defaults.update(kwargs)
+    return TunableParam(**defaults)
+
+
+def _bool_param(**kwargs) -> TunableParam:
+    defaults = dict(
+        name="enabled",
+        value_type=bool,
+        default=True,
+        category=Category.AUTO,
+        group="test",
+        description="enabled",
+    )
+    defaults.update(kwargs)
+    return TunableParam(**defaults)
+
+
+def _hostile_name_value():
+    """Value whose class-name lookup raises: type(v).__name__ consults the
+    metaclass, so a hostile metaclass turns message formatting into a hook."""
+
+    class Meta(type):
+        calls: list[str] = []
+
+        @property
+        def __name__(cls):
+            Meta.calls.append("__name__")
+            raise RuntimeError("metaclass __name__ hook executed")
+
+    bomb_cls = Meta("NameBomb", (), {})
+    return bomb_cls(), Meta.calls
+
+
+def _hostile_class_value():
+    """Value whose __class__ property raises — isinstance() reads it whenever
+    the exact-type fast path misses."""
+
+    class ClassBomb:
+        calls: list[str] = []
+
+        @property
+        def __class__(self):
+            ClassBomb.calls.append("__class__")
+            raise RuntimeError("__class__ hook executed")
+
+    return ClassBomb(), ClassBomb.calls
+
+
+def _hostile_int_subclass():
+    """int subclass whose comparison and float-conversion hooks raise — the
+    value the old isinstance() gate admitted to bounds/conversion."""
+
+    class EvilInt(int):
+        calls: list[str] = []
+
+        def __lt__(self, other):
+            EvilInt.calls.append("__lt__")
+            raise RuntimeError("__lt__ hook executed")
+
+        def __gt__(self, other):
+            EvilInt.calls.append("__gt__")
+            raise RuntimeError("__gt__ hook executed")
+
+        def __le__(self, other):
+            EvilInt.calls.append("__le__")
+            raise RuntimeError("__le__ hook executed")
+
+        def __ge__(self, other):
+            EvilInt.calls.append("__ge__")
+            raise RuntimeError("__ge__ hook executed")
+
+        def __float__(self):
+            EvilInt.calls.append("__float__")
+            raise RuntimeError("__float__ hook executed")
+
+        def __index__(self):
+            EvilInt.calls.append("__index__")
+            raise RuntimeError("__index__ hook executed")
+
+    return EvilInt(5), EvilInt.calls
+
+
+class _PlainIntSubclass(int):
+    """Benign int subclass — exact-type totality refuses even quiet ones."""
+
+
+class _PlainFloatSubclass(float):
+    """Benign float subclass."""
+
+
+def test_hostile_name_value_gets_typed_refusal_not_escape():
+    for param, expected in [
+        (_bool_param(), "enabled requires bool, got non-builtin value."),
+        (_int_param(), "n requires int, got non-builtin value."),
+        (_float_param(), "x requires float, got non-builtin value."),
+    ]:
+        value, calls = _hostile_name_value()
+        result = param.validate(value)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == expected
+        assert calls == []
+
+
+def test_hostile_class_value_gets_typed_refusal_not_escape():
+    for param, expected in [
+        (_bool_param(), "enabled requires bool, got non-builtin value."),
+        (_int_param(), "n requires int, got non-builtin value."),
+        (_float_param(), "x requires float, got non-builtin value."),
+    ]:
+        value, calls = _hostile_class_value()
+        result = param.validate(value)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == expected
+        assert calls == []
+
+
+def test_int_param_refuses_int_subclass_before_bounds():
+    value, calls = _hostile_int_subclass()
+    result = _int_param().validate(value)  # 5 is inside [0, 10] — type-only refusal
+    assert not result.ok
+    assert result.error is ValidationError.WRONG_TYPE
+    assert result.message == "n requires int, got non-builtin value."
+    assert calls == []
+
+
+def test_float_param_refuses_int_subclass_before_conversion():
+    value, calls = _hostile_int_subclass()
+    result = _float_param().validate(value)
+    assert not result.ok
+    assert result.error is ValidationError.WRONG_TYPE
+    assert result.message == "x requires float, got non-builtin value."
+    assert calls == []
+
+
+def test_benign_subclasses_are_refused_too():
+    assert _int_param().validate(_PlainIntSubclass(5)).error is ValidationError.WRONG_TYPE
+    assert _float_param().validate(_PlainIntSubclass(0)).error is ValidationError.WRONG_TYPE
+    assert _float_param().validate(_PlainFloatSubclass(0.5)).error is ValidationError.WRONG_TYPE
+
+
+def test_locked_param_refuses_before_inspecting_value():
+    p = _float_param(category=Category.LOCKED)
+    for factory in (_hostile_name_value, _hostile_class_value, _hostile_int_subclass):
+        value, calls = factory()
+        result = p.validate(value)
+        assert not result.ok
+        assert result.error is ValidationError.LOCKED
+        assert calls == []
+
+
+def test_bool_param_accepts_only_exact_bool():
+    p = _bool_param()
+    assert p.validate(True).ok
+    assert p.validate(False).ok
+    for bad in (1, 0, 1.0, "true", None, [], {}):
+        result = p.validate(bad)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+
+
+def test_int_param_accepts_only_exact_int():
+    p = _int_param()
+    assert p.validate(5).ok
+    for bad in (True, False, 5.0, "5", None):
+        result = p.validate(bad)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+
+
+def test_float_param_accepts_exact_int_and_exact_float_only():
+    p = _float_param()
+    assert p.validate(0.25).ok
+    assert p.validate(1).ok  # exact builtin int still converts
+    for bad in (True, "0.5", None, [0.5], {"v": 0.5}):
+        result = p.validate(bad)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+
+
+def test_builtin_json_value_messages_unchanged():
+    assert _int_param().validate("x").message == "n requires int, got str."
+    assert _int_param().validate(1.5).message == "n requires int, got float."
+    assert _int_param().validate(True).message == "n requires int, got bool."
+    assert _int_param().validate(None).message == "n requires int, got NoneType."
+    assert _int_param().validate([1]).message == "n requires int, got list."
+    assert _int_param().validate({}).message == "n requires int, got dict."
+    assert _float_param().validate("x").message == "x requires float, got str."
+    assert _bool_param().validate(1).message == "enabled requires bool, got int."
+
+
+def test_float_param_int_conversion_and_bounds_retained():
+    p = _float_param(min_value=0.0, max_value=1.0)
+    result = p.validate(2)  # exact int converts, then trips the max bound
+    assert not result.ok
+    assert result.error is ValidationError.ABOVE_MAX
+    assert result.message == "x=2.0 above max 1.0."
+
+
+def test_validate_proposal_propagates_hostile_refusals():
+    name_bomb, name_calls = _hostile_name_value()
+    evil_int, evil_calls = _hostile_int_subclass()
+    result = validate_proposal({
+        "magnon_radius": evil_int,       # int param in the live registry
+        "magnon_coupling": name_bomb,    # float param in the live registry
+        "signal_interval": 12,           # valid alongside the hostiles
+    })
+    assert not result.ok
+    assert set(result.errors) == {"magnon_radius", "magnon_coupling"}
+    assert result.errors["magnon_radius"].error is ValidationError.WRONG_TYPE
+    assert result.errors["magnon_coupling"].error is ValidationError.WRONG_TYPE
+    assert set(result.known_params) == {
+        "magnon_radius", "magnon_coupling", "signal_interval",
+    }
+    assert result.unknown_params == []
+    assert name_calls == []
+    assert evil_calls == []
+
+
+def test_describe_type_is_hook_free_and_fixed():
+    from scripts.params_schema import _describe_type
+
+    assert _describe_type(True) == "bool"
+    assert _describe_type(3) == "int"
+    assert _describe_type(3.0) == "float"
+    assert _describe_type("s") == "str"
+    assert _describe_type(None) == "NoneType"
+    assert _describe_type([]) == "list"
+    assert _describe_type({}) == "dict"
+    assert _describe_type(_PlainIntSubclass(3)) == "non-builtin value"
+    for factory in (_hostile_name_value, _hostile_class_value):
+        value, calls = factory()
+        assert _describe_type(value) == "non-builtin value"
+        assert calls == []
+
+
+def test_validate_source_has_no_value_type_name_lookup():
+    """The three former ``type(value).__name__`` sites must be gone, and no
+    isinstance() may touch a proposed value."""
+    src = inspect.getsource(TunableParam.validate)
+    code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    assert "type(value).__name__" not in code
+    assert "isinstance" not in code
+
+
+# -- follow-up: bounded float normalization (finite-value totality) -----------
+#
+# The exact-type gate proves a proposed float-param value is builtin int or
+# float — but float() of an oversized int raises OverflowError, and NaN
+# passes both inclusive bound comparisons. Normalization is now bounded:
+# conversion failures and non-finite results get WRONG_TYPE with the
+# supplied-value-free message "<name> requires a finite float value.";
+# only finite normalized values reach the bound comparisons.
+
+_OVERSIZED_INT = 10 ** 400
+_FINITE_REFUSAL = "x requires a finite float value."
+
+
+def test_float_param_refuses_oversized_int_without_raising():
+    p = _float_param()
+    for value in (_OVERSIZED_INT, -_OVERSIZED_INT):
+        result = p.validate(value)  # must not raise OverflowError
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == _FINITE_REFUSAL
+
+
+def test_float_param_refuses_nan_and_infinities():
+    p = _float_param()
+    for value in (float("nan"), float("inf"), float("-inf")):
+        result = p.validate(value)
+        assert not result.ok
+        assert result.error is ValidationError.WRONG_TYPE
+        assert result.message == _FINITE_REFUSAL
+
+
+def test_finite_refusal_message_carries_no_supplied_value():
+    digits = str(_OVERSIZED_INT)
+    for value in (_OVERSIZED_INT, float("inf"), float("nan")):
+        result = _float_param().validate(value)
+        assert len(result.message) < 80
+        assert digits[:20] not in result.message
+        assert "inf" not in result.message
+        assert "nan" not in result.message
+
+
+def test_finite_int_conversion_and_bound_messages_unchanged():
+    p = _float_param(min_value=0.0, max_value=1.0)
+    assert p.validate(0.25).ok
+    assert p.validate(1).ok
+    assert p.validate(2).message == "x=2.0 above max 1.0."
+    assert p.validate(-1).message == "x=-1.0 below min 0.0."
+
+
+def test_validate_proposal_propagates_finite_refusals():
+    result = validate_proposal({
+        "magnon_coupling": _OVERSIZED_INT,       # float param, oversized int
+        "magnon_sage_age_min": float("nan"),     # float param, NaN
+        "signal_interval": 12,                   # valid alongside
+    })
+    assert not result.ok
+    assert set(result.errors) == {"magnon_coupling", "magnon_sage_age_min"}
+    for name in ("magnon_coupling", "magnon_sage_age_min"):
+        assert result.errors[name].error is ValidationError.WRONG_TYPE
+        assert result.errors[name].message == f"{name} requires a finite float value."
+    assert result.unknown_params == []
+    assert all(len(r.message) < 80 for r in result.errors.values())
+
+
+def test_public_proposal_path_returns_validation_not_server_error():
+    """POST /api/tuning/propose with an oversized int previously escaped as
+    HTTP 500, and a NaN literal was ACCEPTED (200). Both must now be ordinary
+    422 rejections whose bodies never carry the supplied value."""
+    pytest.importorskip("flask")
+    from flask import Flask
+
+    from scripts.tuning_api import TuningState, create_blueprint
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        state = TuningState(data_dir=Path(td), gen_getter=lambda: 1_000_000)
+        app = Flask(__name__)
+        app.register_blueprint(create_blueprint(state))
+        client = app.test_client()
+
+        oversized_body = (
+            '{"params": {"magnon_coupling": ' + str(_OVERSIZED_INT)
+            + '}, "source": "human:kevin", "justification": "pin"}'
+        )
+        resp = client.post("/api/tuning/propose", data=oversized_body,
+                           content_type="application/json")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert body["status"] == "rejected"
+        err = body["validation"]["errors"]["magnon_coupling"]
+        assert err["error"] == "wrong_type"
+        assert err["message"] == "magnon_coupling requires a finite float value."
+        assert str(_OVERSIZED_INT)[:20] not in resp.get_data(as_text=True)
+
+        nan_body = ('{"params": {"magnon_coupling": NaN}, '
+                    '"source": "human:kevin", "justification": "pin"}')
+        resp = client.post("/api/tuning/propose", data=nan_body,
+                           content_type="application/json")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert body["status"] == "rejected"
+        err = body["validation"]["errors"]["magnon_coupling"]
+        assert err["error"] == "wrong_type"
+        assert err["message"] == "magnon_coupling requires a finite float value."

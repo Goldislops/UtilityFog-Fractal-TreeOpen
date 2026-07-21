@@ -18,9 +18,11 @@ later PRs as we gain confidence about their tuning semantics.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Final
 
 
 class Category(str, Enum):
@@ -57,6 +59,40 @@ class ValidationResult:
     ok: bool
     error: ValidationError | None = None
     message: str = ""
+
+
+# --- Hook-free type description ----------------------------------------------
+
+
+_BUILTIN_TYPE_NAMES: Final[tuple[tuple[type, str], ...]] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description for rejection messages.
+
+    ``type(value).__name__`` consults the metaclass — a hostile class can
+    override ``__name__`` so that reading it raises from inside error
+    formatting. Identity comparison against builtin types runs no user code
+    (a dict keyed by type would hash the class through its metaclass), and
+    anything that is not one of these builtins is described generically
+    instead of executing a hook merely to improve a message.
+    """
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
 
 
 @dataclass(frozen=True)
@@ -112,30 +148,53 @@ class TunableParam:
                 error=ValidationError.LOCKED,
                 message=f"{self.name} is LOCKED — critical invariant, not tunable.",
             )
-        # bool is a subclass of int; be strict about type distinctions.
+        # Exact builtin types only, decided by identity on type(value) BEFORE
+        # any conversion or comparison: isinstance() reads a proposed value's
+        # __class__ property, and a subclass that reached float()/bounds would
+        # run its own __float__/__lt__ — a proposed value must execute no code
+        # here. bool is an int subclass; identity keeps the strict distinction.
+        value_type = type(value)
         if self.value_type is bool:
-            if not isinstance(value, bool):
+            if value_type is not bool:
                 return ValidationResult(
                     ok=False,
                     error=ValidationError.WRONG_TYPE,
-                    message=f"{self.name} requires bool, got {type(value).__name__}.",
+                    message=f"{self.name} requires bool, got {_describe_type(value)}.",
                 )
             return ValidationResult(ok=True)
         if self.value_type is int:
-            if isinstance(value, bool) or not isinstance(value, int):
+            if value_type is not int:
                 return ValidationResult(
                     ok=False,
                     error=ValidationError.WRONG_TYPE,
-                    message=f"{self.name} requires int, got {type(value).__name__}.",
+                    message=f"{self.name} requires int, got {_describe_type(value)}.",
                 )
         elif self.value_type is float:
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if value_type is not int and value_type is not float:
                 return ValidationResult(
                     ok=False,
                     error=ValidationError.WRONG_TYPE,
-                    message=f"{self.name} requires float, got {type(value).__name__}.",
+                    message=f"{self.name} requires float, got {_describe_type(value)}.",
                 )
-            value = float(value)
+            # Bounded normalization: float() of an exact builtin int can
+            # overflow, and NaN would sail through the inclusive bound
+            # comparisons below. The refusal message never carries the
+            # supplied value — an oversized int would copy hundreds of
+            # digits into results and proposal output.
+            try:
+                value = float(value)
+            except (OverflowError, ValueError):
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires a finite float value.",
+                )
+            if not math.isfinite(value):
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires a finite float value.",
+                )
         if self.min_value is not None and value < self.min_value:
             return ValidationResult(
                 ok=False,
