@@ -1279,8 +1279,11 @@ def test_exception_class_name_is_never_queried():
 
 
 def test_url_error_subclass_gets_fixed_transport_result():
-    """A URLError subclass with recording class-name and text hooks is matched
-    by real MRO only: fixed transport result, empty call log."""
+    """A URLError subclass with recording class-name and text hooks yields the
+    fixed transport result with an empty call log: its class name and text
+    hooks are never consulted. (Except-clause matching may consult a metaclass
+    ``__subclasscheck__``, but its result cannot change the classification and
+    a raise inside it stays bounded — see the review notes in the PR.)"""
     calls: list[str] = []
 
     class _URLNameTrapMeta(type):
@@ -1539,12 +1542,39 @@ def test_handler_exception_text_never_reaches_the_model():
     assert json.loads(block.content)["message"] == _FIXED_HANDLER_MESSAGE
 
 
+def test_local_rejection_flag_bool_is_bounded():
+    """The one unavoidable in-try method execution: bool() on an exact dict's
+    _local_rejection value. A raising __bool__ stays bounded to the fixed
+    handler-failure result — it can never crash the iteration loop."""
+    class _BoolBomb:
+        def __bool__(self):
+            raise RuntimeError("hostile __bool__")
+
+    payload, is_error = _census_router(
+        lambda _a: {"_local_rejection": _BoolBomb()}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert "hostile __bool__" not in json.dumps(payload, sort_keys=True)
+
+
 def test_execute_source_fence_no_exception_formatting():
     """Source fence: execute() contains no isinstance and no exception or
-    type-name formatting — refusals decide by exact type identity alone."""
+    type-name formatting — refusals decide by exact type identity alone.
+    The scan runs over an ast round-trip with the docstring dropped, so only
+    executable code (no comments, no docstring) is fenced."""
+    import ast
     import inspect
-    src = inspect.getsource(ToolRouter.execute)
-    body = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(ToolRouter.execute))
+    fn = ast.parse(src).body[0]
+    assert isinstance(fn, ast.FunctionDef)
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            and isinstance(fn.body[0].value.value, str)):
+        fn.body = fn.body[1:]
+    body = ast.unparse(fn)
     for banned in ("type(e).__name__", "type(payload).__name__", "{e}",
                    "str(e", "repr(", "isinstance("):
         assert banned not in body
