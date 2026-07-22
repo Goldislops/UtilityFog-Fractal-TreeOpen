@@ -127,7 +127,12 @@ def _validate_config(config) -> None:
         raise _Refusal("invalid_config")
     for name, (lo, hi) in _CONFIG_BOUNDS.items():
         value = getattr(config, name)
-        if isinstance(value, bool) or type(value) is not int:
+        # Exact builtin int by type() identity ONLY — hook-free. `type(x)`
+        # reads the real type slot and never consults a hostile `__class__`
+        # property, whereas `isinstance(x, bool)` would. bool is still rejected:
+        # `type(True) is bool`, not `int`, so the exact check catches it without
+        # the (now-removed) isinstance(..., bool) prefix.
+        if type(value) is not int:
             raise _Refusal("invalid_config")
         if not lo <= value <= hi:
             raise _Refusal("invalid_config")
@@ -212,16 +217,21 @@ def _validate_snapshot(item, ctx):
     states = item["states"]
     n = _validate_states(states, sid)
 
+    # Exact builtin int by type() identity ONLY — hook-free (see _validate_config):
+    # `type(x)` never consults a hostile `__class__` property; bool is still
+    # rejected because `type(True) is bool`, not `int`. The `!= n` / range / `!= 5`
+    # comparisons run only after the exact-int proof (short-circuit `or`), on a
+    # proven builtin int, so no scalar `__eq__`/`__le__` hook can execute either.
     lattice_size = prov["lattice_size"]
-    if isinstance(lattice_size, bool) or type(lattice_size) is not int or lattice_size != n:
+    if type(lattice_size) is not int or lattice_size != n:
         raise _Refusal("invalid_provenance", sid)
     num_states = prov["num_states"]
-    if isinstance(num_states, bool) or type(num_states) is not int:
+    if type(num_states) is not int:
         raise _Refusal("invalid_provenance", sid)
     if num_states != 5:
         raise _Refusal("unsupported_num_states", sid)
     generation = prov["generation"]
-    if isinstance(generation, bool) or type(generation) is not int \
+    if type(generation) is not int \
             or not 0 <= generation <= MAX_GENERATION:
         raise _Refusal("invalid_provenance", sid)
     ctx["gens_seen"].append(generation)

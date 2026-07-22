@@ -989,3 +989,72 @@ def test_stable_sequence_does_not_mutate_caller_list_or_inputs():
     assert [id(s) for s in snaps] == before_order      # same objects, same order
     for s, b in zip(snaps, before_states):
         assert np.array_equal(s["states"], b)          # nested arrays unmutated
+
+
+# ---------------------------------------------------------------------------
+# S1 exact-integer-guard totality (Jack) — the config and provenance integer
+# guards previously ran isinstance(x, bool) BEFORE the exact-type proof, and
+# isinstance() consults a hostile x.__class__ property. They now use type()
+# identity only (hook-free): bool is still rejected (type(True) is bool, not
+# int), valid exact ints are retained, int subclasses are rejected, and a
+# hostile __class__ never executes.
+# ---------------------------------------------------------------------------
+
+
+class _ClassHook:
+    """An object whose __class__ property spoofs int and records every access.
+    A hook-free guard (type() only) must never touch it; isinstance() would."""
+    hits = 0
+
+    @property
+    def __class__(self):
+        _ClassHook.hits += 1
+        return int
+
+
+def _valid_snap_with(field, value):
+    snap = fixtures.fx_single()[0]
+    snap["provenance"][field] = value
+    snap["provenance"]["sha256_triple"] = compute_sha256_triple(snap["states"])
+    return snap
+
+
+def test_config_int_guard_hostile_class_hook_not_executed():
+    for field in ("min_component_size", "component_cap", "op_budget_multiplier"):
+        _ClassHook.hits = 0
+        cfg = DetectorConfig(**{field: _ClassHook()})
+        _, refusal = refusal_of(fixtures.fx_single(), cfg)
+        assert refusal["reason"] == "invalid_config"
+        assert _ClassHook.hits == 0     # type()-only guard never read __class__
+
+
+def test_provenance_int_guard_hostile_class_hook_not_executed():
+    for field in ("lattice_size", "num_states", "generation"):
+        _ClassHook.hits = 0
+        _, refusal = refusal_of([_valid_snap_with(field, _ClassHook())])
+        assert refusal["reason"] == "invalid_provenance"
+        assert _ClassHook.hits == 0
+
+
+def test_int_guards_reject_bools_structurally():
+    _, refusal = refusal_of(fixtures.fx_single(), DetectorConfig(component_cap=True))
+    assert refusal["reason"] == "invalid_config"
+    for field in ("lattice_size", "num_states", "generation"):
+        _, refusal = refusal_of([_valid_snap_with(field, True)])
+        assert refusal["reason"] == "invalid_provenance"
+
+
+def test_int_guards_retain_valid_exact_ints_reject_subclasses():
+    # a fully valid exact-int config + provenance still validates normally
+    header = detect_structures(fixtures.fx_single(),
+                               DetectorConfig(min_component_size=1)).records()[0]
+    assert header["kind"] == "header" and header["counts"]["refusals"] == 0
+
+    class _MyInt(int):
+        pass
+
+    _, refusal = refusal_of(fixtures.fx_single(),
+                            DetectorConfig(component_cap=_MyInt(100)))
+    assert refusal["reason"] == "invalid_config"       # int subclass rejected
+    _, refusal = refusal_of([_valid_snap_with("num_states", _MyInt(5))])
+    assert refusal["reason"] == "invalid_provenance"
