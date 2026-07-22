@@ -434,6 +434,31 @@ def _refusal_artifact(refusal, config_valid, config, ids, gens) -> FindingsArtif
     return _finalize([header, record])
 
 
+def _stable_snapshot_sequence(snapshots):
+    """Bounded, private, iterate-safe view of an already-proven exact
+    ``list``/``tuple`` top-level container.
+
+    An exact ``list`` is MUTABLE — a plain ``for item in snapshots`` iterator
+    observes elements a concurrent thread appends *after* the ``len`` ceiling
+    check, so more than ``MAX_SNAPSHOTS`` could be validated, discovered,
+    accounted and serialized. We take a shallow slice of at most
+    ``MAX_SNAPSHOTS + 1`` references (never the full list; the stop bound is a
+    constant) into a private list the caller has no handle on, so later
+    appends/removals/replacements to the caller's original list cannot affect
+    this invocation. Exact-``list`` type is proven by the caller *before* this
+    runs, so slicing can invoke no subclass ``__getitem__`` hook.
+
+    An exact ``tuple`` is already an immutable top-level container, so it is
+    returned directly (no copy needed). NOTE: this defends only the top-level
+    list's membership/order — snapshot dicts, arrays and their contents are NOT
+    copied, and concurrent mutation of those nested objects by the caller
+    remains outside the S1 contract (see README / preflight §5).
+    """
+    if type(snapshots) is list:
+        return snapshots[:MAX_SNAPSHOTS + 1]
+    return snapshots
+
+
 def detect_structures(snapshots, config: DetectorConfig = DetectorConfig()) -> FindingsArtifact:
     """Analyze an ordered sequence of synthetic snapshots. Pure and
     deterministic: identical inputs yield byte-identical ``jsonl``."""
@@ -452,11 +477,18 @@ def detect_structures(snapshots, config: DetectorConfig = DetectorConfig()) -> F
         # truncation and never partial processing.
         if type(snapshots) is not list and type(snapshots) is not tuple:
             raise _Refusal("invalid_input")                        # stage 2a
-        if len(snapshots) == 0:
+        # Normalize to a bounded, private, iterate-safe sequence BEFORE the
+        # ceiling and iteration. For an exact list this is a shallow slice of at
+        # most MAX_SNAPSHOTS+1 references (never the full list) that a concurrent
+        # caller-thread append cannot grow; a tuple is used directly. Every
+        # subsequent length check and the validation iteration read `stable`
+        # only — the caller's original `snapshots` is not referenced again.
+        stable = _stable_snapshot_sequence(snapshots)
+        if len(stable) == 0:
             raise _Refusal("invalid_input")                        # stage 2b
-        if len(snapshots) > MAX_SNAPSHOTS:
+        if len(stable) > MAX_SNAPSHOTS:
             raise _Refusal("invalid_input")                        # stage 2c
-        validated = [_validate_snapshot(item, ctx) for item in snapshots]  # 3
+        validated = [_validate_snapshot(item, ctx) for item in stable]  # 3
 
         ids = [s["snapshot_id"] for s in validated]                # stage 4
         if len(set(ids)) != len(ids):

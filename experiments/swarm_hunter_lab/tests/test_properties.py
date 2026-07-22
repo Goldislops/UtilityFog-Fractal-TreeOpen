@@ -1,6 +1,7 @@
 """Property, determinism, refusal-order, and resource tests for the frozen S1 contract."""
 
 import builtins
+import threading
 import time
 import tracemalloc
 import warnings
@@ -12,7 +13,9 @@ from swarm_hunter_lab import (
     DetectorConfig, FindingsArtifact, compute_sha256_triple,
     detect_structures, fixtures, leanctx_summary, lp, schema,
 )
-from swarm_hunter_lab.detector import MAX_SNAPSHOTS, _axis_interval
+from swarm_hunter_lab.detector import (
+    MAX_SNAPSHOTS, _axis_interval, _stable_snapshot_sequence,
+)
 
 
 def refusal_of(snaps, config=DetectorConfig()):
@@ -897,3 +900,92 @@ def test_amd3_valid_string_source_discriminator_preserved():
     _, refusal = refusal_of([s])
     assert refusal["reason"] == "s2_gated"
     assert detect_structures([_amd3_tiny()]).records()[0]["kind"] == "header"
+
+
+# ---------------------------------------------------------------------------
+# S1 stable-snapshot-sequence follow-up (Jack post-merge P2) — an exact list is
+# MUTABLE, so a plain `for item in snapshots` iterator observes elements a
+# concurrent thread appends AFTER the len<=MAX_SNAPSHOTS check. detect_structures
+# now takes a bounded (<= MAX_SNAPSHOTS+1) private shallow slice of an exact list
+# before the ceiling and iterates only that; a tuple is immutable and used
+# directly. Threading tests use events + joins (no sleeps, no flaky timing).
+# ---------------------------------------------------------------------------
+
+
+def test_stable_sequence_bounded_shallow_copy():
+    # a large exact list is sliced to at most MAX_SNAPSHOTS+1 references (never
+    # copied in full) into a distinct private list; a tuple is returned as-is.
+    big = [_tiny_snap(0)] * 1000
+    stable = _stable_snapshot_sequence(big)
+    assert type(stable) is list
+    assert len(stable) == MAX_SNAPSHOTS + 1          # 65, bounded — not 1000
+    assert stable is not big                          # a private copy
+    assert all(stable[i] is big[i] for i in range(MAX_SNAPSHOTS + 1))  # shallow
+    tup = tuple(_tiny_snap(i) for i in range(3))
+    assert _stable_snapshot_sequence(tup) is tup      # tuple: no copy
+
+
+def test_stable_sequence_over_limit_refused_before_item_inspection(monkeypatch):
+    from swarm_hunter_lab import detector as _d
+    calls = {"n": 0}
+    real = _d._validate_snapshot
+
+    def spy(item, ctx):
+        calls["n"] += 1
+        return real(item, ctx)
+
+    monkeypatch.setattr(_d, "_validate_snapshot", spy)
+    _, refusal = refusal_of([_tiny_snap(i) for i in range(MAX_SNAPSHOTS + 1)])  # 65
+    assert refusal["reason"] == "invalid_input"
+    assert calls["n"] == 0                            # refused before any item
+    calls["n"] = 0
+    _, refusal = refusal_of([_tiny_snap(0)] * 1000)   # large -> bounded slice, refused
+    assert refusal["reason"] == "invalid_input"
+    assert calls["n"] == 0
+
+
+def test_stable_sequence_concurrent_append_ignored(monkeypatch):
+    from swarm_hunter_lab import detector as _d
+    snaps = [_tiny_snap(i) for i in range(MAX_SNAPSHOTS)]  # 64
+    extra = _tiny_snap(MAX_SNAPSHOTS)
+    started, appended = threading.Event(), threading.Event()
+    real = _d._validate_snapshot
+    calls = {"n": 0}
+
+    def hooked(item, ctx):
+        calls["n"] += 1
+        if calls["n"] == 1:               # first validated item: signal + wait
+            started.set()
+            assert appended.wait(timeout=10), "worker never appended"
+        return real(item, ctx)
+
+    monkeypatch.setattr(_d, "_validate_snapshot", hooked)
+
+    def worker():
+        assert started.wait(timeout=10), "validation never started"
+        snaps.append(extra)               # append AFTER the slice + ceiling check
+        appended.set()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    try:
+        records = detect_structures(snaps).records()
+    finally:
+        t.join(timeout=10)
+        assert not t.is_alive()
+    header = records[0]
+    assert header["run"]["snapshot_count"] == MAX_SNAPSHOTS   # exactly 64
+    assert calls["n"] == MAX_SNAPSHOTS                          # 64 validated, not 65
+    assert len(snaps) == MAX_SNAPSHOTS + 1                      # caller's list DID grow
+
+
+def test_stable_sequence_does_not_mutate_caller_list_or_inputs():
+    snaps = [_tiny_snap(i) for i in range(3)]
+    before_len = len(snaps)
+    before_order = [id(s) for s in snaps]
+    before_states = [s["states"].copy() for s in snaps]
+    detect_structures(snaps)
+    assert len(snaps) == before_len                   # not mutated
+    assert [id(s) for s in snaps] == before_order      # same objects, same order
+    for s, b in zip(snaps, before_states):
+        assert np.array_equal(s["states"], b)          # nested arrays unmutated
