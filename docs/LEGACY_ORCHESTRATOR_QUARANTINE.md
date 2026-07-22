@@ -36,41 +36,74 @@ outcomes, rate limits, rollback, and ledger/event schemas — is preserved:
   commit `proposal_id` or rollback `to_proposal_id` that is a JSON array/object
   previously reached the registry `dict.get` and raised `unhashable type` (HTTP
   500); a non-string id is now `400 bad_request` (exact-`str` gate before the
-  lookup). `source` / `justification` remain string-coerced metadata, and a
-  container-valued parameter is still recorded as a `wrong_type` validation
-  rejection (422) — both unchanged.
+  lookup). A SUPPLIED `source` / `justification` must be an exact JSON string —
+  the former `str(...)` coercion (which accepted a JSON list/number/object and
+  stored its Python repr) is removed; a missing field keeps its documented
+  default (`unspecified` / empty string) and a valid string is stored
+  byte-for-byte. A finite container-valued parameter is still recorded as a
+  `wrong_type` validation rejection (422) — unchanged.
 - **DIRECT (arbitrary Python objects).** `TuningState.propose/commit/rollback`
   and `validate_proposal` prove exact builtin shapes before any supplied value
   is hashed, looked up, compared, stringified, validated, serialised, or
-  emitted: `params` must be an exact `dict` with exact-`str` keys and exact JSON
-  tree values; `source`/`justification`/`mode`/`approver`/`proposal_id`/
-  `to_proposal_id` must be exact `str` (a `str` subclass is refused). A
-  malformed call terminates through a fixed `TuningError(400, bad_request)`
-  rather than leaking an `AttributeError`/`TypeError`. Parameter keys are
-  refused by exact type before registry hashing/lookup, so a hostile `__hash__`
-  never runs.
+  emitted: `params` must be an exact `dict` with exact-`str` keys and exact
+  standard-JSON tree values — finite floats only, exact ints within the
+  2048-bit width ceiling; `source`/`justification`/`mode`/`approver`/
+  `proposal_id`/`to_proposal_id` must be exact `str` (a `str` subclass is
+  refused). A malformed call terminates through a fixed
+  `TuningError(400, bad_request)` rather than leaking an
+  `AttributeError`/`TypeError`/`ValueError`. Parameter keys are refused by
+  exact type before registry hashing/lookup, so a hostile `__hash__` never
+  runs.
 - **LEDGER/EVENT.** Because the envelope is proven serialisable up front, a
   refused request appends no ledger line, writes no pending file, records no
   proposal, commits/rolls back nothing, and emits no event (including no
-  `tuning.rejected` event carrying a supplied object). Valid requests still
-  append their canonical JSON ledger entries and events unchanged.
+  `tuning.rejected` event carrying a supplied object). The ledger line is also
+  serialized before the ledger file is opened, so a serialization failure can
+  no longer leave a zero-byte ledger file behind. Startup replay skips any
+  unparseable legacy line — including a pre-ceiling line whose oversized int
+  literal raises the plain-`ValueError` digit guard from `json.loads`, which
+  previously escaped the `JSONDecodeError`-only guard and crashed
+  `TuningState` construction. Valid requests still append their canonical JSON
+  ledger entries and events unchanged.
 
 The refusal message is a fixed generic string (`BAD_REQUEST_MESSAGE`) that names
 neither the supplied value nor its type. The normalized `policy:auto` refusal
 (every whitespace/case spelling) and byte-for-byte storage of valid human
 approver strings in the ledger are preserved.
 
-Two totality bounds are recorded as residuals (neither restricts a valid
-request; parsed JSON cannot express either pathology, so both are DIRECT-lane
-only): a container-nesting depth (`_MAX_REQUEST_VALUE_DEPTH`) that keeps the
-JSON-tree proof total against a **cyclic** DIRECT value, and a per-value
-node-visit budget (`_MAX_REQUEST_VALUE_NODES`, far above any realistic value)
-that keeps it total against a **shared-reference DAG** whose repeated
-references would otherwise be traversed — and `json.dumps`-expanded —
-exponentially. A separate, pre-existing residual: a non-finite float
-(`NaN`/`Infinity`) proposed for a float parameter is rejected by validation
-(`wrong_type`) but still recorded in the ledger as a Python-reparseable
-non-standard-JSON token, exactly as before this change.
+**Integer width ceiling.** An exact builtin int anywhere in a tuning request or
+proposal is bounded to `MAX_TUNING_INT_BITS` = 2048 bits
+(`scripts/params_schema.py`, aligned with the repository's
+`MAX_TOOL_RESULT_INT_BITS` tool-result ceiling), decided by `int.bit_length()`
+only after `type(value) is int` — bool keeps its separate behaviour. A
+2048-bit value reaches ordinary parameter validation (and its existing range
+messages, unchanged); a 2049-bit value is the fixed envelope refusal, for both
+signs, independent of the mutable process-wide `sys.get_int_max_str_digits()`
+setting (an accepted int renders to at most 617 decimal digits, below the
+smallest settable limit of 640). Direct `validate_proposal` stays total on
+oversized ints — including for registered int parameters — with a fixed
+refusal that never formats or copies the supplied integer. This closes the
+previously reproduced trio: `ValueError` leaking from direct `propose` under a
+digit limit, a zero-byte ledger file from an unknown-parameter proposal, and
+thousands-of-digits ledger lines with the limit disabled. Non-finite floats
+(`NaN`/`Infinity`) are likewise no longer a recorded validation rejection: the
+JSON-tree proof requires exact finite floats, so they are the fixed
+`400 bad_request` before validation or any ledger write (the former
+non-standard-token-in-ledger residual is closed).
+
+Totality bounds recorded as residuals (none restricts a valid request; parsed
+JSON cannot express the container pathologies, which are DIRECT-lane only): a
+container-nesting depth (`_MAX_REQUEST_VALUE_DEPTH`) that keeps the JSON-tree
+proof total against a **cyclic** DIRECT value, and a proposal-wide node-visit
+budget (`_MAX_REQUEST_NODES`, far above any realistic request) charged once
+across ALL parameter values of one proposal — not restarted per value — that
+keeps it total against a **shared-reference DAG** whose repeated references
+would otherwise be traversed — and `json.dumps`-expanded — exponentially.
+These bounds limit node count, nesting depth, and integer width only: the
+request has **no scalar-string or total-byte ceiling**, so the serialized size
+of an accepted proposal (and hence of a ledger line) is NOT bounded — a single
+long JSON string value passes the proof at any length. Recorded as a residual
+rather than bounded here.
 
 **S — observe-by-default capability model** (`scripts/orchestrator.py`,
 `scripts/orchestrator_config.py`). The LLM-facing surface is capability-gated:

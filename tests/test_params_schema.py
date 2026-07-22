@@ -638,16 +638,18 @@ def test_public_proposal_path_returns_validation_not_server_error():
         assert err["message"] == "magnon_coupling requires a finite float value."
         assert str(_OVERSIZED_INT)[:20] not in resp.get_data(as_text=True)
 
+        # A NaN literal is no longer a recorded 422 rejection: the request
+        # JSON-tree proof requires exact finite floats, so it is refused at
+        # the envelope (fixed 400) before validation or any ledger write.
+        from scripts.tuning_api import BAD_REQUEST_MESSAGE
+
         nan_body = ('{"params": {"magnon_coupling": NaN}, '
                     '"source": "human:kevin", "justification": "pin"}')
         resp = client.post("/api/tuning/propose", data=nan_body,
                            content_type="application/json")
-        assert resp.status_code == 422
+        assert resp.status_code == 400
         body = resp.get_json()
-        assert body["status"] == "rejected"
-        err = body["validation"]["errors"]["magnon_coupling"]
-        assert err["error"] == "wrong_type"
-        assert err["message"] == "magnon_coupling requires a finite float value."
+        assert body == {"error": "bad_request", "message": BAD_REQUEST_MESSAGE}
 
 
 # -- request-shape totality: validate_proposal on arbitrary Python objects ----
@@ -727,3 +729,111 @@ def test_validate_proposal_str_key_paths_unchanged():
     unknown = validate_proposal({"nope": 1})
     assert unknown.unknown_params == ["nope"]
     assert unknown.errors["nope"].error is ValidationError.UNKNOWN_PARAM
+
+
+# -- follow-up: integer width ceiling (bit-length gate) ------------------------
+#
+# An exact builtin int wider than MAX_TUNING_INT_BITS (2048 bits) is refused by
+# a bit-length check BEFORE any conversion, comparison, or formatting, so
+# validation is total on oversized ints independently of the mutable
+# process-wide sys.get_int_max_str_digits() setting, and no refusal message
+# ever copies the supplied digits. Ints within the ceiling keep the existing
+# range messages byte-for-byte: a 2048-bit int renders to at most 617 decimal
+# digits, below the smallest settable digit limit (640).
+
+import contextlib
+import sys as _sys
+
+_WIDE_OK = 2 ** 2048 - 1     # bit_length 2048 — widest accepted magnitude
+_WIDE_OVER = 2 ** 2048       # bit_length 2049 — narrowest refused magnitude
+_HUGE_5K = 10 ** 5000        # Jack's reproduction value (16 610 bits)
+_WIDTH_REFUSAL_N = "n requires an int within 2048 bits."
+_WIDTH_REFUSAL_X = "x requires an int within 2048 bits."
+
+
+@contextlib.contextmanager
+def _digit_limit(n):
+    saved = _sys.get_int_max_str_digits()
+    _sys.set_int_max_str_digits(n)
+    try:
+        yield
+    finally:
+        _sys.set_int_max_str_digits(saved)
+
+
+def test_int_bits_ceiling_constant_and_repo_alignment():
+    from scripts.params_schema import MAX_TUNING_INT_BITS
+    assert MAX_TUNING_INT_BITS == 2048
+    from scripts.orchestrator import MAX_TOOL_RESULT_INT_BITS
+    assert MAX_TUNING_INT_BITS == MAX_TOOL_RESULT_INT_BITS
+    # Runtime-independence arithmetic: the widest accepted int renders to 617
+    # decimal digits, strictly below the smallest settable digit limit (640).
+    assert len(str(_WIDE_OK)) == 617 < 640
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_int_param_oversized_int_total_and_value_free(limit):
+    p = _int_param()
+    with _digit_limit(limit):
+        for value in (_HUGE_5K, -_HUGE_5K, _WIDE_OVER, -_WIDE_OVER):
+            result = p.validate(value)  # must not raise ValueError
+            assert not result.ok
+            assert result.error is ValidationError.WRONG_TYPE
+            assert result.message == _WIDTH_REFUSAL_N
+            assert len(result.message) < 80
+            assert "0" * 20 not in result.message
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_int_param_2048_bit_boundary_keeps_range_messages(limit):
+    p = _int_param()  # bounds [0, 10]
+    over_msg = f"n={_WIDE_OK} above max 10."      # rendered at default limit
+    under_msg = f"n={-_WIDE_OK} below min 0."
+    with _digit_limit(limit):
+        result = p.validate(_WIDE_OK)
+        assert result.error is ValidationError.ABOVE_MAX
+        assert result.message == over_msg
+        result = p.validate(-_WIDE_OK)
+        assert result.error is ValidationError.BELOW_MIN
+        assert result.message == under_msg
+
+
+def test_bool_behavior_unaffected_by_width_gate():
+    # bool has a bit_length method but must never be routed through the int
+    # width gate: exact-type identity keeps its separate refusal and its
+    # acceptance for bool params byte-identical.
+    assert _int_param().validate(True).message == "n requires int, got bool."
+    assert _bool_param().validate(True).ok
+    assert _bool_param().validate(False).ok
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_float_param_oversized_int_width_refusal(limit):
+    p = _float_param()
+    with _digit_limit(limit):
+        for value in (_WIDE_OVER, -_WIDE_OVER, _HUGE_5K, -_HUGE_5K):
+            result = p.validate(value)
+            assert not result.ok
+            assert result.error is ValidationError.WRONG_TYPE
+            assert result.message == _WIDTH_REFUSAL_X
+    # Within the ceiling the existing finite-normalization refusal is
+    # preserved byte-for-byte (10**400 is 1329 bits — inside 2048).
+    assert _float_param().validate(10 ** 400).message == _FINITE_REFUSAL
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_validate_proposal_oversized_int_total_and_value_free(limit):
+    with _digit_limit(limit):
+        result = validate_proposal({
+            "magnon_radius": _HUGE_5K,        # int param, oversized
+            "magnon_coupling": -_HUGE_5K,     # float param, oversized
+            "not_a_real_param": _WIDE_OVER,   # unknown name, oversized value
+            "signal_interval": 12,            # valid alongside
+        })
+        assert result.ok is False
+        assert result.errors["magnon_radius"].error is ValidationError.WRONG_TYPE
+        assert result.errors["magnon_coupling"].error is ValidationError.WRONG_TYPE
+        assert result.errors["not_a_real_param"].error is ValidationError.UNKNOWN_PARAM
+        for r in result.errors.values():
+            assert len(r.message) < 120
+            assert "0" * 20 not in r.message

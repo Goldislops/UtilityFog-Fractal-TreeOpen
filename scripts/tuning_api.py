@@ -35,6 +35,7 @@ propose/dry-run, reads, and human-approved commits are intentionally unchanged.
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from typing import Any, Callable, Optional
 from flask import Blueprint, Response, jsonify, request
 
 from scripts.params_schema import (
+    MAX_TUNING_INT_BITS,
     PARAMS,
     Category,
     get_param,
@@ -80,41 +82,54 @@ loop; it is not a limit on scalar content. Values obtainable through parsed
 JSON are far shallower, so no valid public request is affected (recorded as a
 residual — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)."""
 
-_MAX_REQUEST_VALUE_NODES = 100_000
-"""Per-value cap on nodes VISITED while proving one proposed parameter value is
-a JSON tree. The depth bound alone stops cycles/recursion but not a shared-
-reference DAG (a DIRECT value where a node is referenced repeatedly), which
-would otherwise be traversed — and later ``json.dumps``-expanded — an
-exponential number of times. Counting visits per occurrence mirrors that
-serialisation cost and refuses such a value before the ledger write. Set far
-above any realistic parsed-JSON value (JSON cannot express sharing, so PUBLIC
-bodies are self-limiting), so no valid request is affected; recorded as a
-residual bound — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md."""
+_MAX_REQUEST_NODES = 100_000
+"""Proposal-wide cap on nodes VISITED while proving the parameter values of
+ONE complete proposal are JSON trees — a single budget charged across every
+value, not restarted per parameter entry (multiple entries sharing repeated
+structure would otherwise multiply the cap). The depth bound alone stops
+cycles/recursion but not a shared-reference DAG (a DIRECT value where a node
+is referenced repeatedly), which would otherwise be traversed — and later
+``json.dumps``-expanded — an exponential number of times. Counting visits per
+occurrence mirrors that serialisation cost and refuses such a proposal before
+the ledger write. Set far above any realistic parsed-JSON request (JSON cannot
+express sharing, so PUBLIC bodies are self-limiting), so no valid request is
+affected; recorded as a residual bound — see
+docs/LEGACY_ORCHESTRATOR_QUARANTINE.md."""
 
 
 # -- helpers ----------------------------------------------------------------
 
 
 def _is_exact_json_tree(value: Any, depth: int, budget: list) -> bool:
-    """True when ``value`` is EXACTLY a builtin JSON tree: exact
-    ``str``/``bool``/``int``/``float``/``None``, or an exact ``list`` / exact
-    ``dict`` (with exact-``str`` keys) recursively within ``depth`` and within
-    the ``budget`` node-visit count (``budget`` is ``[remaining]``, mutated in
-    place). Decided by ``type`` identity — a refused value's methods are never
-    invoked, and only confirmed exact builtin containers are traversed. A
-    proposed parameter value that passes this is guaranteed
-    ``json.dumps``-serialisable for the ledger AND bounded in serialised size;
-    anything else (a set, bytes, a custom object, a hostile mapping, a cyclic
-    or exponentially-shared structure) is a malformed value shape. Non-finite
-    floats are permitted here (they serialise without error and are refused
-    later by per-parameter validation); this gate is only about ledger
-    serialisability, not numeric range."""
+    """True when ``value`` is EXACTLY a builtin standard-JSON tree: exact
+    ``str``, exact ``bool``, exact ``int`` within ``MAX_TUNING_INT_BITS``,
+    exact FINITE ``float``, ``None``, or an exact ``list`` / exact ``dict``
+    (with exact-``str`` keys) recursively within ``depth`` and within the
+    ``budget`` node-visit count (``budget`` is ``[remaining]``, mutated in
+    place and shared across every value of one proposal). Decided by ``type``
+    identity — a refused value's methods are never invoked, only confirmed
+    exact builtin containers are traversed, and the int width check runs only
+    after the exact-``int`` proof (bool is accepted separately, never routed
+    through ``bit_length``). A proposed parameter value that passes is
+    guaranteed ``json.dumps``-serialisable to STANDARD JSON tokens for the
+    ledger, independent of ``sys.get_int_max_str_digits()`` (an accepted int
+    renders to at most 617 digits, below the smallest settable limit).
+    Anything else (a set, bytes, a custom object, a hostile mapping, an int
+    wider than the ceiling, a NaN/Infinity float, a cyclic or exponentially-
+    shared structure) is a malformed value shape. NOTE: this proof bounds
+    nodes, depth, and integer width — NOT serialized byte size; scalar
+    strings and the total encoded length are unbounded (recorded residual —
+    see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)."""
     budget[0] -= 1
     if budget[0] < 0:
         return False
     t = type(value)
-    if t is str or t is bool or t is int or t is float or value is None:
+    if t is str or t is bool or value is None:
         return True
+    if t is int:
+        return value.bit_length() <= MAX_TUNING_INT_BITS
+    if t is float:
+        return math.isfinite(value)
     if t is list:
         if depth <= 0:
             return False
@@ -143,18 +158,21 @@ def _require_valid_proposal_shape(
     """Prove a propose envelope has exact builtin shapes BEFORE any supplied
     value is hashed, looked up, compared, stringified, validated, serialised,
     or emitted. ``params`` must be an exact ``dict`` whose keys are exact
-    ``str`` and whose values are exact JSON trees (ledger-serialisable);
-    ``source`` / ``justification`` / ``mode`` must be exact ``str``. Any
-    deviation is a fixed ``400 bad_request`` — refused requests create no
-    proposal, ledger append, pending file, or event."""
+    ``str`` and whose values are exact standard-JSON trees (ledger-
+    serialisable: finite floats, ints within the width ceiling) proven against
+    ONE shared node-visit budget for the whole proposal; ``source`` /
+    ``justification`` / ``mode`` must be exact ``str``. Any deviation is a
+    fixed ``400 bad_request`` — refused requests create no proposal, ledger
+    append, pending file, or event."""
     _require_exact_str(source)
     _require_exact_str(justification)
     _require_exact_str(mode)
     if type(params) is not dict:
         raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
+    budget = [_MAX_REQUEST_NODES]
     for name, value in params.items():
         if type(name) is not str or not _is_exact_json_tree(
-            value, _MAX_REQUEST_VALUE_DEPTH, [_MAX_REQUEST_VALUE_NODES]
+            value, _MAX_REQUEST_VALUE_DEPTH, budget
         ):
             raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
 
@@ -480,8 +498,17 @@ class TuningState:
                     continue
                 try:
                     entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # skip corrupt lines; don't let a bad append poison startup
+                except ValueError:
+                    # Skip corrupt lines; don't let a bad append poison
+                    # startup. ValueError, not its JSONDecodeError subclass:
+                    # a LEGACY line holding an int wider than the runtime
+                    # sys.get_int_max_str_digits() limit (writable before the
+                    # width ceiling existed) raises the plain-ValueError digit
+                    # guard from json.loads, which previously escaped and
+                    # crashed replay. The gated writer no longer produces such
+                    # lines (accepted ints render to <= 617 digits, below the
+                    # smallest settable limit).
+                    continue
                 etype = entry.get("type")
                 if etype == "propose":
                     self._proposals[entry["proposal_id"]] = entry
@@ -503,9 +530,14 @@ class TuningState:
                         self._last_commit_gen[name] = gen
 
     def _append_ledger(self, entry: dict[str, Any]) -> None:
+        # Serialize BEFORE touching the filesystem: opening in append mode
+        # creates the file, so a json.dumps failure after open would leave a
+        # zero-byte ledger behind. With the line built first, a serialization
+        # failure performs no filesystem operation at all.
+        line = json.dumps(entry, sort_keys=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.ledger_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
+            f.write(line + "\n")
 
 
 def _contains_human_approval_param(params: dict[str, Any]) -> bool:
@@ -565,8 +597,13 @@ def create_blueprint(state: TuningState) -> Blueprint:
                 "error": "bad_request",
                 "message": "'params' (non-empty object) is required",
             }), 400
-        source = str(body.get("source", "unspecified"))
-        justification = str(body.get("justification", ""))
+        # No str() coercion: a SUPPLIED source/justification must already be
+        # an exact builtin str (proven inside state.propose — anything else is
+        # the fixed 400), so a JSON list/number/object can no longer enter the
+        # ledger as its Python repr. A MISSING field keeps its documented
+        # default; a valid string is stored byte-for-byte.
+        source = body.get("source", "unspecified")
+        justification = body.get("justification", "")
         mode = body.get("mode", "dry-run")  # default to safe
         try:
             entry = state.propose(
