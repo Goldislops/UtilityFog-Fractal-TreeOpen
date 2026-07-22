@@ -851,3 +851,162 @@ def test_valid_direct_propose_still_writes_serialisable_ledger(tmp_path):
     reparsed = json.loads(lines[0])
     assert reparsed["type"] == "propose"
     assert reparsed["params"] == {"signal_interval": 12}
+
+
+# -- review-wave pins: exact-type discrimination, depth bound, nan/inf ---------
+#
+# The gates are exact-type (type(x) is ...), never isinstance — so a well-behaved
+# str/dict/list subclass is refused everywhere, not just at the commit-approver
+# gate. The container-nesting depth bound keeps the JSON-tree proof total against
+# a cyclic DIRECT value. Non-finite floats remain a recorded validation rejection
+# whose ledger line is Python-reparseable (unchanged from before this batch).
+
+
+class _DictSub(dict):
+    """Well-behaved dict subclass whose views record if consulted."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.calls = []
+
+    def items(self):
+        self.calls.append("items")
+        return super().items()
+
+    def keys(self):
+        self.calls.append("keys")
+        return super().keys()
+
+
+class _ListSub(list):
+    pass
+
+
+class _StrSub(str):
+    pass
+
+
+def test_direct_propose_dict_subclass_params_refused_without_items(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    params = _DictSub({"signal_interval": 12})
+    params.calls.clear()
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert params.calls == []          # views never consulted — exact-type gate
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_str_subclass_key_refused(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={_StrSub("signal_interval"): 12},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("value_factory", [
+    lambda: _StrSub("x"), lambda: _ListSub([1, 2]), lambda: _DictSub({"a": 1}),
+], ids=["str-sub", "list-sub", "dict-sub"])
+def test_direct_propose_subclass_value_refused_before_ledger(tmp_path, value_factory):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": value_factory()},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def test_validate_proposal_dict_subclass_is_not_ok_without_items():
+    from scripts.params_schema import validate_proposal, ProposalValidation
+    sub = _DictSub({"signal_interval": 12})
+    sub.calls.clear()
+    result = validate_proposal(sub)
+    assert isinstance(result, ProposalValidation)
+    assert result.ok is False
+    assert sub.calls == []             # exact-dict gate, no items()/keys()
+
+
+def test_direct_propose_cyclic_value_is_bad_request_not_recursion_error(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    cyclic = []
+    cyclic.append(cyclic)             # self-referential exact list
+    with pytest.raises(TuningError) as ei:   # must NOT be RecursionError
+        state.propose(params={"signal_interval": cyclic},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def _nest_lists(n):
+    v = 0
+    for _ in range(n):
+        v = [v]
+    return v
+
+
+def test_direct_propose_depth_bound_64_in_65_out(tmp_path):
+    from scripts.tuning_api import _MAX_REQUEST_VALUE_DEPTH
+    assert _MAX_REQUEST_VALUE_DEPTH == 64
+    # At the bound: the tree passes the envelope gate and reaches validation,
+    # where a nested list is an ordinary wrong_type rejection (recorded 422).
+    state_a, _, _ = _fresh_state(tmp_path / "in")
+    entry = state_a.propose(params={"signal_interval": _nest_lists(64)},
+                            source="s", justification="j", mode="dry-run")
+    assert entry["validation"]["ok"] is False
+    assert entry["validation"]["errors"]["signal_interval"]["error"] == "wrong_type"
+    # One past the bound: refused at the envelope, no ledger.
+    state_b, _, _ = _fresh_state(tmp_path / "out")
+    with pytest.raises(TuningError) as ei:
+        state_b.propose(params={"signal_interval": _nest_lists(65)},
+                        source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert not (tmp_path / "out" / "tuning_ledger.jsonl").exists()
+
+
+def test_direct_propose_shared_dag_value_is_bounded_not_hang(tmp_path):
+    """A shared-reference DAG (each level references one child twice) is within
+    the depth bound but expands exponentially; the per-value node budget must
+    refuse it quickly (400) rather than traverse ~2**40 nodes. This test would
+    time out against a depth-only gate."""
+    node = 0
+    for _ in range(40):
+        node = [node, node]          # shares the same child twice per level
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": node},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "inf", "-inf"])
+def test_direct_propose_non_finite_float_is_recorded_wrong_type(tmp_path, bad):
+    """Residual characterisation (behaviour unchanged from before this batch):
+    a non-finite float passes the ledger-serialisability gate, is REJECTED by
+    per-parameter validation as wrong_type/finite, and is recorded — its ledger
+    line is Python-reparseable (json.loads accepts NaN/Infinity tokens)."""
+    state, _, _ = _fresh_state(tmp_path)
+    entry = state.propose(params={"magnon_coupling": bad},
+                          source="human:kevin", justification="j", mode="dry-run")
+    assert entry["validation"]["ok"] is False
+    assert entry["validation"]["errors"]["magnon_coupling"]["error"] == "wrong_type"
+    line = (tmp_path / "tuning_ledger.jsonl").read_text(encoding="utf-8").strip()
+    reparsed = json.loads(line)          # non-strict JSON tokens still reparse
+    assert reparsed["type"] == "propose"
+    assert _math.isnan(reparsed["params"]["magnon_coupling"]) or \
+        _math.isinf(reparsed["params"]["magnon_coupling"])
+
+
+def test_direct_commit_and_rollback_refusal_messages_carry_no_leak(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    for call in (lambda: state.commit(proposal_id=[1, 2], approver="human:kevin"),
+                 lambda: state.rollback(to_proposal_id={"a": 1})):
+        with pytest.raises(TuningError) as ei:
+            call()
+        msg = ei.value.message
+        assert len(msg) < 120
+        for leak in ("[1", "{'a'", "list", "dict"):
+            assert leak not in msg

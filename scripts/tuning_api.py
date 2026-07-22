@@ -80,33 +80,50 @@ loop; it is not a limit on scalar content. Values obtainable through parsed
 JSON are far shallower, so no valid public request is affected (recorded as a
 residual — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)."""
 
+_MAX_REQUEST_VALUE_NODES = 100_000
+"""Per-value cap on nodes VISITED while proving one proposed parameter value is
+a JSON tree. The depth bound alone stops cycles/recursion but not a shared-
+reference DAG (a DIRECT value where a node is referenced repeatedly), which
+would otherwise be traversed — and later ``json.dumps``-expanded — an
+exponential number of times. Counting visits per occurrence mirrors that
+serialisation cost and refuses such a value before the ledger write. Set far
+above any realistic parsed-JSON value (JSON cannot express sharing, so PUBLIC
+bodies are self-limiting), so no valid request is affected; recorded as a
+residual bound — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md."""
+
 
 # -- helpers ----------------------------------------------------------------
 
 
-def _is_exact_json_tree(value: Any, depth: int) -> bool:
+def _is_exact_json_tree(value: Any, depth: int, budget: list) -> bool:
     """True when ``value`` is EXACTLY a builtin JSON tree: exact
     ``str``/``bool``/``int``/``float``/``None``, or an exact ``list`` / exact
-    ``dict`` (with exact-``str`` keys) recursively within ``depth``. Decided by
-    ``type`` identity — a refused value's methods are never invoked, and only
-    confirmed exact builtin containers are traversed. A proposed parameter
-    value that passes this is guaranteed ``json.dumps``-serialisable for the
-    ledger; anything else (a set, bytes, a custom object, a hostile mapping) is
-    a malformed value shape. Non-finite floats are permitted here (they
-    serialise without error and are refused later by per-parameter validation);
-    this gate is only about ledger serialisability, not numeric range."""
+    ``dict`` (with exact-``str`` keys) recursively within ``depth`` and within
+    the ``budget`` node-visit count (``budget`` is ``[remaining]``, mutated in
+    place). Decided by ``type`` identity — a refused value's methods are never
+    invoked, and only confirmed exact builtin containers are traversed. A
+    proposed parameter value that passes this is guaranteed
+    ``json.dumps``-serialisable for the ledger AND bounded in serialised size;
+    anything else (a set, bytes, a custom object, a hostile mapping, a cyclic
+    or exponentially-shared structure) is a malformed value shape. Non-finite
+    floats are permitted here (they serialise without error and are refused
+    later by per-parameter validation); this gate is only about ledger
+    serialisability, not numeric range."""
+    budget[0] -= 1
+    if budget[0] < 0:
+        return False
     t = type(value)
     if t is str or t is bool or t is int or t is float or value is None:
         return True
     if t is list:
         if depth <= 0:
             return False
-        return all(_is_exact_json_tree(item, depth - 1) for item in value)
+        return all(_is_exact_json_tree(item, depth - 1, budget) for item in value)
     if t is dict:
         if depth <= 0:
             return False
         return all(
-            type(k) is str and _is_exact_json_tree(v, depth - 1)
+            type(k) is str and _is_exact_json_tree(v, depth - 1, budget)
             for k, v in value.items()
         )
     return False
@@ -136,7 +153,9 @@ def _require_valid_proposal_shape(
     if type(params) is not dict:
         raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
     for name, value in params.items():
-        if type(name) is not str or not _is_exact_json_tree(value, _MAX_REQUEST_VALUE_DEPTH):
+        if type(name) is not str or not _is_exact_json_tree(
+            value, _MAX_REQUEST_VALUE_DEPTH, [_MAX_REQUEST_VALUE_NODES]
+        ):
             raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
 
 

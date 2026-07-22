@@ -58,10 +58,19 @@ outcomes, rate limits, rollback, and ledger/event schemas — is preserved:
 The refusal message is a fixed generic string (`BAD_REQUEST_MESSAGE`) that names
 neither the supplied value nor its type. The normalized `policy:auto` refusal
 (every whitespace/case spelling) and byte-for-byte storage of valid human
-approver strings in the ledger are preserved. No new content-size ceiling is
-introduced; the only bound is a container-nesting depth
-(`_MAX_REQUEST_VALUE_DEPTH`) that keeps the JSON-tree proof total against a
-cyclic DIRECT value (recorded as a residual, not a content limit).
+approver strings in the ledger are preserved.
+
+Two totality bounds are recorded as residuals (neither restricts a valid
+request; parsed JSON cannot express either pathology, so both are DIRECT-lane
+only): a container-nesting depth (`_MAX_REQUEST_VALUE_DEPTH`) that keeps the
+JSON-tree proof total against a **cyclic** DIRECT value, and a per-value
+node-visit budget (`_MAX_REQUEST_VALUE_NODES`, far above any realistic value)
+that keeps it total against a **shared-reference DAG** whose repeated
+references would otherwise be traversed — and `json.dumps`-expanded —
+exponentially. A separate, pre-existing residual: a non-finite float
+(`NaN`/`Infinity`) proposed for a float parameter is rejected by validation
+(`wrong_type`) but still recorded in the ledger as a Python-reparseable
+non-standard-JSON token, exactly as before this change.
 
 **S — observe-by-default capability model** (`scripts/orchestrator.py`,
 `scripts/orchestrator_config.py`). The LLM-facing surface is capability-gated:
