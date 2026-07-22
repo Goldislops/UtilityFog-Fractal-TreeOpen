@@ -51,6 +51,17 @@ asserted by tests **in both directions**.
   truncated artifact; malformed input → fatal structured refusal.
 - Config: `DetectorConfig(min_component_size=2, component_cap=4096,
   op_budget_multiplier=16)` — closed, immutable, validated first.
+- Concurrency (bounded, honest — **not** a full thread-safety claim): for an
+  exact `list`, the top-level **membership and order are defensively
+  shallow-snapshotted** (a private slice of at most `MAX_SNAPSHOTS + 1`
+  references) **before** the ceiling check and iteration, so appends, removals
+  or replacements a concurrent thread makes to the caller's *original* list
+  after that point **cannot affect this invocation** (they can never push it
+  past 64). An exact `tuple` is already immutable. This defends only the
+  top-level list — the snapshot dicts, their arrays, and their contents are
+  **not** copied, so the caller **must not mutate those nested objects
+  concurrently** during a call; nested concurrent mutation remains **outside
+  the S1 contract**. The detector never mutates the caller's list or inputs.
 
 ## Running the tests
 

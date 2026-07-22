@@ -372,6 +372,15 @@ immutable inputs to a findings artifact.
   instead of re-emitting duplicates.
 - **No-write guarantees:** inputs are never mutated (hash-before == hash-after test);
   the only artifact is the findings object returned to the caller.
+- **Bounded concurrency contract (honest, not full thread-safety):** for an exact
+  `list` top-level container, membership/order are **defensively shallow-snapshotted**
+  — a private slice of at most `MAX_SNAPSHOTS + 1` references taken *before* the
+  ceiling check and iteration — so a concurrent thread's appends/removals/replacements
+  to the caller's *original* list cannot make this invocation validate, discover,
+  account or serialize more than `MAX_SNAPSHOTS`. An exact `tuple` is already immutable.
+  This defends **only** the top-level list; snapshot dicts, arrays and their contents
+  are **not** copied, so concurrent nested mutation by the caller during a call is
+  **outside the S1 contract** and no thread-safety of nested objects is claimed.
 - **Error behavior:** malformed input → structured refusal finding (`evidence_class:
   SRC`, reason `invalid_input`), never a partial silent result. **Empty result** is a
   first-class artifact: a run that finds nothing emits a header record saying so.
