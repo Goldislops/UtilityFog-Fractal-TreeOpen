@@ -286,11 +286,30 @@ class OpenAICompatBackend(AgentBackend):
                 if fn is None:
                     continue
                 name = _attr_or_key(fn, "name", "") or ""
-                args_raw = _attr_or_key(fn, "arguments", "") or ""
-                try:
-                    args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-                except (ValueError, TypeError):
-                    args = {"_raw_arguments": str(args_raw)}
+                # `arguments` is model/server-reachable and can be any value,
+                # so decoding is total and hook-free: the value's truthiness,
+                # iteration, mapping-conversion, and string-conversion hooks
+                # are never invoked. Exact strings are parsed (JSON object →
+                # kept; other valid JSON → {}; undecodable or parser
+                # recursion → the established raw-fallback shape); exact
+                # dicts continue into ToolUseBlock's hardened normalization;
+                # every other value — absent included — becomes a fresh {}.
+                # MemoryError is deliberately not caught.
+                args_raw = _attr_or_key(fn, "arguments", None)
+                if type(args_raw) is str:
+                    if args_raw == "":
+                        args = {}
+                    else:
+                        try:
+                            parsed = json.loads(args_raw)
+                        except (ValueError, RecursionError):
+                            args = {"_raw_arguments": args_raw}
+                        else:
+                            args = parsed if type(parsed) is dict else {}
+                elif type(args_raw) is dict:
+                    args = args_raw
+                else:
+                    args = {}
                 blocks.append(ToolUseBlock(
                     id=_attr_or_key(tc, "id", "") or "",
                     name=name,
