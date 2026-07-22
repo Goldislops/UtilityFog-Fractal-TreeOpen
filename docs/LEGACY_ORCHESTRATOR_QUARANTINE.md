@@ -68,6 +68,47 @@ Error-shape guarantees (Jack amendment):
 - **Error visibility across transports** — an `is_error` result is surfaced by
   native backends via the `is_error` flag and by the OpenAI-compatible backend
   via a leading `[ERROR]` marker, so a model recognises the failure either way.
+- **Fixed refusal messages** — every router/orchestrator-minted failure text
+  is a fixed string: `tool not registered` (unknown or non-str tool name; the
+  supplied name is never echoed, hashed, converted, or type-reported, and the
+  registry lookup itself runs inside the defensive `try`), `tool handler
+  failed`, `URLError`, and `tool result unavailable` (refused result, below).
+- **Exact-dictionary and exact-JSON-tree acceptance** — a handler result is
+  accepted only when it is exactly a builtin `dict`, and it reaches the model
+  only after validating as an exact builtin JSON tree: exact `dict`s with
+  exact-`str` keys, exact `list`s, exact `str`/`int`/finite-`float`/`bool`/
+  `None`. Subclasses, tuples, foreign objects, cycles, non-finite floats,
+  depth > 32 (`MAX_TOOL_RESULT_DEPTH`), and > 4096 cumulative items
+  (`MAX_TOOL_RESULT_ITEMS`) are all refused by exact-type decisions — no
+  conversion, representation, formatting, iteration, comparison, length, or
+  truth method of a refused value is requested.
+- **128 KiB tool-result ceiling** — an accepted result serializes with plain
+  `json.dumps(..., sort_keys=True, allow_nan=False)` (no `default=str`, so no
+  foreign `__str__` can enter model-visible text) and its UTF-8 encoding must
+  fit `MAX_TOOL_RESULT_BYTES` (128 KiB); cumulative string size is bounded
+  during validation, before serialization. Any refusal — validation,
+  serialization, or size — is replaced by the fixed block
+  `{"error": "tool_result_unavailable", "category": "handler_exception",
+  "message": "tool result unavailable"}` with `is_error=True`, records
+  exactly one `handler_exception`, collects no id, and the iteration
+  continues. Ordinary JSON payloads serialize byte-identically to before.
+- **Reserved response-marker stripping** — `_status` and `_local_rejection`
+  are internal router markers only. Both are stripped from every dict
+  response body; on an exactly-builtin-int transport status ≥ 400 the actual
+  transport status is re-inserted as the authoritative `_status`. A response
+  body can never supply, replace, or imitate an internal marker.
+- **Outcome-category allowlisting** — recorded outcomes are never coerced: an
+  error result's category survives only as an exact builtin `str` inside the
+  known error categories (`ok` excluded); absent, malformed, or unknown
+  categories record `handler_exception`, and success records only `ok`, so no
+  arbitrary value can become an `outcome_counts` key.
+- **Live ids vs. receipt-canonical ids** — a live result's
+  `proposal_id` is collected only as an exact builtin non-empty `str` of at
+  most 64 chars (`MAX_LIVE_RESULT_ID_LEN`); invalid values are omitted
+  without conversion or truth testing. This live bound is deliberately
+  looser than the audit receipt's canonical `_ID_RE`
+  (`^prop-[0-9a-f]{8}$`), which continues to govern receipt content
+  independently — the two contracts are distinct by design.
 
 ## LeanCTX audit receipt
 
