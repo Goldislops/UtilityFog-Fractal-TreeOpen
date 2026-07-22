@@ -37,6 +37,7 @@ Capability quarantine (Package S):
 from __future__ import annotations
 
 import json
+import math
 import re
 import urllib.error
 import urllib.parse
@@ -299,6 +300,16 @@ non-dict return. The offending exception/object is never stringified,
 represented, formatted, measured, or sliced, so its class name and arguments
 cannot enter any result."""
 
+UNKNOWN_TOOL_MESSAGE = "tool not registered"
+"""Fixed message for every unknown-tool refusal — an unregistered exact-str
+name or any non-str name shape. The supplied name is never echoed, converted,
+hashed, measured, truth-tested, or type-reported in the refusal."""
+
+TOOL_RESULT_UNAVAILABLE_MESSAGE = "tool result unavailable"
+"""Fixed message when a tool result is refused by the bounded JSON-tree
+validation, serialization, or size check. The refused payload contributes no
+text, no type name, and no partial content to the replacement result."""
+
 TRANSPORT_FAILURE_MESSAGE = "URLError"
 """Fixed message for transport failures — byte-identical to the message an
 ordinary ``urllib.error.URLError`` produced here before, but emitted without
@@ -314,6 +325,33 @@ MAX_LIMIT_CEILING = 1000
 
 MAX_RECEIPT_BYTES = 64 * 1024
 """Hard ceiling on the serialized LeanCTX audit receipt."""
+
+MAX_TOOL_RESULT_BYTES = 128 * 1024
+"""Hard ceiling on one serialized tool-result payload (UTF-8 encoded bytes)."""
+
+MAX_TOOL_RESULT_DEPTH = 32
+"""Maximum container nesting depth accepted in a tool-result payload. Also the
+cycle guard: a cyclic structure grows depth on every revisit, so traversal
+always terminates at this bound."""
+
+MAX_TOOL_RESULT_ITEMS = 4096
+"""Maximum cumulative container items (dict entries + list elements) accepted
+across an entire tool-result payload."""
+
+MAX_TOOL_RESULT_INT_BITS = 2048
+"""Code-level magnitude ceiling (bit length) for an exact builtin int in a
+tool-result payload. Makes integer acceptance and transient conversion cost
+independent of the mutable process-wide ``sys.get_int_max_str_digits()``
+setting: an accepted integer also charges a conservative decimal-character
+bound — computed from its bit length WITHOUT converting it to text — against
+the cumulative scalar-text budget, before any serialization."""
+
+MAX_LIVE_RESULT_ID_LEN = 64
+"""Maximum length of a proposal/commit id collected from a LIVE tool result.
+Deliberately looser than the receipt's canonical ``_ID_RE`` (which still
+applies at receipt build time): live collection accepts any non-empty exact
+builtin str up to this length — e.g. the ``prop-newid`` test fixture — so the
+live-result contract and the receipt-canonical contract stay distinct."""
 
 
 def _validate_positive_limit(name: str, value: int) -> int:
@@ -372,32 +410,38 @@ class ToolRouter:
         Error kinds are distinguished by a stable ``category`` field:
         unknown_tool, transport_failure, handler_exception, and http_rejection
         (HTTP status >= 400 is a genuine tool error, not a silent success).
-        Failure messages are the fixed strings ``HANDLER_FAILURE_MESSAGE`` /
-        ``TRANSPORT_FAILURE_MESSAGE``: the caught exception, its class, and its
-        arguments are never stringified, represented, formatted, measured, or
-        sliced. A handler result is accepted only when it is EXACTLY a builtin
-        dict — any subclass or other object is refused without reading its
-        ``__class__``, its type name, or calling any of its methods. The
-        complete post-processing of an accepted result (local-rejection
-        cleanup, HTTP classification, successful return) also runs inside the
-        protected block, so a raising hook on payload contents degrades to the
-        bounded fixed-message failure instead of escaping."""
-        handler = self._handlers.get(name)
-        if handler is None:
-            return (
-                {"error": "unknown_tool", "category": CATEGORY_UNKNOWN_TOOL,
-                 "message": f"tool {name} not registered"},
-                True,
-            )
-        # Handler invocation and the COMPLETE post-processing of its result —
-        # exact-shape refusal, local-rejection cleanup, HTTP classification,
-        # and the successful return — live inside the defensive try, so a
-        # handler that raises, or hostile payload CONTENTS whose hooks raise
-        # inside dict machinery during post-processing, become a bounded error
-        # result — execute() can never crash the iteration loop. Refusals
-        # decide by exact builtin type identity alone, before any method of
-        # the returned object could run.
+        Failure messages are the fixed strings ``UNKNOWN_TOOL_MESSAGE`` /
+        ``HANDLER_FAILURE_MESSAGE`` / ``TRANSPORT_FAILURE_MESSAGE``: the
+        supplied name, the caught exception, its class, and its arguments are
+        never stringified, represented, formatted, measured, or sliced. A name
+        is looked up only when it is EXACTLY a builtin str — any other shape
+        (including str subclasses, whose methods may be overridden) is refused
+        as unknown_tool without being hashed, compared, or converted, and the
+        lookup itself runs inside the protected block. A handler result is
+        accepted only when it is EXACTLY a builtin dict — any subclass or
+        other object is refused without reading its ``__class__``, its type
+        name, or calling any of its methods. The complete post-processing of
+        an accepted result (local-rejection cleanup, HTTP classification,
+        successful return) also runs inside the protected block, so a raising
+        hook on payload contents degrades to the bounded fixed-message failure
+        instead of escaping."""
+        # Name gate, registry lookup, handler invocation, and the COMPLETE
+        # post-processing of the result — exact-shape refusal, local-rejection
+        # cleanup, HTTP classification, and the successful return — live
+        # inside the defensive try, so a handler that raises, or hostile
+        # payload CONTENTS whose hooks raise inside dict machinery during
+        # post-processing, become a bounded error result — execute() can never
+        # crash the iteration loop. Refusals decide by exact builtin type
+        # identity alone, before any method of the supplied name or returned
+        # object could run.
         try:
+            handler = self._handlers.get(name) if type(name) is str else None
+            if handler is None:
+                return (
+                    {"error": "unknown_tool", "category": CATEGORY_UNKNOWN_TOOL,
+                     "message": UNKNOWN_TOOL_MESSAGE},
+                    True,
+                )
             payload = handler(arguments)
             if type(payload) is not dict:
                 return (
@@ -447,10 +491,24 @@ class ToolRouter:
     # handlers ---
 
     def _unwrap(self, resp: tuple[int, dict]) -> dict:
+        """Separate transport truth from body content. ``_status`` and
+        ``_local_rejection`` are reserved internal router markers: both are
+        stripped from every dict body, and only an EXACTLY-builtin-int
+        transport status >= 400 re-inserts the authoritative ``_status``. A
+        response body can therefore never supply, replace, or imitate an
+        internal marker. Ordinary bodies are preserved apart from the
+        reserved keys (``dict(body)`` is a C-level copy; ``pop`` touches only
+        the two reserved names). A non-dict body passes through untouched and
+        is refused downstream by execute()'s exact-dict payload gate."""
         status, body = resp
-        if status >= 400:
-            return {"_status": status, **body}
-        return body
+        if type(body) is not dict:
+            return body
+        clean = dict(body)
+        clean.pop("_status", None)
+        clean.pop("_local_rejection", None)
+        if type(status) is int and status >= 400:
+            clean["_status"] = status
+        return clean
 
     def _h_census(self, _args: dict) -> dict:
         return self._unwrap(self.client.get_census())
@@ -667,22 +725,34 @@ class Orchestrator:
 
                 payload, is_error = self.router.execute(call.name, call.arguments)
                 tool_calls_executed += 1
+                # The payload is validated and serialized BEFORE its category
+                # or ids are read: a result outside the bounded exact-JSON
+                # contract is replaced wholesale by the fixed refusal block,
+                # records exactly one handler_exception, and collects nothing.
+                content = _safe_result_content(payload)
+                if content is None:
+                    _record(CATEGORY_HANDLER_EXCEPTION)
+                    result_blocks.append(_error_block(
+                        call.id, "tool_result_unavailable",
+                        CATEGORY_HANDLER_EXCEPTION,
+                        TOOL_RESULT_UNAVAILABLE_MESSAGE))
+                    continue
                 if is_error:
-                    _record(str(payload.get("category", CATEGORY_HANDLER_EXCEPTION)))
+                    _record(_error_outcome_category(payload))
                 else:
                     _record(OUTCOME_OK)
                     if call.name == "propose_tuning":
                         pid = payload.get("proposal_id")
-                        if pid:
+                        if _collectable_live_id(pid):
                             proposals_created.append(pid)
                     elif call.name == "commit_tuning":
                         pid = payload.get("proposal_id")
-                        if pid and payload.get("status") == "committed":
+                        if _collectable_live_id(pid) and payload.get("status") == "committed":
                             commits_applied.append(pid)
                 result_blocks.append(
                     ToolResultBlock(
                         tool_use_id=call.id,
-                        content=json.dumps(payload, sort_keys=True, default=str),
+                        content=content,
                         is_error=is_error,
                     )
                 )
@@ -703,6 +773,128 @@ def _error_block(tool_use_id: str, error: str, category: str, message: str) -> T
         ),
         is_error=True,
     )
+
+
+# -- bounded tool-result shaping ---------------------------------------------
+#
+# A tool result reaches the model (and the outcome/id lanes) only after it is
+# validated as an EXACT builtin JSON tree and serialized within fixed bounds.
+# All decisions are by exact type identity: no conversion, representation,
+# formatting, iteration, comparison, length, or truth method of a refused
+# value is ever requested, and only confirmed exact builtin containers are
+# traversed.
+
+_ERROR_OUTCOME_CATEGORIES = frozenset({
+    CATEGORY_UNKNOWN_TOOL, CATEGORY_HANDLER_EXCEPTION,
+    CATEGORY_TRANSPORT_FAILURE, CATEGORY_HTTP_REJECTION,
+    CATEGORY_BUDGET_REJECTION, CATEGORY_PROPOSAL_LIMIT,
+    CATEGORY_LOCAL_REJECTION,
+})
+"""Categories accepted from a validated error result at record time. ``ok``
+is deliberately excluded: an error can never record as success."""
+
+
+def _error_outcome_category(payload: dict) -> str:
+    """The category recorded for a validated error result: kept only when it
+    is EXACTLY a builtin str inside the known error-category allowlist;
+    absent, malformed, or unknown values all record ``handler_exception``.
+    Nothing is converted, so no arbitrary value can mint an
+    ``outcome_counts`` key. (Runs only on payloads that already passed
+    ``_safe_result_content``, so every value here is a JSON builtin.)"""
+    category = payload.get("category")
+    if type(category) is str and category in _ERROR_OUTCOME_CATEGORIES:
+        return category
+    return CATEGORY_HANDLER_EXCEPTION
+
+
+def _collectable_live_id(value: Any) -> bool:
+    """A live proposal/commit id is collected only when it is EXACTLY a
+    builtin str, non-empty, and at most ``MAX_LIVE_RESULT_ID_LEN`` chars.
+    Anything else is omitted without conversion, truth testing, or type-name
+    reporting. The receipt's canonical ``_ID_RE`` is deliberately NOT applied
+    to live results (``prop-newid``-style fixtures remain accepted); it still
+    governs the audit receipt independently."""
+    return type(value) is str and 0 < len(value) <= MAX_LIVE_RESULT_ID_LEN
+
+
+def _valid_result_tree(value: Any, depth: int, budget: list) -> bool:
+    """Exact-builtin JSON-tree check. ``budget`` is
+    ``[items_remaining, scalar_text_remaining]``, mutated in place so the
+    item and cumulative scalar-text bounds (string/key characters plus a
+    conservative integer digit bound) hold across the whole tree BEFORE
+    serialization. Containers are refused at ``MAX_TOOL_RESULT_DEPTH`` — and
+    because every recursion level increments ``depth``, a cyclic structure
+    exhausts that bound deterministically instead of looping. Only confirmed
+    exact builtin containers are traversed (C-level ``list`` iteration /
+    ``dict.items``); refused values are never touched beyond ``type()`` (an
+    accepted exact int is measured only via C-level ``int.bit_length`` and a
+    sign comparison — never converted to text here)."""
+    vt = type(value)
+    if vt is str:
+        budget[1] -= len(value)
+        return budget[1] >= 0
+    if vt is bool or value is None:
+        return True
+    if vt is int:
+        bits = value.bit_length()
+        if bits > MAX_TOOL_RESULT_INT_BITS:
+            return False
+        # Conservative decimal-character bound without converting the value:
+        # 30103/100000 is a slight upper approximation of log10(2).
+        chars = 1 if bits == 0 else (bits * 30103) // 100000 + 1
+        if value < 0:
+            chars += 1
+        budget[1] -= chars
+        return budget[1] >= 0
+    if vt is float:
+        return math.isfinite(value)
+    if vt is list:
+        if depth >= MAX_TOOL_RESULT_DEPTH:
+            return False
+        for item in value:
+            budget[0] -= 1
+            if budget[0] < 0 or not _valid_result_tree(item, depth + 1, budget):
+                return False
+        return True
+    if vt is dict:
+        if depth >= MAX_TOOL_RESULT_DEPTH:
+            return False
+        for key, item in value.items():
+            budget[0] -= 1
+            if budget[0] < 0:
+                return False
+            if type(key) is not str:
+                return False
+            budget[1] -= len(key)
+            if budget[1] < 0:
+                return False
+            if not _valid_result_tree(item, depth + 1, budget):
+                return False
+        return True
+    return False
+
+
+def _safe_result_content(payload: Any) -> Optional[str]:
+    """Serialize a tool-result payload only when it is an exact builtin JSON
+    tree within the depth/item/scalar-text bounds AND its UTF-8 encoding fits
+    ``MAX_TOOL_RESULT_BYTES``. ``None`` means REFUSED — the caller substitutes
+    the fixed ``tool_result_unavailable`` block; the refused payload
+    contributes nothing to it. Accepted payloads serialize byte-identically
+    to plain ``json.dumps(payload, sort_keys=True)`` (``allow_nan=False`` is
+    inert once non-finite floats are refused, and there is no ``default=``
+    hook, so no foreign ``__str__`` can ever run)."""
+    if type(payload) is not dict:
+        return None
+    budget = [MAX_TOOL_RESULT_ITEMS, MAX_TOOL_RESULT_BYTES]
+    if not _valid_result_tree(payload, 0, budget):
+        return None
+    try:
+        text = json.dumps(payload, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):  # defensive: the validator precludes this
+        return None
+    if len(text.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
+        return None
+    return text
 
 
 # -- audit receipt: strict allowlist normalization --------------------------
@@ -899,9 +1091,16 @@ __all__ = [
     "DEFAULT_MAX_TOTAL_TOOL_CALLS",
     "MAX_LIMIT_CEILING",
     "MAX_RECEIPT_BYTES",
+    "MAX_TOOL_RESULT_BYTES",
+    "MAX_TOOL_RESULT_DEPTH",
+    "MAX_TOOL_RESULT_INT_BITS",
+    "MAX_TOOL_RESULT_ITEMS",
+    "MAX_LIVE_RESULT_ID_LEN",
     "OUTCOME_OK",
     "HANDLER_FAILURE_MESSAGE",
     "TRANSPORT_FAILURE_MESSAGE",
+    "UNKNOWN_TOOL_MESSAGE",
+    "TOOL_RESULT_UNAVAILABLE_MESSAGE",
     "CATEGORY_UNKNOWN_TOOL",
     "CATEGORY_HANDLER_EXCEPTION",
     "CATEGORY_TRANSPORT_FAILURE",

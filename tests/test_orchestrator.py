@@ -1838,3 +1838,1023 @@ def test_execute_source_fence_no_exception_formatting():
     for banned in ("type(e).__name__", "type(payload).__name__", "{e}",
                    "str(e", "repr(", "isinstance("):
         assert banned not in body
+
+
+# -- result shaping: bounded, deterministic tool-result lane ------------------
+#
+# This section pins the result-shaping contract:
+#   * Unknown-tool handling: a name is looked up only when it is exactly a
+#     builtin str; the lookup runs inside the protected block; every refusal
+#     is the fixed, name-free message below. No conversion, hashing, equality,
+#     formatting, length, or truth method of a refused name is ever requested.
+#   * Outcome recording: no str() coercion. An error result's category
+#     survives only as an exact builtin str drawn from the known error
+#     categories ("ok" excluded); everything else records handler_exception.
+#     Success records only "ok". No arbitrary value can mint an
+#     outcome_counts key.
+#   * Reserved response markers: "_status" and "_local_rejection" are internal
+#     router vocabulary. They are stripped from every dict body before
+#     classification; on an exact-builtin-int transport status >= 400 the
+#     transport status is re-inserted as the authoritative "_status". A body
+#     cannot supply, replace, or imitate either marker.
+#   * Live proposal/commit ids: collected only as exact builtin str, non-empty,
+#     <= 64 chars. The receipt's canonical _ID_RE is deliberately NOT applied
+#     to live results ("prop-newid" stays accepted).
+#   * Result encoding: a payload is serialized only after validating it as an
+#     exact builtin JSON tree (exact dict/list/str/int/finite-float/bool/None,
+#     str keys, depth <= 32, items <= 4096, bounded cumulative scalar text
+#     covering string/key characters and integer digit bounds),
+#     with plain json.dumps(..., sort_keys=True, allow_nan=False) and a
+#     128 KiB ceiling on the encoded bytes. Anything refused is replaced by a
+#     fixed structured error block; exactly one handler_exception is recorded,
+#     no id is collected, and the iteration continues.
+# Hostile hooks below RECORD instead of raising, so "not consulted" is proven
+# by an empty call log (same idiom as the fixed-message section above).
+
+_RESULT_UNAVAILABLE_MESSAGE = "tool result unavailable"
+_UNKNOWN_TOOL_MESSAGE = "tool not registered"
+_MAX_RESULT_BYTES = 128 * 1024
+_MAX_RESULT_DEPTH = 32
+_MAX_RESULT_ITEMS = 4096
+_MAX_LIVE_ID_LEN = 64
+
+_REFUSAL_CONTENT = json.dumps(
+    {"error": "tool_result_unavailable", "category": "handler_exception",
+     "message": _RESULT_UNAVAILABLE_MESSAGE},
+    sort_keys=True,
+)
+
+
+class _SubDict(dict):
+    """Well-behaved dict subclass — refused by exact-type gates."""
+
+
+class _SubList(list):
+    """Well-behaved list subclass — refused by exact-type gates."""
+
+
+class _SubStr(str):
+    """Well-behaved str subclass — refused by exact-type gates."""
+
+
+class _SubInt(int):
+    """Well-behaved int subclass — refused by exact-type gates."""
+
+
+class _SubFloat(float):
+    """Well-behaved float subclass — refused by exact-type gates."""
+
+
+class _StubRouter:
+    """Injectable router yielding scripted (payload, is_error) results, so
+    run_one_iteration's recording/collection/serialization lanes can be fed
+    arbitrary shapes without HTTP scripting."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls: list = []
+
+    def execute(self, name, arguments):
+        self.calls.append(name)
+        return self._results.pop(0)
+
+
+def _shaping_orchestrator(responses, results, *, mode=MODE_OBSERVE):
+    backend = MockBackend(responses=responses)
+    client = OrchestratorClient("http://test:8080", http_do=FakeHttp())
+    orch = Orchestrator(
+        backend=backend,
+        client=client,
+        system_prompt="s",
+        mode=mode,
+        router=_StubRouter(results),
+        max_tool_depth=4,
+    )
+    return orch, backend
+
+
+def _single_result_iteration(result, *, name="get_medusa_census", mode=MODE_OBSERVE):
+    """One iteration: a single tool call whose router result is `result`,
+    then a closing text turn. Returns (IterationResult, result_blocks)."""
+    orch, backend = _shaping_orchestrator(
+        [_tool_use_response("tu_r1", name, {}), _text_response("done")],
+        [result],
+        mode=mode,
+    )
+    outcome = orch.run_one_iteration("observe")
+    blocks = [b for b in backend.calls[-1].messages[-1].content
+              if isinstance(b, ToolResultBlock)]
+    return outcome, blocks
+
+
+# -- unknown-tool handling ----------------------------------------------------
+
+
+def test_unknown_tool_message_is_fixed_and_name_free():
+    client, http = _client_with_fake()
+    payload, is_error = ToolRouter(client).execute("get_weather", {})
+    assert is_error is True
+    assert payload == {
+        "error": "unknown_tool",
+        "category": "unknown_tool",
+        "message": _UNKNOWN_TOOL_MESSAGE,
+    }
+    assert http.calls == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [123, 1.5, True, None, b"get_params", ("get_params",), frozenset({"x"})],
+    ids=["int", "float", "bool", "none", "bytes", "tuple", "frozenset"],
+)
+def test_unknown_tool_non_str_hashable_name_is_refused(name):
+    client, http = _client_with_fake()
+    payload, is_error = ToolRouter(client).execute(name, {})
+    assert is_error is True
+    assert payload == {
+        "error": "unknown_tool",
+        "category": "unknown_tool",
+        "message": _UNKNOWN_TOOL_MESSAGE,
+    }
+    assert http.calls == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [["get_params"], {"n": 1}, {"get_params"}, bytearray(b"get_params")],
+    ids=["list", "dict", "set", "bytearray"],
+)
+def test_unknown_tool_unhashable_name_cannot_crash_execute(name):
+    """An unhashable name must be refused by the exact-str gate BEFORE any
+    registry lookup could hash it — execute returns the bounded refusal
+    instead of letting a TypeError escape the router."""
+    client, http = _client_with_fake()
+    payload, is_error = ToolRouter(client).execute(name, {})
+    assert is_error is True
+    assert payload == {
+        "error": "unknown_tool",
+        "category": "unknown_tool",
+        "message": _UNKNOWN_TOOL_MESSAGE,
+    }
+    assert http.calls == []
+
+
+def test_unknown_tool_str_subclass_name_refused_without_hooks():
+    """A str subclass spelling a REGISTERED name is still refused (the gate is
+    exact-type, not isinstance), and none of its hooks is requested."""
+    calls: list[str] = []
+
+    class _RecordingName(str):
+        def __hash__(self):
+            calls.append("__hash__")
+            return str.__hash__(self)
+
+        def __eq__(self, other):
+            calls.append("__eq__")
+            return str.__eq__(self, other)
+
+        def __str__(self):
+            calls.append("__str__")
+            return str.__str__(self)
+
+        def __format__(self, spec):
+            calls.append("__format__")
+            return str.__format__(self, spec)
+
+    client, http = _client_with_fake()
+    payload, is_error = ToolRouter(client).execute(
+        _RecordingName("get_medusa_census"), {})
+    assert is_error is True
+    assert payload == {
+        "error": "unknown_tool",
+        "category": "unknown_tool",
+        "message": _UNKNOWN_TOOL_MESSAGE,
+    }
+    assert calls == []
+    assert http.calls == []
+
+
+def test_unknown_tool_hostile_object_name_hooks_not_requested():
+    calls: list[str] = []
+
+    class _RecordingNameObject:
+        def __hash__(self):
+            calls.append("__hash__")
+            return 0
+
+        def __eq__(self, other):
+            calls.append("__eq__")
+            return False
+
+        def __str__(self):
+            calls.append("__str__")
+            return "n"
+
+        def __repr__(self):
+            calls.append("__repr__")
+            return "n"
+
+        def __format__(self, spec):
+            calls.append("__format__")
+            return "n"
+
+        def __len__(self):
+            calls.append("__len__")
+            return 1
+
+        def __bool__(self):
+            calls.append("__bool__")
+            return True
+
+    client, http = _client_with_fake()
+    payload, is_error = ToolRouter(client).execute(_RecordingNameObject(), {})
+    assert is_error is True
+    assert payload == {
+        "error": "unknown_tool",
+        "category": "unknown_tool",
+        "message": _UNKNOWN_TOOL_MESSAGE,
+    }
+    assert calls == []
+    assert http.calls == []
+
+
+def test_registered_tool_exact_str_lookup_unchanged():
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", 200, {"generation": 42})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is False
+    assert payload == {"generation": 42}
+
+
+# -- outcome-category allowlist ----------------------------------------------
+
+
+def test_error_result_keeps_known_error_category():
+    result, _ = _single_result_iteration(
+        ({"category": "transport_failure", "error": "x", "message": "m"}, True))
+    assert result.outcome_counts == {"transport_failure": 1}
+
+
+def test_error_result_without_category_records_handler_exception():
+    result, _ = _single_result_iteration(({"error": "x"}, True))
+    assert result.outcome_counts == {"handler_exception": 1}
+
+
+def test_error_result_unknown_string_category_records_handler_exception():
+    result, _ = _single_result_iteration(
+        ({"category": "weird_new_category"}, True))
+    assert result.outcome_counts == {"handler_exception": 1}
+
+
+@pytest.mark.parametrize(
+    "category",
+    [123, 1.5, True, None, ["local_rejection"], {"c": "ok"}],
+    ids=["int", "float", "bool", "none", "list", "dict"],
+)
+def test_error_result_non_str_category_records_handler_exception(category):
+    """JSON-legal but non-str categories are never stringified into keys."""
+    result, _ = _single_result_iteration(({"category": category}, True))
+    assert result.outcome_counts == {"handler_exception": 1}
+
+
+def test_error_result_ok_category_is_not_accepted():
+    result, _ = _single_result_iteration(({"category": "ok"}, True))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert "ok" not in result.outcome_counts
+
+
+def test_success_records_only_ok_even_with_category_key():
+    result, _ = _single_result_iteration(
+        ({"category": "http_rejection", "data": 1}, False))
+    assert result.outcome_counts == {"ok": 1}
+
+
+# -- reserved response-marker separation ---------------------------------------
+
+
+def test_success_body_reserved_markers_are_stripped():
+    """A 200 body carrying both reserved markers is an ordinary success once
+    they are stripped — it cannot imitate a local rejection or an HTTP error."""
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", 200,
+             {"_status": 500, "_local_rejection": True, "data": 1})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is False
+    assert payload == {"data": 1}
+
+
+def test_success_body_preserved_apart_from_reserved_markers():
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", 200,
+             {"_status": 999, "value": [1, 2], "n": None, "f": 1.5})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is False
+    assert payload == {"value": [1, 2], "n": None, "f": 1.5}
+
+
+def test_http_error_transport_status_is_authoritative():
+    """On a >= 400 transport status, a body-supplied "_status" (and any
+    "_local_rejection") is discarded and the actual status is inserted."""
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", 503,
+             {"_status": 200, "_local_rejection": True, "error": "down"})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"error": "down", "_status": 503,
+                       "category": "http_rejection"}
+
+
+def test_http_error_ordinary_body_shape_pinned():
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", 404, {"error": "not_found"})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"error": "not_found", "_status": 404,
+                       "category": "http_rejection"}
+
+
+@pytest.mark.parametrize("status", [500.0, True], ids=["float", "bool"])
+def test_non_exact_int_status_never_classifies_as_http_error(status):
+    """Only an exact builtin int >= 400 is an HTTP rejection; other status
+    shapes fall through to the success lane with markers stripped."""
+    client, http = _client_with_fake()
+    http.set("GET", "/api/census", status, {"_status": 500, "x": 1})
+    payload, is_error = ToolRouter(client).execute("get_medusa_census", {})
+    assert is_error is False
+    assert payload == {"x": 1}
+
+
+def test_genuine_local_rejection_still_flagged_and_marker_free():
+    """The router's own local refusals keep working after marker separation,
+    and the internal marker never leaks into the payload."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client, mode=MODE_PROPOSE)
+    payload, is_error = router.execute(
+        "propose_tuning", {"params": {}, "justification": "   "})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert "_local_rejection" not in payload
+
+
+# -- live proposal/commit id collection ----------------------------------------
+
+
+def _propose_iteration(propose_body, *, status=200):
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_p1", "propose_tuning", {
+            "params": {"signal_interval": 12},
+            "justification": "test",
+        }),
+        _text_response("done"),
+    ])
+    http = FakeHttp()
+    http.set("POST", "/api/tuning/propose", status, propose_body)
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        mode=MODE_PROPOSE, max_tool_depth=4)
+    return orch.run_one_iteration("observe")
+
+
+@pytest.mark.parametrize(
+    ("pid", "collected"),
+    [
+        ("p", True),
+        ("a" * 64, True),
+        ("a" * 65, False),
+        ("", False),
+    ],
+    ids=["len1", "len64", "len65", "empty"],
+)
+def test_live_proposal_id_length_boundaries(pid, collected):
+    result = _propose_iteration({"proposal_id": pid, "status": "accepted"})
+    assert result.outcome_counts == {"ok": 1}
+    assert result.proposals_created == ([pid] if collected else [])
+
+
+@pytest.mark.parametrize(
+    "pid",
+    [123, 1.5, True, None, ["prop-newid"], {"id": "prop-newid"}],
+    ids=["int", "float", "bool", "none", "list", "dict"],
+)
+def test_live_proposal_id_non_str_json_values_omitted(pid):
+    """JSON-legal non-str ids pass result validation but are never collected
+    — and never converted into strings."""
+    result = _propose_iteration({"proposal_id": pid, "status": "accepted"})
+    assert result.outcome_counts == {"ok": 1}
+    assert result.proposals_created == []
+
+
+@pytest.mark.parametrize(
+    "pid",
+    ["prop-newid", "PROP-UPPER-1234", "x" * 40],
+    ids=["prop-newid", "uppercase", "arbitrary40"],
+)
+def test_live_proposal_id_non_canonical_shapes_stay_accepted(pid):
+    """The receipt's canonical _ID_RE must NOT gate live results."""
+    result = _propose_iteration({"proposal_id": pid, "status": "accepted"})
+    assert result.proposals_created == [pid]
+
+
+def test_live_proposal_id_str_subclass_body_is_refused_upstream():
+    """A str-subclass id makes the whole body fail exact-JSON-tree validation:
+    the result is replaced by the fixed refusal block and nothing is
+    collected."""
+    result = _propose_iteration(
+        {"proposal_id": _SubStr("prop-newid"), "status": "accepted"})
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.proposals_created == []
+
+
+def test_commit_lane_live_id_gate():
+    """commit_tuning is never registered on the real router; the collection
+    gate is pinned through an injected router. The same exact-str 1..64 bound
+    applies, and only status == "committed" collects."""
+    long_ok = "c" * 64
+    result, _ = _single_result_iteration(
+        ({"proposal_id": long_ok, "status": "committed"}, False),
+        name="commit_tuning")
+    assert result.commits_applied == [long_ok]
+
+    result, _ = _single_result_iteration(
+        ({"proposal_id": "c" * 65, "status": "committed"}, False),
+        name="commit_tuning")
+    assert result.commits_applied == []
+
+    result, _ = _single_result_iteration(
+        ({"proposal_id": "c" * 10, "status": "accepted"}, False),
+        name="commit_tuning")
+    assert result.commits_applied == []
+
+
+# -- bounded JSON result encoding: validator unit probes ------------------------
+
+
+def test_safe_result_accepts_plain_tree_byte_identical():
+    from scripts.orchestrator import _safe_result_content
+    payload = {"b": [1, 2.5, True, None, "s"], "a": {"nested": {"k": "v"}}}
+    assert _safe_result_content(payload) == json.dumps(payload, sort_keys=True)
+
+
+def test_safe_result_depth_boundary_32_in_33_out():
+    from scripts.orchestrator import _safe_result_content
+
+    def _nest(n: int) -> dict:
+        d: dict = {"leaf": 1}
+        for _ in range(n - 1):
+            d = {"k": d}
+        return d
+
+    assert _safe_result_content(_nest(_MAX_RESULT_DEPTH)) is not None
+    assert _safe_result_content(_nest(_MAX_RESULT_DEPTH + 1)) is None
+
+
+def test_safe_result_item_boundary_4096_in_4097_out():
+    from scripts.orchestrator import _safe_result_content
+    flat_ok = {f"k{i:05d}": 0 for i in range(_MAX_RESULT_ITEMS)}
+    assert _safe_result_content(flat_ok) is not None
+    flat_over = {f"k{i:05d}": 0 for i in range(_MAX_RESULT_ITEMS + 1)}
+    assert _safe_result_content(flat_over) is None
+    # the item budget is cumulative across nested containers
+    nested_over = {"a": [0] * 3000, "b": [0] * (_MAX_RESULT_ITEMS - 3000 - 2 + 1)}
+    assert _safe_result_content(nested_over) is None
+
+
+def test_safe_result_cumulative_string_budget():
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({"a": "x" * 1000}) is not None
+    assert _safe_result_content({"s": "x" * (_MAX_RESULT_BYTES + 1)}) is None
+    # split across two values: each under the cap, together over it
+    assert _safe_result_content(
+        {"a": "x" * 70000, "b": "x" * 70000}) is None
+
+
+def test_safe_result_final_encoded_size_is_bounded():
+    """JSON structural overhead (quotes, colons, commas) can push the encoded
+    size past the ceiling even when raw string content is under it — the
+    final encoded-byte check must still refuse."""
+    from scripts.orchestrator import _safe_result_content
+    # 4000 items, raw string content = 4000 * (5 + 27) = 128,000 chars
+    # (< 131,072), encoded ≈ 4000 * 38 ≈ 152,000 bytes (> 131,072)
+    over = {f"k{i:04d}": "x" * 27 for i in range(4000)}
+    assert _safe_result_content(over) is None
+    # same shape with short values stays comfortably under both bounds
+    under = {f"k{i:04d}": "x" * 10 for i in range(4000)}
+    assert _safe_result_content(under) == json.dumps(under, sort_keys=True)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "inf", "-inf"],
+)
+def test_safe_result_refuses_non_finite_floats(bad):
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({"v": bad}) is None
+    assert _safe_result_content({"v": [1.0, bad]}) is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [1, 1.5, True, None, ("t",), b"k"],
+    ids=["int", "float", "bool", "none", "tuple", "bytes"],
+)
+def test_safe_result_refuses_non_str_keys(key):
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({key: "v"}) is None
+    assert _safe_result_content({"outer": {key: "v"}}) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _SubDict({"a": 1}),
+        _SubList([1]),
+        _SubStr("s"),
+        _SubInt(1),
+        _SubFloat(1.0),
+        b"bytes",
+        (1, 2),
+        {1, 2},
+        frozenset({1}),
+        object(),
+    ],
+    ids=["dict-sub", "list-sub", "str-sub", "int-sub", "float-sub",
+         "bytes", "tuple", "set", "frozenset", "object"],
+)
+def test_safe_result_refuses_subclasses_and_foreign_values(value):
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({"v": value}) is None
+    assert _safe_result_content({"v": [value]}) is None
+
+
+def test_safe_result_refuses_str_subclass_keys():
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({_SubStr("k"): 1}) is None
+
+
+def test_safe_result_refuses_cycles():
+    from scripts.orchestrator import _safe_result_content
+    d: dict = {}
+    d["self"] = d
+    assert _safe_result_content(d) is None
+    inner: list = []
+    inner.append(inner)
+    assert _safe_result_content({"l": inner}) is None
+
+
+@pytest.mark.parametrize(
+    "root",
+    [_SubDict({"a": 1}), ["x"], "s", 1, None],
+    ids=["dict-sub", "list", "str", "int", "none"],
+)
+def test_safe_result_root_must_be_exact_dict(root):
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content(root) is None
+
+
+def test_safe_result_hooks_not_requested_on_refused_value():
+    """A refused value's conversion, representation, formatting, iteration,
+    comparison, length, and truth hooks are never requested — refusal is by
+    exact type alone."""
+    from scripts.orchestrator import _safe_result_content
+    calls: list[str] = []
+
+    class _RecordingValue:
+        def __str__(self):
+            calls.append("__str__")
+            return "v"
+
+        def __repr__(self):
+            calls.append("__repr__")
+            return "v"
+
+        def __format__(self, spec):
+            calls.append("__format__")
+            return "v"
+
+        def __bytes__(self):
+            calls.append("__bytes__")
+            return b"v"
+
+        def __len__(self):
+            calls.append("__len__")
+            return 1
+
+        def __bool__(self):
+            calls.append("__bool__")
+            return True
+
+        def __iter__(self):
+            calls.append("__iter__")
+            return iter(())
+
+        def __int__(self):
+            calls.append("__int__")
+            return 0
+
+        def __index__(self):
+            calls.append("__index__")
+            return 0
+
+        def __eq__(self, other):
+            calls.append("__eq__")
+            return False
+
+        def __lt__(self, other):
+            calls.append("__lt__")
+            return False
+
+        def keys(self):
+            calls.append("keys")
+            return []
+
+    assert _safe_result_content({"v": _RecordingValue()}) is None
+    assert calls == []
+
+
+def test_safe_result_hooks_not_requested_on_refused_containers():
+    """Refused container subclasses are never iterated, measured, viewed, or
+    truth-tested."""
+    from scripts.orchestrator import _safe_result_content
+    calls: list[str] = []
+
+    class _RecordingDict(dict):
+        def keys(self):
+            calls.append("keys")
+            return dict.keys(self)
+
+        def items(self):
+            calls.append("items")
+            return dict.items(self)
+
+        def values(self):
+            calls.append("values")
+            return dict.values(self)
+
+        def __iter__(self):
+            calls.append("__iter__")
+            return dict.__iter__(self)
+
+        def __len__(self):
+            calls.append("__len__")
+            return dict.__len__(self)
+
+        def __bool__(self):
+            calls.append("__bool__")
+            return True
+
+    class _RecordingList(list):
+        def __iter__(self):
+            calls.append("__iter__")
+            return list.__iter__(self)
+
+        def __len__(self):
+            calls.append("__len__")
+            return list.__len__(self)
+
+        def __bool__(self):
+            calls.append("__bool__")
+            return True
+
+    assert _safe_result_content({"d": _RecordingDict({"a": 1})}) is None
+    assert _safe_result_content({"l": _RecordingList([1])}) is None
+    assert calls == []
+
+
+# -- bounded JSON result encoding: iteration lane -------------------------------
+
+
+def test_refused_result_is_replaced_by_fixed_block():
+    result, blocks = _single_result_iteration(({"bad": {1, 2}}, False))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.tool_calls_executed == 1
+    assert result.stopped_because == "end_turn"  # iteration continued
+    assert len(blocks) == 1
+    assert blocks[0].is_error is True
+    assert blocks[0].content == _REFUSAL_CONTENT
+
+
+def test_refused_error_result_records_handler_exception_not_its_category():
+    """Validation runs BEFORE the category is read: an unserializable error
+    payload cannot smuggle its own category into outcome_counts."""
+    result, blocks = _single_result_iteration(
+        ({"category": "http_rejection", "detail": object()}, True))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert "http_rejection" not in result.outcome_counts
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert blocks[0].is_error is True
+
+
+def test_refused_success_result_never_records_ok():
+    result, _ = _single_result_iteration(({"v": (1, 2)}, False))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert "ok" not in result.outcome_counts
+
+
+def test_no_default_str_stringification_of_result_values():
+    """The #403 residual: json.dumps(default=str) used to execute a foreign
+    value's __str__ and feed the text to the model. Now the value's hooks are
+    never requested and the fixed refusal block is returned instead."""
+    calls: list[str] = []
+
+    class _RecordingWhen:
+        def __str__(self):
+            calls.append("__str__")
+            return "2026-07-22"
+
+        def __repr__(self):
+            calls.append("__repr__")
+            return "when"
+
+        def __format__(self, spec):
+            calls.append("__format__")
+            return "2026-07-22"
+
+    result, blocks = _single_result_iteration(
+        ({"when": _RecordingWhen()}, False))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert calls == []
+
+
+def test_non_finite_float_result_never_reaches_the_model():
+    """NaN/Infinity used to serialize into the tool result as bare tokens;
+    now the payload is refused with the fixed block."""
+    result, blocks = _single_result_iteration(({"v": float("nan")}, False))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert "NaN" not in blocks[0].content
+
+
+def test_oversized_result_refused():
+    result, blocks = _single_result_iteration(
+        ({"blob": "x" * (_MAX_RESULT_BYTES + 1024)}, False))
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert blocks[0].content == _REFUSAL_CONTENT
+
+
+def test_accepted_result_serialization_is_byte_identical():
+    payload = {"z": {"deep": [1, 2, {"k": None}]}, "a": True, "f": 2.5}
+    result, blocks = _single_result_iteration((payload, False))
+    assert result.outcome_counts == {"ok": 1}
+    assert blocks[0].is_error is False
+    assert blocks[0].content == json.dumps(payload, sort_keys=True)
+
+
+def test_ordinary_router_error_payloads_still_serialize():
+    """The router's own fixed error payloads are pure JSON trees and pass the
+    validator unchanged."""
+    payload = {"error": "transport_failure",
+               "category": "transport_failure",
+               "tool": "get_medusa_census",
+               "message": "URLError"}
+    result, blocks = _single_result_iteration((payload, True))
+    assert result.outcome_counts == {"transport_failure": 1}
+    assert blocks[0].is_error is True
+    assert blocks[0].content == json.dumps(payload, sort_keys=True)
+
+
+def test_mixed_turn_refused_and_accepted_results_keep_positions():
+    ok_payload = {"data": 1}
+    backend = MockBackend(responses=[
+        AgentResponse.from_content(
+            [ToolUseBlock(id="tu_m1", name="get_medusa_census", input={}),
+             ToolUseBlock(id="tu_m2", name="get_medusa_census", input={})],
+            stop_reason="tool_use",
+            usage={"input_tokens": 1, "output_tokens": 1},
+        ),
+        _text_response("done"),
+    ])
+    client = OrchestratorClient("http://test:8080", http_do=FakeHttp())
+    orch = Orchestrator(
+        backend=backend, client=client, system_prompt="s",
+        router=_StubRouter([({"bad": object()}, False), (ok_payload, False)]),
+        max_tool_depth=4,
+    )
+    result = orch.run_one_iteration("observe")
+    blocks = [b for b in backend.calls[-1].messages[-1].content
+              if isinstance(b, ToolResultBlock)]
+    assert result.outcome_counts == {"handler_exception": 1, "ok": 1}
+    assert [b.tool_use_id for b in blocks] == ["tu_m1", "tu_m2"]
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert blocks[0].is_error is True
+    assert blocks[1].content == json.dumps(ok_payload, sort_keys=True)
+    assert blocks[1].is_error is False
+
+
+def test_refusal_collects_no_proposal_id():
+    """A propose result that fails validation collects nothing even though it
+    carries a plausible id."""
+    result, blocks = _single_result_iteration(
+        ({"proposal_id": "prop-newid", "junk": {1, 2}}, False),
+        name="propose_tuning", mode=MODE_PROPOSE)
+    assert result.proposals_created == []
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert blocks[0].content == _REFUSAL_CONTENT
+
+
+# -- review pins: direct falsifiability of the redundant exact-type gates ------
+#
+# Upstream _safe_result_content validation means a subclass category/pid can
+# never reach these gates in the integrated lane (proven above), so their
+# exact-type coding is redundant defense. These unit pins make each gate
+# falsifiable on its own, per the post-implementation review waves.
+
+
+def test_error_outcome_category_gate_is_exact_type():
+    from scripts.orchestrator import _error_outcome_category
+    assert _error_outcome_category(
+        {"category": _SubStr("http_rejection")}) == "handler_exception"
+    assert _error_outcome_category(
+        {"category": "http_rejection"}) == "http_rejection"
+
+
+def test_collectable_live_id_gate_is_exact_type():
+    from scripts.orchestrator import _collectable_live_id
+    assert _collectable_live_id(_SubStr("prop-newid")) is False
+    assert _collectable_live_id("prop-newid") is True
+    assert _collectable_live_id("") is False
+    assert _collectable_live_id("a" * 64) is True
+    assert _collectable_live_id("a" * 65) is False
+
+
+def test_unwrap_status_gate_refuses_int_subclass():
+    """An int-subclass >= 400 status never inserts the authoritative marker
+    — the one shape the transport-level tests cannot reach."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client)
+    assert router._unwrap((_SubInt(503), {"e": 1})) == {"e": 1}
+    assert router._unwrap((503, {"e": 1})) == {"e": 1, "_status": 503}
+
+
+def test_commit_lane_non_str_id_omitted():
+    result, _ = _single_result_iteration(
+        ({"proposal_id": 123, "status": "committed"}, False),
+        name="commit_tuning")
+    assert result.outcome_counts == {"ok": 1}
+    assert result.commits_applied == []
+
+
+def test_local_rejection_category_recorded_end_to_end():
+    """A validated error result carrying the local_rejection category lands
+    in outcome_counts under that category (allowlist membership, not just the
+    transport_failure representative)."""
+    result, _ = _single_result_iteration(
+        ({"category": "local_rejection", "error": "bad_request"}, True))
+    assert result.outcome_counts == {"local_rejection": 1}
+
+
+def test_string_budget_counts_dict_keys():
+    """Documents intent: dict KEYS consume the cumulative scalar-text budget.
+    (Behaviorally backstopped by the final encoded-byte ceiling either way.)"""
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({"x" * 200000: 1}) is None
+
+
+def test_oversized_census_body_refused_end_to_end():
+    """Explicit pin of the semantic shift in
+    test_audit_receipt_excludes_large_tool_payloads: a > 128 KiB SUCCESS body
+    from a real handler now takes the refusal lane (handler_exception + fixed
+    block) instead of serializing into model-visible content."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_big", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    http = FakeHttp()
+    http.set("GET", "/api/census", 200, {"blob": "z" * 200000})
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4)
+    result = orch.run_one_iteration("observe")
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.stopped_because == "end_turn"
+    blocks = [b for b in backend.calls[-1].messages[-1].content
+              if isinstance(b, ToolResultBlock)]
+    assert blocks[0].is_error is True
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert "zzz" not in blocks[0].content
+
+
+# -- follow-up: exact-integer magnitude ceiling + scalar-text accounting ------
+#
+# Jack's reproduced finding: integer acceptance previously depended on the
+# process-wide sys.get_int_max_str_digits() setting — under the default
+# 4300-digit limit json.dumps raised on a 5,001-digit integer (refused via
+# the defensive except), but after sys.set_int_max_str_digits(0) the
+# identical value was accepted into a 5,008-character serialized result, and
+# the conversion ran before the final byte check. Exact integers now carry a
+# code-level MAX_TOOL_RESULT_INT_BITS = 2048 ceiling and charge a
+# conservative decimal-character bound (computed WITHOUT text conversion;
+# 30103/100000 slightly over-approximates log10(2)) against the cumulative
+# scalar-text budget, so acceptance and transient allocation are
+# runtime-setting-independent.
+
+_MAX_INT_BITS = 2048
+
+
+def test_int_at_2048_bit_boundary_accepted_with_sign():
+    from scripts.orchestrator import _safe_result_content
+    v = 2 ** (_MAX_INT_BITS - 1)
+    assert v.bit_length() == _MAX_INT_BITS
+    payload = {"v": v, "neg": -v}
+    assert _safe_result_content(payload) == json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+def test_int_above_2048_bits_refused(sign):
+    from scripts.orchestrator import _safe_result_content
+    v = sign * (2 ** _MAX_INT_BITS)
+    assert abs(v).bit_length() == _MAX_INT_BITS + 1
+    assert _safe_result_content({"v": v}) is None
+
+
+def test_zero_and_ordinary_ints_still_accepted():
+    from scripts.orchestrator import _safe_result_content
+    payload = {"z": 0, "a": 1, "b": -1, "c": 123456789, "d": -987654321}
+    assert _safe_result_content(payload) == json.dumps(payload, sort_keys=True)
+
+
+def test_cumulative_int_text_budget_refuses_before_serialization(monkeypatch):
+    """Individually permitted integers whose conservative digit bounds
+    cumulatively exhaust the scalar-text budget are refused BEFORE
+    serialization — the json.dumps sentinel must never fire."""
+    from scripts.orchestrator import _safe_result_content
+    big = 2 ** (_MAX_INT_BITS - 1)  # conservative bound: 617 chars each
+    count = (128 * 1024) // 617 + 2  # cumulative bound exceeds the budget
+    payload = {"ints": [big] * count}
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("json.dumps must not be entered")
+
+    monkeypatch.setattr(json, "dumps", _boom)
+    assert _safe_result_content(payload) is None
+
+
+def test_5001_digit_reproduction_refused_under_both_runtime_settings():
+    """Jack's direct receipt, pinned both ways: 10**5000 (5,001 digits) is
+    refused with the runtime conversion limit at its current value AND with
+    the limit disabled. The process-wide setting is saved and restored in
+    try/finally."""
+    import sys
+    from scripts.orchestrator import _safe_result_content
+    payload = {"v": 10 ** 5000}
+    assert _safe_result_content(payload) is None
+    saved = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        assert _safe_result_content(payload) is None
+    finally:
+        sys.set_int_max_str_digits(saved)
+
+
+def test_oversized_int_refusal_iteration_lane():
+    """The integer ceiling flows through the standard refusal lane: one
+    handler_exception, the fixed block, zero live-id collection, and the
+    iteration continues."""
+    result, blocks = _single_result_iteration(
+        ({"proposal_id": "prop-newid", "v": 2 ** (_MAX_INT_BITS + 1)}, False),
+        name="propose_tuning", mode=MODE_PROPOSE)
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.proposals_created == []
+    assert result.stopped_because == "end_turn"
+    assert blocks[0].is_error is True
+    assert blocks[0].content == _REFUSAL_CONTENT
+
+
+def test_negative_sign_charge_is_budget_decisive():
+    """The +1 sign character must be able to decide accept-vs-refuse on its
+    own: a maximal positive int fits a 617-char budget exactly; its negation
+    needs 618."""
+    from scripts.orchestrator import _valid_result_tree
+    v = 2 ** (_MAX_INT_BITS - 1)  # 617 decimal digits
+    budget = [100, 617]
+    assert _valid_result_tree(v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 617
+    budget = [100, 617]
+    assert _valid_result_tree(-v, 0, budget) is False  # sign char tips it
+    budget = [100, 618]
+    assert _valid_result_tree(-v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 618
+
+
+def test_int_digit_bound_factor_is_a_true_upper_bound():
+    """At bit length 196 the correct 30103/100000 factor charges exactly the
+    true digit count (60), while an unsafe 30102 under-approximation of
+    log10(2) would charge 59 — this pins the factor's conservativeness."""
+    from scripts.orchestrator import _valid_result_tree
+    v = 2 ** 196 - 1  # 60 decimal digits
+    assert len(str(v)) == 60
+    budget = [100, 60]
+    assert _valid_result_tree(v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 60, never 59
+    budget = [100, 59]
+    assert _valid_result_tree(v, 0, budget) is False
+
+
+def test_bool_and_none_are_not_charged_against_scalar_budget():
+    from scripts.orchestrator import _valid_result_tree
+    budget = [100, 5]
+    assert _valid_result_tree(True, 0, budget) is True
+    assert _valid_result_tree(False, 0, budget) is True
+    assert _valid_result_tree(None, 0, budget) is True
+    assert budget == [100, 5]  # untouched
