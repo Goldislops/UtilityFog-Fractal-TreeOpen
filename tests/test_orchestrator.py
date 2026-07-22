@@ -23,6 +23,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import urllib.error
 from typing import Optional
 
 import pytest
@@ -38,6 +39,7 @@ from scripts.agent_backends import (
 from scripts.orchestrator import (
     CATEGORY_HANDLER_EXCEPTION,
     CATEGORY_LOCAL_REJECTION,
+    CATEGORY_TRANSPORT_FAILURE,
     DEFAULT_MAX_TOTAL_TOOL_CALLS,
     IterationResult,
     MAX_LIMIT_CEILING,
@@ -1143,3 +1145,696 @@ def test_orchestrator_has_no_reverse_dependency_on_observer_or_engine():
     for banned in ("continuous_evolution_ca", "nextness_observer",
                    "nextness_calibration", "swarm_hunter"):
         assert banned not in src
+
+
+# -- ToolRouter.execute() message totality (sites 380/387/393) ----------------
+#
+# The result-message sites inside execute()'s defensive try must never run
+# code belonging to a hostile handler return or exception. Contract:
+#   * a handler result is accepted only when it is EXACTLY a builtin dict —
+#     any subclass or other object is refused without reading its __class__,
+#     its type name, or calling any of its methods;
+#   * both failure messages are fixed strings — the caught exception, its
+#     class, and its arguments are never stringified, represented, formatted,
+#     measured, or sliced;
+#   * ``_status`` is honored only as an EXACT builtin int, so a non-standard
+#     value is never queried for its class.
+# Every hostile hook below RECORDS instead of raising, so "not consulted" is
+# proven by an empty call log rather than inferred from the absence of a crash.
+
+_FIXED_HANDLER_MESSAGE = "tool handler failed"
+_FIXED_TRANSPORT_MESSAGE = "URLError"
+
+
+def _census_router(handler) -> ToolRouter:
+    """A router whose get_medusa_census handler is replaced by `handler`."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client)
+    router._handlers["get_medusa_census"] = handler
+    return router
+
+
+def test_handler_failure_fields_and_fixed_message():
+    """Ordinary handler failure: the payload shape is pinned exactly — stable
+    error/category/tool fields plus the fixed message, nothing else."""
+    def boom(_args):
+        raise ValueError("boom")
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+
+
+def test_transport_failure_fields_and_fixed_message():
+    """Ordinary transport failure: pinned payload with the fixed ``URLError``
+    message — byte-identical to what a plain URLError produced here before."""
+    def boom(_args):
+        raise urllib.error.URLError("network down")
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "transport_failure",
+        "category": CATEGORY_TRANSPORT_FAILURE,
+        "tool": "get_medusa_census",
+        "message": _FIXED_TRANSPORT_MESSAGE,
+    }
+
+
+def test_exception_with_hostile_text_conversion_is_never_stringified():
+    """An exception whose __str__/__repr__/__format__ record their invocation
+    returns normally with the fixed message and an empty call log."""
+    calls: list[str] = []
+
+    class _TextTrapError(Exception):
+        def __str__(self):
+            calls.append("__str__")
+            return "trap"
+        def __repr__(self):
+            calls.append("__repr__")
+            return "trap"
+        def __format__(self, spec):
+            calls.append("__format__")
+            return "trap"
+
+    def boom(_args):
+        raise _TextTrapError("x")
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls == []
+
+
+def test_exception_argument_is_never_inspected():
+    """An exception carrying an argument with recording text/representation/
+    measurement hooks: none of the argument's methods run."""
+    calls: list[str] = []
+
+    class _HostileArg:
+        def __str__(self):
+            calls.append("arg.__str__")
+            return "a"
+        def __repr__(self):
+            calls.append("arg.__repr__")
+            return "a"
+        def __format__(self, spec):
+            calls.append("arg.__format__")
+            return "a"
+        def __len__(self):
+            calls.append("arg.__len__")
+            return 0
+
+    def boom(_args):
+        raise ValueError(_HostileArg())
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls == []
+
+
+def test_exception_class_name_is_never_queried():
+    """A custom exception class whose metaclass __name__ records access: the
+    name is never read and never appears in the result."""
+    calls: list[str] = []
+
+    class _NameTrapMeta(type):
+        @property
+        def __name__(cls):
+            calls.append("cls.__name__")
+            return "TrappedName"
+
+    class _NameTrapError(Exception, metaclass=_NameTrapMeta):
+        pass
+
+    def boom(_args):
+        raise _NameTrapError("x")
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert "TrappedName" not in json.dumps(payload, sort_keys=True)
+    assert calls == []
+
+
+def test_url_error_subclass_gets_fixed_transport_result():
+    """A URLError subclass with recording class-name and text hooks yields the
+    fixed transport result with an empty call log: its class name and text
+    hooks are never consulted. (Except-clause matching may consult a metaclass
+    ``__subclasscheck__``, but its result cannot change the classification and
+    a raise inside it stays bounded — see the review notes in the PR.)"""
+    calls: list[str] = []
+
+    class _URLNameTrapMeta(type):
+        @property
+        def __name__(cls):
+            calls.append("cls.__name__")
+            return "NotURLError"
+
+    class _TrapURLError(urllib.error.URLError, metaclass=_URLNameTrapMeta):
+        def __str__(self):
+            calls.append("__str__")
+            return "trap"
+        def __repr__(self):
+            calls.append("__repr__")
+            return "trap"
+
+    def boom(_args):
+        raise _TrapURLError("no route")
+    payload, is_error = _census_router(boom).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_TRANSPORT_FAILURE
+    assert payload["message"] == _FIXED_TRANSPORT_MESSAGE
+    assert "NotURLError" not in json.dumps(payload, sort_keys=True)
+    assert calls == []
+
+
+def test_non_dict_return_with_hostile_class_is_refused_unconsulted():
+    """A non-dict return whose __class__ property records access (and lies,
+    claiming dict) is refused by exact type identity — the property never runs."""
+    calls: list[str] = []
+
+    class _ClassTrapReturn:
+        @property
+        def __class__(self):
+            calls.append("__class__")
+            return dict
+
+    payload, is_error = _census_router(
+        lambda _a: _ClassTrapReturn()).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls == []
+
+
+def test_non_dict_return_type_name_is_never_read():
+    """A non-dict return whose metaclass __name__ records access and yields an
+    oversized name: refused with the fixed message, name never read."""
+    calls: list[str] = []
+
+    class _NameTrapReturnMeta(type):
+        @property
+        def __name__(cls):
+            calls.append("type.__name__")
+            return "N" * 4096
+
+    class _NameTrapReturn(metaclass=_NameTrapReturnMeta):
+        pass
+
+    payload, is_error = _census_router(
+        lambda _a: _NameTrapReturn()).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert "N" * 64 not in json.dumps(payload, sort_keys=True)
+    assert calls == []
+
+
+def test_dict_subclass_return_is_refused_before_its_methods_run():
+    """A dict subclass with recording get/items/keys/__iter__ hooks is refused
+    by exact type before any of those methods is called."""
+    calls: list[str] = []
+
+    class _HookedDict(dict):
+        def get(self, key, default=None):
+            calls.append("get")
+            return dict.get(self, key, default)
+        def items(self):
+            calls.append("items")
+            return dict.items(self)
+        def keys(self):
+            calls.append("keys")
+            return dict.keys(self)
+        def __iter__(self):
+            calls.append("__iter__")
+            return dict.__iter__(self)
+
+    payload, is_error = _census_router(
+        lambda _a: _HookedDict(generation=1)).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls == []
+
+
+def test_huge_exception_payloads_never_enlarge_the_fixed_results():
+    """Very large exception arguments (handler and transport lanes) neither
+    appear in the result nor enlarge its fixed message."""
+    big = "Z" * 1_000_000
+
+    def boom_handler(_args):
+        raise ValueError(big)
+    payload, is_error = _census_router(boom_handler).execute("get_medusa_census", {})
+    encoded = json.dumps(payload, sort_keys=True)
+    assert is_error is True
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert big[:64] not in encoded
+    assert len(encoded.encode("utf-8")) < 512
+
+    def boom_transport(_args):
+        raise urllib.error.URLError(big)
+    payload, is_error = _census_router(boom_transport).execute("get_medusa_census", {})
+    encoded = json.dumps(payload, sort_keys=True)
+    assert is_error is True
+    assert payload["message"] == _FIXED_TRANSPORT_MESSAGE
+    assert big[:64] not in encoded
+    assert len(encoded.encode("utf-8")) < 512
+
+
+def test_exact_dict_nonstandard_status_value_class_never_accessed():
+    """An exact dict whose _status value records __class__/comparison access
+    passes through as an ordinary success with an empty call log."""
+    calls: list[str] = []
+
+    class _StatusTrap:
+        @property
+        def __class__(self):
+            calls.append("__class__")
+            return int
+        def __ge__(self, other):
+            calls.append("__ge__")
+            return True
+        def __gt__(self, other):
+            calls.append("__gt__")
+            return True
+
+    trap_payload = {"_status": _StatusTrap(), "generation": 7}
+    payload, is_error = _census_router(
+        lambda _a: trap_payload).execute("get_medusa_census", {})
+    assert is_error is False
+    assert payload is trap_payload
+    assert calls == []
+
+
+def test_status_exactness_pins():
+    """Exact-int statuses keep their existing classification; bool stays a
+    non-rejection; an int SUBCLASS 500 is now an ordinary success BY DESIGN
+    (the intentional compatibility change: non-standard values are never
+    queried for their class, so they cannot classify as HTTP rejections)."""
+    payload, is_error = _census_router(
+        lambda _a: {"_status": 500, "error": "server_broke"}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == "http_rejection"
+
+    payload, is_error = _census_router(
+        lambda _a: {"_status": True}).execute("get_medusa_census", {})
+    assert is_error is False
+
+    class _Code(int):
+        pass
+    payload, is_error = _census_router(
+        lambda _a: {"_status": _Code(500)}).execute("get_medusa_census", {})
+    assert is_error is False
+
+
+def test_iteration_completes_on_hostile_handler_exception():
+    """run_one_iteration completes when the transport raises a text-trapping
+    exception: correct category, fixed LLM-visible message, bounded valid
+    receipt, empty call log."""
+    calls: list[str] = []
+
+    class _TextTrapError(Exception):
+        def __str__(self):
+            calls.append("__str__")
+            return "trap-text"
+        def __repr__(self):
+            calls.append("__repr__")
+            return "trap-text"
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise _TextTrapError("x")
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_h", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+    block = backend.calls[1].messages[-1].content[0]
+    assert isinstance(block, ToolResultBlock)
+    assert block.is_error is True
+    assert json.loads(block.content)["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls == []
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "trap-text" not in receipt_json
+
+
+def test_iteration_completes_on_hostile_transport_exception():
+    """run_one_iteration completes when the transport raises a hostile URLError
+    subclass: transport_failure category, fixed message, bounded valid receipt."""
+    calls: list[str] = []
+
+    class _TrapURLError(urllib.error.URLError):
+        def __str__(self):
+            calls.append("__str__")
+            return "trap-url"
+        def __repr__(self):
+            calls.append("__repr__")
+            return "trap-url"
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise _TrapURLError("no route")
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_t", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_TRANSPORT_FAILURE) == 1
+    block = backend.calls[1].messages[-1].content[0]
+    assert json.loads(block.content)["message"] == _FIXED_TRANSPORT_MESSAGE
+    assert calls == []
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "trap-url" not in receipt_json
+
+
+def test_handler_exception_text_never_reaches_the_model():
+    """Sensitive exception text stays out of the LLM-visible tool result, not
+    just out of the audit receipt: the message is the fixed string."""
+    secret = "SECRET_API_KEY_sk-abc123"
+
+    def boom_http(method, url, *, json=None, timeout=5.0):
+        raise ValueError(secret)
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_s", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    client = OrchestratorClient("http://test:8080", http_do=boom_http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4)
+    result = orch.run_one_iteration("go")
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+    block = backend.calls[1].messages[-1].content[0]
+    assert secret not in block.content
+    assert json.loads(block.content)["message"] == _FIXED_HANDLER_MESSAGE
+
+
+def test_local_rejection_flag_bool_is_bounded():
+    """The one unavoidable in-try method execution: bool() on an exact dict's
+    _local_rejection value. A raising __bool__ stays bounded to the fixed
+    handler-failure result — it can never crash the iteration loop."""
+    class _BoolBomb:
+        def __bool__(self):
+            raise RuntimeError("hostile __bool__")
+
+    payload, is_error = _census_router(
+        lambda _a: {"_local_rejection": _BoolBomb()}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_HANDLER_EXCEPTION
+    assert payload["message"] == _FIXED_HANDLER_MESSAGE
+    assert "hostile __bool__" not in json.dumps(payload, sort_keys=True)
+
+
+def test_local_rejection_cleanup_raising_key_comparison_is_bounded():
+    """The remaining gap (thread-independent reproduction): an exact builtin
+    dict marked as a local rejection carries a custom key whose comparison
+    raises during the cleanup comprehension's ``k != "_local_rejection"``.
+    The raise comes from ``__ne__`` — which only the cleanup's ``!=`` uses;
+    dict lookups use ``__eq__``, so the in-try ``.get`` cannot trigger it —
+    making the reproduction deterministic. Post-processing must be inside the
+    defensive try: the result is the bounded fixed handler failure, never a
+    crash of execute()."""
+    calls: list[str] = []
+
+    class _NeBombKey:
+        def __hash__(self):
+            calls.append("hash")
+            return 12345
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __ne__(self, other):
+            calls.append("ne")
+            raise RuntimeError("hostile __ne__ during cleanup")
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    def handler(_args):
+        return {_NeBombKey(): "x", "_local_rejection": True}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    # Exactly one comparison attempt raised; text hooks never ran. (__eq__ may
+    # run 0..n times from bucket-dependent dict probes; it is benign here.)
+    assert calls.count("ne") == 1
+    assert "str" not in calls and "repr" not in calls
+    assert "hostile __ne__" not in json.dumps(payload, sort_keys=True)
+
+
+def test_local_rejection_category_insertion_with_colliding_key():
+    """Local-rejection cleanup with a custom key hash-colliding with
+    "category" (recording ``__eq__`` honestly returning False): the category
+    default is still inserted, the colliding key and its value survive, and no
+    text hook was consulted. The recorded ``__eq__`` calls include both the
+    cleanup's ``!=`` (default ``__ne__`` falls back to ``__eq__``) and the
+    ``setdefault`` probe — the latter is guaranteed to run by the forced
+    full-hash collision, though the count alone does not isolate it."""
+    calls: list[str] = []
+
+    class _CollidingKey:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    colliding = _CollidingKey()
+
+    def handler(_args):
+        return {"_local_rejection": True, "error": "bad_request",
+                colliding: "kept-value"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert payload["error"] == "bad_request"
+    assert payload[colliding] == "kept-value"
+    assert "_local_rejection" not in payload
+    assert calls.count("eq") >= 1  # the collision comparison genuinely ran
+    assert "str" not in calls and "repr" not in calls
+
+
+def test_http_rejection_construction_with_nonstandard_contents():
+    """HTTP-rejection rebuild with a custom key hash-colliding with
+    "category" (recording, honestly-False ``__eq__``): the category is still
+    added, all contents survive, and no text hook runs. A second variant whose
+    ``__eq__`` raises during the rebuild is bounded to the fixed handler
+    failure — it can no longer escape execute()."""
+    calls: list[str] = []
+
+    class _CollidingKey:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    colliding = _CollidingKey()
+
+    def handler(_args):
+        return {"_status": 502, "error": "bad_gateway", colliding: "kept"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == "http_rejection"
+    assert payload["_status"] == 502
+    assert payload["error"] == "bad_gateway"
+    assert payload[colliding] == "kept"
+    assert calls.count("eq") >= 1
+    assert "str" not in calls and "repr" not in calls
+
+    raising_calls: list[str] = []
+
+    class _EqBombKey:
+        def __hash__(self):
+            raising_calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            raising_calls.append("eq")
+            raise RuntimeError("hostile __eq__ during rebuild")
+
+    def raising_handler(_args):
+        return {"_status": 502, _EqBombKey(): "x"}
+
+    payload, is_error = _census_router(raising_handler).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    assert raising_calls.count("eq") == 1
+    assert "hostile __eq__" not in json.dumps(payload, sort_keys=True)
+
+
+def test_status_collision_on_local_rejection_stays_bounded():
+    """Review-caught regression pin: a local-rejection exact dict carrying a
+    key that hash-collides with "_status" and raises from ``__eq__`` (benign
+    ``__ne__``). The eager ``_status`` lookup — preserved in its
+    pre-relocation position before the local-rejection branch — hits the
+    collision inside the try, so the result is the bounded fixed handler
+    failure; the live hostile key can never survive into a returned payload.
+    The equal-full-hash probe makes the single ``__eq__`` call deterministic."""
+    calls: list[str] = []
+
+    class _StatusCollideBomb:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("_status")
+        def __eq__(self, other):
+            calls.append("eq")
+            raise RuntimeError("hostile __eq__ vs _status")
+        def __ne__(self, other):
+            calls.append("ne")
+            return True
+
+    def handler(_args):
+        return {_StatusCollideBomb(): "v", "_local_rejection": True,
+                "error": "x"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    assert calls.count("eq") == 1
+    assert calls.count("ne") == 0
+    assert "hostile __eq__" not in json.dumps(payload, sort_keys=True)
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_sc", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, _http = _make_orchestrator(backend)
+    orch.router._handlers["get_medusa_census"] = handler
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+
+
+def test_ordinary_postprocessing_results_byte_identical():
+    """Ordinary local rejection, HTTP rejection, and success flows through the
+    relocated post-processing, pinned by exact dict equality against fully
+    literal expected dicts (and by object identity for the success flow —
+    stronger than byte equality: the payload is passed through unmodified)."""
+    payload, is_error = _census_router(
+        lambda _a: {"_local_rejection": True, "error": "bad_request",
+                    "message": "justification is required"}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"error": "bad_request", "category": "local_rejection",
+                       "message": "justification is required"}
+
+    payload, is_error = _census_router(
+        lambda _a: {"_status": 500, "error": "server_broke"}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"_status": 500, "error": "server_broke",
+                       "category": "http_rejection"}
+
+    success = {"generation": 41, "counts": {"VOID": 9}}
+    payload, is_error = _census_router(lambda _a: success).execute(
+        "get_medusa_census", {})
+    assert is_error is False
+    assert payload is success
+    assert payload == {"generation": 41, "counts": {"VOID": 9}}
+
+
+def test_iteration_completes_on_hostile_local_rejection_cleanup():
+    """run_one_iteration for the newly covered path: a hostile local-rejection
+    payload whose cleanup comparison raises completes the iteration, records
+    handler_exception (the bounded conversion), keeps the fixed message in the
+    LLM-visible result, and yields a valid bounded receipt."""
+    calls: list[str] = []
+
+    class _NeBombKey:
+        def __hash__(self):
+            return 12345
+        def __eq__(self, other):
+            return False
+        def __ne__(self, other):
+            calls.append("ne")
+            raise RuntimeError("hostile __ne__ during cleanup")
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_lr", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, _http = _make_orchestrator(backend)
+    orch.router._handlers["get_medusa_census"] = (
+        lambda _a: {_NeBombKey(): "x", "_local_rejection": True})
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION, 0) == 0
+    block = backend.calls[1].messages[-1].content[0]
+    assert block.is_error is True
+    assert json.loads(block.content)["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls.count("ne") == 1
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "hostile __ne__" not in receipt_json
+
+
+def test_execute_source_fence_no_exception_formatting():
+    """Source fence: execute() contains no isinstance and no exception or
+    type-name formatting — refusals decide by exact type identity alone.
+    The scan runs over an ast round-trip with the docstring dropped, so only
+    executable code (no comments, no docstring) is fenced."""
+    import ast
+    import inspect
+    import textwrap
+    src = textwrap.dedent(inspect.getsource(ToolRouter.execute))
+    fn = ast.parse(src).body[0]
+    assert isinstance(fn, ast.FunctionDef)
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            and isinstance(fn.body[0].value.value, str)):
+        fn.body = fn.body[1:]
+    body = ast.unparse(fn)
+    for banned in ("type(e).__name__", "type(payload).__name__", "{e}",
+                   "str(e", "repr(", "isinstance("):
+        assert banned not in body

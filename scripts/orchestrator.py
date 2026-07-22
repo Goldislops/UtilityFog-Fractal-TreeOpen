@@ -293,6 +293,17 @@ justification or a forbidden `commit-pending` mode. Distinct from
 `http_rejection` (server said no) because no request left the process; still a
 genuine tool error (is_error=True) that never creates a proposal."""
 
+HANDLER_FAILURE_MESSAGE = "tool handler failed"
+"""Fixed message for every handler failure — a raised exception or a refused
+non-dict return. The offending exception/object is never stringified,
+represented, formatted, measured, or sliced, so its class name and arguments
+cannot enter any result."""
+
+TRANSPORT_FAILURE_MESSAGE = "URLError"
+"""Fixed message for transport failures — byte-identical to the message an
+ordinary ``urllib.error.URLError`` produced here before, but emitted without
+inspecting the caught exception at all."""
+
 DEFAULT_MAX_TOTAL_TOOL_CALLS = 24
 """Total tool calls permitted across an entire iteration, independent of the
 per-turn `max_tool_depth`. Bounds a model that emits many tool calls per turn."""
@@ -360,7 +371,17 @@ class ToolRouter:
 
         Error kinds are distinguished by a stable ``category`` field:
         unknown_tool, transport_failure, handler_exception, and http_rejection
-        (HTTP status >= 400 is a genuine tool error, not a silent success)."""
+        (HTTP status >= 400 is a genuine tool error, not a silent success).
+        Failure messages are the fixed strings ``HANDLER_FAILURE_MESSAGE`` /
+        ``TRANSPORT_FAILURE_MESSAGE``: the caught exception, its class, and its
+        arguments are never stringified, represented, formatted, measured, or
+        sliced. A handler result is accepted only when it is EXACTLY a builtin
+        dict — any subclass or other object is refused without reading its
+        ``__class__``, its type name, or calling any of its methods. The
+        complete post-processing of an accepted result (local-rejection
+        cleanup, HTTP classification, successful return) also runs inside the
+        protected block, so a raising hook on payload contents degrades to the
+        bounded fixed-message failure instead of escaping."""
         handler = self._handlers.get(name)
         if handler is None:
             return (
@@ -368,46 +389,60 @@ class ToolRouter:
                  "message": f"tool {name} not registered"},
                 True,
             )
-        # Handler invocation, return-shape validation, and the _status /
-        # local-rejection inspection all live inside the defensive try, so a
-        # handler that returns a non-dict (None, list, scalar, …) or that
-        # raises becomes a bounded handler_exception error — it can never crash
-        # the iteration loop.
+        # Handler invocation and the COMPLETE post-processing of its result —
+        # exact-shape refusal, local-rejection cleanup, HTTP classification,
+        # and the successful return — live inside the defensive try, so a
+        # handler that raises, or hostile payload CONTENTS whose hooks raise
+        # inside dict machinery during post-processing, become a bounded error
+        # result — execute() can never crash the iteration loop. Refusals
+        # decide by exact builtin type identity alone, before any method of
+        # the returned object could run.
         try:
             payload = handler(arguments)
-            if not isinstance(payload, dict):
-                raise TypeError(
-                    f"handler returned {type(payload).__name__}, expected dict"
+            if type(payload) is not dict:
+                return (
+                    {"error": "tool_handler_exception",
+                     "category": CATEGORY_HANDLER_EXCEPTION,
+                     "tool": name, "message": HANDLER_FAILURE_MESSAGE},
+                    True,
                 )
+            # Both marker lookups run eagerly, BEFORE the local-rejection
+            # branch, preserving the pre-relocation operation order: a raising
+            # hash-collision on either lookup is bounded right here instead of
+            # surviving inside a returned payload (review-caught regression).
             is_local_rejection = bool(payload.get("_local_rejection"))
             status = payload.get("_status")
-        except urllib.error.URLError as e:  # network/transport-level failure
+            if is_local_rejection:
+                # A refusal the router enforced locally (blank justification,
+                # commit-pending). A genuine error: flagged is_error,
+                # categorized local_rejection, and — because no request was
+                # sent — it cannot have created a proposal. The internal
+                # marker is stripped so it never reaches the model.
+                clean = {k: v for k, v in payload.items()
+                         if k != "_local_rejection"}
+                clean.setdefault("category", CATEGORY_LOCAL_REJECTION)
+                return (clean, True)
+            if type(status) is int and status >= 400:
+                # An HTTP rejection is a genuine tool error. Keep bounded
+                # metadata (status + any error code/message) but flag it so
+                # callers do not count a rejected proposal/commit as applied.
+                # Only an EXACT builtin int classifies: bool and int
+                # subclasses are not HTTP statuses and are never queried for
+                # their class.
+                return ({**payload, "category": CATEGORY_HTTP_REJECTION}, True)
+            return payload, False
+        except urllib.error.URLError:  # network/transport-level failure
             return (
                 {"error": "transport_failure", "category": CATEGORY_TRANSPORT_FAILURE,
-                 "tool": name, "message": type(e).__name__},
+                 "tool": name, "message": TRANSPORT_FAILURE_MESSAGE},
                 True,
             )
-        except Exception as e:  # defensive: any handler bug → LLM-visible error
+        except Exception:  # defensive: any handler bug → LLM-visible error
             return (
                 {"error": "tool_handler_exception", "category": CATEGORY_HANDLER_EXCEPTION,
-                 "tool": name, "message": f"{type(e).__name__}: {e}"},
+                 "tool": name, "message": HANDLER_FAILURE_MESSAGE},
                 True,
             )
-        if is_local_rejection:
-            # A refusal the router enforced locally (blank justification,
-            # commit-pending). A genuine error: flagged is_error, categorized
-            # local_rejection, and — because no request was sent — it cannot
-            # have created a proposal. The internal marker is stripped so it
-            # never reaches the model.
-            clean = {k: v for k, v in payload.items() if k != "_local_rejection"}
-            clean.setdefault("category", CATEGORY_LOCAL_REJECTION)
-            return (clean, True)
-        if isinstance(status, int) and status >= 400:
-            # An HTTP rejection is a genuine tool error. Keep bounded metadata
-            # (status + any error code/message) but flag it so callers do not
-            # count a rejected proposal/commit as applied.
-            return ({**payload, "category": CATEGORY_HTTP_REJECTION}, True)
-        return payload, False
 
     # handlers ---
 
@@ -865,6 +900,8 @@ __all__ = [
     "MAX_LIMIT_CEILING",
     "MAX_RECEIPT_BYTES",
     "OUTCOME_OK",
+    "HANDLER_FAILURE_MESSAGE",
+    "TRANSPORT_FAILURE_MESSAGE",
     "CATEGORY_UNKNOWN_TOOL",
     "CATEGORY_HANDLER_EXCEPTION",
     "CATEGORY_TRANSPORT_FAILURE",
