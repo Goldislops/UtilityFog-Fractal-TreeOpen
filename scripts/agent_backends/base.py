@@ -28,6 +28,22 @@ from typing import Any, ClassVar, Literal, Optional, Union
 # -- content blocks ---------------------------------------------------------
 
 
+_TOOL_NAME_MAX_LEN = 128
+_TOOL_ID_MAX_LEN = 256
+
+
+def _bounded_exact_str(value: Any, limit: int) -> str:
+    """Keep `value` (sliced to `limit`) only when it is exactly `str`.
+
+    Every other exact type — including str subclasses, whose methods may be
+    overridden — becomes "" without any conversion, length, or representation
+    method being requested on the value.
+    """
+    if type(value) is str:
+        return value[:limit]
+    return ""
+
+
 @dataclass(frozen=True)
 class TextBlock:
     """Plain-text assistant or user content."""
@@ -38,12 +54,27 @@ class TextBlock:
 
 @dataclass(frozen=True)
 class ToolUseBlock:
-    """Model is requesting a tool call. Matches Anthropic's block shape."""
+    """Model is requesting a tool call. Matches Anthropic's block shape.
+
+    Field values are model-reachable (backends build these straight from
+    wire/SDK responses, e.g. `json.loads` of an arguments string can yield
+    any JSON type), so construction normalizes to a bounded shape:
+    `id`/`name` are kept only when exactly `str` (sliced to 256/128 chars,
+    else ""), and `input` is kept only when exactly `dict` (else replaced
+    by a fresh empty dict — never derived from other shapes). This keeps
+    `AgentResponse.from_content` total over every constructed block.
+    """
 
     id: str
     name: str
     input: dict[str, Any] = field(default_factory=dict)
     type: Literal["tool_use"] = "tool_use"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _bounded_exact_str(self.id, _TOOL_ID_MAX_LEN))
+        object.__setattr__(self, "name", _bounded_exact_str(self.name, _TOOL_NAME_MAX_LEN))
+        if type(self.input) is not dict:
+            object.__setattr__(self, "input", {})
 
 
 @dataclass(frozen=True)
