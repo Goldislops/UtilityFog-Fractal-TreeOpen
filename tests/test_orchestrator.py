@@ -1980,8 +1980,8 @@ def test_unknown_tool_non_str_hashable_name_is_refused(name):
 
 @pytest.mark.parametrize(
     "name",
-    [["get_params"], {"n": 1}, {"get_params"}],
-    ids=["list", "dict", "set"],
+    [["get_params"], {"n": 1}, {"get_params"}, bytearray(b"get_params")],
+    ids=["list", "dict", "set", "bytearray"],
 )
 def test_unknown_tool_unhashable_name_cannot_crash_execute(name):
     """An unhashable name must be refused by the exact-str gate BEFORE any
@@ -2650,3 +2650,85 @@ def test_refusal_collects_no_proposal_id():
     assert result.proposals_created == []
     assert result.outcome_counts == {"handler_exception": 1}
     assert blocks[0].content == _REFUSAL_CONTENT
+
+
+# -- review pins: direct falsifiability of the redundant exact-type gates ------
+#
+# Upstream _safe_result_content validation means a subclass category/pid can
+# never reach these gates in the integrated lane (proven above), so their
+# exact-type coding is redundant defense. These unit pins make each gate
+# falsifiable on its own, per the post-implementation review waves.
+
+
+def test_error_outcome_category_gate_is_exact_type():
+    from scripts.orchestrator import _error_outcome_category
+    assert _error_outcome_category(
+        {"category": _SubStr("http_rejection")}) == "handler_exception"
+    assert _error_outcome_category(
+        {"category": "http_rejection"}) == "http_rejection"
+
+
+def test_collectable_live_id_gate_is_exact_type():
+    from scripts.orchestrator import _collectable_live_id
+    assert _collectable_live_id(_SubStr("prop-newid")) is False
+    assert _collectable_live_id("prop-newid") is True
+    assert _collectable_live_id("") is False
+    assert _collectable_live_id("a" * 64) is True
+    assert _collectable_live_id("a" * 65) is False
+
+
+def test_unwrap_status_gate_refuses_int_subclass():
+    """An int-subclass >= 400 status never inserts the authoritative marker
+    — the one shape the transport-level tests cannot reach."""
+    client, _ = _client_with_fake()
+    router = ToolRouter(client)
+    assert router._unwrap((_SubInt(503), {"e": 1})) == {"e": 1}
+    assert router._unwrap((503, {"e": 1})) == {"e": 1, "_status": 503}
+
+
+def test_commit_lane_non_str_id_omitted():
+    result, _ = _single_result_iteration(
+        ({"proposal_id": 123, "status": "committed"}, False),
+        name="commit_tuning")
+    assert result.outcome_counts == {"ok": 1}
+    assert result.commits_applied == []
+
+
+def test_local_rejection_category_recorded_end_to_end():
+    """A validated error result carrying the local_rejection category lands
+    in outcome_counts under that category (allowlist membership, not just the
+    transport_failure representative)."""
+    result, _ = _single_result_iteration(
+        ({"category": "local_rejection", "error": "bad_request"}, True))
+    assert result.outcome_counts == {"local_rejection": 1}
+
+
+def test_string_budget_counts_dict_keys():
+    """Documents intent: dict KEYS consume the cumulative string budget.
+    (Behaviorally backstopped by the final encoded-byte ceiling either way.)"""
+    from scripts.orchestrator import _safe_result_content
+    assert _safe_result_content({"x" * 200000: 1}) is None
+
+
+def test_oversized_census_body_refused_end_to_end():
+    """Explicit pin of the semantic shift in
+    test_audit_receipt_excludes_large_tool_payloads: a > 128 KiB SUCCESS body
+    from a real handler now takes the refusal lane (handler_exception + fixed
+    block) instead of serializing into model-visible content."""
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_big", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    http = FakeHttp()
+    http.set("GET", "/api/census", 200, {"blob": "z" * 200000})
+    client = OrchestratorClient("http://test:8080", http_do=http)
+    orch = Orchestrator(backend=backend, client=client, system_prompt="s",
+                        max_tool_depth=4)
+    result = orch.run_one_iteration("observe")
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.stopped_because == "end_turn"
+    blocks = [b for b in backend.calls[-1].messages[-1].content
+              if isinstance(b, ToolResultBlock)]
+    assert blocks[0].is_error is True
+    assert blocks[0].content == _REFUSAL_CONTENT
+    assert "zzz" not in blocks[0].content
