@@ -496,3 +496,358 @@ def test_ledger_survives_corrupt_line(tuning):
     fresh = TuningState(data_dir=tmp_path, gen_getter=gen)
     # State from the valid lines is still restored.
     assert fresh.effective_params()["signal_interval"] == 14
+
+
+# -- request-shape totality (PUBLIC / DIRECT / LEDGER lanes) ------------------
+#
+# The proposal/commit/rollback envelopes must be deterministic for malformed
+# value shapes across three reachability lanes:
+#   PUBLIC   — values obtainable through parsed JSON (str/int/float/bool/None/
+#              list/dict only); a malformed envelope returns a stable
+#              400 bad_request, never a 500.
+#   DIRECT   — TuningState / validate_proposal called with arbitrary Python
+#              objects; a malformed call terminates through a fixed typed
+#              TuningError(400) rather than leaking AttributeError/TypeError.
+#   LEDGER   — no refused request appends to the ledger, writes the pending
+#              file, records a proposal, commits, rolls back, or emits an event.
+# Refusals carry a fixed generic message that names neither the supplied value
+# nor its type. Hostile instruments RECORD their hook invocations so "not
+# consulted" is proven by an empty call log, not inferred from the absence of
+# a crash.
+
+import math as _math
+
+from scripts.tuning_api import TuningError, TuningState, create_blueprint
+
+
+def _fresh_state(tmp_path, bus=None):
+    gen = FakeGen()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    return state, app.test_client(), gen
+
+
+def _post_raw(client, path, raw_body):
+    return client.post(path, data=raw_body, content_type="application/json")
+
+
+def _no_side_effects(tmp_path, state):
+    """No ledger file, no pending file, no recorded proposal."""
+    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    assert not (tmp_path / "tuning_pending.json").exists()
+    assert state._proposals == {}
+
+
+# -- PUBLIC lane: non-object top-level body reaching .get --------------------
+
+
+_NON_OBJECT_BODIES = ["[1, 2, 3]", "42", "3.14", "true", '"hello"']
+
+
+@pytest.mark.parametrize("raw", _NON_OBJECT_BODIES)
+@pytest.mark.parametrize("path", [
+    "/api/tuning/propose", "/api/tuning/commit", "/api/tuning/rollback",
+])
+def test_public_non_object_body_is_bad_request_not_500(tmp_path, raw, path):
+    state, client, _ = _fresh_state(tmp_path)
+    resp = _post_raw(client, path, raw)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("path", [
+    "/api/tuning/propose", "/api/tuning/commit", "/api/tuning/rollback",
+])
+def test_public_empty_and_null_body_still_bad_request(tmp_path, path):
+    state, client, _ = _fresh_state(tmp_path)
+    for raw in ("null", ""):
+        resp = _post_raw(client, path, raw)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "bad_request"
+
+
+# -- PUBLIC lane: unhashable / non-string ids reaching registry .get ---------
+
+
+@pytest.mark.parametrize("raw_id", ["[1, 2]", '{"a": 1}', "123", "true"])
+def test_public_commit_non_string_proposal_id_is_bad_request(tmp_path, raw_id):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"proposal_id": ' + raw_id + ', "approver": "human:kevin"}'
+    resp = _post_raw(client, "/api/tuning/commit", body)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+@pytest.mark.parametrize("raw_id", ["[1, 2]", '{"a": 1}', "123", "true"])
+def test_public_rollback_non_string_to_proposal_id_is_bad_request(tmp_path, raw_id):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"to_proposal_id": ' + raw_id + "}"
+    resp = _post_raw(client, "/api/tuning/rollback", body)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+# -- PUBLIC lane: preserved behaviour for valid & recorded-rejection paths ----
+
+
+def test_public_valid_propose_commit_rollback_unchanged(tmp_path):
+    """Golden-path smoke: the whole valid envelope still behaves exactly."""
+    state, client, gen = _fresh_state(tmp_path)
+    pid = client.post("/api/tuning/propose", json={
+        "params": {"signal_interval": 15}, "source": "human:kevin",
+        "justification": "t", "mode": "commit-pending",
+    }).get_json()["proposal_id"]
+    assert pid.startswith("prop-")
+    r = client.post("/api/tuning/commit",
+                    json={"proposal_id": pid, "approver": "human:kevin"})
+    assert r.status_code == 200 and r.get_json()["status"] == "committed"
+    assert state.effective_params()["signal_interval"] == 15
+    r = client.post("/api/tuning/rollback", json={"to_proposal_id": pid})
+    assert r.status_code == 200 and r.get_json()["status"] == "rolled_back"
+
+
+def test_public_container_param_value_still_records_wrong_type(tmp_path):
+    """A JSON container as a param value is not a scalar, but it IS a JSON
+    tree — it still reaches validation and is recorded as a wrong_type
+    rejection (422), exactly as before; not refused at the envelope."""
+    state, client, _ = _fresh_state(tmp_path)
+    resp = _post_raw(client, "/api/tuning/propose",
+                     '{"params": {"signal_interval": [1, 2]}}')
+    assert resp.status_code == 422
+    body = resp.get_json()
+    assert body["status"] == "rejected"
+    assert body["validation"]["errors"]["signal_interval"]["error"] == "wrong_type"
+
+
+# -- DIRECT lane: TuningState.propose malformed envelope shapes ---------------
+
+
+class _Recorder:
+    """Base for hostile instruments: every hook appends its name to `calls`."""
+
+    def __init__(self):
+        self.calls = []
+
+
+class _HostileKey(_Recorder):
+    """A non-str dict key whose equality/str hooks record. __hash__ records too
+    (dict insertion needs it) so the test measures only NEW calls after build."""
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return self is other
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "k"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "k"
+
+
+class _HostileScalar(_Recorder):
+    """A non-JSON, non-str value whose conversion hooks all record."""
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "v"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "v"
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return False
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __bool__(self):
+        self.calls.append("__bool__")
+        return True
+
+    def __iter__(self):
+        self.calls.append("__iter__")
+        return iter(())
+
+
+@pytest.mark.parametrize("bad_params", [
+    [1, 2], "params", 42, 3.14, True, None, ("k", "v"),
+], ids=["list", "str", "int", "float", "bool", "none", "tuple"])
+def test_direct_propose_non_dict_params_is_typed_bad_request(tmp_path, bad_params):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=bad_params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400
+    assert ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_non_str_key_refused_without_registry_lookup(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    key = _HostileKey()
+    params = {key: 1}
+    key.calls.clear()  # forget the hash from dict construction
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    # No registry lookup / equality / stringify of the hostile key.
+    assert key.calls == []
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("field", ["source", "justification"])
+def test_direct_propose_non_str_metadata_is_bad_request_no_ledger(tmp_path, field):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    val = _HostileScalar()
+    kw = dict(params={"signal_interval": 12}, source="s", justification="j", mode="dry-run")
+    kw[field] = val
+    with pytest.raises(TuningError) as ei:
+        state.propose(**kw)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert val.calls == []            # never stringified/serialized
+    assert bus.published == []        # no event emitted
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_non_str_mode_refused_without_equality(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    mode = _HostileScalar()
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": 12}, source="s",
+                      justification="j", mode=mode)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert mode.calls == []           # `mode not in VALID_MODES` never ran __eq__
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("value_factory", [
+    lambda: {1, 2, 3},           # set — not JSON serializable
+    lambda: object(),            # bare object
+    lambda: b"bytes",            # bytes
+], ids=["set", "object", "bytes"])
+def test_direct_propose_non_json_value_refused_before_ledger(tmp_path, value_factory):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": value_factory()},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_refusal_message_carries_no_value_or_type(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": {1, 2, 3}},
+                      source="s", justification="j", mode="dry-run")
+    msg = ei.value.message
+    assert len(msg) < 120
+    for leak in ("set", "{1", "signal_interval", "object", "bytes"):
+        assert leak not in msg
+
+
+# -- DIRECT lane: commit / rollback id shapes --------------------------------
+
+
+@pytest.mark.parametrize("bad_id", [
+    [1, 2], {"a": 1}, 123, 1.5, True, None, _HostileScalar,
+], ids=["list", "dict", "int", "float", "bool", "none", "hostile"])
+def test_direct_commit_non_str_proposal_id_is_bad_request(tmp_path, bad_id):
+    state, _, _ = _fresh_state(tmp_path)
+    pid = bad_id() if bad_id is _HostileScalar else bad_id
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=pid, approver="human:kevin")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    if isinstance(pid, _HostileScalar):
+        assert pid.calls == []        # never hashed for the registry lookup
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+@pytest.mark.parametrize("bad_id_factory", [
+    lambda: [1, 2],            # unhashable: currently a raw TypeError (no emit)
+    lambda: _HostileScalar(),  # hostile-hashable: currently emits a rejected event
+], ids=["unhashable", "hostile-hash"])
+def test_direct_commit_non_str_proposal_id_emits_no_event(tmp_path, bad_id_factory):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError):
+        state.commit(proposal_id=bad_id_factory(), approver="human:kevin")
+    assert bus.published == []          # malformed shape → no rejected event at all
+
+
+@pytest.mark.parametrize("bad_id", [
+    [1, 2], {"a": 1}, 123, 1.5, True, None, _HostileScalar,
+], ids=["list", "dict", "int", "float", "bool", "none", "hostile"])
+def test_direct_rollback_non_str_id_is_bad_request(tmp_path, bad_id):
+    state, _, _ = _fresh_state(tmp_path)
+    tid = bad_id() if bad_id is _HostileScalar else bad_id
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id=tid)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    if isinstance(tid, _HostileScalar):
+        assert tid.calls == []
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_direct_rollback_hostile_id_emits_no_event(tmp_path):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError):
+        state.rollback(to_proposal_id=_HostileScalar())
+    assert bus.published == []
+
+
+def test_direct_commit_str_subclass_approver_is_refused(tmp_path):
+    """Exact-type gate: a str subclass approver is refused (400), not run
+    through the quarantine's strip/casefold subclass methods."""
+    class _SubStr(str):
+        pass
+
+    state, client, _ = _fresh_state(tmp_path)
+    pid = _propose(client, {"signal_interval": 15})
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=pid, approver=_SubStr("human:kevin"))
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+
+
+# -- LEDGER/EVENT lane: refused request is inert ------------------------------
+
+
+def test_refused_direct_propose_writes_no_ledger_line(tmp_path):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    for bad in ([1, 2], {"signal_interval": object()}, {object(): 1}):
+        with pytest.raises(TuningError):
+            state.propose(params=bad, source="s", justification="j", mode="dry-run")
+    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    assert bus.published == []
+    assert state._proposals == {}
+
+
+def test_valid_direct_propose_still_writes_serialisable_ledger(tmp_path):
+    """Positive control: a well-formed proposal still appends exactly one
+    JSON-serialisable ledger line and records the proposal."""
+    state, _, _ = _fresh_state(tmp_path)
+    entry = state.propose(params={"signal_interval": 12}, source="human:kevin",
+                          justification="ok", mode="dry-run")
+    assert entry["proposal_id"].startswith("prop-")
+    lines = (tmp_path / "tuning_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    reparsed = json.loads(lines[0])
+    assert reparsed["type"] == "propose"
+    assert reparsed["params"] == {"signal_interval": 12}

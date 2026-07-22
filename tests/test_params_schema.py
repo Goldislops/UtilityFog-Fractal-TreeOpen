@@ -648,3 +648,82 @@ def test_public_proposal_path_returns_validation_not_server_error():
         err = body["validation"]["errors"]["magnon_coupling"]
         assert err["error"] == "wrong_type"
         assert err["message"] == "magnon_coupling requires a finite float value."
+
+
+# -- request-shape totality: validate_proposal on arbitrary Python objects ----
+#
+# validate_proposal is a DIRECT entry point (the tuning API and direct callers
+# both reach it). It must be total on any object: a non-dict proposal and a
+# proposal carrying non-str keys must resolve to a not-ok result without a
+# leaked AttributeError/TypeError and without hashing a hostile key into the
+# registry lookup.
+
+
+class _RecordingKey:
+    """A non-str dict key whose hooks record. __hash__ records (dict insertion
+    needs it) so a test measures only NEW invocations after construction."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return self is other
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "k"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "k"
+
+
+@pytest.mark.parametrize("bad", [
+    [1, 2], "params", 42, 3.14, True, None, ("k", "v"),
+], ids=["list", "str", "int", "float", "bool", "none", "tuple"])
+def test_validate_proposal_non_dict_is_not_ok_without_raising(bad):
+    result = validate_proposal(bad)  # must not raise .items() AttributeError
+    assert isinstance(result, ProposalValidation)
+    assert result.ok is False
+    assert result.errors == {}
+    assert result.known_params == []
+    assert result.unknown_params == []
+
+
+def test_validate_proposal_non_str_key_is_not_ok_without_lookup():
+    key = _RecordingKey()
+    params = {key: 1}
+    key.calls.clear()  # forget the hash from dict construction
+    result = validate_proposal(params)
+    assert result.ok is False
+    # No registry lookup / equality / stringify of the hostile key.
+    assert key.calls == []
+
+
+def test_validate_proposal_mixed_str_and_non_str_keys():
+    """Valid str keys still validate; a non-str key alongside them forces the
+    aggregate result to not-ok while the valid keys are still processed."""
+    key = _RecordingKey()
+    params = {"signal_interval": 12, key: 1}
+    key.calls.clear()
+    result = validate_proposal(params)
+    assert result.ok is False
+    assert "signal_interval" in result.known_params
+    assert key.calls == []
+
+
+def test_validate_proposal_str_key_paths_unchanged():
+    """Positive control: an all-str-key proposal behaves exactly as before."""
+    ok = validate_proposal({"signal_interval": 12, "magnon_sage_age_min": 7.5})
+    assert ok.ok is True
+    bad = validate_proposal({"signal_interval": 0})
+    assert bad.ok is False
+    assert bad.errors["signal_interval"].error is ValidationError.BELOW_MIN
+    unknown = validate_proposal({"nope": 1})
+    assert unknown.unknown_params == ["nope"]
+    assert unknown.errors["nope"].error is ValidationError.UNKNOWN_PARAM

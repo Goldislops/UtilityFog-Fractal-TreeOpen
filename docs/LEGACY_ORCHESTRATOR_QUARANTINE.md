@@ -24,6 +24,45 @@ requires a reviewed code change. Human commits (`approver="human:<name>"`),
 reads, dry-run/propose, LOCKED-at-propose rejection, and the per-parameter rate
 limit are unchanged.
 
+Request-shape totality (`scripts/tuning_api.py`, `scripts/params_schema.py`).
+The propose / commit / rollback envelopes are deterministic for malformed value
+shapes across three reachability lanes, while every valid request's behaviour —
+defaults, response bytes, status codes, proposal identifiers, validation
+outcomes, rate limits, rollback, and ledger/event schemas — is preserved:
+
+- **PUBLIC (parsed-JSON reachable).** A non-object top-level body (a JSON array,
+  number, string, or `true`) previously reached `body.get(...)` and returned
+  HTTP 500; it is now a stable `400 bad_request` (exact-`dict` body gate). A
+  commit `proposal_id` or rollback `to_proposal_id` that is a JSON array/object
+  previously reached the registry `dict.get` and raised `unhashable type` (HTTP
+  500); a non-string id is now `400 bad_request` (exact-`str` gate before the
+  lookup). `source` / `justification` remain string-coerced metadata, and a
+  container-valued parameter is still recorded as a `wrong_type` validation
+  rejection (422) — both unchanged.
+- **DIRECT (arbitrary Python objects).** `TuningState.propose/commit/rollback`
+  and `validate_proposal` prove exact builtin shapes before any supplied value
+  is hashed, looked up, compared, stringified, validated, serialised, or
+  emitted: `params` must be an exact `dict` with exact-`str` keys and exact JSON
+  tree values; `source`/`justification`/`mode`/`approver`/`proposal_id`/
+  `to_proposal_id` must be exact `str` (a `str` subclass is refused). A
+  malformed call terminates through a fixed `TuningError(400, bad_request)`
+  rather than leaking an `AttributeError`/`TypeError`. Parameter keys are
+  refused by exact type before registry hashing/lookup, so a hostile `__hash__`
+  never runs.
+- **LEDGER/EVENT.** Because the envelope is proven serialisable up front, a
+  refused request appends no ledger line, writes no pending file, records no
+  proposal, commits/rolls back nothing, and emits no event (including no
+  `tuning.rejected` event carrying a supplied object). Valid requests still
+  append their canonical JSON ledger entries and events unchanged.
+
+The refusal message is a fixed generic string (`BAD_REQUEST_MESSAGE`) that names
+neither the supplied value nor its type. The normalized `policy:auto` refusal
+(every whitespace/case spelling) and byte-for-byte storage of valid human
+approver strings in the ledger are preserved. No new content-size ceiling is
+introduced; the only bound is a container-nesting depth
+(`_MAX_REQUEST_VALUE_DEPTH`) that keeps the JSON-tree proof total against a
+cyclic DIRECT value (recorded as a residual, not a content limit).
+
 **S — observe-by-default capability model** (`scripts/orchestrator.py`,
 `scripts/orchestrator_config.py`). The LLM-facing surface is capability-gated:
 

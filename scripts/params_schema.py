@@ -406,17 +406,34 @@ class ProposalValidation:
     unknown_params: list[str]            # names that don't
 
 
-def validate_proposal(params: dict[str, Any]) -> ProposalValidation:
+def validate_proposal(params: Any) -> ProposalValidation:
     """Validate a proposed {name: value} dict against the registry.
 
     Runs every parameter; collects ALL errors rather than short-circuiting.
     Returns `ok=True` iff every known parameter validates and no unknown
     names are present. LOCKED parameters always fail validation.
+
+    Total on arbitrary input (this is a DIRECT entry point): a proposal that
+    is not EXACTLY a builtin ``dict`` resolves to a not-ok result rather than
+    leaking an ``.items()`` AttributeError, and a non-``str`` key forces the
+    aggregate result to not-ok WITHOUT being hashed into ``PARAMS.get`` (which
+    would run a hostile ``__hash__``) or copied into any message. Exact-type
+    decisions only — a proposed value's methods still run no code here.
     """
+    if type(params) is not dict:
+        return ProposalValidation(
+            ok=False, errors={}, known_params=[], unknown_params=[])
     errors: dict[str, ValidationResult] = {}
     known: list[str] = []
     unknown: list[str] = []
+    malformed_keys = 0
     for name, value in params.items():
+        # A non-str key cannot name a registered parameter. Refuse it by exact
+        # type BEFORE ``PARAMS.get`` — hashing it (or formatting it into a
+        # message) would execute a supplied object's ``__hash__``/``__repr__``.
+        if type(name) is not str:
+            malformed_keys += 1
+            continue
         param = PARAMS.get(name)
         if param is None:
             unknown.append(name)
@@ -431,7 +448,7 @@ def validate_proposal(params: dict[str, Any]) -> ProposalValidation:
         if not result.ok:
             errors[name] = result
     return ProposalValidation(
-        ok=len(errors) == 0,
+        ok=len(errors) == 0 and malformed_keys == 0,
         errors=errors,
         known_params=known,
         unknown_params=unknown,
