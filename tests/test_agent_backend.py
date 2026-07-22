@@ -355,6 +355,17 @@ def test_normalization_refuses_hostile_object_name_id_without_hooks():
     assert b.name == ""
 
 
+def test_normalization_refuses_hostile_name_and_id_separately():
+    # Each field is gated on its own: a hostile value in one never
+    # disturbs a well-formed value in the other, and no hook runs.
+    b1 = ToolUseBlock(id="tu_ok", name=_HostileValue())
+    assert b1.id == "tu_ok"
+    assert b1.name == ""
+    b2 = ToolUseBlock(id=_HostileValue(), name="get_params")
+    assert b2.id == ""
+    assert b2.name == "get_params"
+
+
 @pytest.mark.parametrize("bad_input", _NON_DICT_INPUTS, ids=_NON_DICT_IDS)
 def test_normalization_replaces_non_dict_input(bad_input):
     b = ToolUseBlock(id="tu_1", name="get_params", input=bad_input)
@@ -383,6 +394,14 @@ def test_normalization_replaces_hostile_object_input_without_hooks():
 def test_normalization_replacement_dicts_are_independent():
     b1 = ToolUseBlock(id="tu_1", name="n", input=["not-a-dict"])
     b2 = ToolUseBlock(id="tu_2", name="n", input="also-not")
+    assert b1.input is not b2.input
+    b1.input["k"] = "v"
+    assert b2.input == {}
+
+
+def test_default_input_dicts_are_independent_instances():
+    b1 = ToolUseBlock(id="tu_1", name="n")
+    b2 = ToolUseBlock(id="tu_2", name="n")
     assert b1.input is not b2.input
     b1.input["k"] = "v"
     assert b2.input == {}
