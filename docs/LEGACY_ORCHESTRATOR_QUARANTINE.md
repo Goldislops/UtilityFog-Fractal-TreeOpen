@@ -78,15 +78,21 @@ Error-shape guarantees (Jack amendment):
   only after validating as an exact builtin JSON tree: exact `dict`s with
   exact-`str` keys, exact `list`s, exact `str`/`int`/finite-`float`/`bool`/
   `None`. Subclasses, tuples, foreign objects, cycles, non-finite floats,
-  depth > 32 (`MAX_TOOL_RESULT_DEPTH`), and > 4096 cumulative items
-  (`MAX_TOOL_RESULT_ITEMS`) are all refused by exact-type decisions — no
-  conversion, representation, formatting, iteration, comparison, length, or
-  truth method of a refused value is requested.
+  depth > 32 (`MAX_TOOL_RESULT_DEPTH`), > 4096 cumulative items
+  (`MAX_TOOL_RESULT_ITEMS`), and exact integers wider than 2048 bits
+  (`MAX_TOOL_RESULT_INT_BITS` — a code-level ceiling independent of the
+  mutable process-wide `sys.get_int_max_str_digits()` setting) are all
+  refused by exact-type decisions — no conversion, representation,
+  formatting, iteration, comparison, length, or truth method of a refused
+  value is requested; an accepted integer is measured only by its C-level
+  bit length, never converted to text during validation.
 - **128 KiB tool-result ceiling** — an accepted result serializes with plain
   `json.dumps(..., sort_keys=True, allow_nan=False)` (no `default=str`, so no
   foreign `__str__` can enter model-visible text) and its UTF-8 encoding must
-  fit `MAX_TOOL_RESULT_BYTES` (128 KiB); cumulative string size is bounded
-  during validation, before serialization. Any refusal — validation,
+  fit `MAX_TOOL_RESULT_BYTES` (128 KiB); cumulative scalar text — string and
+  key characters plus a conservative no-conversion bound on integer decimal
+  digits (sign included) — is bounded during validation, before
+  serialization. Any refusal — validation,
   serialization, or size — is replaced by the fixed block
   `{"error": "tool_result_unavailable", "category": "handler_exception",
   "message": "tool result unavailable"}` with `is_error=True`, records

@@ -338,6 +338,14 @@ MAX_TOOL_RESULT_ITEMS = 4096
 """Maximum cumulative container items (dict entries + list elements) accepted
 across an entire tool-result payload."""
 
+MAX_TOOL_RESULT_INT_BITS = 2048
+"""Code-level magnitude ceiling (bit length) for an exact builtin int in a
+tool-result payload. Makes integer acceptance and transient conversion cost
+independent of the mutable process-wide ``sys.get_int_max_str_digits()``
+setting: an accepted integer also charges a conservative decimal-character
+bound — computed from its bit length WITHOUT converting it to text — against
+the cumulative scalar-text budget, before any serialization."""
+
 MAX_LIVE_RESULT_ID_LEN = 64
 """Maximum length of a proposal/commit id collected from a LIVE tool result.
 Deliberately looser than the receipt's canonical ``_ID_RE`` (which still
@@ -811,19 +819,33 @@ def _collectable_live_id(value: Any) -> bool:
 
 def _valid_result_tree(value: Any, depth: int, budget: list) -> bool:
     """Exact-builtin JSON-tree check. ``budget`` is
-    ``[items_remaining, string_chars_remaining]``, mutated in place so the
-    item and cumulative string-size bounds hold across the whole tree BEFORE
+    ``[items_remaining, scalar_text_remaining]``, mutated in place so the
+    item and cumulative scalar-text bounds (string/key characters plus a
+    conservative integer digit bound) hold across the whole tree BEFORE
     serialization. Containers are refused at ``MAX_TOOL_RESULT_DEPTH`` — and
     because every recursion level increments ``depth``, a cyclic structure
     exhausts that bound deterministically instead of looping. Only confirmed
     exact builtin containers are traversed (C-level ``list`` iteration /
-    ``dict.items``); refused values are never touched beyond ``type()``."""
+    ``dict.items``); refused values are never touched beyond ``type()`` (an
+    accepted exact int is measured only via C-level ``int.bit_length`` and a
+    sign comparison — never converted to text here)."""
     vt = type(value)
     if vt is str:
         budget[1] -= len(value)
         return budget[1] >= 0
-    if vt is bool or vt is int or value is None:
+    if vt is bool or value is None:
         return True
+    if vt is int:
+        bits = value.bit_length()
+        if bits > MAX_TOOL_RESULT_INT_BITS:
+            return False
+        # Conservative decimal-character bound without converting the value:
+        # 30103/100000 is a slight upper approximation of log10(2).
+        chars = 1 if bits == 0 else (bits * 30103) // 100000 + 1
+        if value < 0:
+            chars += 1
+        budget[1] -= chars
+        return budget[1] >= 0
     if vt is float:
         return math.isfinite(value)
     if vt is list:
@@ -854,7 +876,7 @@ def _valid_result_tree(value: Any, depth: int, budget: list) -> bool:
 
 def _safe_result_content(payload: Any) -> Optional[str]:
     """Serialize a tool-result payload only when it is an exact builtin JSON
-    tree within the depth/item/string bounds AND its UTF-8 encoding fits
+    tree within the depth/item/scalar-text bounds AND its UTF-8 encoding fits
     ``MAX_TOOL_RESULT_BYTES``. ``None`` means REFUSED — the caller substitutes
     the fixed ``tool_result_unavailable`` block; the refused payload
     contributes nothing to it. Accepted payloads serialize byte-identically
@@ -1071,6 +1093,7 @@ __all__ = [
     "MAX_RECEIPT_BYTES",
     "MAX_TOOL_RESULT_BYTES",
     "MAX_TOOL_RESULT_DEPTH",
+    "MAX_TOOL_RESULT_INT_BITS",
     "MAX_TOOL_RESULT_ITEMS",
     "MAX_LIVE_RESULT_ID_LEN",
     "OUTCOME_OK",

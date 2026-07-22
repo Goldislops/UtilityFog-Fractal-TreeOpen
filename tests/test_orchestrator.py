@@ -1862,7 +1862,8 @@ def test_execute_source_fence_no_exception_formatting():
 #     to live results ("prop-newid" stays accepted).
 #   * Result encoding: a payload is serialized only after validating it as an
 #     exact builtin JSON tree (exact dict/list/str/int/finite-float/bool/None,
-#     str keys, depth <= 32, items <= 4096, bounded cumulative string size),
+#     str keys, depth <= 32, items <= 4096, bounded cumulative scalar text
+#     covering string/key characters and integer digit bounds),
 #     with plain json.dumps(..., sort_keys=True, allow_nan=False) and a
 #     128 KiB ceiling on the encoded bytes. Anything refused is replaced by a
 #     fixed structured error block; exactly one handler_exception is recorded,
@@ -2704,7 +2705,7 @@ def test_local_rejection_category_recorded_end_to_end():
 
 
 def test_string_budget_counts_dict_keys():
-    """Documents intent: dict KEYS consume the cumulative string budget.
+    """Documents intent: dict KEYS consume the cumulative scalar-text budget.
     (Behaviorally backstopped by the final encoded-byte ceiling either way.)"""
     from scripts.orchestrator import _safe_result_content
     assert _safe_result_content({"x" * 200000: 1}) is None
@@ -2732,3 +2733,128 @@ def test_oversized_census_body_refused_end_to_end():
     assert blocks[0].is_error is True
     assert blocks[0].content == _REFUSAL_CONTENT
     assert "zzz" not in blocks[0].content
+
+
+# -- follow-up: exact-integer magnitude ceiling + scalar-text accounting ------
+#
+# Jack's reproduced finding: integer acceptance previously depended on the
+# process-wide sys.get_int_max_str_digits() setting — under the default
+# 4300-digit limit json.dumps raised on a 5,001-digit integer (refused via
+# the defensive except), but after sys.set_int_max_str_digits(0) the
+# identical value was accepted into a 5,008-character serialized result, and
+# the conversion ran before the final byte check. Exact integers now carry a
+# code-level MAX_TOOL_RESULT_INT_BITS = 2048 ceiling and charge a
+# conservative decimal-character bound (computed WITHOUT text conversion;
+# 30103/100000 slightly over-approximates log10(2)) against the cumulative
+# scalar-text budget, so acceptance and transient allocation are
+# runtime-setting-independent.
+
+_MAX_INT_BITS = 2048
+
+
+def test_int_at_2048_bit_boundary_accepted_with_sign():
+    from scripts.orchestrator import _safe_result_content
+    v = 2 ** (_MAX_INT_BITS - 1)
+    assert v.bit_length() == _MAX_INT_BITS
+    payload = {"v": v, "neg": -v}
+    assert _safe_result_content(payload) == json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+def test_int_above_2048_bits_refused(sign):
+    from scripts.orchestrator import _safe_result_content
+    v = sign * (2 ** _MAX_INT_BITS)
+    assert abs(v).bit_length() == _MAX_INT_BITS + 1
+    assert _safe_result_content({"v": v}) is None
+
+
+def test_zero_and_ordinary_ints_still_accepted():
+    from scripts.orchestrator import _safe_result_content
+    payload = {"z": 0, "a": 1, "b": -1, "c": 123456789, "d": -987654321}
+    assert _safe_result_content(payload) == json.dumps(payload, sort_keys=True)
+
+
+def test_cumulative_int_text_budget_refuses_before_serialization(monkeypatch):
+    """Individually permitted integers whose conservative digit bounds
+    cumulatively exhaust the scalar-text budget are refused BEFORE
+    serialization — the json.dumps sentinel must never fire."""
+    from scripts.orchestrator import _safe_result_content
+    big = 2 ** (_MAX_INT_BITS - 1)  # conservative bound: 617 chars each
+    count = (128 * 1024) // 617 + 2  # cumulative bound exceeds the budget
+    payload = {"ints": [big] * count}
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("json.dumps must not be entered")
+
+    monkeypatch.setattr(json, "dumps", _boom)
+    assert _safe_result_content(payload) is None
+
+
+def test_5001_digit_reproduction_refused_under_both_runtime_settings():
+    """Jack's direct receipt, pinned both ways: 10**5000 (5,001 digits) is
+    refused with the runtime conversion limit at its current value AND with
+    the limit disabled. The process-wide setting is saved and restored in
+    try/finally."""
+    import sys
+    from scripts.orchestrator import _safe_result_content
+    payload = {"v": 10 ** 5000}
+    assert _safe_result_content(payload) is None
+    saved = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        assert _safe_result_content(payload) is None
+    finally:
+        sys.set_int_max_str_digits(saved)
+
+
+def test_oversized_int_refusal_iteration_lane():
+    """The integer ceiling flows through the standard refusal lane: one
+    handler_exception, the fixed block, zero live-id collection, and the
+    iteration continues."""
+    result, blocks = _single_result_iteration(
+        ({"proposal_id": "prop-newid", "v": 2 ** (_MAX_INT_BITS + 1)}, False),
+        name="propose_tuning", mode=MODE_PROPOSE)
+    assert result.outcome_counts == {"handler_exception": 1}
+    assert result.proposals_created == []
+    assert result.stopped_because == "end_turn"
+    assert blocks[0].is_error is True
+    assert blocks[0].content == _REFUSAL_CONTENT
+
+
+def test_negative_sign_charge_is_budget_decisive():
+    """The +1 sign character must be able to decide accept-vs-refuse on its
+    own: a maximal positive int fits a 617-char budget exactly; its negation
+    needs 618."""
+    from scripts.orchestrator import _valid_result_tree
+    v = 2 ** (_MAX_INT_BITS - 1)  # 617 decimal digits
+    budget = [100, 617]
+    assert _valid_result_tree(v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 617
+    budget = [100, 617]
+    assert _valid_result_tree(-v, 0, budget) is False  # sign char tips it
+    budget = [100, 618]
+    assert _valid_result_tree(-v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 618
+
+
+def test_int_digit_bound_factor_is_a_true_upper_bound():
+    """At bit length 196 the correct 30103/100000 factor charges exactly the
+    true digit count (60), while an unsafe 30102 under-approximation of
+    log10(2) would charge 59 — this pins the factor's conservativeness."""
+    from scripts.orchestrator import _valid_result_tree
+    v = 2 ** 196 - 1  # 60 decimal digits
+    assert len(str(v)) == 60
+    budget = [100, 60]
+    assert _valid_result_tree(v, 0, budget) is True
+    assert budget[1] == 0  # charged exactly 60, never 59
+    budget = [100, 59]
+    assert _valid_result_tree(v, 0, budget) is False
+
+
+def test_bool_and_none_are_not_charged_against_scalar_budget():
+    from scripts.orchestrator import _valid_result_tree
+    budget = [100, 5]
+    assert _valid_result_tree(True, 0, budget) is True
+    assert _valid_result_tree(False, 0, budget) is True
+    assert _valid_result_tree(None, 0, budget) is True
+    assert budget == [100, 5]  # untouched
