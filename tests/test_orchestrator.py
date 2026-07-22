@@ -1559,6 +1559,266 @@ def test_local_rejection_flag_bool_is_bounded():
     assert "hostile __bool__" not in json.dumps(payload, sort_keys=True)
 
 
+def test_local_rejection_cleanup_raising_key_comparison_is_bounded():
+    """The remaining gap (thread-independent reproduction): an exact builtin
+    dict marked as a local rejection carries a custom key whose comparison
+    raises during the cleanup comprehension's ``k != "_local_rejection"``.
+    The raise comes from ``__ne__`` — which only the cleanup's ``!=`` uses;
+    dict lookups use ``__eq__``, so the in-try ``.get`` cannot trigger it —
+    making the reproduction deterministic. Post-processing must be inside the
+    defensive try: the result is the bounded fixed handler failure, never a
+    crash of execute()."""
+    calls: list[str] = []
+
+    class _NeBombKey:
+        def __hash__(self):
+            calls.append("hash")
+            return 12345
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __ne__(self, other):
+            calls.append("ne")
+            raise RuntimeError("hostile __ne__ during cleanup")
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    def handler(_args):
+        return {_NeBombKey(): "x", "_local_rejection": True}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    # Exactly one comparison attempt raised; text hooks never ran. (__eq__ may
+    # run 0..n times from bucket-dependent dict probes; it is benign here.)
+    assert calls.count("ne") == 1
+    assert "str" not in calls and "repr" not in calls
+    assert "hostile __ne__" not in json.dumps(payload, sort_keys=True)
+
+
+def test_local_rejection_category_insertion_with_colliding_key():
+    """Local-rejection cleanup with a custom key hash-colliding with
+    "category" (recording ``__eq__`` honestly returning False): the category
+    default is still inserted, the colliding key and its value survive, and no
+    text hook was consulted. The recorded ``__eq__`` calls include both the
+    cleanup's ``!=`` (default ``__ne__`` falls back to ``__eq__``) and the
+    ``setdefault`` probe — the latter is guaranteed to run by the forced
+    full-hash collision, though the count alone does not isolate it."""
+    calls: list[str] = []
+
+    class _CollidingKey:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    colliding = _CollidingKey()
+
+    def handler(_args):
+        return {"_local_rejection": True, "error": "bad_request",
+                colliding: "kept-value"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == CATEGORY_LOCAL_REJECTION
+    assert payload["error"] == "bad_request"
+    assert payload[colliding] == "kept-value"
+    assert "_local_rejection" not in payload
+    assert calls.count("eq") >= 1  # the collision comparison genuinely ran
+    assert "str" not in calls and "repr" not in calls
+
+
+def test_http_rejection_construction_with_nonstandard_contents():
+    """HTTP-rejection rebuild with a custom key hash-colliding with
+    "category" (recording, honestly-False ``__eq__``): the category is still
+    added, all contents survive, and no text hook runs. A second variant whose
+    ``__eq__`` raises during the rebuild is bounded to the fixed handler
+    failure — it can no longer escape execute()."""
+    calls: list[str] = []
+
+    class _CollidingKey:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            calls.append("eq")
+            return False
+        def __str__(self):  # pragma: no cover - must not be called
+            calls.append("str")
+            return "k"
+        def __repr__(self):  # pragma: no cover - must not be called
+            calls.append("repr")
+            return "k"
+
+    colliding = _CollidingKey()
+
+    def handler(_args):
+        return {"_status": 502, "error": "bad_gateway", colliding: "kept"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload["category"] == "http_rejection"
+    assert payload["_status"] == 502
+    assert payload["error"] == "bad_gateway"
+    assert payload[colliding] == "kept"
+    assert calls.count("eq") >= 1
+    assert "str" not in calls and "repr" not in calls
+
+    raising_calls: list[str] = []
+
+    class _EqBombKey:
+        def __hash__(self):
+            raising_calls.append("hash")
+            return hash("category")
+        def __eq__(self, other):
+            raising_calls.append("eq")
+            raise RuntimeError("hostile __eq__ during rebuild")
+
+    def raising_handler(_args):
+        return {"_status": 502, _EqBombKey(): "x"}
+
+    payload, is_error = _census_router(raising_handler).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    assert raising_calls.count("eq") == 1
+    assert "hostile __eq__" not in json.dumps(payload, sort_keys=True)
+
+
+def test_status_collision_on_local_rejection_stays_bounded():
+    """Review-caught regression pin: a local-rejection exact dict carrying a
+    key that hash-collides with "_status" and raises from ``__eq__`` (benign
+    ``__ne__``). The eager ``_status`` lookup — preserved in its
+    pre-relocation position before the local-rejection branch — hits the
+    collision inside the try, so the result is the bounded fixed handler
+    failure; the live hostile key can never survive into a returned payload.
+    The equal-full-hash probe makes the single ``__eq__`` call deterministic."""
+    calls: list[str] = []
+
+    class _StatusCollideBomb:
+        def __hash__(self):
+            calls.append("hash")
+            return hash("_status")
+        def __eq__(self, other):
+            calls.append("eq")
+            raise RuntimeError("hostile __eq__ vs _status")
+        def __ne__(self, other):
+            calls.append("ne")
+            return True
+
+    def handler(_args):
+        return {_StatusCollideBomb(): "v", "_local_rejection": True,
+                "error": "x"}
+
+    payload, is_error = _census_router(handler).execute("get_medusa_census", {})
+    assert is_error is True
+    assert payload == {
+        "error": "tool_handler_exception",
+        "category": CATEGORY_HANDLER_EXCEPTION,
+        "tool": "get_medusa_census",
+        "message": _FIXED_HANDLER_MESSAGE,
+    }
+    assert calls.count("eq") == 1
+    assert calls.count("ne") == 0
+    assert "hostile __eq__" not in json.dumps(payload, sort_keys=True)
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_sc", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, _http = _make_orchestrator(backend)
+    orch.router._handlers["get_medusa_census"] = handler
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+
+
+def test_ordinary_postprocessing_results_byte_identical():
+    """Ordinary local rejection, HTTP rejection, and success flows through the
+    relocated post-processing, pinned by exact dict equality against fully
+    literal expected dicts (and by object identity for the success flow —
+    stronger than byte equality: the payload is passed through unmodified)."""
+    payload, is_error = _census_router(
+        lambda _a: {"_local_rejection": True, "error": "bad_request",
+                    "message": "justification is required"}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"error": "bad_request", "category": "local_rejection",
+                       "message": "justification is required"}
+
+    payload, is_error = _census_router(
+        lambda _a: {"_status": 500, "error": "server_broke"}).execute(
+        "get_medusa_census", {})
+    assert is_error is True
+    assert payload == {"_status": 500, "error": "server_broke",
+                       "category": "http_rejection"}
+
+    success = {"generation": 41, "counts": {"VOID": 9}}
+    payload, is_error = _census_router(lambda _a: success).execute(
+        "get_medusa_census", {})
+    assert is_error is False
+    assert payload is success
+    assert payload == {"generation": 41, "counts": {"VOID": 9}}
+
+
+def test_iteration_completes_on_hostile_local_rejection_cleanup():
+    """run_one_iteration for the newly covered path: a hostile local-rejection
+    payload whose cleanup comparison raises completes the iteration, records
+    handler_exception (the bounded conversion), keeps the fixed message in the
+    LLM-visible result, and yields a valid bounded receipt."""
+    calls: list[str] = []
+
+    class _NeBombKey:
+        def __hash__(self):
+            return 12345
+        def __eq__(self, other):
+            return False
+        def __ne__(self, other):
+            calls.append("ne")
+            raise RuntimeError("hostile __ne__ during cleanup")
+
+    backend = MockBackend(responses=[
+        _tool_use_response("tu_lr", "get_medusa_census", {}),
+        _text_response("done"),
+    ])
+    orch, _http = _make_orchestrator(backend)
+    orch.router._handlers["get_medusa_census"] = (
+        lambda _a: {_NeBombKey(): "x", "_local_rejection": True})
+    result = orch.run_one_iteration("go")
+    assert result.stopped_because == "end_turn"
+    assert result.outcome_counts.get(CATEGORY_HANDLER_EXCEPTION) == 1
+    assert result.outcome_counts.get(CATEGORY_LOCAL_REJECTION, 0) == 0
+    block = backend.calls[1].messages[-1].content[0]
+    assert block.is_error is True
+    assert json.loads(block.content)["message"] == _FIXED_HANDLER_MESSAGE
+    assert calls.count("ne") == 1
+    receipt_json = json.dumps(build_audit_receipt(result), sort_keys=True)
+    assert len(receipt_json.encode("utf-8")) <= MAX_RECEIPT_BYTES
+    assert "hostile __ne__" not in receipt_json
+
+
 def test_execute_source_fence_no_exception_formatting():
     """Source fence: execute() contains no isinstance and no exception or
     type-name formatting — refusals decide by exact type identity alone.
