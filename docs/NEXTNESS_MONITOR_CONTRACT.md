@@ -87,6 +87,48 @@ float thresholds ∈ (0, 1)).
   the bridge's inherited NP1 options (`smoothing`, `holdout_fraction`)
   keep NP1's exact bounds and fail closed on violation.
 
+### Exact-string field boundary (reachability stated separately)
+
+**PUBLIC CLI lane** — observations reach the monitor from the JSONL log
+via NP1's bounded reader, so every record key is a `json`-produced
+builtin `str`. **No CLI-reachable behavior changes**, and every public
+diagnostic is byte-identical.
+
+**DIRECT Python-API lane** — a caller may pass records built in memory,
+whose keys are arbitrary objects. A proven-exact record is therefore
+traversed by **item iteration only**: just the exact builtin `str` keys
+on the allowlist are copied into a **fresh owned dict**, and every
+required field is read from that dict alone. A foreign key is never
+hashed, compared, stringified or represented, and counts as exactly one
+discarded field under the existing discard-and-count policy.
+
+This is a **soundness** boundary, not only a hook boundary. The previous
+`set(record)` / `record["confidence"]` / `record.get("hit")` /
+`"prev_seen" in record` sequence hashed the field names and compared them
+against whatever shared their buckets, so a non-`str` key whose
+`__hash__` collided with a field name had its `__eq__` invoked — and an
+`__eq__` returning `True` let that foreign key **satisfy the field and
+supply its own value as the reading the receipt is computed from**. All
+four required fields were substitutable this way; a colliding key whose
+`__eq__` raised escaped instead. A genuine field coexisting with a
+colliding foreign key now wins, and the foreign key is discarded.
+
+**The two supplied-value type-refusal diagnostics repaired in this batch
+are hook-free**: they inspect the rejected value no further than exact
+type identity and never inspect its class. This is **not** a module-wide
+hook-free-totality claim; other DIRECT-API validation surfaces and the
+caller-controlled outer `records` sequence remain outside Batch 4.
+
+Reading `type(value).__name__` is what made those two unsafe: `__name__`
+is an overridable **metaclass** property, so its getter can run
+caller-controlled code from inside error formatting and escape the typed
+refusal. Builtin type names now come from a bounded literal identity
+table scanned by `is` comparison; anything not on it is described as
+`non-builtin value`. The scan is deliberately **not** a dictionary
+lookup — `mapping.get(type(value))` would hash the caller's class object
+and could itself execute a hostile metaclass `__hash__`, reopening the
+hole this repair closes.
+
 ## CLI expected-failure contract (inherited from NP1)
 
 `0` success · `2` validation failure (missing log file or out-of-bounds

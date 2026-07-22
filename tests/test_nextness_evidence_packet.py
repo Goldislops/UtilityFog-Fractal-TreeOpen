@@ -1066,3 +1066,543 @@ def test_cli_read_side_oserror_propagates(chain, tmp_path, monkeypatch, capsys) 
     assert not out.exists()
     for p, b in before.items():
         assert p.read_bytes() == b
+
+
+# ---------------------------------------------------------------------------
+# Batch 3 — hook-free type diagnostics + exact-string field lookup
+# (Option-B family policy). Refusals must be typed PacketInputError whose
+# formatting reads NO attribute of the rejected value or of its class, and
+# _exact_dict_field must never run a hook of an unproven key — nor let a
+# hash-colliding foreign key satisfy a required string field.
+# ---------------------------------------------------------------------------
+
+
+class _RaisingMeta(type):
+    """Metaclass whose __name__ property raises — even type(x).__name__ is a
+    user-controlled hook."""
+
+    ran = False
+
+    @property
+    def __name__(cls):
+        _RaisingMeta.ran = True
+        raise RuntimeError("metaclass __name__ hook executed")
+
+
+class _MetaBomb(metaclass=_RaisingMeta):
+    pass
+
+
+class _StrictCollisionKey(metaclass=_RaisingMeta):
+    """A non-str key hashing EXACTLY like a target str, every hook armed.
+
+    ``__hash__`` is inert only until armed, permitting the single hash needed
+    to plant the collision in a dict; after arming the lookup must not hash,
+    compare or represent it either.
+    """
+
+    fired: list[str] = []
+    armed = False
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        if _StrictCollisionKey.armed:
+            _StrictCollisionKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return self._h
+
+    def __eq__(self, other):
+        _StrictCollisionKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _StrictCollisionKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _SoftCollisionKey:
+    """Hash-collides with a target str AND compares equal — the soundness
+    variant that used to satisfy a required field and supply its value."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+def _packet_arm() -> None:
+    _RaisingMeta.ran = False
+    _StrictCollisionKey.fired.clear()
+    _StrictCollisionKey.armed = False
+
+
+def test_packet_hostile_metaclass_never_consulted_at_any_site() -> None:
+    """All four supplied-value diagnostics refuse with the exact typed error
+    and the generic description, without consulting the metaclass."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        _evaluation_link,
+        _exact_dict_field,
+        _recorded_reader_bounds,
+    )
+
+    cases = [
+        (lambda: _exact_dict_field(_MetaBomb(), "x", "ctx"),
+         "ctx: expected builtin dict, got non-builtin value"),
+        (lambda: _evaluation_link({"artifacts": {"lab": {"provided": _MetaBomb()}}}, "lab", None),
+         "evaluation.artifacts.lab.provided: expected builtin bool, "
+         "got non-builtin value"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": _MetaBomb(),
+                                                     "max_line_bytes": 1}}),
+         "lab.config.max_rows: expected builtin int, got non-builtin value"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1,
+                                                     "max_line_bytes": _MetaBomb()}}),
+         "lab.config.max_line_bytes: expected builtin int, got non-builtin value"),
+    ]
+    for call, expected in cases:
+        _packet_arm()
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == expected
+        assert _RaisingMeta.ran is False
+
+
+def test_packet_strict_collision_key_runs_no_hook_at_all() -> None:
+    """A foreign key colliding with a required field name must never have
+    __hash__/__eq__/__repr__/metaclass __name__ invoked by the lookup."""
+    from scripts.nextness_evidence_packet import PacketInputError, _exact_dict_field
+
+    _packet_arm()
+    container = {_StrictCollisionKey("schema"): 1}
+    _StrictCollisionKey.armed = True  # planted: no further hash allowed
+    try:
+        with pytest.raises(PacketInputError) as excinfo:
+            _exact_dict_field(container, "schema", "ctx")
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == "ctx: missing field 'schema'"
+        assert _StrictCollisionKey.fired == []
+        assert _RaisingMeta.ran is False
+    finally:
+        _StrictCollisionKey.armed = False
+
+
+def test_packet_collision_key_can_never_satisfy_a_required_field() -> None:
+    """Soundness: a colliding key whose __eq__ returns True previously
+    satisfied the field AND supplied its own value as the field's content."""
+    from scripts.nextness_evidence_packet import PacketInputError, _exact_dict_field
+
+    container = {_SoftCollisionKey("schema"): "HOSTILE-VALUE"}
+    with pytest.raises(PacketInputError) as excinfo:
+        _exact_dict_field(container, "schema", "ctx")
+    assert str(excinfo.value) == "ctx: missing field 'schema'"
+
+
+def test_packet_genuine_field_wins_beside_a_foreign_key() -> None:
+    """A container carrying both a hostile foreign key and the genuine exact
+    string field returns the genuine value, firing no hook."""
+    from scripts.nextness_evidence_packet import _exact_dict_field
+
+    _packet_arm()
+    container = {_MetaBomb(): "HOSTILE", "schema": "GENUINE"}
+    assert _exact_dict_field(container, "schema", "ctx") == "GENUINE"
+    assert _RaisingMeta.ran is False
+    assert _StrictCollisionKey.fired == []
+
+
+def test_packet_builtin_lane_diagnostics_are_byte_identical() -> None:
+    """PUBLIC/ARTIFACT lane keeps every message, exception type and range
+    message byte-for-byte."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        _evaluation_link,
+        _exact_dict_field,
+        _recorded_reader_bounds,
+    )
+
+    matrix = [
+        (lambda: _exact_dict_field([], "x", "ctx"),
+         "ctx: expected builtin dict, got list"),
+        (lambda: _exact_dict_field({}, "x", "ctx"),
+         "ctx: missing field 'x'"),
+        (lambda: _evaluation_link({"artifacts": {"lab": {"provided": 1}}}, "lab", None),
+         "evaluation.artifacts.lab.provided: expected builtin bool, got int"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": "x", "max_line_bytes": 1}}),
+         "lab.config.max_rows: expected builtin int, got str"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 0, "max_line_bytes": 1}}),
+         "lab.config.max_rows: 0 outside (0, 1000000]"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1, "max_line_bytes": "x"}}),
+         "lab.config.max_line_bytes: expected builtin int, got str"),
+        (lambda: _recorded_reader_bounds({"config": {"max_rows": 1, "max_line_bytes": 0}}),
+         "lab.config.max_line_bytes: 0 outside [1, 16777216]"),
+    ]
+    for call, expected in matrix:
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert type(excinfo.value) is PacketInputError
+        assert str(excinfo.value) == expected
+
+
+def test_packet_exact_dict_field_returns_the_value_unchanged() -> None:
+    """Accepted lookups are unaffected and return the stored object itself."""
+    from scripts.nextness_evidence_packet import _exact_dict_field
+
+    sentinel = {"nested": 1}
+    container = {"a": 0, "x": sentinel}
+    assert _exact_dict_field(container, "x", "ctx") is sentinel
+
+
+def test_packet_describe_type_is_hook_free_and_names_builtins() -> None:
+    """Identity table only: builtins by literal name, everything else generic."""
+    from scripts.nextness_evidence_packet import _describe_type
+
+    assert _describe_type(True) == "bool"  # before int
+    assert _describe_type(1) == "int"
+    assert _describe_type(1.0) == "float"
+    assert _describe_type("s") == "str"
+    assert _describe_type([]) == "list"
+    assert _describe_type({}) == "dict"
+    assert _describe_type(()) == "tuple"
+    assert _describe_type(set()) == "set"
+    assert _describe_type(b"") == "bytes"
+    assert _describe_type(None) == "NoneType"
+
+    class _IntSub(int):
+        pass
+
+    assert _describe_type(_IntSub(1)) == "non-builtin value"
+    assert _describe_type(int) == "non-builtin value"
+    _packet_arm()
+    assert _describe_type(_MetaBomb()) == "non-builtin value"
+    assert _RaisingMeta.ran is False
+
+
+# ---------------------------------------------------------------------------
+# Outer role-map boundary (DIRECT API only — the public CLI builds this map
+# itself with exact builtin str roles). build_packet() and
+# validate_output_path() previously consumed the caller's mapping directly
+# via set(), `in`, subscript and list rendering.
+# ---------------------------------------------------------------------------
+
+
+_ROLE_MAP_NOT_DICT = "artifact role map: expected a builtin dict"
+_ROLE_MAP_FOREIGN_KEY = "artifact role map: role keys must be builtin strings"
+
+
+class _ReprBombKey:
+    """Foreign role key whose __repr__ raises — the unknown-roles message
+    rendered the key list, which repr()s every element."""
+
+    fired: list[str] = []
+
+    def __repr__(self):
+        _ReprBombKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _SoftCollidingRole:
+    """Collides with a real role AND compares equal: used to satisfy that
+    role and supply its own value."""
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        return True
+
+
+class _HardCollidingRole:
+    """Collides with a real role; every comparison/representation raises."""
+
+    fired: list[str] = []
+
+    def __init__(self, target: str) -> None:
+        self._h = hash(target)
+
+    def __hash__(self) -> int:
+        return self._h
+
+    def __eq__(self, other):
+        _HardCollidingRole.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _HardCollidingRole.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+class _HostileRoleDict(dict):
+    """An exact-dict SUBCLASS whose iteration hooks are armed."""
+
+    fired: list[str] = []
+
+    def items(self):
+        _HostileRoleDict.fired.append("items")
+        raise RuntimeError("items hook executed")
+
+    def keys(self):
+        _HostileRoleDict.fired.append("keys")
+        raise RuntimeError("keys hook executed")
+
+    def __iter__(self):
+        _HostileRoleDict.fired.append("__iter__")
+        raise RuntimeError("__iter__ hook executed")
+
+
+def _role_map_arm() -> None:
+    _ReprBombKey.fired.clear()
+    _HardCollidingRole.fired.clear()
+    _HostileRoleDict.fired.clear()
+
+
+def test_role_map_foreign_key_repr_never_runs(chain) -> None:
+    """A foreign role key whose __repr__ raises used to escape from
+    build_packet() when the unknown-roles message rendered the key list."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    _role_map_arm()
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_ReprBombKey(): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _ReprBombKey.fired == []
+
+
+def test_role_map_collision_cannot_satisfy_a_role_in_build_packet(chain) -> None:
+    """A key colliding with 'report' and comparing equal used to satisfy that
+    role and supply its own value as the artifact."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_SoftCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+
+
+def test_role_map_hard_collision_runs_no_hook_in_validate_output_path(chain, tmp_path) -> None:
+    """Primary-role selection used to hash and compare caller keys."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    _role_map_arm()
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {_HardCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _HardCollidingRole.fired == []
+
+
+def test_role_map_collision_cannot_supply_the_primary_input(chain) -> None:
+    """A soft-colliding key used to be ACCEPTED by validate_output_path and
+    supply the primary input that anchors the whole write boundary."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {_SoftCollidingRole("report"): chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+
+
+def test_role_map_foreign_key_is_rejected_beside_a_genuine_role(chain) -> None:
+    """A foreign key must be refused, never silently ignored, even when a
+    genuine role is present in the same mapping."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    _role_map_arm()
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({_ReprBombKey(): chain["report"], "report": chain["report"]})
+    assert str(excinfo.value) == _ROLE_MAP_FOREIGN_KEY
+    assert _ReprBombKey.fired == []
+
+
+def test_role_map_dict_subclass_iteration_hooks_never_run(chain) -> None:
+    """Only an exact builtin dict is accepted, so a subclass is refused
+    before any of its iteration hooks can interpose."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        build_packet,
+        validate_output_path,
+    )
+
+    out = chain["report"].parent / "packet.json"
+    for call in (
+        lambda: build_packet(_HostileRoleDict({"report": chain["report"]})),
+        lambda: validate_output_path(out, _HostileRoleDict({"report": chain["report"]})),
+    ):
+        _role_map_arm()
+        with pytest.raises(PacketInputError) as excinfo:
+            call()
+        assert str(excinfo.value) == _ROLE_MAP_NOT_DICT
+        assert _HostileRoleDict.fired == []
+
+
+def test_role_map_refusals_report_no_supplied_type_name(chain) -> None:
+    """Both refusals are generic: neither names the supplied type."""
+    from scripts.nextness_evidence_packet import PacketInputError, build_packet
+
+    for bad in ([("report", chain["report"])], ("report",), None):
+        with pytest.raises(PacketInputError) as excinfo:
+            build_packet(bad)
+        message = str(excinfo.value)
+        assert message == _ROLE_MAP_NOT_DICT
+        for leaked in ("list", "tuple", "NoneType", "non-builtin"):
+            assert leaked not in message
+
+
+def test_role_map_preserves_public_messages_and_valid_inputs(chain) -> None:
+    """Valid exact-dict DIRECT inputs and every pre-existing public message
+    are unchanged."""
+    from scripts.nextness_evidence_packet import (
+        PacketInputError,
+        build_packet,
+        validate_output_path,
+    )
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({})
+    assert str(excinfo.value) == "no artifacts provided: nothing to package"
+
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet({"bogus": chain["report"]})
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+
+    # A valid exact dict still builds, and the write boundary still accepts.
+    packet = build_packet(chain)
+    assert packet["schema"] == PACKET_SCHEMA
+    validate_output_path(chain["report"].parent / "packet.json", chain)
+
+
+# ---------------------------------------------------------------------------
+# Complete role-map grammar: exact-dict identity, emptiness and the artifact
+# ceiling are decided BEFORE any key is traversed; unknown roles are refused
+# on proven exact strings. Both entry points rely on this boundary alone.
+# ---------------------------------------------------------------------------
+
+
+class _ArmableRoleKey:
+    """A foreign key that can be planted (inert hash) and then armed, so a
+    test can prove the ceiling refuses before ANY key hook executes."""
+
+    fired: list[str] = []
+    armed = False
+
+    def __hash__(self) -> int:
+        if _ArmableRoleKey.armed:
+            _ArmableRoleKey.fired.append("__hash__")
+            raise RuntimeError("__hash__ hook executed")
+        return 0
+
+    def __eq__(self, other):
+        _ArmableRoleKey.fired.append("__eq__")
+        raise RuntimeError("__eq__ hook executed")
+
+    def __repr__(self):
+        _ArmableRoleKey.fired.append("__repr__")
+        raise RuntimeError("__repr__ hook executed")
+
+
+def test_role_map_ceiling_refuses_before_any_key_hook(chain) -> None:
+    """A nine-entry map is refused by the exact-dict ceiling before the map
+    is traversed, so a hostile key planted inside it is never touched."""
+    from scripts.nextness_evidence_packet import (
+        MAX_PACKET_ARTIFACTS,
+        PacketInputError,
+        build_packet,
+    )
+
+    _ArmableRoleKey.fired.clear()
+    _ArmableRoleKey.armed = False
+    payload = {f"r{i}": chain["report"] for i in range(8)}
+    payload[_ArmableRoleKey()] = chain["report"]  # planted while inert
+    _ArmableRoleKey.armed = True
+    try:
+        assert len(payload) == MAX_PACKET_ARTIFACTS + 1
+        with pytest.raises(PacketInputError) as excinfo:
+            build_packet(payload)
+        assert str(excinfo.value) == f"9 artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+        assert _ArmableRoleKey.fired == []
+    finally:
+        _ArmableRoleKey.armed = False
+
+
+def test_role_map_large_map_diagnostic_stays_short(chain) -> None:
+    """An oversized map must not be rendered: the refusal names a count, not
+    ten thousand keys."""
+    from scripts.nextness_evidence_packet import (
+        MAX_PACKET_ARTIFACTS,
+        PacketInputError,
+        build_packet,
+    )
+
+    payload = {f"r{i}": chain["report"] for i in range(10_000)}
+    with pytest.raises(PacketInputError) as excinfo:
+        build_packet(payload)
+    message = str(excinfo.value)
+    assert message == f"10000 artifacts exceed the {MAX_PACKET_ARTIFACTS} bound"
+    assert len(message) < 64
+    assert "r0" not in message and "r9999" not in message
+
+
+def test_output_alias_refused_for_an_unknown_role(chain) -> None:
+    """The alias sweep only walks ROLES, so an UNKNOWN role naming the output
+    path used to slip past it entirely and validate successfully."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    out.write_bytes(b"PRE-EXISTING")
+    before_out = out.read_bytes()
+    before_report = chain["report"].read_bytes()
+
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {"report": chain["report"], "bogus": out})
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+    assert out.read_bytes() == before_out
+    assert chain["report"].read_bytes() == before_report
+
+
+def test_output_validation_unknown_only_is_typed_not_stopiteration(chain) -> None:
+    """A map with no known role used to fall out of primary-role selection as
+    a bare StopIteration."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {"bogus": chain["report"]})
+    assert type(excinfo.value) is PacketInputError
+    assert str(excinfo.value) == "unknown artifact roles: ['bogus']"
+
+    with pytest.raises(PacketInputError):  # never StopIteration
+        validate_output_path(out, {"nope": chain["report"], "alsonope": chain["report"]})
+
+
+def test_output_validation_empty_map_uses_the_no_artifacts_message(chain) -> None:
+    """An empty map reaches the established no-artifacts refusal, not
+    StopIteration."""
+    from scripts.nextness_evidence_packet import PacketInputError, validate_output_path
+
+    out = chain["report"].parent / "packet.json"
+    with pytest.raises(PacketInputError) as excinfo:
+        validate_output_path(out, {})
+    assert str(excinfo.value) == "no artifacts provided: nothing to package"
+
+
+def test_valid_exact_dict_behaviour_is_unchanged(chain) -> None:
+    """Valid exact-dict input still builds identically and still validates."""
+    from scripts.nextness_evidence_packet import (
+        build_packet,
+        serialize_packet,
+        validate_output_path,
+    )
+
+    first = serialize_packet(build_packet(chain))
+    second = serialize_packet(build_packet(dict(chain)))
+    assert first == second  # byte-identical across repeated runs
+    validate_output_path(chain["report"].parent / "packet.json", chain)
+    # A single-role exact dict remains acceptable.
+    assert build_packet({"log": chain["log"]})["schema"] == PACKET_SCHEMA

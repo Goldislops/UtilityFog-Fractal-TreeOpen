@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 import time
 import subprocess
 import argparse
@@ -28,6 +29,190 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 CREATE_NO_WINDOW = 0x08000000
 
+# ---------------------------------------------------------------------------
+# API launch recognition: LAUNCH ENVELOPE + PUBLIC-CLI ARGUMENT MIRROR.
+#
+# Detection must select the SERVICE, and only the service. Earlier revisions
+# matched substring signatures, and a substring recognizes a FRAGMENT: it can
+# stop mid-word ("--port" inside "--portability"), start mid-word ("scripts"
+# inside "my_scripts"), or ignore what follows ("--help", trailing arguments,
+# a nested path handed to another tool). The recognizer below has two parts,
+# and the claims for each are deliberately different.
+#
+# Part one, the SUPPORTED PYTHON LAUNCH ENVELOPE:
+#
+#   <interpreter> [-u] -m scripts.medusa_api            <arguments>
+#   <interpreter> [-u] <path to scripts\medusa_api.py>  <arguments>
+#
+# The launch target must sit in LAUNCH POSITION, immediately after the
+# interpreter and its optional -u. This envelope is NARROW BY DESIGN: -u is
+# the only interpreter option modeled, because it is the only one any
+# launcher in this system uses. No claim of complete Python-interpreter
+# -option coverage is made — an exotic launch such as ``python -X utf8 -m
+# scripts.medusa_api`` is outside the envelope and goes unrecognized. What
+# the launch position buys is structural: a command that merely NAMES the
+# file or module elsewhere — a nested path argument to another tool, a
+# quoted textual mention, a runner invocation — is refused whatever
+# arguments it carries ("tool.py C:\...\scripts\medusa_api.py --port 8080"
+# is refused because "tool.py" occupies the launch position).
+#
+# Part two, the API ARGUMENT GRAMMAR, is not an independent grammar at all:
+# it is a silent, non-exiting MIRROR of the public CLI that
+# scripts/medusa_api.py actually exposes (argparse with --port type=int,
+# --host type=str, and the auto-added --help, abbreviations allowed). The
+# real parser is the authority on what launches: it accepts "--port=8080",
+# unique abbreviations like "--po 8080" and "--ho localhost", repeated
+# options with the last value winning, empty host values ("--host """ and
+# "--host="), and ANY int()-parsable port spelling ("+8080", "8_080", "0",
+# even negative numbers) — argparse-valid, not socket-valid, because a
+# process launched that way exists and must be visible to status, stop and
+# duplicate prevention. The mirror accepts exactly those. It refuses, all
+# silently: help in any spelling (that process prints usage and exits, so
+# it is never the running service), ambiguous options ("--h": help/host),
+# unknown options ("--portability"), invalid integers, missing values, and
+# extra positional arguments. parse_args consumes the ENTIRE trailing
+# list, which is the end-of-command boundary — and it is what a substring
+# could never assert.
+#
+# The path form accepts absolute and relative paths, both separator styles,
+# quoted or unquoted (Windows quotes a path containing spaces; element
+# splitting honors double quotes as grouping characters, and an empty
+# quoted group still yields an element — a real, empty argument the mirror
+# then refuses as positional). Path and module elements compare
+# case-insensitively — Windows filesystem semantics, matching the old
+# query's behavior — but must be COMPLETE: the final path elements must be
+# exactly "scripts\medusa_api.py" and the module exactly
+# "scripts.medusa_api", so a longer word ("my_scripts", "medusa_api_tests",
+# "medusa_api.pyc") never matches. Long-option names and abbreviations
+# stay case-sensitive, exactly as argparse treats them.
+#
+# Honest boundaries that remain: quote handling is a deliberate
+# simplification of the full CommandLineToArgvW rules — backslash-escaped
+# quotes are not modeled, so an adversarially quote-crafted command line
+# can parse differently here than in the OS; every launcher and shell in
+# this system produces conventionally quoted commands. The mirror parses
+# with the ORCHESTRATOR's own argparse — a service launched by a
+# different Python whose argparse semantics differ could in principle be
+# classified differently than its own parser classified it; every
+# launcher here uses the one seat interpreter. And recognition is by
+# command SHAPE: an identically shaped launch of another checkout's copy
+# of the script is indistinguishable — as in every prior design, the
+# shape is the contract.
+# ---------------------------------------------------------------------------
+
+_API_MODULE = "scripts.medusa_api"
+_API_SCRIPT = "scripts\\medusa_api.py"
+
+
+def _split_command_elements(command: str) -> list:
+    """Split a command line into its elements.
+
+    Whitespace separates elements; double quotes group — they bound an
+    element (or part of one) and are not characters of it. A quoted group
+    with nothing in it still yields an element: ``""`` (and a dangling
+    ``"``) is a real, empty argument to the process, so it must survive
+    splitting for the grammar to refuse it as a trailing element.
+    """
+    elements, current, quoted, grouped = [], [], False, False
+    for character in command:
+        if character == '"':
+            quoted = not quoted
+            grouped = True
+        elif character in " \t" and not quoted:
+            if current or grouped:
+                elements.append("".join(current))
+                current = []
+            grouped = False
+        else:
+            current.append(character)
+    if current or grouped:
+        elements.append("".join(current))
+    return elements
+
+
+class _ArgumentRefusal(Exception):
+    """Raised inside the mirror parser instead of printing or exiting."""
+
+
+class _SilentArgumentMirror(argparse.ArgumentParser):
+    """An ArgumentParser that can neither write output nor exit.
+
+    Every argparse refusal path funnels through ``error`` (which normally
+    prints usage to stderr and exits) or ``exit``; overriding both means
+    process scanning can never emit a byte or terminate the orchestrator.
+    """
+
+    def error(self, message):
+        raise _ArgumentRefusal(message)
+
+    def exit(self, status=0, message=None):
+        raise _ArgumentRefusal(message or str(status))
+
+
+def _build_api_argument_mirror() -> argparse.ArgumentParser:
+    """The PUBLIC CLI of scripts/medusa_api.py, mirrored silently.
+
+    The same long-option table the real entry point exposes — ``--help``
+    (argparse auto-adds it there; declared here as a plain flag so it can
+    never print), ``--port`` ``type=int``, ``--host`` ``type=str`` — so
+    abbreviation and ambiguity resolve exactly as the real parser resolves
+    them. The short ``-h`` is deliberately absent: it refuses as unknown,
+    and the real ``-h`` process prints usage and exits, so the outcome is
+    the same refusal.
+    """
+    mirror = _SilentArgumentMirror(add_help=False)
+    mirror.add_argument("--help", action="store_true")
+    mirror.add_argument("--port", type=int, default=8080)
+    mirror.add_argument("--host", type=str, default="0.0.0.0")
+    return mirror
+
+
+_API_ARGUMENT_MIRROR = _build_api_argument_mirror()
+
+
+def _accepts_api_arguments(arguments: list) -> bool:
+    """True when the public CLI would accept ``arguments`` AND keep serving.
+
+    ``parse_args`` consumes the ENTIRE trailing list — ambiguous options,
+    unknown options, invalid integers, missing values and extra positional
+    arguments all refuse, silently. A parse that succeeds only to request
+    help is refused too: that process prints usage and exits, so it is
+    never the running service.
+    """
+    try:
+        namespace = _API_ARGUMENT_MIRROR.parse_args(list(arguments))
+    except _ArgumentRefusal:
+        return False
+    return not namespace.help
+
+
+def _is_api_launch_command(command: str) -> bool:
+    """True only for a supported API launch command.
+
+    The launch target — the module element or the script path — must sit in
+    launch position, immediately after the interpreter and its optional
+    ``-u`` (the supported launch envelope), and everything after it must be
+    an argument list the public CLI accepts, consumed to the end of the
+    command.
+    """
+    elements = _split_command_elements(command)
+    rest = elements[1:]  # elements[0] is the interpreter, whatever its path
+    if rest and rest[0] == "-u":
+        rest = rest[1:]
+    if not rest:
+        return False
+    if rest[0] == "-m":
+        return (
+            len(rest) >= 2
+            and rest[1].lower() == _API_MODULE
+            and _accepts_api_arguments(rest[2:])
+        )
+    target = rest[0].replace("/", "\\").lower()
+    if target == _API_SCRIPT or target.endswith("\\" + _API_SCRIPT):
+        return _accepts_api_arguments(rest[1:])
+    return False
+
+
 # Service definitions
 SERVICES = {
     "watchdog": {
@@ -35,10 +220,21 @@ SERVICES = {
         "marker": "watchdog.py",
         "description": "Watchdog Daemon (Phase 14d)",
     },
+    # The API must be launched as a PACKAGE MODULE. Running it by absolute
+    # file path leaves the repository root off sys.path, so its
+    # ``from scripts.tuning_api import ...`` fails with ModuleNotFoundError
+    # and the service exits immediately.
+    #
+    # The marker is the RECOGNIZER defined above — not a substring
+    # collection. Selection requires the WHOLE command to be a supported
+    # launch: module or legacy script in launch position, quoted or
+    # unquoted path, either separator style, followed by any argument list
+    # the PUBLIC CLI accepts (mirrored argparse semantics, nothing
+    # trailing).
     "api": {
-        "script": "scripts/medusa_api.py",
+        "module": "scripts.medusa_api",
         "args": ["--port", "8080"],
-        "marker": "medusa_api.py",
+        "marker": _is_api_launch_command,
         "description": "REST API (Phase 16a)",
     },
     "geometry": {
@@ -49,22 +245,118 @@ SERVICES = {
 }
 
 
-def find_process(marker: str) -> list:
-    """Find running processes matching a marker string."""
+def build_process_filter(marker: str) -> str:
+    """PowerShell ``Where-Object`` predicate for a plain-string marker.
+
+    ``python.exe AND (CommandLine contains marker)`` — the engine, watchdog
+    and geometry selectors keep this exact substring form, unchanged.
+    """
+    return f"$_.Name -eq 'python.exe' -and ($_.CommandLine -like '*{marker}*')"
+
+
+#: Host-shell query for the recognizer path: enumerate every python.exe
+#: process with its PID and full command line, as JSON. Recognition happens
+#: in Python — the shell filters by PROCESS NAME only, so the emitted query
+#: carries no knowledge of any launch form.
+_PYTHON_PROCESS_QUERY = (
+    "Where-Object {$_.Name -eq 'python.exe'} | "
+    "Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+)
+
+
+def _parse_process_rows(stdout: str) -> list:
+    """Rows from the JSON query: nothing, one bare object, or an array.
+
+    PowerShell emits a bare object (not a one-element array) when the
+    pipeline yields a single row, and nothing at all when it yields none.
+    """
+    text = stdout.strip()
+    if not text:
+        return []
+    rows = json.loads(text)
+    return [rows] if isinstance(rows, dict) else rows
+
+
+def _select_recognized_pids(rows, recognizer) -> list:
+    """Ordered, de-duplicated PIDs of rows whose command is recognized.
+
+    A row without a PID is skipped; a row without a command line
+    (``CommandLine`` can be null) is refused. Order follows the query; a
+    PID appearing more than once is reported once.
+    """
+    pids = []
+    for row in rows:
+        pid = row.get("ProcessId")
+        if pid is None:
+            continue
+        pid = int(pid)
+        if recognizer(row.get("CommandLine") or "") and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def find_process(marker) -> list:
+    """Find running python.exe processes selected by ``marker``.
+
+    A plain-string marker keeps the original substring query, emitted and
+    parsed exactly as before (engine, watchdog, geometry). A callable
+    marker is a full-command recognizer: the shell enumerates python.exe
+    processes and Python classifies each command line, so the shell query
+    itself never encodes a launch form.
+    """
     try:
+        if callable(marker):
+            # -NoProfile -NonInteractive keep stdout pure JSON: the strict
+            # parser is all-or-nothing, so a profile banner would otherwise
+            # read as "nothing running" (fail-safe, but a double-start risk).
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-CimInstance Win32_Process | " + _PYTHON_PROCESS_QUERY],
+                capture_output=True, text=True, timeout=10,
+            )
+            return _select_recognized_pids(_parse_process_rows(result.stdout), marker)
         result = subprocess.run(
             ["powershell", "-Command",
-             f"Get-CimInstance Win32_Process | Where-Object {{$_.CommandLine -like '*{marker}*' -and $_.Name -eq 'python.exe'}} | Select-Object ProcessId | Format-List"],
+             f"Get-CimInstance Win32_Process | Where-Object {{{build_process_filter(marker)}}} | Select-Object ProcessId | Format-List"],
             capture_output=True, text=True, timeout=10,
         )
         pids = []
         for line in result.stdout.strip().split("\n"):
             if line.strip().startswith("ProcessId"):
                 pid = int(line.split(":")[-1].strip())
-                pids.append(pid)
+                if pid not in pids:
+                    pids.append(pid)
         return pids
     except Exception:
         return []
+
+
+def build_command(config: dict) -> list:
+    """Build the launch argv for one service.
+
+    A service declaring ``module`` is launched as a package module
+    (``python -u -m pkg.mod``) so the repository root stays importable;
+    a service declaring ``script`` keeps the file-path form. The API needs
+    the module form because it imports ``scripts.*`` at import time.
+
+    Exactly one of the two must be declared. A configuration carrying
+    NEITHER would otherwise surface as a bare ``KeyError: 'script'``, and
+    one carrying BOTH would silently pick a launch form the author did not
+    choose. Both are configuration errors, refused with one generic message
+    that reports no supplied value.
+    """
+    has_module = "module" in config
+    has_script = "script" in config
+    if has_module == has_script:  # neither, or both
+        raise ValueError(
+            "Service configuration must define exactly one of 'module' or 'script'."
+        )
+    if has_module:
+        args = [PYTHON, "-u", "-m", config["module"]]
+    else:
+        args = [PYTHON, "-u", str(PROJECT_ROOT / config["script"])]
+    args.extend(config.get("args", []))
+    return args
 
 
 def start_service(name: str, config: dict) -> int:
@@ -75,8 +367,7 @@ def start_service(name: str, config: dict) -> int:
         print(f"  [{name}] Already running (PID {existing[0]})")
         return existing[0]
 
-    args = [PYTHON, "-u", str(PROJECT_ROOT / config["script"])]
-    args.extend(config.get("args", []))
+    args = build_command(config)
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"

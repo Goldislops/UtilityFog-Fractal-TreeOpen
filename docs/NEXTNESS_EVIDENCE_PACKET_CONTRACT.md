@@ -114,6 +114,107 @@ timestamps, no random identifiers, no absolute paths; byte-identical
 across repeated runs; manifest order is the fixed role order regardless
 of invocation order.
 
+**Hook-free refusal diagnostics (DIRECT Python API included).** A refusal
+never reads an attribute of the rejected value or of its class — in
+particular never `type(value).__name__`, since `__name__` is an
+overridable **metaclass** property whose getter would run
+caller-controlled code from inside error formatting and escape the typed
+`PacketInputError`. Builtin type names come from a literal identity
+table; anything else is described as `non-builtin value`. Public
+CLI/artifact messages, exception types and range messages are
+unaffected: `json.loads` yields only builtins, so every reachable-lane
+diagnostic is byte-identical to before.
+
+**Exact-string field lookup.** A required field is fetched from a
+proven-exact builtin `dict` by **item iteration only**: an unproven key
+is never hashed, compared, stringified or represented, only exact
+builtin `str` keys are compared against the field name, and the matched
+value is taken **straight from the iteration** — never from a second
+subscript, which would re-enter the hash table and could meet a
+colliding hostile key. This is a **soundness** boundary, not only a hook
+boundary: the previous `field not in container` / `container[field]`
+pair hashed the field name and compared it against whatever shared its
+bucket, so a non-string key whose `__hash__` collided with a required
+name had its `__eq__` invoked — and an `__eq__` returning `True` let
+that hostile key **satisfy the required field and supply its own value
+as the field's content**. A foreign key can now never satisfy a
+required string field, and a container holding both a foreign key and
+the genuine string field returns the genuine value.
+
+**Exact role-map boundary (top level).** The same class of defect existed
+one level up, in the **outer role map** passed to `build_packet()` and
+`validate_output_path()`. Both consumed the caller's mapping directly —
+`set(paths)`, `role in paths`, `paths[role]`, `inputs[role]` and, in the
+unknown-roles message, list rendering that `repr`'d every key.
+
+**Reachability**: the **PUBLIC CLI is unaffected** — it constructs this
+map itself with exact builtin `str` roles, so none of the hazards below
+are reachable from the command line. They are **DIRECT-Python-API only**.
+
+Failing-first evidence (Jack's outer-role-map audit), all reproduced
+against the pre-repair tree:
+
+| probe | pre-repair |
+|---|---|
+| foreign role key whose `__repr__` raises | escaped `build_packet()` as a raw `RuntimeError` |
+| key colliding with `"report"`, `__eq__` → `True` | **satisfied the role and supplied its own value** — reached `_validate_role` and parsed the file |
+| colliding key whose `__eq__` raises | escaped `validate_output_path()` |
+| soft-colliding key in `validate_output_path()` | **accepted**, supplying the primary input that anchors the whole write boundary |
+| `dict` **subclass** with armed iteration hooks | `__iter__` executed in `build_packet()`; accepted outright by `validate_output_path()` |
+
+Both entry points now normalize through **one shared private boundary**
+before any membership test, lookup or key rendering. It accepts only an
+exact builtin `dict` (refusing anything else generically, naming no
+supplied type), inspects a rejected mapping or key no further than exact
+type identity, traverses by item iteration only, admits a key solely on
+exact builtin `str` identity — never hashing, comparing, stringifying or
+representing a foreign key — and returns a **fresh exact dict** that is
+the only thing later membership, lookup, `.get()` and primary-role
+selection ever see. A foreign key is **rejected even when a genuine role
+is also present**, never silently dropped.
+
+**The boundary enforces the COMPLETE role-map grammar**, in this order:
+
+1. exact builtin `dict` identity;
+2. **emptiness**, using the established no-artifacts message;
+3. the **artifact-count ceiling**, using the established count message —
+   decided with exact-dict operations **before any key is traversed**;
+4. item iteration admitting **exact builtin `str` keys only**;
+5. **unknown exact-string roles**, refused with the established sorted
+   unknown-role message;
+6. a **fresh dict containing only proven known roles**.
+
+`build_packet()` and `validate_output_path()` rely on this boundary
+**exclusively** and repeat none of its checks.
+
+A second round of failing-first evidence drove steps 2–6:
+
+| probe | pre-repair | post-repair |
+|---|---|---|
+| 9 exact-string unknown roles | traversed and listed: `unknown artifact roles: [...]` (78 chars) | `9 artifacts exceed the 8 bound` (30 chars) |
+| 10 000 exact-string unknown roles | an **88 914-character** diagnostic naming every key | 34 characters, no key listing |
+| `validate_output_path(out, {"report": …, "bogus": out})` | **returned successfully** — the alias sweep walks only ROLES, so an unknown role naming the output path was skipped entirely, defeating the alias boundary | `unknown artifact roles: ['bogus']` |
+| output validation with no known role | escaped as bare **`StopIteration`** | typed `PacketInputError` |
+| output validation with an empty map | escaped as bare **`StopIteration`** | `no artifacts provided: nothing to package` |
+
+**PUBLIC CLI behavior is unchanged** — it builds this map itself from
+known roles, so no CLI-reachable path changes. **DIRECT-API behavior is
+deliberately CHANGED, not preserved**: a direct caller that previously
+received an unknown-role listing for an oversized map now receives the
+short ceiling refusal, and one that previously reached `StopIteration`,
+or silently skipped an unknown role while validating an output path, now
+receives a typed refusal. Valid exact-dict direct input is unaffected and
+still produces byte-identical packets.
+
+**Correction of record.** The note accompanying the field-lookup repair
+claimed it removed *"the only mechanism by which a hostile key could
+raise anything here."* That was **false as written**: it accounted for
+the per-container field lookup but not for this outer role map, which
+remained a live DIRECT-API hole — and the role map turned out to carry
+both a hook-escape and two data-substitution defects. The claim is
+withdrawn, and the accompanying assertion that direct behavior was
+"unchanged" is withdrawn with it.
+
 ## Write boundary
 
 Default output is **stdout**. `--output` must resolve inside the
@@ -154,10 +255,12 @@ retain byte-identical messages and exit 2**. A plain `ValueError` — like
 any exception outside the documented catch classes — now **propagates**
 through public `main()` (test-pinned beside the standing
 sentinel-`RuntimeError` pin), consistent with the self-check's existing
-`RuntimeError` re-raise. No raise was retyped, no new exception class
-was introduced, no validator behavior changed; `build_packet`'s
-direct-Python behavior and its existing typed failures are unchanged.
-This is a packet-only decision; no family-wide convention is implied.
+`RuntimeError` re-raise. That exception-boundary change retyped no
+raise, introduced no new exception class, and left the established
+typed failures byte-identical. The later outer role-map hardening above
+deliberately changes malformed DIRECT-API behavior; valid exact-dict
+direct input remains byte-identical. This is a packet-only decision; no
+family-wide convention is implied.
 
 ## Safety
 

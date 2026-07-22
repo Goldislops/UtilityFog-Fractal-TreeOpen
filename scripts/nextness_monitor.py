@@ -141,12 +141,43 @@ class MonitorConfig:
 # ---------------------------------------------------------------------------
 
 
+_BUILTIN_TYPE_NAMES: Final[tuple[tuple[type, str], ...]] = (
+    (bool, "bool"),  # before int: bool is an int subclass
+    (int, "int"),
+    (float, "float"),
+    (str, "str"),
+    (list, "list"),
+    (dict, "dict"),
+    (tuple, "tuple"),
+    (set, "set"),
+    (bytes, "bytes"),
+    (type(None), "NoneType"),
+)
+
+
+def _describe_type(value: Any) -> str:
+    """Hook-free type description for error messages.
+
+    ``type(value).__name__`` consults the metaclass — a hostile class can
+    override ``__name__`` so that reading it raises from inside error
+    formatting, escaping the typed-error promise. Identity comparison
+    against builtin types runs no user code, and anything that is not one
+    of these builtins is described generically instead of executing a hook
+    merely to improve a message.
+    """
+    value_type = type(value)
+    for builtin, name in _BUILTIN_TYPE_NAMES:
+        if value_type is builtin:
+            return name
+    return "non-builtin value"
+
+
 def _require_exact_int(name: str, value: Any) -> None:
     """Exact builtin ``int`` only — bool, float and int subclasses are
     configuration errors, not values to coerce."""
     if type(value) is not int:
         raise ValueError(
-            f"{name} must be a builtin int, got {type(value).__name__}"
+            f"{name} must be a builtin int, got {_describe_type(value)}"
         )
 
 
@@ -158,7 +189,7 @@ def _bounded_float(value: Any, field: str, low: float, high: float) -> float:
     conversion hook (__float__/__index__) is ever invoked."""
     if type(value) is not int and type(value) is not float:
         raise MonitorInputError(
-            f"{field}: expected a builtin real number, got {type(value).__name__}"
+            f"{field}: expected a builtin real number, got {_describe_type(value)}"
         )
     try:
         as_float = float(value)
@@ -181,27 +212,45 @@ def validate_observations(
     are discarded (counted), missing/invalid required fields fail
     closed. Values are read exactly once into owned plain objects — no
     caller container is retained.
+
+    The proven-exact record is traversed by ITEM ITERATION only, and just
+    the exact builtin ``str`` keys on the allowlist are copied into a
+    fresh owned dict from which every required field is then read. This
+    is a soundness boundary, not only a hook boundary: the previous
+    ``set(record)`` / ``record["confidence"]`` / ``record.get("hit")`` /
+    ``"prev_seen" in record`` sequence hashed and compared caller keys, so
+    a non-``str`` key whose ``__hash__`` collided with a field name had
+    its ``__eq__`` invoked — and an ``__eq__`` returning True let that
+    foreign key SATISFY the field and supply its own value as the reading
+    the receipt is computed from. A foreign or unknown key is now simply
+    one discarded field.
     """
     observations: list[dict[str, Any]] = []
     discarded = 0
     for i, record in enumerate(records):
         if type(record) is not dict:
             raise MonitorInputError(f"observation {i}: expected builtin dict")
-        unknown = set(record) - OBSERVATION_FIELDS
-        discarded += len(unknown)
+        fields: dict[str, Any] = {}
+        for key, value in record.items():
+            # Identity first: a foreign key short-circuits before any
+            # hash, comparison, str or repr of it can occur.
+            if type(key) is str and key in OBSERVATION_FIELDS:
+                fields[key] = value
+            else:
+                discarded += 1
         try:
-            confidence = _bounded_float(record["confidence"], "confidence", 0.0, 1.0)
-            p_actual = _bounded_float(record["p_actual"], "p_actual", 0.0, 1.0)
+            confidence = _bounded_float(fields["confidence"], "confidence", 0.0, 1.0)
+            p_actual = _bounded_float(fields["p_actual"], "p_actual", 0.0, 1.0)
         except KeyError as e:
             raise MonitorInputError(f"observation {i}: missing field {e.args[0]!r}") from e
-        hit = record.get("hit")
+        hit = fields.get("hit")
         if type(hit) is not bool:
             raise MonitorInputError(f"observation {i}: hit must be a builtin bool")
-        if "prev_seen" not in record:
+        if "prev_seen" not in fields:
             # Fail closed — defaulting a missing prev_seen to True would
             # silently mask unseen_state abstention.
             raise MonitorInputError(f"observation {i}: missing field 'prev_seen'")
-        prev_seen = record["prev_seen"]
+        prev_seen = fields["prev_seen"]
         if type(prev_seen) is not bool:
             raise MonitorInputError(f"observation {i}: prev_seen must be a builtin bool")
         observations.append(
