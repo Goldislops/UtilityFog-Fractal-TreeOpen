@@ -638,13 +638,202 @@ def test_public_proposal_path_returns_validation_not_server_error():
         assert err["message"] == "magnon_coupling requires a finite float value."
         assert str(_OVERSIZED_INT)[:20] not in resp.get_data(as_text=True)
 
+        # A NaN literal is no longer a recorded 422 rejection: the request
+        # JSON-tree proof requires exact finite floats, so it is refused at
+        # the envelope (fixed 400) before validation or any ledger write.
+        from scripts.tuning_api import BAD_REQUEST_MESSAGE
+
         nan_body = ('{"params": {"magnon_coupling": NaN}, '
                     '"source": "human:kevin", "justification": "pin"}')
         resp = client.post("/api/tuning/propose", data=nan_body,
                            content_type="application/json")
-        assert resp.status_code == 422
+        assert resp.status_code == 400
         body = resp.get_json()
-        assert body["status"] == "rejected"
-        err = body["validation"]["errors"]["magnon_coupling"]
-        assert err["error"] == "wrong_type"
-        assert err["message"] == "magnon_coupling requires a finite float value."
+        assert body == {"error": "bad_request", "message": BAD_REQUEST_MESSAGE}
+
+
+# -- request-shape totality: validate_proposal on arbitrary Python objects ----
+#
+# validate_proposal is a DIRECT entry point (the tuning API and direct callers
+# both reach it). It must be total on any object: a non-dict proposal and a
+# proposal carrying non-str keys must resolve to a not-ok result without a
+# leaked AttributeError/TypeError and without hashing a hostile key into the
+# registry lookup.
+
+
+class _RecordingKey:
+    """A non-str dict key whose hooks record. __hash__ records (dict insertion
+    needs it) so a test measures only NEW invocations after construction."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return self is other
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "k"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "k"
+
+
+@pytest.mark.parametrize("bad", [
+    [1, 2], "params", 42, 3.14, True, None, ("k", "v"),
+], ids=["list", "str", "int", "float", "bool", "none", "tuple"])
+def test_validate_proposal_non_dict_is_not_ok_without_raising(bad):
+    result = validate_proposal(bad)  # must not raise .items() AttributeError
+    assert isinstance(result, ProposalValidation)
+    assert result.ok is False
+    assert result.errors == {}
+    assert result.known_params == []
+    assert result.unknown_params == []
+
+
+def test_validate_proposal_non_str_key_is_not_ok_without_lookup():
+    key = _RecordingKey()
+    params = {key: 1}
+    key.calls.clear()  # forget the hash from dict construction
+    result = validate_proposal(params)
+    assert result.ok is False
+    # No registry lookup / equality / stringify of the hostile key.
+    assert key.calls == []
+
+
+def test_validate_proposal_mixed_str_and_non_str_keys():
+    """Valid str keys still validate; a non-str key alongside them forces the
+    aggregate result to not-ok while the valid keys are still processed."""
+    key = _RecordingKey()
+    params = {"signal_interval": 12, key: 1}
+    key.calls.clear()
+    result = validate_proposal(params)
+    assert result.ok is False
+    assert "signal_interval" in result.known_params
+    assert key.calls == []
+
+
+def test_validate_proposal_str_key_paths_unchanged():
+    """Positive control: an all-str-key proposal behaves exactly as before."""
+    ok = validate_proposal({"signal_interval": 12, "magnon_sage_age_min": 7.5})
+    assert ok.ok is True
+    bad = validate_proposal({"signal_interval": 0})
+    assert bad.ok is False
+    assert bad.errors["signal_interval"].error is ValidationError.BELOW_MIN
+    unknown = validate_proposal({"nope": 1})
+    assert unknown.unknown_params == ["nope"]
+    assert unknown.errors["nope"].error is ValidationError.UNKNOWN_PARAM
+
+
+# -- follow-up: integer width ceiling (bit-length gate) ------------------------
+#
+# An exact builtin int wider than MAX_TUNING_INT_BITS (2048 bits) is refused by
+# a bit-length check BEFORE any conversion, comparison, or formatting, so
+# validation is total on oversized ints independently of the mutable
+# process-wide sys.get_int_max_str_digits() setting, and no refusal message
+# ever copies the supplied digits. Ints within the ceiling keep the existing
+# range messages byte-for-byte: a 2048-bit int renders to at most 617 decimal
+# digits, below the smallest settable digit limit (640).
+
+import contextlib
+import sys as _sys
+
+_WIDE_OK = 2 ** 2048 - 1     # bit_length 2048 — widest accepted magnitude
+_WIDE_OVER = 2 ** 2048       # bit_length 2049 — narrowest refused magnitude
+_HUGE_5K = 10 ** 5000        # Jack's reproduction value (16 610 bits)
+_WIDTH_REFUSAL_N = "n requires an int within 2048 bits."
+_WIDTH_REFUSAL_X = "x requires an int within 2048 bits."
+
+
+@contextlib.contextmanager
+def _digit_limit(n):
+    saved = _sys.get_int_max_str_digits()
+    _sys.set_int_max_str_digits(n)
+    try:
+        yield
+    finally:
+        _sys.set_int_max_str_digits(saved)
+
+
+def test_int_bits_ceiling_constant_and_repo_alignment():
+    from scripts.params_schema import MAX_TUNING_INT_BITS
+    assert MAX_TUNING_INT_BITS == 2048
+    from scripts.orchestrator import MAX_TOOL_RESULT_INT_BITS
+    assert MAX_TUNING_INT_BITS == MAX_TOOL_RESULT_INT_BITS
+    # Runtime-independence arithmetic: the widest accepted int renders to 617
+    # decimal digits, strictly below the smallest settable digit limit (640).
+    assert len(str(_WIDE_OK)) == 617 < 640
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_int_param_oversized_int_total_and_value_free(limit):
+    p = _int_param()
+    with _digit_limit(limit):
+        for value in (_HUGE_5K, -_HUGE_5K, _WIDE_OVER, -_WIDE_OVER):
+            result = p.validate(value)  # must not raise ValueError
+            assert not result.ok
+            assert result.error is ValidationError.WRONG_TYPE
+            assert result.message == _WIDTH_REFUSAL_N
+            assert len(result.message) < 80
+            assert "0" * 20 not in result.message
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_int_param_2048_bit_boundary_keeps_range_messages(limit):
+    p = _int_param()  # bounds [0, 10]
+    over_msg = f"n={_WIDE_OK} above max 10."      # rendered at default limit
+    under_msg = f"n={-_WIDE_OK} below min 0."
+    with _digit_limit(limit):
+        result = p.validate(_WIDE_OK)
+        assert result.error is ValidationError.ABOVE_MAX
+        assert result.message == over_msg
+        result = p.validate(-_WIDE_OK)
+        assert result.error is ValidationError.BELOW_MIN
+        assert result.message == under_msg
+
+
+def test_bool_behavior_unaffected_by_width_gate():
+    # bool has a bit_length method but must never be routed through the int
+    # width gate: exact-type identity keeps its separate refusal and its
+    # acceptance for bool params byte-identical.
+    assert _int_param().validate(True).message == "n requires int, got bool."
+    assert _bool_param().validate(True).ok
+    assert _bool_param().validate(False).ok
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_float_param_oversized_int_width_refusal(limit):
+    p = _float_param()
+    with _digit_limit(limit):
+        for value in (_WIDE_OVER, -_WIDE_OVER, _HUGE_5K, -_HUGE_5K):
+            result = p.validate(value)
+            assert not result.ok
+            assert result.error is ValidationError.WRONG_TYPE
+            assert result.message == _WIDTH_REFUSAL_X
+    # Within the ceiling the existing finite-normalization refusal is
+    # preserved byte-for-byte (10**400 is 1329 bits — inside 2048).
+    assert _float_param().validate(10 ** 400).message == _FINITE_REFUSAL
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_validate_proposal_oversized_int_total_and_value_free(limit):
+    with _digit_limit(limit):
+        result = validate_proposal({
+            "magnon_radius": _HUGE_5K,        # int param, oversized
+            "magnon_coupling": -_HUGE_5K,     # float param, oversized
+            "not_a_real_param": _WIDE_OVER,   # unknown name, oversized value
+            "signal_interval": 12,            # valid alongside
+        })
+        assert result.ok is False
+        assert result.errors["magnon_radius"].error is ValidationError.WRONG_TYPE
+        assert result.errors["magnon_coupling"].error is ValidationError.WRONG_TYPE
+        assert result.errors["not_a_real_param"].error is ValidationError.UNKNOWN_PARAM
+        for r in result.errors.values():
+            assert len(r.message) < 120
+            assert "0" * 20 not in r.message

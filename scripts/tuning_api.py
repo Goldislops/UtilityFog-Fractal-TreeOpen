@@ -35,6 +35,7 @@ propose/dry-run, reads, and human-approved commits are intentionally unchanged.
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import threading
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from typing import Any, Callable, Optional
 from flask import Blueprint, Response, jsonify, request
 
 from scripts.params_schema import (
+    MAX_TUNING_INT_BITS,
     PARAMS,
     Category,
     get_param,
@@ -67,8 +69,112 @@ identity are all rejected (``auto_commit_disabled``). Re-enabling autonomous
 commits must be a reviewed code change here — there is deliberately no env flag,
 query param, header, or alternate route that turns it back on."""
 
+BAD_REQUEST_MESSAGE = "request envelope has a malformed value shape."
+"""Fixed generic refusal for a malformed request envelope. It reports neither
+the supplied value nor its type name, so no proposed object's ``__str__`` /
+``__repr__`` is executed and no attacker-chosen text enters a response, the
+ledger, or an event payload."""
+
+_MAX_REQUEST_VALUE_DEPTH = 64
+"""Container-nesting depth accepted while proving a proposed parameter VALUE is
+a builtin JSON tree. This bounds the recursion so a cyclic DIRECT value cannot
+loop; it is not a limit on scalar content. Values obtainable through parsed
+JSON are far shallower, so no valid public request is affected (recorded as a
+residual — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)."""
+
+_MAX_REQUEST_NODES = 100_000
+"""Proposal-wide cap on nodes VISITED while proving the parameter values of
+ONE complete proposal are JSON trees — a single budget charged across every
+value, not restarted per parameter entry (multiple entries sharing repeated
+structure would otherwise multiply the cap). The depth bound alone stops
+cycles/recursion but not a shared-reference DAG (a DIRECT value where a node
+is referenced repeatedly), which would otherwise be traversed — and later
+``json.dumps``-expanded — an exponential number of times. Counting visits per
+occurrence mirrors that serialisation cost and refuses such a proposal before
+the ledger write. Set far above any realistic parsed-JSON request (JSON cannot
+express sharing, so PUBLIC bodies are self-limiting), so no valid request is
+affected; recorded as a residual bound — see
+docs/LEGACY_ORCHESTRATOR_QUARANTINE.md."""
+
 
 # -- helpers ----------------------------------------------------------------
+
+
+def _is_exact_json_tree(value: Any, depth: int, budget: list) -> bool:
+    """True when ``value`` is EXACTLY a builtin standard-JSON tree: exact
+    ``str``, exact ``bool``, exact ``int`` within ``MAX_TUNING_INT_BITS``,
+    exact FINITE ``float``, ``None``, or an exact ``list`` / exact ``dict``
+    (with exact-``str`` keys) recursively within ``depth`` and within the
+    ``budget`` node-visit count (``budget`` is ``[remaining]``, mutated in
+    place and shared across every value of one proposal). Decided by ``type``
+    identity — a refused value's methods are never invoked, only confirmed
+    exact builtin containers are traversed, and the int width check runs only
+    after the exact-``int`` proof (bool is accepted separately, never routed
+    through ``bit_length``). A proposed parameter value that passes is
+    guaranteed ``json.dumps``-serialisable to STANDARD JSON tokens for the
+    ledger, independent of ``sys.get_int_max_str_digits()`` (an accepted int
+    renders to at most 617 digits, below the smallest settable limit).
+    Anything else (a set, bytes, a custom object, a hostile mapping, an int
+    wider than the ceiling, a NaN/Infinity float, a cyclic or exponentially-
+    shared structure) is a malformed value shape. NOTE: this proof bounds
+    nodes, depth, and integer width — NOT serialized byte size; scalar
+    strings and the total encoded length are unbounded (recorded residual —
+    see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md)."""
+    budget[0] -= 1
+    if budget[0] < 0:
+        return False
+    t = type(value)
+    if t is str or t is bool or value is None:
+        return True
+    if t is int:
+        return value.bit_length() <= MAX_TUNING_INT_BITS
+    if t is float:
+        return math.isfinite(value)
+    if t is list:
+        if depth <= 0:
+            return False
+        return all(_is_exact_json_tree(item, depth - 1, budget) for item in value)
+    if t is dict:
+        if depth <= 0:
+            return False
+        return all(
+            type(k) is str and _is_exact_json_tree(v, depth - 1, budget)
+            for k, v in value.items()
+        )
+    return False
+
+
+def _require_exact_str(value: Any) -> None:
+    """Raise a fixed ``400 bad_request`` unless ``value`` is EXACTLY a builtin
+    ``str`` (str subclasses, whose methods may be overridden, are refused). No
+    method of a refused value is invoked."""
+    if type(value) is not str:
+        raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
+
+
+def _require_valid_proposal_shape(
+    params: Any, source: Any, justification: Any, mode: Any
+) -> None:
+    """Prove a propose envelope has exact builtin shapes BEFORE any supplied
+    value is hashed, looked up, compared, stringified, validated, serialised,
+    or emitted. ``params`` must be an exact ``dict`` whose keys are exact
+    ``str`` and whose values are exact standard-JSON trees (ledger-
+    serialisable: finite floats, ints within the width ceiling) proven against
+    ONE shared node-visit budget for the whole proposal; ``source`` /
+    ``justification`` / ``mode`` must be exact ``str``. Any deviation is a
+    fixed ``400 bad_request`` — refused requests create no proposal, ledger
+    append, pending file, or event."""
+    _require_exact_str(source)
+    _require_exact_str(justification)
+    _require_exact_str(mode)
+    if type(params) is not dict:
+        raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
+    budget = [_MAX_REQUEST_NODES]
+    for name, value in params.items():
+        if type(name) is not str or not _is_exact_json_tree(
+            value, _MAX_REQUEST_VALUE_DEPTH, budget
+        ):
+            raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
 
 
 def _now_iso() -> str:
@@ -161,6 +267,10 @@ class TuningState:
         justification: str,
         mode: str,
     ) -> dict[str, Any]:
+        # Prove exact envelope shapes before any supplied value is validated,
+        # hashed, serialised, or emitted. A malformed shape is a fixed
+        # 400 bad_request that leaves no proposal, ledger line, or event.
+        _require_valid_proposal_shape(params, source, justification, mode)
         if mode not in VALID_MODES:
             raise TuningError(400, "bad_mode", f"mode must be one of {VALID_MODES}")
         with self._lock:
@@ -201,6 +311,12 @@ class TuningState:
     # ---- write: commit ----
 
     def commit(self, proposal_id: str, approver: str) -> dict[str, Any]:
+        # Exact-string shape proof BEFORE the registry lookup (which hashes
+        # proposal_id) and before the try/emit block, so a malformed-shape
+        # commit is a fixed 400 bad_request with no proposal lookup, no state
+        # mutation, and no rejected event carrying a supplied object.
+        _require_exact_str(proposal_id)
+        _require_exact_str(approver)
         try:
             entry = self._commit_locked(proposal_id, approver)
         except TuningError as e:
@@ -223,18 +339,10 @@ class TuningState:
 
     def _commit_locked(self, proposal_id: str, approver: str) -> dict[str, Any]:
         with self._lock:
-            # Type guard: `approver` must be a string before any string
-            # operation (the quarantine comparison and the human-approval
-            # startswith check below both assume str). A bool/number/null/
-            # list/dict is a malformed request → stable 400 bad_request, never
-            # an AttributeError. Checked first so a bad type cannot slip past
-            # on an otherwise-valid proposal.
-            if not isinstance(approver, str):
-                raise TuningError(
-                    400, "bad_request",
-                    "approver must be a string.",
-                )
-
+            # `proposal_id` and `approver` are already proven EXACTLY str by
+            # commit() before this lock is taken, so the registry lookup below
+            # and the quarantine / human-approval string operations run no
+            # supplied object's code.
             proposal = self._proposals.get(proposal_id)
             if proposal is None:
                 raise TuningError(
@@ -322,6 +430,11 @@ class TuningState:
     # ---- write: rollback ----
 
     def rollback(self, to_proposal_id: str) -> dict[str, Any]:
+        # Exact-string shape proof BEFORE the snapshot lookup (which hashes
+        # to_proposal_id) and before the try/emit block, so a malformed-shape
+        # rollback is a fixed 400 bad_request with no lookup, no mutation, and
+        # no rejected event carrying a supplied object.
+        _require_exact_str(to_proposal_id)
         try:
             entry = self._rollback_locked(to_proposal_id)
         except TuningError as e:
@@ -385,8 +498,17 @@ class TuningState:
                     continue
                 try:
                     entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # skip corrupt lines; don't let a bad append poison startup
+                except ValueError:
+                    # Skip corrupt lines; don't let a bad append poison
+                    # startup. ValueError, not its JSONDecodeError subclass:
+                    # a LEGACY line holding an int wider than the runtime
+                    # sys.get_int_max_str_digits() limit (writable before the
+                    # width ceiling existed) raises the plain-ValueError digit
+                    # guard from json.loads, which previously escaped and
+                    # crashed replay. The gated writer no longer produces such
+                    # lines (accepted ints render to <= 617 digits, below the
+                    # smallest settable limit).
+                    continue
                 etype = entry.get("type")
                 if etype == "propose":
                     self._proposals[entry["proposal_id"]] = entry
@@ -408,9 +530,14 @@ class TuningState:
                         self._last_commit_gen[name] = gen
 
     def _append_ledger(self, entry: dict[str, Any]) -> None:
+        # Serialize BEFORE touching the filesystem: opening in append mode
+        # creates the file, so a json.dumps failure after open would leave a
+        # zero-byte ledger behind. With the line built first, a serialization
+        # failure performs no filesystem operation at all.
+        line = json.dumps(entry, sort_keys=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.ledger_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
+            f.write(line + "\n")
 
 
 def _contains_human_approval_param(params: dict[str, Any]) -> bool:
@@ -432,6 +559,20 @@ def _first_param_in_category(params: dict[str, Any], category: Category) -> str:
 # -- blueprint --------------------------------------------------------------
 
 
+def _json_object_body() -> dict:
+    """Return the request body only when it is EXACTLY a JSON object.
+
+    ``request.get_json(silent=True) or {}`` swapped in ``{}`` for *falsy*
+    bodies only, so a truthy non-object body (a JSON array, number, string, or
+    ``true``) survived and reached ``body.get(...)`` — an AttributeError /
+    HTTP 500. Guarding for an exact ``dict`` here turns every non-object body
+    into a stable 400 bad_request. Raises TuningError(400) on a non-object."""
+    body = request.get_json(silent=True)
+    if type(body) is not dict:
+        raise TuningError(400, "bad_request", BAD_REQUEST_MESSAGE)
+    return body
+
+
 def create_blueprint(state: TuningState) -> Blueprint:
     bp = Blueprint("tuning", __name__, url_prefix="/api")
 
@@ -446,15 +587,23 @@ def create_blueprint(state: TuningState) -> Blueprint:
 
     @bp.route("/tuning/propose", methods=["POST"])
     def propose() -> Response:
-        body = request.get_json(silent=True) or {}
+        try:
+            body = _json_object_body()
+        except TuningError as e:
+            return jsonify({"error": e.code, "message": e.message}), e.status_code
         params = body.get("params")
         if not isinstance(params, dict) or not params:
             return jsonify({
                 "error": "bad_request",
                 "message": "'params' (non-empty object) is required",
             }), 400
-        source = str(body.get("source", "unspecified"))
-        justification = str(body.get("justification", ""))
+        # No str() coercion: a SUPPLIED source/justification must already be
+        # an exact builtin str (proven inside state.propose — anything else is
+        # the fixed 400), so a JSON list/number/object can no longer enter the
+        # ledger as its Python repr. A MISSING field keeps its documented
+        # default; a valid string is stored byte-for-byte.
+        source = body.get("source", "unspecified")
+        justification = body.get("justification", "")
         mode = body.get("mode", "dry-run")  # default to safe
         try:
             entry = state.propose(
@@ -472,7 +621,10 @@ def create_blueprint(state: TuningState) -> Blueprint:
 
     @bp.route("/tuning/commit", methods=["POST"])
     def commit() -> Response:
-        body = request.get_json(silent=True) or {}
+        try:
+            body = _json_object_body()
+        except TuningError as e:
+            return jsonify({"error": e.code, "message": e.message}), e.status_code
         proposal_id = body.get("proposal_id")
         approver = body.get("approver")
         if not proposal_id or not approver:
@@ -494,7 +646,10 @@ def create_blueprint(state: TuningState) -> Blueprint:
 
     @bp.route("/tuning/rollback", methods=["POST"])
     def rollback() -> Response:
-        body = request.get_json(silent=True) or {}
+        try:
+            body = _json_object_body()
+        except TuningError as e:
+            return jsonify({"error": e.code, "message": e.message}), e.status_code
         to_proposal_id = body.get("to_proposal_id")
         if not to_proposal_id:
             return jsonify({
@@ -519,6 +674,7 @@ __all__ = [
     "MIN_GEN_BETWEEN_COMMITS_PER_PARAM",
     "VALID_MODES",
     "AUTO_COMMIT_APPROVER",
+    "BAD_REQUEST_MESSAGE",
     "TuningError",
     "TuningState",
     "create_blueprint",

@@ -61,6 +61,19 @@ class ValidationResult:
     message: str = ""
 
 
+MAX_TUNING_INT_BITS: Final[int] = 2048
+"""Code-level magnitude ceiling (bit length) for an exact builtin int anywhere
+in a tuning request or proposal. Aligned with the repository's tool-result
+ceiling (``MAX_TOOL_RESULT_INT_BITS`` in ``scripts/orchestrator.py``). Checked
+via ``int.bit_length()`` only AFTER ``type(value) is int`` proves the exact
+builtin type (bool is excluded by that identity check and keeps its separate
+behaviour), so acceptance is decided without rendering the value and is
+independent of the mutable process-wide ``sys.get_int_max_str_digits()``
+setting. A within-ceiling int renders to at most 617 decimal digits — below
+the smallest settable digit limit (640) — so the existing range-refusal
+messages and ledger serialisation can never raise for an accepted integer."""
+
+
 # --- Hook-free type description ----------------------------------------------
 
 
@@ -169,12 +182,32 @@ class TunableParam:
                     error=ValidationError.WRONG_TYPE,
                     message=f"{self.name} requires int, got {_describe_type(value)}.",
                 )
+            # Width ceiling AFTER the exact-int proof: bit_length here is the
+            # builtin int method, and an oversized value is refused before any
+            # bound comparison or message formatting could render its digits
+            # (str() of a wide int raises under sys.set_int_max_str_digits).
+            # The refusal message never carries the supplied value.
+            if value.bit_length() > MAX_TUNING_INT_BITS:
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires an int within {MAX_TUNING_INT_BITS} bits.",
+                )
         elif self.value_type is float:
             if value_type is not int and value_type is not float:
                 return ValidationResult(
                     ok=False,
                     error=ValidationError.WRONG_TYPE,
                     message=f"{self.name} requires float, got {_describe_type(value)}.",
+                )
+            # Same width ceiling for an int offered to a float parameter: one
+            # uniform rule — no exact int wider than the ceiling proceeds to
+            # conversion, comparison, or formatting.
+            if value_type is int and value.bit_length() > MAX_TUNING_INT_BITS:
+                return ValidationResult(
+                    ok=False,
+                    error=ValidationError.WRONG_TYPE,
+                    message=f"{self.name} requires an int within {MAX_TUNING_INT_BITS} bits.",
                 )
             # Bounded normalization: float() of an exact builtin int can
             # overflow, and NaN would sail through the inclusive bound
@@ -406,17 +439,34 @@ class ProposalValidation:
     unknown_params: list[str]            # names that don't
 
 
-def validate_proposal(params: dict[str, Any]) -> ProposalValidation:
+def validate_proposal(params: Any) -> ProposalValidation:
     """Validate a proposed {name: value} dict against the registry.
 
     Runs every parameter; collects ALL errors rather than short-circuiting.
     Returns `ok=True` iff every known parameter validates and no unknown
     names are present. LOCKED parameters always fail validation.
+
+    Total on arbitrary input (this is a DIRECT entry point): a proposal that
+    is not EXACTLY a builtin ``dict`` resolves to a not-ok result rather than
+    leaking an ``.items()`` AttributeError, and a non-``str`` key forces the
+    aggregate result to not-ok WITHOUT being hashed into ``PARAMS.get`` (which
+    would run a hostile ``__hash__``) or copied into any message. Exact-type
+    decisions only — a proposed value's methods still run no code here.
     """
+    if type(params) is not dict:
+        return ProposalValidation(
+            ok=False, errors={}, known_params=[], unknown_params=[])
     errors: dict[str, ValidationResult] = {}
     known: list[str] = []
     unknown: list[str] = []
+    malformed_keys = 0
     for name, value in params.items():
+        # A non-str key cannot name a registered parameter. Refuse it by exact
+        # type BEFORE ``PARAMS.get`` — hashing it (or formatting it into a
+        # message) would execute a supplied object's ``__hash__``/``__repr__``.
+        if type(name) is not str:
+            malformed_keys += 1
+            continue
         param = PARAMS.get(name)
         if param is None:
             unknown.append(name)
@@ -431,7 +481,7 @@ def validate_proposal(params: dict[str, Any]) -> ProposalValidation:
         if not result.ok:
             errors[name] = result
     return ProposalValidation(
-        ok=len(errors) == 0,
+        ok=len(errors) == 0 and malformed_keys == 0,
         errors=errors,
         known_params=known,
         unknown_params=unknown,
@@ -440,6 +490,7 @@ def validate_proposal(params: dict[str, Any]) -> ProposalValidation:
 
 __all__ = [
     "Category",
+    "MAX_TUNING_INT_BITS",
     "ValidationError",
     "ValidationResult",
     "TunableParam",

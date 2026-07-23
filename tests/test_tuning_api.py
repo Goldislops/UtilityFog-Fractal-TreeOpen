@@ -496,3 +496,797 @@ def test_ledger_survives_corrupt_line(tuning):
     fresh = TuningState(data_dir=tmp_path, gen_getter=gen)
     # State from the valid lines is still restored.
     assert fresh.effective_params()["signal_interval"] == 14
+
+
+# -- request-shape totality (PUBLIC / DIRECT / LEDGER lanes) ------------------
+#
+# The proposal/commit/rollback envelopes must be deterministic for malformed
+# value shapes across three reachability lanes:
+#   PUBLIC   — values obtainable through parsed JSON (str/int/float/bool/None/
+#              list/dict only); a malformed envelope returns a stable
+#              400 bad_request, never a 500.
+#   DIRECT   — TuningState / validate_proposal called with arbitrary Python
+#              objects; a malformed call terminates through a fixed typed
+#              TuningError(400) rather than leaking AttributeError/TypeError.
+#   LEDGER   — no refused request appends to the ledger, writes the pending
+#              file, records a proposal, commits, rolls back, or emits an event.
+# Refusals carry a fixed generic message that names neither the supplied value
+# nor its type. Hostile instruments RECORD their hook invocations so "not
+# consulted" is proven by an empty call log, not inferred from the absence of
+# a crash.
+
+import math as _math
+
+from scripts.tuning_api import TuningError, TuningState, create_blueprint
+
+
+def _fresh_state(tmp_path, bus=None):
+    gen = FakeGen()
+    state = TuningState(data_dir=tmp_path, gen_getter=gen, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    return state, app.test_client(), gen
+
+
+def _post_raw(client, path, raw_body):
+    return client.post(path, data=raw_body, content_type="application/json")
+
+
+def _no_side_effects(tmp_path, state):
+    """No ledger file, no pending file, no recorded proposal."""
+    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    assert not (tmp_path / "tuning_pending.json").exists()
+    assert state._proposals == {}
+
+
+# -- PUBLIC lane: non-object top-level body reaching .get --------------------
+
+
+_NON_OBJECT_BODIES = ["[1, 2, 3]", "42", "3.14", "true", '"hello"']
+
+
+@pytest.mark.parametrize("raw", _NON_OBJECT_BODIES)
+@pytest.mark.parametrize("path", [
+    "/api/tuning/propose", "/api/tuning/commit", "/api/tuning/rollback",
+])
+def test_public_non_object_body_is_bad_request_not_500(tmp_path, raw, path):
+    state, client, _ = _fresh_state(tmp_path)
+    resp = _post_raw(client, path, raw)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("path", [
+    "/api/tuning/propose", "/api/tuning/commit", "/api/tuning/rollback",
+])
+def test_public_empty_and_null_body_still_bad_request(tmp_path, path):
+    state, client, _ = _fresh_state(tmp_path)
+    for raw in ("null", ""):
+        resp = _post_raw(client, path, raw)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "bad_request"
+
+
+# -- PUBLIC lane: unhashable / non-string ids reaching registry .get ---------
+
+
+@pytest.mark.parametrize("raw_id", ["[1, 2]", '{"a": 1}', "123", "true"])
+def test_public_commit_non_string_proposal_id_is_bad_request(tmp_path, raw_id):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"proposal_id": ' + raw_id + ', "approver": "human:kevin"}'
+    resp = _post_raw(client, "/api/tuning/commit", body)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+@pytest.mark.parametrize("raw_id", ["[1, 2]", '{"a": 1}', "123", "true"])
+def test_public_rollback_non_string_to_proposal_id_is_bad_request(tmp_path, raw_id):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"to_proposal_id": ' + raw_id + "}"
+    resp = _post_raw(client, "/api/tuning/rollback", body)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "bad_request"
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+# -- PUBLIC lane: preserved behaviour for valid & recorded-rejection paths ----
+
+
+def test_public_valid_propose_commit_rollback_unchanged(tmp_path):
+    """Golden-path smoke: the whole valid envelope still behaves exactly."""
+    state, client, gen = _fresh_state(tmp_path)
+    pid = client.post("/api/tuning/propose", json={
+        "params": {"signal_interval": 15}, "source": "human:kevin",
+        "justification": "t", "mode": "commit-pending",
+    }).get_json()["proposal_id"]
+    assert pid.startswith("prop-")
+    r = client.post("/api/tuning/commit",
+                    json={"proposal_id": pid, "approver": "human:kevin"})
+    assert r.status_code == 200 and r.get_json()["status"] == "committed"
+    assert state.effective_params()["signal_interval"] == 15
+    r = client.post("/api/tuning/rollback", json={"to_proposal_id": pid})
+    assert r.status_code == 200 and r.get_json()["status"] == "rolled_back"
+
+
+def test_public_container_param_value_still_records_wrong_type(tmp_path):
+    """A JSON container as a param value is not a scalar, but it IS a JSON
+    tree — it still reaches validation and is recorded as a wrong_type
+    rejection (422), exactly as before; not refused at the envelope."""
+    state, client, _ = _fresh_state(tmp_path)
+    resp = _post_raw(client, "/api/tuning/propose",
+                     '{"params": {"signal_interval": [1, 2]}}')
+    assert resp.status_code == 422
+    body = resp.get_json()
+    assert body["status"] == "rejected"
+    assert body["validation"]["errors"]["signal_interval"]["error"] == "wrong_type"
+
+
+# -- DIRECT lane: TuningState.propose malformed envelope shapes ---------------
+
+
+class _Recorder:
+    """Base for hostile instruments: every hook appends its name to `calls`."""
+
+    def __init__(self):
+        self.calls = []
+
+
+class _HostileKey(_Recorder):
+    """A non-str dict key whose equality/str hooks record. __hash__ records too
+    (dict insertion needs it) so the test measures only NEW calls after build."""
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return self is other
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "k"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "k"
+
+
+class _HostileScalar(_Recorder):
+    """A non-JSON, non-str value whose conversion hooks all record."""
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "v"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "v"
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return False
+
+    def __hash__(self):
+        self.calls.append("__hash__")
+        return 0
+
+    def __bool__(self):
+        self.calls.append("__bool__")
+        return True
+
+    def __iter__(self):
+        self.calls.append("__iter__")
+        return iter(())
+
+
+@pytest.mark.parametrize("bad_params", [
+    [1, 2], "params", 42, 3.14, True, None, ("k", "v"),
+], ids=["list", "str", "int", "float", "bool", "none", "tuple"])
+def test_direct_propose_non_dict_params_is_typed_bad_request(tmp_path, bad_params):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=bad_params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400
+    assert ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_non_str_key_refused_without_registry_lookup(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    key = _HostileKey()
+    params = {key: 1}
+    key.calls.clear()  # forget the hash from dict construction
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    # No registry lookup / equality / stringify of the hostile key.
+    assert key.calls == []
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("field", ["source", "justification"])
+def test_direct_propose_non_str_metadata_is_bad_request_no_ledger(tmp_path, field):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    val = _HostileScalar()
+    kw = dict(params={"signal_interval": 12}, source="s", justification="j", mode="dry-run")
+    kw[field] = val
+    with pytest.raises(TuningError) as ei:
+        state.propose(**kw)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert val.calls == []            # never stringified/serialized
+    assert bus.published == []        # no event emitted
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_non_str_mode_refused_without_equality(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    mode = _HostileScalar()
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": 12}, source="s",
+                      justification="j", mode=mode)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert mode.calls == []           # `mode not in VALID_MODES` never ran __eq__
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("value_factory", [
+    lambda: {1, 2, 3},           # set — not JSON serializable
+    lambda: object(),            # bare object
+    lambda: b"bytes",            # bytes
+], ids=["set", "object", "bytes"])
+def test_direct_propose_non_json_value_refused_before_ledger(tmp_path, value_factory):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": value_factory()},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_refusal_message_carries_no_value_or_type(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": {1, 2, 3}},
+                      source="s", justification="j", mode="dry-run")
+    msg = ei.value.message
+    assert len(msg) < 120
+    for leak in ("set", "{1", "signal_interval", "object", "bytes"):
+        assert leak not in msg
+
+
+# -- DIRECT lane: commit / rollback id shapes --------------------------------
+
+
+@pytest.mark.parametrize("bad_id", [
+    [1, 2], {"a": 1}, 123, 1.5, True, None, _HostileScalar,
+], ids=["list", "dict", "int", "float", "bool", "none", "hostile"])
+def test_direct_commit_non_str_proposal_id_is_bad_request(tmp_path, bad_id):
+    state, _, _ = _fresh_state(tmp_path)
+    pid = bad_id() if bad_id is _HostileScalar else bad_id
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=pid, approver="human:kevin")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    if isinstance(pid, _HostileScalar):
+        assert pid.calls == []        # never hashed for the registry lookup
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+@pytest.mark.parametrize("bad_id_factory", [
+    lambda: [1, 2],            # unhashable: currently a raw TypeError (no emit)
+    lambda: _HostileScalar(),  # hostile-hashable: currently emits a rejected event
+], ids=["unhashable", "hostile-hash"])
+def test_direct_commit_non_str_proposal_id_emits_no_event(tmp_path, bad_id_factory):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError):
+        state.commit(proposal_id=bad_id_factory(), approver="human:kevin")
+    assert bus.published == []          # malformed shape → no rejected event at all
+
+
+@pytest.mark.parametrize("bad_id", [
+    [1, 2], {"a": 1}, 123, 1.5, True, None, _HostileScalar,
+], ids=["list", "dict", "int", "float", "bool", "none", "hostile"])
+def test_direct_rollback_non_str_id_is_bad_request(tmp_path, bad_id):
+    state, _, _ = _fresh_state(tmp_path)
+    tid = bad_id() if bad_id is _HostileScalar else bad_id
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id=tid)
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    if isinstance(tid, _HostileScalar):
+        assert tid.calls == []
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_direct_rollback_hostile_id_emits_no_event(tmp_path):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError):
+        state.rollback(to_proposal_id=_HostileScalar())
+    assert bus.published == []
+
+
+def test_direct_commit_str_subclass_approver_is_refused(tmp_path):
+    """Exact-type gate: a str subclass approver is refused (400), not run
+    through the quarantine's strip/casefold subclass methods."""
+    class _SubStr(str):
+        pass
+
+    state, client, _ = _fresh_state(tmp_path)
+    pid = _propose(client, {"signal_interval": 15})
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=pid, approver=_SubStr("human:kevin"))
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert state.effective_params()["signal_interval"] == PARAMS["signal_interval"].default
+
+
+# -- LEDGER/EVENT lane: refused request is inert ------------------------------
+
+
+def test_refused_direct_propose_writes_no_ledger_line(tmp_path):
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    for bad in ([1, 2], {"signal_interval": object()}, {object(): 1}):
+        with pytest.raises(TuningError):
+            state.propose(params=bad, source="s", justification="j", mode="dry-run")
+    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    assert bus.published == []
+    assert state._proposals == {}
+
+
+def test_valid_direct_propose_still_writes_serialisable_ledger(tmp_path):
+    """Positive control: a well-formed proposal still appends exactly one
+    JSON-serialisable ledger line and records the proposal."""
+    state, _, _ = _fresh_state(tmp_path)
+    entry = state.propose(params={"signal_interval": 12}, source="human:kevin",
+                          justification="ok", mode="dry-run")
+    assert entry["proposal_id"].startswith("prop-")
+    lines = (tmp_path / "tuning_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    reparsed = json.loads(lines[0])
+    assert reparsed["type"] == "propose"
+    assert reparsed["params"] == {"signal_interval": 12}
+
+
+# -- review-wave pins: exact-type discrimination, depth bound, nan/inf ---------
+#
+# The gates are exact-type (type(x) is ...), never isinstance — so a well-behaved
+# str/dict/list subclass is refused everywhere, not just at the commit-approver
+# gate. The container-nesting depth bound keeps the JSON-tree proof total against
+# a cyclic DIRECT value. Non-finite floats are refused at the envelope (fixed
+# 400) — the tree proof requires exact finite floats, closing the former
+# recorded-NaN/Infinity-ledger-token residual.
+
+
+class _DictSub(dict):
+    """Well-behaved dict subclass whose views record if consulted."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.calls = []
+
+    def items(self):
+        self.calls.append("items")
+        return super().items()
+
+    def keys(self):
+        self.calls.append("keys")
+        return super().keys()
+
+
+class _ListSub(list):
+    pass
+
+
+class _StrSub(str):
+    pass
+
+
+def test_direct_propose_dict_subclass_params_refused_without_items(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    params = _DictSub({"signal_interval": 12})
+    params.calls.clear()
+    with pytest.raises(TuningError) as ei:
+        state.propose(params=params, source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert params.calls == []          # views never consulted — exact-type gate
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_propose_str_subclass_key_refused(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={_StrSub("signal_interval"): 12},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("value_factory", [
+    lambda: _StrSub("x"), lambda: _ListSub([1, 2]), lambda: _DictSub({"a": 1}),
+], ids=["str-sub", "list-sub", "dict-sub"])
+def test_direct_propose_subclass_value_refused_before_ledger(tmp_path, value_factory):
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": value_factory()},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def test_validate_proposal_dict_subclass_is_not_ok_without_items():
+    from scripts.params_schema import validate_proposal, ProposalValidation
+    sub = _DictSub({"signal_interval": 12})
+    sub.calls.clear()
+    result = validate_proposal(sub)
+    assert isinstance(result, ProposalValidation)
+    assert result.ok is False
+    assert sub.calls == []             # exact-dict gate, no items()/keys()
+
+
+def test_direct_propose_cyclic_value_is_bad_request_not_recursion_error(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    cyclic = []
+    cyclic.append(cyclic)             # self-referential exact list
+    with pytest.raises(TuningError) as ei:   # must NOT be RecursionError
+        state.propose(params={"signal_interval": cyclic},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+def _nest_lists(n):
+    v = 0
+    for _ in range(n):
+        v = [v]
+    return v
+
+
+def test_direct_propose_depth_bound_64_in_65_out(tmp_path):
+    from scripts.tuning_api import _MAX_REQUEST_VALUE_DEPTH
+    assert _MAX_REQUEST_VALUE_DEPTH == 64
+    # At the bound: the tree passes the envelope gate and reaches validation,
+    # where a nested list is an ordinary wrong_type rejection (recorded 422).
+    state_a, _, _ = _fresh_state(tmp_path / "in")
+    entry = state_a.propose(params={"signal_interval": _nest_lists(64)},
+                            source="s", justification="j", mode="dry-run")
+    assert entry["validation"]["ok"] is False
+    assert entry["validation"]["errors"]["signal_interval"]["error"] == "wrong_type"
+    # One past the bound: refused at the envelope, no ledger.
+    state_b, _, _ = _fresh_state(tmp_path / "out")
+    with pytest.raises(TuningError) as ei:
+        state_b.propose(params={"signal_interval": _nest_lists(65)},
+                        source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert not (tmp_path / "out" / "tuning_ledger.jsonl").exists()
+
+
+def test_direct_propose_shared_dag_value_is_bounded_not_hang(tmp_path):
+    """A shared-reference DAG (each level references one child twice) is within
+    the depth bound but expands exponentially; the per-value node budget must
+    refuse it quickly (400) rather than traverse ~2**40 nodes. This test would
+    time out against a depth-only gate."""
+    node = 0
+    for _ in range(40):
+        node = [node, node]          # shares the same child twice per level
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"signal_interval": node},
+                      source="s", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "inf", "-inf"])
+def test_direct_propose_non_finite_float_is_bad_request_no_ledger(tmp_path, bad):
+    """The former residual is closed: the request JSON-tree proof requires
+    exact FINITE floats, so a NaN/±Infinity parameter value is refused at the
+    envelope (fixed 400) before validation — no ledger line (previously a
+    non-standard ``NaN``/``Infinity`` token was recorded), no event."""
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"magnon_coupling": bad},
+                      source="human:kevin", justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+def test_direct_commit_and_rollback_refusal_messages_carry_no_leak(tmp_path):
+    state, _, _ = _fresh_state(tmp_path)
+    for call in (lambda: state.commit(proposal_id=[1, 2], approver="human:kevin"),
+                 lambda: state.rollback(to_proposal_id={"a": 1})):
+        with pytest.raises(TuningError) as ei:
+            call()
+        msg = ei.value.message
+        assert len(msg) < 120
+        for leak in ("[1", "{'a'", "list", "dict"):
+            assert leak not in msg
+
+
+# -- follow-up: integer width ceiling, finite floats, exact-str metadata, ------
+#    proposal-wide node budget
+#
+# The request JSON-tree proof now enforces a 2048-bit width ceiling on exact
+# ints (MAX_TUNING_INT_BITS, aligned with the repository's tool-result
+# ceiling) and exact FINITE floats, decided by bit_length / math.isfinite —
+# never by rendering the value — so envelope behaviour is independent of the
+# mutable process-wide sys.get_int_max_str_digits() setting. PUBLIC metadata
+# (`source` / `justification`) is no longer str()-coerced: a supplied field
+# must be an exact builtin str; missing fields keep their documented defaults.
+# The node-visit budget is charged once across the complete proposal, not
+# restarted per parameter value. The tree proof does NOT bound serialized byte
+# size: scalar strings and the total encoded length are unbounded (recorded
+# residual — see docs/LEGACY_ORCHESTRATOR_QUARANTINE.md).
+
+import contextlib
+import sys as _sys
+
+from scripts.tuning_api import BAD_REQUEST_MESSAGE, _is_exact_json_tree
+
+_INT_WIDE_OK = 2 ** 2048 - 1     # bit_length 2048 — widest accepted magnitude
+_INT_WIDE_OVER = 2 ** 2048       # bit_length 2049 — narrowest refused magnitude
+_HUGE_INT = 10 ** 5000           # Jack's reproduction value (16 610 bits)
+_HUGE_LITERAL = "1" + "0" * 5000  # decimal literal of 10**5000, built str-free
+
+
+@contextlib.contextmanager
+def _digit_limit(n):
+    saved = _sys.get_int_max_str_digits()
+    _sys.set_int_max_str_digits(n)
+    try:
+        yield
+    finally:
+        _sys.set_int_max_str_digits(saved)
+
+
+def test_tree_proof_int_width_boundary_both_signs():
+    for v in (_INT_WIDE_OK, -_INT_WIDE_OK, 0, 1, -1):
+        assert _is_exact_json_tree(v, 64, [100]) is True
+    for v in (_INT_WIDE_OVER, -_INT_WIDE_OVER, _HUGE_INT, -_HUGE_INT):
+        assert _is_exact_json_tree(v, 64, [100]) is False
+
+
+def test_tree_proof_requires_finite_floats():
+    for v in (0.0, 1.5, -2.75):
+        assert _is_exact_json_tree(v, 64, [100]) is True
+    for v in (float("nan"), float("inf"), float("-inf")):
+        assert _is_exact_json_tree(v, 64, [100]) is False
+
+
+def test_request_node_budget_constant_is_proposal_wide():
+    from scripts.tuning_api import _MAX_REQUEST_NODES
+    assert _MAX_REQUEST_NODES == 100_000
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+@pytest.mark.parametrize("pname", ["magnon_radius", "definitely_unknown"],
+                         ids=["known-int", "unknown"])
+@pytest.mark.parametrize("sign", [1, -1], ids=["pos", "neg"])
+def test_direct_propose_oversized_int_bad_request_all_limits(
+        tmp_path, limit, pname, sign):
+    """Closes the reproduced leak trio: no ValueError under a digit limit, no
+    zero-byte ledger file for an unknown parameter, no thousands-of-digits
+    ledger line with the limit disabled — one fixed envelope refusal."""
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with _digit_limit(limit):
+        with pytest.raises(TuningError) as ei:
+            state.propose(params={pname: sign * _HUGE_INT}, source="s",
+                          justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert ei.value.message == BAD_REQUEST_MESSAGE
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_direct_propose_2048_bit_validates_2049_refused(tmp_path, limit):
+    """Exact boundary, both signs, independent of the runtime digit limit:
+    a 2048-bit int reaches ordinary parameter validation (recorded range
+    rejection, ledger line written); a 2049-bit int is the fixed envelope
+    refusal (no ledger)."""
+    state_ok, _, _ = _fresh_state(tmp_path / "ok")
+    with _digit_limit(limit):
+        entry = state_ok.propose(params={"magnon_radius": _INT_WIDE_OK},
+                                 source="s", justification="j", mode="dry-run")
+        assert entry["validation"]["errors"]["magnon_radius"]["error"] == "above_max"
+        entry = state_ok.propose(params={"magnon_radius": -_INT_WIDE_OK},
+                                 source="s", justification="j", mode="dry-run")
+        assert entry["validation"]["errors"]["magnon_radius"]["error"] == "below_min"
+    ledger = (tmp_path / "ok" / "tuning_ledger.jsonl").read_text(encoding="utf-8")
+    assert len(ledger.splitlines()) == 2
+
+    state_over, _, _ = _fresh_state(tmp_path / "over")
+    with _digit_limit(limit):
+        for v in (_INT_WIDE_OVER, -_INT_WIDE_OVER):
+            with pytest.raises(TuningError) as ei:
+                state_over.propose(params={"magnon_radius": v}, source="s",
+                                   justification="j", mode="dry-run")
+            assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path / "over", state_over)
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+@pytest.mark.parametrize("pname", ["magnon_radius", "definitely_unknown"],
+                         ids=["known-int", "unknown"])
+@pytest.mark.parametrize("sign", ["", "-"], ids=["pos", "neg"])
+def test_public_propose_oversized_int_bad_request(tmp_path, limit, pname, sign):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"params": {"%s": %s%s}}' % (pname, sign, _HUGE_LITERAL)
+    with _digit_limit(limit):
+        resp = _post_raw(client, "/api/tuning/propose", body)
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "bad_request",
+                               "message": BAD_REQUEST_MESSAGE}
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("limit", [640, 0], ids=["digits-640", "digits-0"])
+def test_public_propose_2048_bit_boundary_independent_of_digit_limit(
+        tmp_path, limit):
+    state, client, _ = _fresh_state(tmp_path)
+    lit_ok = str(_INT_WIDE_OK)      # 617 digits — safe at the default limit
+    lit_over = str(_INT_WIDE_OVER)  # 617 digits as well
+    with _digit_limit(limit):
+        resp = _post_raw(client, "/api/tuning/propose",
+                         '{"params": {"magnon_radius": %s}}' % lit_ok)
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert body["validation"]["errors"]["magnon_radius"]["error"] == "above_max"
+        resp = _post_raw(client, "/api/tuning/propose",
+                         '{"params": {"magnon_radius": %s}}' % lit_over)
+        assert resp.status_code == 400
+        assert resp.get_json() == {"error": "bad_request",
+                                   "message": BAD_REQUEST_MESSAGE}
+
+
+@pytest.mark.parametrize("value_factory", [
+    lambda: [1, _INT_WIDE_OVER],            # wide int inside a list
+    lambda: {"k": [_HUGE_INT]},             # wide int nested list-in-dict
+    lambda: [[-_INT_WIDE_OVER]],            # negative wide int, double-nested
+    lambda: [float("nan")],                 # NaN inside a list
+    lambda: {"k": float("inf")},            # +inf inside a dict
+    lambda: [[float("-inf")]],              # -inf double-nested
+], ids=["list-wide", "dict-list-wide", "nested-neg-wide",
+        "list-nan", "dict-inf", "nested-neg-inf"])
+def test_direct_nested_wide_int_and_non_finite_refused(tmp_path, value_factory):
+    """Composition pin: the width and finite gates apply through container
+    recursion, not only to top-level scalar values — a refactor hoisting them
+    into a top-level fast path must fail here."""
+    bus = _RecordingBus()
+    state, _, _ = _fresh_state(tmp_path, bus=bus)
+    with pytest.raises(TuningError) as ei:
+        state.propose(params={"magnon_radius": value_factory()}, source="s",
+                      justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("inner", ["[1, %s]" % _HUGE_LITERAL, "[NaN]",
+                                   '{"k": [-Infinity]}'],
+                         ids=["nested-wide", "nested-nan", "nested-neg-inf"])
+def test_public_nested_wide_int_and_non_finite_refused(tmp_path, inner):
+    state, client, _ = _fresh_state(tmp_path)
+    body = '{"params": {"definitely_unknown": %s}}' % inner
+    with _digit_limit(0):
+        resp = _post_raw(client, "/api/tuning/propose", body)
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "bad_request",
+                               "message": BAD_REQUEST_MESSAGE}
+    _no_side_effects(tmp_path, state)
+
+
+@pytest.mark.parametrize("field", ["source", "justification"])
+@pytest.mark.parametrize("raw", ["[1, 2]", "42", "7.5", '{"a": 1}', "true", "null"],
+                         ids=["list", "int", "float", "object", "bool", "null"])
+def test_public_non_str_metadata_bad_request_not_coerced(tmp_path, field, raw):
+    """PUBLIC str() coercion removed: a supplied non-string source or
+    justification (previously accepted as e.g. \"[1, 2]\" / \"{'a': 1}\") is
+    the fixed 400 — no proposal, ledger line, pending file, or event."""
+    bus = _RecordingBus()
+    state, client, _ = _fresh_state(tmp_path, bus=bus)
+    body = '{"params": {"signal_interval": 12}, "%s": %s}' % (field, raw)
+    resp = _post_raw(client, "/api/tuning/propose", body)
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "bad_request",
+                               "message": BAD_REQUEST_MESSAGE}
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+def test_public_metadata_defaults_and_exact_strings_preserved(tmp_path):
+    """Missing source still defaults to 'unspecified', missing justification
+    to ''; supplied exact strings are stored byte-for-byte."""
+    state, client, _ = _fresh_state(tmp_path)
+    resp = client.post("/api/tuning/propose",
+                       json={"params": {"signal_interval": 12}})
+    assert resp.status_code == 200
+    raw_src = "human:Kévin "        # unicode + trailing space, kept verbatim
+    raw_just = "why\tnot\n"
+    resp = client.post("/api/tuning/propose",
+                       json={"params": {"joy_beta": 0.5}, "source": raw_src,
+                             "justification": raw_just})
+    assert resp.status_code == 200
+    lines = (tmp_path / "tuning_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    first, second = (json.loads(ln) for ln in lines)
+    assert first["source"] == "unspecified" and first["justification"] == ""
+    assert second["source"] == raw_src and second["justification"] == raw_just
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_public_non_finite_param_value_bad_request_no_ledger(tmp_path, token):
+    """A non-standard JSON numeric token can no longer reach the ledger:
+    the envelope refuses non-finite floats before validation."""
+    bus = _RecordingBus()
+    state, client, _ = _fresh_state(tmp_path, bus=bus)
+    body = '{"params": {"magnon_coupling": %s}}' % token
+    resp = _post_raw(client, "/api/tuning/propose", body)
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "bad_request",
+                               "message": BAD_REQUEST_MESSAGE}
+    assert bus.published == []
+    _no_side_effects(tmp_path, state)
+
+
+def test_node_budget_spans_whole_proposal(tmp_path):
+    """Regression for the budget-restart hole: parameter entries sharing
+    repeated structure are charged against ONE proposal-wide budget. Each
+    value below costs 60_001 visits — alone it passes; two entries together
+    (120_002 > 100_000) are refused at the envelope."""
+    inner = [0] * 999            # 1_000 visits per traversal
+    outer = [inner] * 60         # 60_001 visits per traversal
+    state_multi, _, _ = _fresh_state(tmp_path / "multi")
+    with pytest.raises(TuningError) as ei:
+        state_multi.propose(params={"a": outer, "b": outer}, source="s",
+                            justification="j", mode="dry-run")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+    _no_side_effects(tmp_path / "multi", state_multi)
+
+    state_single, _, _ = _fresh_state(tmp_path / "single")
+    entry = state_single.propose(params={"a": outer}, source="s",
+                                 justification="j", mode="dry-run")
+    assert entry["validation"]["ok"] is False    # unknown param — but envelope passed
+    assert (tmp_path / "single" / "tuning_ledger.jsonl").exists()
+
+
+def test_failed_ledger_serialization_leaves_no_file(tmp_path):
+    """The ledger line is serialized BEFORE the file is opened, so a dumps
+    failure can no longer create or truncate anything (the reproduced
+    zero-byte-ledger mechanism, exercised here directly)."""
+    state, _, _ = _fresh_state(tmp_path)
+    with pytest.raises(TypeError):
+        state._append_ledger({"type": "probe", "value": object()})
+    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+
+
+@pytest.mark.parametrize("limit", [640, 4300], ids=["digits-640", "digits-default"])
+def test_replay_skips_legacy_wide_int_line_not_crash(tmp_path, limit):
+    """Startup totality for poisoned LEGACY ledgers: the pre-ceiling code could
+    write thousands-of-digits int lines; parsing one under a runtime digit
+    limit raises plain ValueError (not its JSONDecodeError subclass), which
+    previously escaped the corrupt-line guard and crashed TuningState.__init__.
+    Such a line must be skipped like any other corrupt line, and the valid
+    lines around it still replayed."""
+    wide_digits = "1" * 5001            # wider than any settable digit limit
+    legacy = ('{"type": "propose", "proposal_id": "prop-legacy", '
+              '"params": {"x": %s}}' % wide_digits)
+    valid = json.dumps({
+        "type": "propose", "proposal_id": "prop-ok",
+        "params": {"signal_interval": 12},
+        "validation": {"ok": True, "errors": {}},
+    })
+    (tmp_path / "tuning_ledger.jsonl").write_text(
+        legacy + "\n" + valid + "\n", encoding="utf-8")
+    with _digit_limit(limit):
+        state = TuningState(data_dir=tmp_path, gen_getter=lambda: 0)
+    assert "prop-ok" in state._proposals
+    assert "prop-legacy" not in state._proposals
