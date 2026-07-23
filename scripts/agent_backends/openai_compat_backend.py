@@ -265,27 +265,53 @@ class OpenAICompatBackend(AgentBackend):
 
     @staticmethod
     def _response_from_wire(response: Any) -> AgentResponse:
-        choices = _attr_or_key(response, "choices", None) or []
-        if not choices:
+        """Convert an OpenAI-compatible ChatCompletion into our `AgentResponse`.
+
+        Supported containers are SDK-style typed objects (ordinary attribute
+        access, which is inherent to supporting them) and exact built-in dicts
+        (built-in lookup first); dict SUBCLASSES are refused as unsupported
+        mapping containers without invoking their overridden `.get()` or
+        attribute hooks — see `_attr_or_key`. Arbitrary hostile NON-dict
+        proxies are outside the supported SDK-object contract (supporting real
+        SDK typed objects requires ordinary attribute access). This matches the
+        established AnthropicBackend boundary contract.
+
+        Within that contract decoding is total and hook-free over extracted
+        field values: `choices` and `tool_calls` are iterated only after an
+        exact-`list` proof (a list SUBCLASS is refused); `content`, the
+        tool-call `type` discriminator, `finish_reason`, and the tool-call
+        `id`/`name` are exact-type-checked before any truth, equality, hashing,
+        iteration, mapping-conversion, or string-conversion could run, and
+        `id`/`name` are handed to `ToolUseBlock` for its established
+        normalization (no truth-testing `or`). `finish_reason` keeps the
+        established semantics — absent, None, or empty exact string →
+        "end_turn"; a known exact string → its mapped value; any other exact
+        string → "other"; a non-string → "other". A dict-subclass `usage`
+        container is refused to empty usage.
+        """
+        choices = _attr_or_key(response, "choices", None)
+        if type(choices) is not list or not choices:
             return AgentResponse.from_content([], stop_reason="other", usage={})
         choice = choices[0]
         msg = _attr_or_key(choice, "message", None)
 
         blocks: list[ContentBlock] = []
         text = _attr_or_key(msg, "content", None) if msg is not None else None
-        if isinstance(text, str) and text:
+        if type(text) is str and text:
             blocks.append(TextBlock(text=text))
 
         tool_calls = _attr_or_key(msg, "tool_calls", None) if msg is not None else None
-        if tool_calls:
+        if type(tool_calls) is list:
             for tc in tool_calls:
                 tc_type = _attr_or_key(tc, "type", "function")
-                if tc_type != "function":
-                    continue  # unknown tool-call kind; ignore for now
+                # The discriminator is proven exact str before the equality
+                # check, so a non-str / hostile-__eq__ type never runs a hook.
+                if type(tc_type) is not str or tc_type != "function":
+                    continue  # unknown / absent-typed tool-call kind; ignore
                 fn = _attr_or_key(tc, "function", None)
                 if fn is None:
                     continue
-                name = _attr_or_key(fn, "name", "") or ""
+                name = _attr_or_key(fn, "name", "")
                 # `arguments` is model/server-reachable and can be any value,
                 # so decoding is total and hook-free: the value's truthiness,
                 # iteration, mapping-conversion, and string-conversion hooks
@@ -310,16 +336,31 @@ class OpenAICompatBackend(AgentBackend):
                     args = args_raw
                 else:
                     args = {}
+                # `id`/`name` are handed to ToolUseBlock unchanged (no `or`
+                # truth-test); ToolUseBlock keeps them only when exactly str.
                 blocks.append(ToolUseBlock(
-                    id=_attr_or_key(tc, "id", "") or "",
+                    id=_attr_or_key(tc, "id", ""),
                     name=name,
                     input=args,
                 ))
 
-        raw_finish = _attr_or_key(choice, "finish_reason", "stop") or "stop"
-        stop_reason: StopReason = _FINISH_REASON_MAP.get(raw_finish, "other")
+        # finish_reason: preserve established absent/None/empty → "end_turn";
+        # exact-type-checked before the mapping lookup so a non-str value is
+        # never hashed or compared (no __hash__/__eq__ hook).
+        raw_finish = _attr_or_key(choice, "finish_reason", None)
+        if raw_finish is None:
+            stop_reason: StopReason = "end_turn"
+        elif type(raw_finish) is str:
+            if raw_finish == "":
+                stop_reason = "end_turn"
+            else:
+                stop_reason = _FINISH_REASON_MAP.get(raw_finish, "other")
+        else:
+            stop_reason = "other"
 
         usage_obj = _attr_or_key(response, "usage", None)
+        if isinstance(usage_obj, dict) and type(usage_obj) is not dict:
+            usage_obj = None  # dict-subclass usage container refused → empty usage
         usage: dict[str, Any] = {}
         if usage_obj is not None:
             usage = {
@@ -334,14 +375,32 @@ class OpenAICompatBackend(AgentBackend):
 
 
 def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
-    """Read `name` from an object via attribute access, falling back to dict."""
-    if obj is None:
+    """Read `name` from a supported container, else return `default`.
+
+    Supported-container contract (matches AnthropicBackend._attr_or_key):
+      - an exact built-in dict takes the built-in dict lookup path first
+        (its `.get` cannot be overridden);
+      - a dict SUBCLASS is refused as an unsupported mapping container —
+        checked before any attribute access, so neither its overridden
+        `.get()` nor its attribute hooks are ever invoked;
+      - anything else keeps ordinary attribute access, which is inherent to
+        supporting SDK-style typed objects (and SimpleNamespace test fixtures);
+      - missing fields return `default`.
+
+    Arbitrary hostile NON-dict proxies (objects with adversarial `__getattr__`)
+    are outside the supported SDK-object contract: supporting real SDK typed
+    objects requires ordinary attribute access, and JSON received through an
+    ordinary provider deserializes to builtins only, so a dict subclass or a
+    hostile proxy is unreachable via PUBLIC provider traffic and reachable only
+    by DIRECT / injected-client construction.
+    """
+    if type(obj) is dict:
+        return obj.get(name, default)
+    if isinstance(obj, dict):
         return default
     val = getattr(obj, name, None)
     if val is not None:
         return val
-    if isinstance(obj, dict):
-        return obj.get(name, default)
     return default
 
 
