@@ -46,8 +46,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 API_PORT = 8080
 API_HOST = "0.0.0.0"  # Listen on all interfaces for cluster access
+API_VERSION = "1.2.0"  # Semantic API version — single source for / and /api/health.
 
 app = Flask(__name__)
+# The launch port surfaced by /api/status. Defaults to the module API_PORT at
+# import time; the public CLI overrides it via configure_runtime() before
+# app.run (see the __main__ block). This is the *configured* launch port — with
+# --port 0 it is 0, not the OS-selected bound port.
+app.config["API_PORT"] = API_PORT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,8 +107,15 @@ def _read_engine_log():
 
 @app.route("/api/health")
 def health():
-    """Simple health check."""
-    return jsonify({"status": "ok", "service": "medusa-api", "timestamp": time.time()})
+    """API-process liveness. Reports the process is up and its version; it is
+    deliberately independent of snapshot presence or engine freshness (that
+    signal lives in /api/status)."""
+    return jsonify({
+        "status": "ok",
+        "service": "medusa-api",
+        "timestamp": time.time(),
+        "version": API_VERSION,
+    })
 
 
 @app.route("/api/status")
@@ -124,7 +137,9 @@ def status():
         "snapshot_size_mb": round(snap_size / 1024 / 1024, 1),
         "total_snapshots": len(all_snaps),
         "engine_alive": snap_age < 900,  # 15 min threshold
-        "api_port": API_PORT,
+        # The configured launch port (set by the public CLI via
+        # configure_runtime), falling back to the module default at import time.
+        "api_port": app.config.get("API_PORT", API_PORT),
     })
 
 
@@ -383,7 +398,7 @@ def index():
     """API documentation."""
     return jsonify({
         "service": "Medusa REST API (Phase 16a + Phase 18 PRs 2+3)",
-        "version": "1.2.0",
+        "version": API_VERSION,
         "endpoints": {
             "/api/health": "Health check",
             "/api/status": "Engine status",
@@ -415,12 +430,28 @@ def index():
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+def _build_arg_parser():
+    """The public CLI parser. Its grammar is authoritative and mirrored by
+    tests/test_medusa_start.py — keep the --port/--host spellings, types, and
+    defaults stable."""
     import argparse
     parser = argparse.ArgumentParser(description="Medusa REST API (Phase 16a)")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    args = parser.parse_args()
+    return parser
+
+
+def configure_runtime(args):
+    """Wire the parsed public-CLI arguments into the app's runtime config
+    before app.run, so /api/status reports the configured launch port rather
+    than the module default. Returns the configured app (for testability)."""
+    app.config["API_PORT"] = args.port
+    return app
+
+
+if __name__ == "__main__":
+    args = _build_arg_parser().parse_args()
+    configure_runtime(args)
 
     print("=" * 60)
     print("  MEDUSA REST API — Phase 16a")
