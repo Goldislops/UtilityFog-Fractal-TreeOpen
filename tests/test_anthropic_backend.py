@@ -12,6 +12,9 @@ required. Verifies:
   - Transport errors propagate; empty content returns cleanly
   - Model override via constructor kwarg
   - Missing anthropic package raises at construction (sans injected client)
+  - Inbound shape totality: hostile / malformed wire values (non-list
+    content, non-str text, non-dict tool input, unhashable stop_reason,
+    dict-shaped responses) decode totally and hook-free
 """
 
 from __future__ import annotations
@@ -312,6 +315,168 @@ def test_empty_content_returns_clean_response():
     resp = backend.complete(messages=[Message(role="user", content="x")], tools=[])
     assert resp.text is None
     assert resp.tool_calls == []
+    assert resp.raw_content == []
+
+
+# -- inbound shape totality: every wire value in a response is model/server-
+#    reachable and can be ANY shape, so decoding must be total and hook-free.
+#    Content decodes only from an exact list; text kept only when exactly
+#    str; tool_use input kept only when exactly dict (never derived from
+#    pair-lists) and continues into ToolUseBlock's hardened normalization;
+#    stop_reason kept only when an exactly-str known value (absent →
+#    "end_turn", any other shape → "other"); dict-shaped responses keep
+#    their content and usage. No __bool__ / __len__ / __iter__ / keys() /
+#    __str__ / __eq__ hook of a wire value is ever invoked. -------------------
+
+
+class _HostileValue:
+    """Wire value whose truthiness / iteration / mapping-conversion /
+    string-conversion hooks all raise if invoked."""
+
+    def __bool__(self):
+        raise AssertionError("hook invoked: __bool__")
+
+    def __len__(self):
+        raise AssertionError("hook invoked: __len__")
+
+    def __iter__(self):
+        raise AssertionError("hook invoked: __iter__")
+
+    def keys(self):
+        raise AssertionError("hook invoked: keys()")
+
+    def __str__(self):
+        raise AssertionError("hook invoked: __str__")
+
+
+class _RaisingEq:
+    """Wire value whose equality hook raises if invoked."""
+
+    def __eq__(self, other):
+        raise AssertionError("hook invoked: __eq__")
+
+    __hash__ = None
+
+
+def _complete(response) -> AgentResponse:
+    client = _MockClient()
+    client.messages.response = response
+    backend = AnthropicBackend(client=client)
+    return backend.complete(messages=[Message(role="user", content="x")], tools=[])
+
+
+def test_dict_shaped_response_recovers_content_and_usage():
+    """A fully dict-shaped response (very old SDKs / proxies / injected
+    clients) must decode content AND usage — the old bare getattr silently
+    dropped both."""
+    resp = _complete({
+        "content": [{"type": "text", "text": "dict-response"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 2},
+    })
+    assert resp.text == "dict-response"
+    assert resp.usage == {"input_tokens": 1, "output_tokens": 2}
+
+
+def test_pair_list_tool_input_is_not_dict_derived():
+    """The old eager dict(...) manufactured {"a": 1} from a pair-list wire
+    value; ToolUseBlock.input must never be derived from other shapes."""
+    resp = _complete(_make_response(
+        [_tool_use("tu_1", "f", [["a", 1]])], stop_reason="tool_use",
+    ))
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_non_mapping_tool_input_normalizes_to_empty_dict():
+    """dict(5) / dict([1, 2]) raised TypeError out of complete(); any
+    non-exact-dict input must become a fresh {} instead."""
+    for bad in (5, [1, 2]):
+        resp = _complete(_make_response(
+            [_tool_use("tu_1", "f", bad)], stop_reason="tool_use",
+        ))
+        assert resp.tool_calls[0].arguments == {}, f"input={bad!r}"
+
+
+def test_hostile_tool_input_value_never_has_hooks_invoked():
+    """The old `or {}` executed the value's __bool__; hostile hook objects
+    must decode to {} with no hook invoked."""
+    resp = _complete(_make_response(
+        [_tool_use("tu_1", "f", _HostileValue())], stop_reason="tool_use",
+    ))
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_exact_dict_tool_input_passes_through():
+    """An exact dict keeps its content (through ToolUseBlock's hardened
+    normalization) — behavior lock."""
+    resp = _complete(_make_response(
+        [_tool_use("tu_1", "f", {"k": 1})], stop_reason="tool_use",
+    ))
+    assert resp.tool_calls[0].arguments == {"k": 1}
+
+
+def test_non_str_text_value_normalizes_to_empty():
+    """A truthy non-str text (e.g. 123) used to reach the from_content
+    join and raise TypeError; it must decode as an empty text."""
+    resp = _complete(_make_response([SimpleNamespace(type="text", text=123)]))
+    assert resp.text == ""
+
+
+def test_hostile_text_value_never_has_hooks_invoked():
+    """The old `or ""` executed the text value's __bool__; hostile hook
+    objects must decode as empty text with no hook invoked."""
+    resp = _complete(_make_response(
+        [SimpleNamespace(type="text", text=_HostileValue())],
+    ))
+    assert resp.text == ""
+
+
+def test_unhashable_or_hostile_stop_reason_maps_to_other():
+    """An unhashable stop_reason crashed the set-membership test and a
+    hostile one had its __bool__ executed by `or`; both are unexpected
+    model shapes and must map to "other"."""
+    for bad in (["end_turn"], _HostileValue()):
+        resp = _complete(_make_response([], stop_reason=bad))
+        assert resp.stop_reason == "other", f"stop_reason={type(bad).__name__}"
+
+
+def test_empty_string_stop_reason_maps_to_other():
+    """Disclosed behavior change: "" was truthiness-folded into "end_turn";
+    an empty string is an unexpected stop_reason and now maps to "other"
+    per the module's model-error philosophy."""
+    resp = _complete(_make_response([], stop_reason=""))
+    assert resp.stop_reason == "other"
+
+
+def test_absent_stop_reason_defaults_to_end_turn():
+    """Absent (None) stop_reason keeps its established "end_turn" default
+    — behavior lock."""
+    resp = _complete(_make_response([], stop_reason=None))
+    assert resp.stop_reason == "end_turn"
+
+
+def test_non_list_content_yields_no_blocks():
+    """Content is decoded only from an exact list: a hostile object (whose
+    __bool__ the old `or []` executed), a str (whose chars the old code
+    iterated), or any other shape must yield a clean empty response."""
+    for bad in (_HostileValue(), "hi", 42):
+        resp = _complete(_make_response(bad))
+        assert resp.raw_content == [], f"content={type(bad).__name__}"
+        assert resp.text is None
+
+
+def test_raising_eq_block_type_is_skipped():
+    """A block whose `type` raises on equality comparison must be skipped
+    (exact-str proof before dispatch), not crash the decode."""
+    resp = _complete(_make_response(
+        [SimpleNamespace(type=_RaisingEq(), text="x")],
+    ))
+    assert resp.raw_content == []
+
+
+def test_non_str_block_type_is_skipped():
+    """A non-str block type (e.g. 42) is skipped — behavior lock."""
+    resp = _complete(_make_response([SimpleNamespace(type=42, text="x")]))
     assert resp.raw_content == []
 
 

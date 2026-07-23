@@ -189,31 +189,49 @@ class AnthropicBackend(AgentBackend):
         """Convert an `anthropic.types.Message` back into our `AgentResponse`.
 
         Reads via attribute access first, falls back to dict access for
-        robustness across SDK versions.
+        robustness across SDK versions. Every wire value here is model/
+        server-reachable, so decoding is total and hook-free: no value's
+        truthiness, iteration, mapping-conversion, or string-conversion
+        hook is ever invoked. Content is decoded only from an exact list;
+        text is kept only when exactly str; tool_use input is kept only
+        when exactly dict (never derived from other shapes) and continues
+        into ToolUseBlock's hardened normalization; stop_reason is kept
+        only when an exactly-str known value (absent → "end_turn", any
+        other shape → "other" per the model-error philosophy above).
         """
         blocks: list[ContentBlock] = []
-        for raw in getattr(response, "content", []) or []:
+        content = _attr_or_key(response, "content", None)
+        if type(content) is not list:
+            content = []
+        for raw in content:
             btype = _attr_or_key(raw, "type")
+            if type(btype) is not str:
+                continue
             if btype == "text":
-                blocks.append(TextBlock(text=_attr_or_key(raw, "text", "") or ""))
+                text = _attr_or_key(raw, "text", None)
+                blocks.append(TextBlock(text=text if type(text) is str else ""))
             elif btype == "tool_use":
+                raw_input = _attr_or_key(raw, "input", None)
                 blocks.append(
                     ToolUseBlock(
                         id=_attr_or_key(raw, "id", ""),
                         name=_attr_or_key(raw, "name", ""),
-                        input=dict(_attr_or_key(raw, "input", {}) or {}),
+                        input=raw_input if type(raw_input) is dict else {},
                     )
                 )
             # Unknown or "thinking" blocks: skip for now. A later PR can
             # preserve them if we start using extended-thinking mode.
 
-        raw_stop = _attr_or_key(response, "stop_reason", "end_turn") or "end_turn"
-        stop_reason: StopReason = (
-            raw_stop if raw_stop in _KNOWN_STOP_REASONS else "other"
-        )
+        raw_stop = _attr_or_key(response, "stop_reason", None)
+        if raw_stop is None:
+            stop_reason: StopReason = "end_turn"
+        elif type(raw_stop) is str and raw_stop in _KNOWN_STOP_REASONS:
+            stop_reason = raw_stop
+        else:
+            stop_reason = "other"
 
         usage: dict[str, Any] = {}
-        u = getattr(response, "usage", None)
+        u = _attr_or_key(response, "usage", None)
         if u is not None:
             usage = {
                 "input_tokens": _attr_or_key(u, "input_tokens", None),
