@@ -21,8 +21,10 @@ import pytest
 from scripts.agent_backends import (
     AgentBackend,
     AgentResponse,
+    AnthropicBackend,
     Message,
     MockBackend,
+    OpenAICompatBackend,
     TextBlock,
     ToolCall,
     ToolResultBlock,
@@ -453,6 +455,294 @@ def test_from_content_raw_content_carries_normalized_blocks():
     assert resp.tool_calls[0].id == resp.raw_content[0].id
     assert resp.tool_calls[0].name == resp.raw_content[0].name
     assert resp.tool_calls[0].arguments == resp.raw_content[0].input
+
+
+# -- TextBlock.text / ToolResultBlock.content shape totality ------------------
+#
+# Shared-root normalization (Candidate 3). Like ToolUseBlock, these fields are
+# model/tool-reachable and were previously unnormalized:
+#   - TextBlock.text kept only when type(text) is str (byte-for-byte, NO length
+#     ceiling); every other shape becomes "" without any hook.
+#   - ToolResultBlock.content kept only when type(content) is str (byte-for-
+#     byte) or type(content) is list (retaining only exact built-in
+#     content-block elements, in order); every other shape becomes "".
+# Failing-before: a non-str text made AgentResponse.from_content and both
+# encoders raise (or run a hostile __bool__); a non-str/non-list content made
+# the Anthropic encoder raise (or run a hostile __iter__) and the OpenAI-compat
+# encoder raise or emit corrupt output. The hostile instruments defined above
+# raise _HookCalled from every forbidden hook, so a construction/encode that
+# returns is proof no such hook was requested.
+
+_NON_STR_NON_LIST_CONTENT = [123, 1.5, True, False, None, b"bytes", {"d": 1}, ("t",), {1, 2}]
+_NON_STR_NON_LIST_IDS = ["int", "float", "true", "false", "none", "bytes", "dict", "tuple", "set"]
+
+
+class _PlainListSub(list):
+    """Well-behaved list subclass — still refused, because content must be an
+    EXACT list (type is list), not merely a list instance."""
+
+
+class _HostileList(list):
+    """list subclass whose iteration/length hooks raise — must be refused as a
+    non-exact list without requesting any of them."""
+
+    def __iter__(self):
+        raise _HookCalled("__iter__")
+
+    def __len__(self):
+        raise _HookCalled("__len__")
+
+    def __bool__(self):
+        raise _HookCalled("__bool__")
+
+
+class _TextBlockSub(TextBlock):
+    """TextBlock subclass — an element of this type must be dropped from a
+    content list, proving element filtering is exact-type (type(x) is
+    TextBlock), not isinstance."""
+
+
+# -- TextBlock.text ---------------------------------------------------------
+
+
+def test_text_block_preserves_exact_str_byte_for_byte():
+    for value in ("hello", "", "with\nnewlines\tand spaces", "🌟unicode✓"):
+        b = TextBlock(text=value)
+        assert b.text == value
+        assert type(b.text) is str
+
+
+def test_text_block_no_length_ceiling_introduced():
+    long_text = "x" * 50_000
+    b = TextBlock(text=long_text)
+    assert b.text == long_text
+    assert len(b.text) == 50_000
+
+
+@pytest.mark.parametrize("value", _NON_STR_VALUES, ids=_NON_STR_IDS)
+def test_text_block_replaces_non_str_text(value):
+    b = TextBlock(text=value)
+    assert type(b.text) is str
+    assert b.text == ""  # no conversion, no type-name reporting
+
+
+def test_text_block_refuses_plain_str_subclass():
+    b = TextBlock(text=_PlainStrSub("subclass"))
+    assert type(b.text) is str
+    assert b.text == ""  # exact-type gate, not isinstance
+
+
+def test_text_block_refuses_hostile_str_subclass_without_hooks():
+    b = TextBlock(text=_HostileStr("evil"))
+    assert b.text == ""
+
+
+def test_text_block_refuses_hostile_object_without_hooks():
+    b = TextBlock(text=_HostileValue())
+    assert b.text == ""
+
+
+def test_text_block_remains_frozen_after_normalization():
+    b = TextBlock(text=123)
+    assert b.text == ""
+    with pytest.raises(Exception):
+        b.text = "y"  # frozen dataclass → FrozenInstanceError
+
+
+def test_from_content_total_over_non_str_text():
+    # 123 → "" (filtered by the empty-text guard); real text survives; no raise.
+    resp = AgentResponse.from_content([TextBlock(text=123), TextBlock(text="real")])
+    assert resp.text == "real"
+
+
+def test_from_content_no_hook_on_hostile_text():
+    # A hostile text value must not reach from_content's truthiness/join hooks;
+    # it normalizes to "" at construction, so the derived text is "".
+    resp = AgentResponse.from_content([TextBlock(text=_HostileValue())])
+    assert resp.text == ""
+
+
+# -- ToolResultBlock.content ------------------------------------------------
+
+
+def test_tool_result_preserves_exact_str_content_byte_for_byte():
+    for value in ("OK", "", "multi\nline result", "🌟"):
+        b = ToolResultBlock(tool_use_id="t", content=value)
+        assert b.content == value
+        assert type(b.content) is str
+
+
+def test_tool_result_content_no_length_ceiling_introduced():
+    long_content = "y" * 50_000
+    b = ToolResultBlock(tool_use_id="t", content=long_content)
+    assert b.content == long_content
+    assert len(b.content) == 50_000
+
+
+@pytest.mark.parametrize("value", _NON_STR_NON_LIST_CONTENT, ids=_NON_STR_NON_LIST_IDS)
+def test_tool_result_replaces_non_str_non_list_content(value):
+    b = ToolResultBlock(tool_use_id="t", content=value)
+    assert type(b.content) is str
+    assert b.content == ""
+
+
+def test_tool_result_refuses_plain_str_subclass_content():
+    b = ToolResultBlock(tool_use_id="t", content=_PlainStrSub("sub"))
+    assert type(b.content) is str
+    assert b.content == ""
+
+
+def test_tool_result_refuses_hostile_str_subclass_content_without_hooks():
+    b = ToolResultBlock(tool_use_id="t", content=_HostileStr("evil"))
+    assert b.content == ""
+
+
+def test_tool_result_refuses_hostile_object_content_without_hooks():
+    b = ToolResultBlock(tool_use_id="t", content=_HostileValue())
+    assert b.content == ""
+
+
+def test_tool_result_refuses_plain_list_subclass_content():
+    b = ToolResultBlock(tool_use_id="t", content=_PlainListSub([TextBlock(text="a")]))
+    assert type(b.content) is str
+    assert b.content == ""  # exact-list gate: a list subclass is not a list
+
+
+def test_tool_result_refuses_hostile_list_subclass_without_hooks():
+    b = ToolResultBlock(tool_use_id="t", content=_HostileList([1, 2]))
+    assert b.content == ""  # never iterated → no __iter__/__len__/__bool__ hook
+
+
+def test_tool_result_preserves_valid_block_list_in_order():
+    blocks = [
+        TextBlock(text="a"),
+        ToolUseBlock(id="u1", name="tool", input={"k": 1}),
+        ToolResultBlock(tool_use_id="inner", content="nested"),
+    ]
+    b = ToolResultBlock(tool_use_id="t", content=blocks)
+    assert type(b.content) is list
+    assert b.content == blocks
+    assert [type(x) for x in b.content] == [TextBlock, ToolUseBlock, ToolResultBlock]
+
+
+def test_tool_result_empty_list_stays_empty_list():
+    b = ToolResultBlock(tool_use_id="t", content=[])
+    assert type(b.content) is list
+    assert b.content == []
+
+
+def test_tool_result_filters_foreign_elements_preserving_order():
+    b = ToolResultBlock(
+        tool_use_id="t",
+        content=[TextBlock(text="a"), 5, "str", {"d": 1}, TextBlock(text="b")],
+    )
+    assert [x.text for x in b.content] == ["a", "b"]
+    assert all(type(x) is TextBlock for x in b.content)
+
+
+def test_tool_result_filters_hostile_elements_without_hooks():
+    b = ToolResultBlock(
+        tool_use_id="t",
+        content=[TextBlock(text="keep"), _HostileValue(), _HostileStr("x")],
+    )
+    assert [x.text for x in b.content] == ["keep"]
+
+
+def test_tool_result_drops_content_block_subclass_element():
+    b = ToolResultBlock(
+        tool_use_id="t",
+        content=[TextBlock(text="ok"), _TextBlockSub(text="sub")],
+    )
+    # exact-type element gate drops the subclass instance
+    assert len(b.content) == 1
+    assert type(b.content[0]) is TextBlock
+    assert b.content[0].text == "ok"
+
+
+def test_tool_result_does_not_manufacture_content_from_pairs():
+    # A pair sequence or nested list must NOT be turned into a block.
+    b = ToolResultBlock(tool_use_id="t", content=[("k", "v"), ["a", 1]])
+    assert b.content == []
+
+
+def test_tool_result_content_remains_frozen_after_normalization():
+    b = ToolResultBlock(tool_use_id="t", content=123)
+    assert b.content == ""
+    with pytest.raises(Exception):
+        b.content = "y"  # frozen dataclass → FrozenInstanceError
+
+
+def test_tool_result_filter_lists_are_independent_instances():
+    b1 = ToolResultBlock(tool_use_id="t1", content=[TextBlock(text="a"), 5])
+    b2 = ToolResultBlock(tool_use_id="t2", content=[TextBlock(text="b"), 9])
+    assert b1.content is not b2.content
+    b1.content.append(TextBlock(text="mutated"))
+    assert len(b2.content) == 1
+
+
+# -- both provider encoders stay total (malformed) + byte retention (valid) --
+
+
+def test_anthropic_encoder_byte_retention_for_accepted_values():
+    # Accepted str content, accepted block-list content, and accepted text
+    # encode to the exact established wire bytes — normalization is a no-op.
+    assert AnthropicBackend._block_to_wire(TextBlock(text="hello")) == {
+        "type": "text",
+        "text": "hello",
+    }
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="t", content="ok")
+    ) == {"type": "tool_result", "tool_use_id": "t", "content": "ok"}
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="t", content=[TextBlock(text="a")])
+    ) == {
+        "type": "tool_result",
+        "tool_use_id": "t",
+        "content": [{"type": "text", "text": "a"}],
+    }
+
+
+def test_openai_encoder_byte_retention_for_accepted_values():
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="assistant", content=[TextBlock(text="hi")])
+    ) == [{"role": "assistant", "content": "hi"}]
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="user", content=[ToolResultBlock(tool_use_id="t", content="ok")])
+    ) == [{"role": "tool", "tool_call_id": "t", "content": "ok"}]
+
+
+def test_anthropic_encoder_total_for_malformed_text_and_content():
+    # None of these raise or run a hook after normalization.
+    assert AnthropicBackend._block_to_wire(TextBlock(text=123)) == {
+        "type": "text",
+        "text": "",
+    }
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="t", content=123)
+    ) == {"type": "tool_result", "tool_use_id": "t", "content": ""}
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="t", content=_HostileValue())
+    ) == {"type": "tool_result", "tool_use_id": "t", "content": ""}
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="t", content=[5, "x", TextBlock(text="a")])
+    ) == {
+        "type": "tool_result",
+        "tool_use_id": "t",
+        "content": [{"type": "text", "text": "a"}],
+    }
+
+
+def test_openai_encoder_total_for_malformed_text_and_content():
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="assistant", content=[TextBlock(text=_HostileValue())])
+    ) == [{"role": "assistant", "content": ""}]
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="user", content=[ToolResultBlock(tool_use_id="t", content=123)])
+    ) == [{"role": "tool", "tool_call_id": "t", "content": ""}]
+    # foreign elements dropped → no corrupt "{'type': 'int'}" payload
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="user", content=[ToolResultBlock(tool_use_id="t", content=[5])])
+    ) == [{"role": "tool", "tool_call_id": "t", "content": "[]"}]
 
 
 # -- AgentBackend ABC --------------------------------------------------------
