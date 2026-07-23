@@ -188,16 +188,21 @@ class AnthropicBackend(AgentBackend):
     def _response_from_wire(response: Any) -> AgentResponse:
         """Convert an `anthropic.types.Message` back into our `AgentResponse`.
 
-        Reads via attribute access first, falls back to dict access for
-        robustness across SDK versions. Every wire value here is model/
-        server-reachable, so decoding is total and hook-free: no value's
-        truthiness, iteration, mapping-conversion, or string-conversion
-        hook is ever invoked. Content is decoded only from an exact list;
-        text is kept only when exactly str; tool_use input is kept only
-        when exactly dict (never derived from other shapes) and continues
-        into ToolUseBlock's hardened normalization; stop_reason is kept
-        only when an exactly-str known value (absent → "end_turn", any
-        other shape → "other" per the model-error philosophy above).
+        Supported containers are SDK-style typed objects (ordinary
+        attribute access, which is inherent to supporting them) and exact
+        built-in dicts (built-in lookup); dict SUBCLASSES are refused as
+        unsupported mapping containers without invoking their overridden
+        `.get()` or attribute hooks — see `_attr_or_key`. Within that
+        contract decoding is total and hook-free over extracted field
+        values: no field value's truthiness, iteration, mapping-
+        conversion, string-conversion, or equality hook is ever invoked.
+        Content is decoded only from an exact list; text is kept only
+        when exactly str; tool_use input is kept only when exactly dict
+        (never derived from other shapes) and continues into
+        ToolUseBlock's hardened normalization; stop_reason keeps the
+        established semantics — absent, None, or empty exact string →
+        "end_turn"; known exact string → itself; anything else → "other"
+        per the model-error philosophy above.
         """
         blocks: list[ContentBlock] = []
         content = _attr_or_key(response, "content", None)
@@ -225,13 +230,20 @@ class AnthropicBackend(AgentBackend):
         raw_stop = _attr_or_key(response, "stop_reason", None)
         if raw_stop is None:
             stop_reason: StopReason = "end_turn"
-        elif type(raw_stop) is str and raw_stop in _KNOWN_STOP_REASONS:
-            stop_reason = raw_stop
+        elif type(raw_stop) is str:
+            if raw_stop == "":
+                stop_reason = "end_turn"
+            elif raw_stop in _KNOWN_STOP_REASONS:
+                stop_reason = raw_stop
+            else:
+                stop_reason = "other"
         else:
             stop_reason = "other"
 
         usage: dict[str, Any] = {}
         u = _attr_or_key(response, "usage", None)
+        if isinstance(u, dict) and type(u) is not dict:
+            u = None  # dict-subclass container refused → empty usage, no hooks
         if u is not None:
             usage = {
                 "input_tokens": _attr_or_key(u, "input_tokens", None),
@@ -244,18 +256,30 @@ class AnthropicBackend(AgentBackend):
 
 
 def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
-    """Read `name` from an object via attribute access, falling back to
-    dict-key access. Returns `default` if neither is present.
+    """Read `name` from a supported container, else return `default`.
+
+    Supported-container contract:
+      - an exact built-in dict takes the built-in dict lookup path first
+        (its `.get` cannot be overridden);
+      - a dict SUBCLASS is refused as an unsupported mapping container —
+        checked before any attribute access, so neither its overridden
+        `.get()` nor its attribute hooks are ever invoked;
+      - anything else keeps ordinary attribute access, which is inherent
+        to supporting SDK-style typed objects (and SimpleNamespace test
+        fixtures);
+      - missing fields return `default`.
 
     The anthropic SDK historically returned typed objects; very old
-    versions returned dicts. Test fixtures may use SimpleNamespace. This
-    helper lets the translator work against all three shapes.
+    versions returned plain dicts. This helper supports exactly those
+    shapes and refuses lookalike mapping containers.
     """
+    if type(obj) is dict:
+        return obj.get(name, default)
+    if isinstance(obj, dict):
+        return default
     val = getattr(obj, name, None)
     if val is not None:
         return val
-    if isinstance(obj, dict):
-        return obj.get(name, default)
     return default
 
 
