@@ -677,3 +677,397 @@ def test_response_shape_compatible_with_orchestrator_loop():
     assert resp.tool_calls[0].id == "tu_1"
     assert resp.tool_calls[0].name == "f"
     assert resp.tool_calls[0].arguments == {"x": 1}
+
+
+# ============================================================================
+# Inbound-response shape totality (Kev-owned lane): the OpenAI-compatible
+# inbound decoder matches the established AnthropicBackend boundary contract —
+# exact-dict lookup (built-in .get, never a subclass override), an exact-list
+# proof before iterating `choices` / `tool_calls`, and exact-type checks on
+# content, the tool-call `type` discriminator, `finish_reason`, `id` and `name`
+# before any truth / equality / hashing / iteration / mapping / string
+# conversion could run.
+#
+# DIRECT vs PUBLIC reachability: JSON received through an ordinary provider
+# deserializes to builtins only (exact dict / list / str / int / float / bool /
+# None), so a dict-or-list SUBCLASS or a hostile proxy CANNOT arrive over
+# PUBLIC provider traffic — these cells are reachable only by DIRECT /
+# injected-client construction (a local-server shim, a proxy, a test double).
+# They are pinned because an injected client can construct exactly them.
+# ============================================================================
+
+
+def _from_wire(response: Any) -> AgentResponse:
+    """Call the inbound decoder directly. Equivalent to the injected-client
+    path: `complete()` forwards the client's response into `_response_from_wire`
+    (see `_complete_with_injected_response`)."""
+    return openai_compat_backend_module.OpenAICompatBackend._response_from_wire(response)
+
+
+def _complete_with_injected_response(response: Any) -> AgentResponse:
+    """Drive the FULL public path with a dependency-injected client whose
+    `.create()` returns `response` — the literal DIRECT/injected-client lane."""
+    client = _MockClient()
+    client.chat.completions.response = response
+    backend = OpenAICompatBackend(client=client)
+    return backend.complete(messages=[Message(role="user", content="x")], tools=[])
+
+
+def _wrap(*, message: Any, finish_reason: Any = "stop", usage: Any = None) -> SimpleNamespace:
+    """A response envelope around one choice (all exact SimpleNamespace/list)."""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+        usage=usage,
+    )
+
+
+class _RecordingGetDict(dict):
+    """A dict SUBCLASS whose overridden `.get()` records every call. A decoder
+    honoring the exact-dict contract must never invoke it."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.get_calls: list = []
+
+    def get(self, key, default=None):
+        self.get_calls.append(key)
+        return super().get(key, default)
+
+
+class _BenignDictSub(dict):
+    """A dict subclass with no overridden behavior — still refused, because the
+    contract is exact-type, not behavior-sniffing."""
+
+
+class _ListSub(list):
+    """A list subclass — refused by the exact-list proof for envelopes."""
+
+
+class _HostileEq:
+    """A non-str discriminator/value whose equality and hash hooks must never
+    run (default truthiness is used, so `or` would slip past __bool__)."""
+
+    def __eq__(self, other):
+        raise AssertionError("hook invoked: __eq__")
+
+    def __hash__(self):
+        raise AssertionError("hook invoked: __hash__")
+
+
+class _HostileScalar:
+    """A value whose truth / iteration / str / hash / eq hooks all raise."""
+
+    def __bool__(self):
+        raise AssertionError("hook invoked: __bool__")
+
+    def __iter__(self):
+        raise AssertionError("hook invoked: __iter__")
+
+    def __str__(self):
+        raise AssertionError("hook invoked: __str__")
+
+    def __hash__(self):
+        raise AssertionError("hook invoked: __hash__")
+
+    def __eq__(self, other):
+        raise AssertionError("hook invoked: __eq__")
+
+
+# -- FAILING-FIRST reproduction: dict-subclass function container -------------
+
+
+def test_dict_subclass_function_container_get_hook_not_invoked():
+    """CONFIRMED DIRECT/injected-client defect reproduction. A dict-subclass
+    `function` container with an overridden `.get()` previously had that hook
+    executed while `arguments` (and `name`) were retrieved. The exact-dict
+    contract refuses the subclass before any `.get()` runs; extracted values
+    fall back to defaults (name "", input {}). This is DIRECT/injected only —
+    a provider's JSON deserializes to an exact dict, never a dict subclass."""
+    fn = _RecordingGetDict({"name": "f", "arguments": '{"k": 1}'})
+    tc = SimpleNamespace(id="tu_x", type="function", function=fn)
+    resp = _complete_with_injected_response(
+        _wrap(message=SimpleNamespace(content=None, tool_calls=[tc]),
+              finish_reason="tool_calls"))
+    assert fn.get_calls == []                 # overridden .get() never invoked
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].arguments == {}
+    assert resp.tool_calls[0].name == ""
+    assert resp.tool_calls[0].id == "tu_x"    # id read from the exact-object tc
+
+
+# -- container matrix: exact dict vs benign/hostile dict subclass ------------
+
+
+def test_top_level_exact_dict_response_translates():
+    resp = _from_wire({
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+    })
+    assert resp.text == "hi"
+    assert resp.stop_reason == "end_turn"
+    assert resp.usage == {"input_tokens": 3, "output_tokens": 4}
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_top_level_response_refused(factory):
+    r = factory({"choices": [{"message": {"content": "hi"}}], "usage": {}})
+    resp = _from_wire(r)
+    assert resp.text is None
+    assert resp.tool_calls == []
+    assert resp.stop_reason == "other"
+    if isinstance(r, _RecordingGetDict):
+        assert r.get_calls == []
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_choice_refused(factory):
+    choice = factory({"message": {"content": "hi"}, "finish_reason": "stop"})
+    resp = _from_wire(SimpleNamespace(choices=[choice], usage=None))
+    assert resp.text is None                 # message on a subclass choice refused
+    assert resp.stop_reason == "end_turn"    # finish_reason refused → None → end_turn
+    if isinstance(choice, _RecordingGetDict):
+        assert choice.get_calls == []
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_message_refused(factory):
+    msg = factory({
+        "content": "hi",
+        "tool_calls": [{"id": "t", "type": "function",
+                        "function": {"name": "f", "arguments": "{}"}}],
+    })
+    resp = _from_wire(_wrap(message=msg, finish_reason="stop"))
+    assert resp.text is None
+    assert resp.tool_calls == []
+    if isinstance(msg, _RecordingGetDict):
+        assert msg.get_calls == []
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_tool_call_container_skipped(factory):
+    tc = factory({"id": "t", "type": "function",
+                  "function": {"name": "f", "arguments": "{}"}})
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    # subclass tc: `type` refused → default "function"; `function` refused →
+    # None → the call is skipped. No .get() hook.
+    assert resp.tool_calls == []
+    if isinstance(tc, _RecordingGetDict):
+        assert tc.get_calls == []
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_function_container_refused(factory):
+    fn = factory({"name": "f", "arguments": '{"k": 1}'})
+    tc = SimpleNamespace(id="tu_x", type="function", function=fn)
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == ""
+    assert resp.tool_calls[0].arguments == {}
+    if isinstance(fn, _RecordingGetDict):
+        assert fn.get_calls == []
+
+
+@pytest.mark.parametrize("factory", [_BenignDictSub, _RecordingGetDict])
+def test_dict_subclass_usage_refused_to_empty(factory):
+    u = factory({"prompt_tokens": 5, "completion_tokens": 7})
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="x", tool_calls=None),
+        finish_reason="stop", usage=u))
+    assert resp.usage == {}
+    if isinstance(u, _RecordingGetDict):
+        assert u.get_calls == []
+
+
+# -- exact list vs list subclass for response envelopes ----------------------
+
+
+def test_list_subclass_choices_refused():
+    choices = _ListSub([SimpleNamespace(
+        message=SimpleNamespace(content="hi", tool_calls=None), finish_reason="stop")])
+    resp = _from_wire(SimpleNamespace(choices=choices, usage=None))
+    assert resp.text is None
+    assert resp.tool_calls == []
+    assert resp.stop_reason == "other"
+
+
+def test_list_subclass_tool_calls_not_iterated():
+    tcs = _ListSub([_tc("t", "f", {})])
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="hi", tool_calls=tcs), finish_reason="stop"))
+    assert resp.text == "hi"
+    assert resp.tool_calls == []
+
+
+def test_exact_list_choices_and_tool_calls_iterated():
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="hi", tool_calls=[_tc("t", "f", {"a": 1})]),
+        finish_reason="tool_calls"))
+    assert resp.text == "hi"
+    assert [t.name for t in resp.tool_calls] == ["f"]
+
+
+# -- hostile / malformed tool-call discriminators ----------------------------
+
+
+def test_hostile_tool_call_type_discriminator_skipped_without_hook():
+    tc = SimpleNamespace(id="t", type=_HostileEq(),
+                         function=SimpleNamespace(name="f", arguments="{}"))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert resp.tool_calls == []             # non-str discriminator → skip; __eq__ never called
+
+
+def test_unknown_string_tool_call_type_skipped():
+    tc = SimpleNamespace(id="t", type="web_search",
+                         function=SimpleNamespace(name="f", arguments="{}"))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert resp.tool_calls == []
+
+
+def test_absent_tool_call_type_defaults_to_function():
+    tc = SimpleNamespace(id="t", function=SimpleNamespace(name="f", arguments='{"a": 1}'))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert [t.name for t in resp.tool_calls] == ["f"]     # missing type → "function"
+
+
+# -- content exact-type ------------------------------------------------------
+
+
+def test_str_subclass_content_ignored():
+    class _S(str):
+        pass
+
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=_S("hi"), tool_calls=None), finish_reason="stop"))
+    assert resp.text is None                 # content kept only when exactly str
+
+
+def test_hostile_content_value_yields_no_text_no_hook():
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=_HostileScalar(), tool_calls=None),
+        finish_reason="stop"))
+    assert resp.text is None                 # non-str content → no TextBlock, no hook
+
+
+# -- supplied id / name values (no truth-testing `or`) -----------------------
+
+
+def test_hostile_id_value_no_truth_hook():
+    tc = SimpleNamespace(id=_HostileScalar(), type="function",
+                         function=SimpleNamespace(name="f", arguments="{}"))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert resp.tool_calls[0].id == ""       # hostile id → ToolUseBlock normalizes, no `or`
+    assert resp.tool_calls[0].name == "f"
+
+
+def test_hostile_name_value_no_truth_hook():
+    tc = SimpleNamespace(id="t", type="function",
+                         function=SimpleNamespace(name=_HostileScalar(), arguments="{}"))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert resp.tool_calls[0].name == ""     # hostile name → ToolUseBlock normalizes, no `or`
+    assert resp.tool_calls[0].id == "t"
+
+
+def test_non_str_id_and_name_normalized_to_empty():
+    tc = SimpleNamespace(id=12345, type="function",
+                         function=SimpleNamespace(name=None, arguments="{}"))
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content=None, tool_calls=[tc]),
+        finish_reason="tool_calls"))
+    assert resp.tool_calls[0].id == ""
+    assert resp.tool_calls[0].name == ""
+
+
+# -- finish_reason matrix ----------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("stop", "end_turn"),
+    ("tool_calls", "tool_use"),
+    ("length", "max_tokens"),
+    ("content_filter", "other"),
+    ("function_call", "tool_use"),
+    ("stop_sequence", "stop_sequence"),
+    ("", "end_turn"),
+    ("totally-unknown", "other"),
+])
+def test_finish_reason_string_cases(raw, expected):
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="x", tool_calls=None), finish_reason=raw))
+    assert resp.stop_reason == expected
+
+
+def test_finish_reason_none_is_end_turn():
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="x", tool_calls=None), finish_reason=None))
+    assert resp.stop_reason == "end_turn"
+
+
+def test_finish_reason_missing_is_end_turn():
+    resp = _from_wire(SimpleNamespace(choices=[{"message": {"content": "x"}}], usage=None))
+    assert resp.stop_reason == "end_turn"
+
+
+def test_finish_reason_unhashable_list_is_other_without_hashing():
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="x", tool_calls=None), finish_reason=["x"]))
+    assert resp.stop_reason == "other"       # non-str → "other"; never hashed into the map
+
+
+def test_finish_reason_hostile_is_other_without_hook():
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(content="x", tool_calls=None), finish_reason=_HostileEq()))
+    assert resp.stop_reason == "other"       # non-str → no __eq__ / __hash__
+
+
+# -- mixed accepted / refused tool calls, order preserved --------------------
+
+
+def test_mixed_accepted_and_refused_tool_calls_preserve_order():
+    good1 = _tc("id1", "alpha", {"a": 1})
+    bad_type = SimpleNamespace(id="idX", type="web_search",
+                               function=SimpleNamespace(name="x", arguments="{}"))
+    sub_tc = _BenignDictSub({"id": "idY", "type": "function",
+                             "function": {"name": "y", "arguments": "{}"}})
+    hostile_type = SimpleNamespace(id="idZ", type=_HostileEq(),
+                                   function=SimpleNamespace(name="z", arguments="{}"))
+    good2 = _tc("id2", "beta", {"b": 2})
+    resp = _from_wire(_wrap(
+        message=SimpleNamespace(
+            content=None, tool_calls=[good1, bad_type, sub_tc, hostile_type, good2]),
+        finish_reason="tool_calls"))
+    assert [t.name for t in resp.tool_calls] == ["alpha", "beta"]
+    assert [t.id for t in resp.tool_calls] == ["id1", "id2"]
+    assert [t.arguments for t in resp.tool_calls] == [{"a": 1}, {"b": 2}]
+
+
+# -- accepted-value / output-byte behavior preserved -------------------------
+
+
+def test_exact_object_happy_path_roundtrips_unchanged():
+    """Ordinary SDK-object response still produces the exact accepted output —
+    text, tool call, mapped stop reason, and translated usage bytes."""
+    resp = _from_wire(_make_response(
+        content="checking",
+        tool_calls=[_tc("tu_1", "get_params", {"verbose": True})],
+        finish_reason="tool_calls",
+        prompt_tokens=11, completion_tokens=22))
+    assert resp.text == "checking"
+    assert resp.tool_calls[0].id == "tu_1"
+    assert resp.tool_calls[0].name == "get_params"
+    assert resp.tool_calls[0].arguments == {"verbose": True}
+    assert resp.stop_reason == "tool_use"
+    assert resp.usage == {"input_tokens": 11, "output_tokens": 22}
