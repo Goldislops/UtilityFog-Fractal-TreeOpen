@@ -44,6 +44,7 @@ from typing import Any, Optional
 
 import pytest
 
+import scripts.agent_backends.openai_compat_backend as openai_compat_backend_module
 from scripts.agent_backends import (
     AgentResponse,
     Message,
@@ -518,6 +519,136 @@ def test_env_var_api_key_does_not_trigger_dummy(monkeypatch):
         model="llama3.1:8b",
     )
     assert backend.name == "openai-compat"
+
+
+# -- argument-decode totality: tool_call.arguments is model/server-reachable
+#    and can be ANY value, so decoding must be total and hook-free. Exact
+#    strings: JSON object kept; other valid JSON → {}; undecodable or parser
+#    recursion → {"_raw_arguments": original}. Empty/absent → {}. Exact dicts
+#    pass through to ToolUseBlock's hardened normalization. Everything else →
+#    a fresh {} with no __bool__/__iter__/keys/__str__ hook ever invoked. ----
+
+
+def _raw_tc(arguments: Any) -> SimpleNamespace:
+    """A tool_call whose `arguments` is an arbitrary raw wire value (not
+    necessarily the JSON string a well-behaved SDK produces)."""
+    return SimpleNamespace(
+        id="tu_raw", type="function",
+        function=SimpleNamespace(name="f", arguments=arguments),
+    )
+
+
+def _complete_with_arguments(arguments: Any) -> AgentResponse:
+    client = _MockClient()
+    client.chat.completions.response = _make_response(
+        content=None, tool_calls=[_raw_tc(arguments)], finish_reason="tool_calls",
+    )
+    backend = OpenAICompatBackend(client=client)
+    return backend.complete(messages=[Message(role="user", content="x")], tools=[])
+
+
+def test_empty_string_arguments_normalize_to_empty_dict():
+    """'' is how several servers encode a no-argument call; it must become
+    {} — not the {"_raw_arguments": ""} shape the old json.loads('')
+    ValueError path produced."""
+    resp = _complete_with_arguments("")
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_absent_arguments_normalize_to_empty_dict():
+    """arguments=None (field absent) must also become {}."""
+    resp = _complete_with_arguments(None)
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_json_array_scalar_and_null_arguments_normalize_to_empty_dict():
+    """Valid JSON that is not an object carries no argument mapping; the
+    backend itself normalizes to {} rather than pushing a non-dict into
+    the ToolUseBlock boundary."""
+    for raw in ("[1, 2]", "5", '"s"', "true", "null"):
+        resp = _complete_with_arguments(raw)
+        assert resp.tool_calls[0].arguments == {}, f"arguments={raw!r}"
+
+
+def test_valid_json_object_arguments_retained():
+    """The ordinary path is untouched: a JSON object keeps its content."""
+    resp = _complete_with_arguments('{"verbose": true, "n": 5}')
+    assert resp.tool_calls[0].arguments == {"verbose": True, "n": 5}
+
+
+def test_pair_list_arguments_are_not_dict_converted():
+    """The old eager dict(...) manufactured {"a": 1} from a pair-list wire
+    value; non-string values must normalize to {} without conversion."""
+    resp = _complete_with_arguments([["a", 1]])
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_exact_dict_arguments_pass_through():
+    """Some local servers return arguments as an already-decoded dict; an
+    exact dict continues through ToolUseBlock's hardened normalization."""
+    resp = _complete_with_arguments({"k": 1})
+    assert resp.tool_calls[0].arguments == {"k": 1}
+
+
+def test_hostile_arguments_value_never_has_hooks_invoked():
+    """A direct wire value whose truthiness / iteration / mapping-conversion /
+    string-conversion hooks raise must decode to {} with no hook executed
+    (the old path invoked __bool__ via `or ""` and str() in the fallback)."""
+
+    class Hostile:
+        def __bool__(self):
+            raise AssertionError("hook invoked: __bool__")
+
+        def __len__(self):
+            raise AssertionError("hook invoked: __len__")
+
+        def __iter__(self):
+            raise AssertionError("hook invoked: __iter__")
+
+        def keys(self):
+            raise AssertionError("hook invoked: keys()")
+
+        def __str__(self):
+            raise AssertionError("hook invoked: __str__")
+
+    resp = _complete_with_arguments(Hostile())
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_str_subclass_arguments_normalize_to_empty_dict():
+    """A str subclass is not an exact string (subclasses can override
+    behavior), so it takes the hook-free {} path, never the parser."""
+
+    class WeirdStr(str):
+        pass
+
+    resp = _complete_with_arguments(WeirdStr('{"a": 1}'))
+    assert resp.tool_calls[0].arguments == {}
+
+
+def test_parser_recursion_error_uses_raw_fallback(monkeypatch):
+    """RecursionError raised by the JSON parser on an ordinary exact-string
+    value must land in the same {"_raw_arguments": ...} fallback as invalid
+    JSON, not escape the backend. Deterministic parser substitution — no
+    dependence on a platform-specific nesting depth."""
+    marker = '{"deep": "payload"}'
+    real_loads = json.loads
+
+    def fake_loads(s, *args, **kwargs):
+        if s == marker:
+            raise RecursionError("maximum recursion depth exceeded")
+        return real_loads(s, *args, **kwargs)
+
+    monkeypatch.setattr(openai_compat_backend_module.json, "loads", fake_loads)
+    resp = _complete_with_arguments(marker)
+    assert resp.tool_calls[0].arguments == {"_raw_arguments": marker}
+
+
+def test_malformed_arguments_fallback_shape_exact():
+    """The established fallback keeps the ORIGINAL string under
+    _raw_arguments — exact shape, no str() re-wrapping."""
+    resp = _complete_with_arguments("{not valid")
+    assert resp.tool_calls[0].arguments == {"_raw_arguments": "{not valid"}
 
 
 # -- regression: orchestrator can swap backends seamlessly ------------------
