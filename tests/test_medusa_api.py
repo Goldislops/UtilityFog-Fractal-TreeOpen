@@ -14,24 +14,34 @@ port is bound, no OS process is launched, and no real repository data is read
 (the snapshot directory is monkeypatched to a temp path and any snapshot file
 is a synthetic byte blob — /api/status only stats it, never loads it).
 
-The event bus (a ZMQ PUB socket + telemetry watcher thread) is disabled BEFORE
-the module is imported, so importing it here binds no socket and starts no
-thread.
+The event bus (a ZMQ PUB socket + telemetry watcher thread) is disabled for the
+duration of importing the module — via a scoped ``patch.dict`` that restores
+the prior environment immediately afterward — so importing binds no socket and
+starts no thread, and leaks no env flag into the rest of the pytest process.
 """
 
 from __future__ import annotations
 
 import os
-
-# Disable the event-bus PUB socket / watcher thread before importing the module
-# under test, so import binds no network port and starts no background thread.
-os.environ["MEDUSA_EVENT_BUS_DISABLED"] = "1"
+from unittest import mock
 
 import pytest
 
 pytest.importorskip("flask")  # flask is an optional dependency for the REST API.
 
-from scripts import medusa_api  # noqa: E402  (import after env flag is set)
+# Record the ambient environment before the scoped import so a test can prove
+# the override restored it exactly — including the originally-absent case.
+_EVENT_BUS_ENV_KEY = "MEDUSA_EVENT_BUS_DISABLED"
+_ENV_BEFORE_IMPORT = os.environ.get(_EVENT_BUS_ENV_KEY)
+
+# Disable the event-bus PUB socket / watcher thread ONLY for the duration of
+# importing the module under test, then restore the exact prior environment.
+# Unlike a bare ``os.environ`` assignment, ``patch.dict`` leaks nothing into
+# the rest of the pytest process (Jack re-audit: collection-time containment).
+with mock.patch.dict(os.environ, {_EVENT_BUS_ENV_KEY: "1"}):
+    from scripts import medusa_api  # noqa: E402  (import inside the scoped override)
+
+_ENV_AFTER_IMPORT = os.environ.get(_EVENT_BUS_ENV_KEY)
 
 
 # -- fixtures ---------------------------------------------------------------
@@ -197,12 +207,47 @@ def test_configured_port_zero_is_reported_verbatim(client, snapshot_data_dir):
     assert body["api_port"] == 0
 
 
+def test_main_entry_point_configures_port_before_app_run(monkeypatch):
+    """Production entry-point regression (Jack re-audit): main() must drive the
+    real parse -> configure_runtime -> app.run chain, wiring the configured
+    port BEFORE app.run. app.run is monkeypatched to capture its arguments and
+    the config value at the instant it is invoked — socket-free, no server, no
+    bound port. Fails if configure_runtime(args) is removed from main() or
+    moved after app.run (the captured port-at-run would not be 9090)."""
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        # Snapshot app config at the exact moment app.run is invoked.
+        captured["api_port_at_run"] = medusa_api.app.config.get("API_PORT")
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(medusa_api.app, "run", fake_run)
+    medusa_api.main(["--host", "127.0.0.1", "--port", "9090"])
+
+    assert captured["api_port_at_run"] == 9090          # configured BEFORE run
+    assert medusa_api.app.config["API_PORT"] == 9090
+    assert captured["kwargs"]["host"] == "127.0.0.1"
+    assert captured["kwargs"]["port"] == 9090
+    assert captured["kwargs"]["debug"] is False
+    assert captured["kwargs"]["threaded"] is True
+
+
 # -- event-bus disabled during tests ----------------------------------------
 
 
-def test_event_bus_disabled_during_tests():
-    """The module was imported with the event bus disabled: no publisher and
-    no watcher were constructed (no socket bound, no thread started)."""
-    assert os.environ.get("MEDUSA_EVENT_BUS_DISABLED") == "1"
+def test_event_bus_was_disabled_at_import():
+    """The module was imported with the event bus disabled: neither the ZMQ
+    publisher nor the watcher thread was constructed (no socket bound, no
+    thread started)."""
     assert medusa_api._event_publisher is None
     assert medusa_api._state_watcher is None
+
+
+def test_scoped_import_restored_the_environment_exactly():
+    """The scoped import override restored the ambient environment exactly —
+    including when MEDUSA_EVENT_BUS_DISABLED was originally absent (None ==
+    None) — so this module's collection-time env leakage cannot return. A
+    reintroduced permanent ``os.environ[...] = "1"`` would make the after-value
+    differ from the before-value and fail this pin."""
+    assert _ENV_AFTER_IMPORT == _ENV_BEFORE_IMPORT

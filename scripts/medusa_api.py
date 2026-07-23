@@ -449,8 +449,13 @@ def configure_runtime(args):
     return app
 
 
-if __name__ == "__main__":
-    args = _build_arg_parser().parse_args()
+def main(argv=None):
+    """Production entry point. Parses the public CLI (``argv`` defaults to
+    ``sys.argv[1:]``), wires the configured port into runtime config, prints
+    the startup banner, and runs the server. Kept small and importable so a
+    test can drive the real parse -> configure_runtime -> app.run chain with
+    ``app.run`` monkeypatched (socket-free)."""
+    args = _build_arg_parser().parse_args(argv)
     configure_runtime(args)
 
     print("=" * 60)
@@ -460,3 +465,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     app.run(host=args.host, port=args.port, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
