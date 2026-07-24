@@ -43,6 +43,23 @@ MEMORY_CHANNEL_DEFS = [
 ]
 
 
+class PortableGenomeError(ValueError):
+    """Structural refusal for malformed portable-genome shapes.
+
+    Raised by :func:`import_genome` for the narrow set of top-level and
+    transition-table structural shapes validated in this module: the genome
+    root, ``format``, ``transition_table``, each source-state mapping, and each
+    source/target state name and neighbor-count key. Subclasses
+    :class:`ValueError` so existing callers that catch ``ValueError`` keep
+    working; the public ``info`` CLI catches this type specifically.
+
+    This does NOT make the whole importer total. Malformed shapes elsewhere in
+    the genome (e.g. non-object ``stochastic``/``contagion``/``metadata`` config
+    sections or the epigenetic snapshot) remain outside this package's scope and
+    still surface as their original exceptions.
+    """
+
+
 def export_genome(filepath, rule_spec, generation=0, ca_step=0, best_fitness=0.0,
                   lattice=None, memory_grid=None, include_epigenetic=False, pretty=True):
     """Export the organism complete genome to a portable JSON file."""
@@ -236,13 +253,22 @@ def import_genome(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
         genome = json.load(f)
 
+    if type(genome) is not dict:
+        raise PortableGenomeError("genome must be a JSON object")
+
     fmt = genome.get("format", {})
+    if type(fmt) is not dict:
+        raise PortableGenomeError("format must be a JSON object")
     if fmt.get("format_id") != "utilityfog-portable-genome":
-        raise ValueError(f"Unknown genome format: {fmt.get('format_id')}")
+        raise PortableGenomeError("unknown genome format")
 
     tt_raw = genome.get("transition_table", {})
+    if type(tt_raw) is not dict:
+        raise PortableGenomeError("transition_table must be a JSON object")
     transitions = {}
     for src_name, mappings in tt_raw.items():
+        if type(mappings) is not dict:
+            raise PortableGenomeError("transition mappings must be a JSON object")
         transitions[src_name] = {}
         for count_str, target_name in mappings.items():
             transitions[src_name][count_str] = target_name
@@ -342,10 +368,20 @@ def import_genome(filepath):
 
     int_table = {}
     for src_name, mappings in transitions.items():
+        if type(src_name) is not str or src_name.upper() not in STATE_NAME_TO_ID:
+            raise PortableGenomeError("transition source state must be a known state name")
         src_id = STATE_NAME_TO_ID[src_name.upper()]
         int_table[src_id] = {}
         for count_str, target_name in mappings.items():
-            int_table[src_id][int(count_str)] = STATE_NAME_TO_ID[target_name.upper()]
+            if type(count_str) is not str:
+                raise PortableGenomeError("transition neighbor count must be an integer string")
+            try:
+                neighbor_count = int(count_str)
+            except ValueError:
+                raise PortableGenomeError("transition neighbor count must be an integer string") from None
+            if type(target_name) is not str or target_name.upper() not in STATE_NAME_TO_ID:
+                raise PortableGenomeError("transition target state must be a known state name")
+            int_table[src_id][neighbor_count] = STATE_NAME_TO_ID[target_name.upper()]
 
     ca_config = CAConfig(
         stochastic=stoch_cfg, contagion=contagion_cfg, decay=decay_cfg,
@@ -414,7 +450,13 @@ if __name__ == "__main__":
                              include_epigenetic=args.include_epigenetic)
         print(f"Genome exported to: {path} ({path.stat().st_size:,} bytes)")
     elif args.command == "info":
-        _, config, md = import_genome(args.genome)
+        try:
+            _, config, md = import_genome(args.genome)
+        except PortableGenomeError as exc:
+            # Only structural refusals route through argparse's ordinary error
+            # path (exit code 2). JSON syntax errors, filesystem errors,
+            # MemoryError and unrelated exceptions are deliberately NOT caught.
+            parser.error(str(exc))
         for k in ["name", "version", "author", "exported_at", "source_generation", "source_ca_step", "best_fitness"]:
             print(f"  {k}: {md.get(k, '?')}")
         print(f"  states: {len(config.transition_table)} with transitions")
