@@ -12,6 +12,11 @@ Covers:
   - ToolUseBlock value-shape normalization: exact-str id/name bounded to
     256/128 chars, exact-dict input, hostile shapes replaced without
     invoking any conversion/length/representation hook.
+  - ToolResultBlock metadata shape totality: tool_use_id kept only as an
+    exact built-in str (no length ceiling, else ""), is_error kept only as
+    an exact built-in bool (else exact False), so neither can carry a
+    foreign object into a provider wire dict or a hostile __bool__ into an
+    encoder.
 """
 
 from __future__ import annotations
@@ -743,6 +748,291 @@ def test_openai_encoder_total_for_malformed_text_and_content():
     assert OpenAICompatBackend._message_to_wire(
         Message(role="user", content=[ToolResultBlock(tool_use_id="t", content=[5])])
     ) == [{"role": "tool", "tool_call_id": "t", "content": "[]"}]
+
+
+# -- ToolResultBlock.tool_use_id / is_error metadata shape totality ----------
+#
+# The two documented residuals left by #412 (see the ToolResultBlock
+# docstring). Both fields are model/tool-reachable and were previously
+# unnormalized, so a non-str/hostile `tool_use_id` flowed straight into both
+# providers' outbound wire dicts, and `is_error` was truth-tested by both
+# encoders — letting a hostile `__bool__` escape and letting a malformed
+# truthy value (e.g. `1`, `"yes"`) produce false error semantics.
+# Construction now proves `tool_use_id` an exact built-in `str` (byte-for-
+# byte, no length ceiling, reusing `_exact_str`, else "") and `is_error` an
+# exact built-in `bool` (`True`/`False` by `type(x) is bool` identity, else
+# exact `False`) — without invoking any hook on a refused value.
+#
+# Failing-before (observed on the pre-fix base, on-seat): a hostile
+# `is_error.__bool__` raised out of BOTH encoders; a malformed truthy
+# `is_error` set the Anthropic `is_error` flag + the OpenAI "[ERROR] "
+# prefix; a non-str/hostile `tool_use_id` survived construction and entered
+# BOTH wire dicts. Passing-after: every case below is total and correct.
+# Assertions use type()/is/`in`/`==`-against-builtins and never invoke a
+# refused value's own equality, hash, or representation hooks.
+
+
+class _HostileBool:
+    """Object whose truth, comparison, hash, and representation hooks all
+    raise — proves `is_error` normalization refuses it by exact-type identity
+    (`type(x) is bool`) without calling bool(), ==, !=, hash(), str(), repr(),
+    iteration, or length. (`_HostileValue` above omits __eq__/__hash__, which
+    default to identity; this instrument closes that gap for the is_error
+    matrix.)"""
+
+    def __bool__(self):
+        raise _HookCalled("__bool__")
+
+    def __eq__(self, other):
+        raise _HookCalled("__eq__")
+
+    def __ne__(self, other):
+        raise _HookCalled("__ne__")
+
+    def __hash__(self):
+        raise _HookCalled("__hash__")
+
+    def __str__(self):
+        raise _HookCalled("__str__")
+
+    def __repr__(self):
+        raise _HookCalled("__repr__")
+
+    def __len__(self):
+        raise _HookCalled("__len__")
+
+    def __iter__(self):
+        raise _HookCalled("__iter__")
+
+    def __index__(self):
+        raise _HookCalled("__index__")
+
+    def __int__(self):
+        raise _HookCalled("__int__")
+
+
+# Refused tool_use_id shapes (plain builtins). str subclasses + hostile
+# objects are exercised in dedicated bodies below so no hook runs.
+_REFUSED_ID_BUILTINS = [None, 0, 123, True, False, 1.5, b"bytes", ["l"], ("t",), {"d": 1}, {1, 2}]
+_REFUSED_ID_IDS = ["none", "int0", "int", "true", "false", "float", "bytes", "list", "tuple", "dict", "set"]
+
+# Refused is_error shapes (plain builtins): 0/1, None, empty/non-empty
+# strings, bytes, list, tuple, dict, set, floats — every one must become
+# exact built-in False.
+_MALFORMED_IS_ERROR = [
+    0, 1, 2, None, "", "yes", b"", b"x", [], [1], (), ("t",),
+    {}, {"k": 1}, set(), {1, 2}, 0.0, 3.14,
+]
+_MALFORMED_IS_ERROR_IDS = [
+    "int0", "int1", "int2", "none", "empty_str", "nonempty_str",
+    "empty_bytes", "nonempty_bytes", "empty_list", "nonempty_list",
+    "empty_tuple", "nonempty_tuple", "empty_dict", "nonempty_dict",
+    "empty_set", "nonempty_set", "float0", "float",
+]
+
+
+# -- tool_use_id: exact-string retention ------------------------------------
+
+
+def test_tool_result_tool_use_id_exact_str_retained_byte_for_byte():
+    for value in ("tu_1", "", "  spaced  ", "line\nbreak\tid", "🌟unicode✓"):
+        b = ToolResultBlock(tool_use_id=value, content="c")
+        assert type(b.tool_use_id) is str
+        assert b.tool_use_id == value
+
+
+def test_tool_result_tool_use_id_no_length_ceiling_introduced():
+    long_id = "z" * 100_000
+    b = ToolResultBlock(tool_use_id=long_id, content="c")
+    assert b.tool_use_id == long_id
+    assert len(b.tool_use_id) == 100_000  # no new ceiling (unlike ToolUseBlock.id)
+
+
+# -- tool_use_id: refused shapes become exact "" ----------------------------
+
+
+@pytest.mark.parametrize("value", _REFUSED_ID_BUILTINS, ids=_REFUSED_ID_IDS)
+def test_tool_result_tool_use_id_refuses_non_str_builtins(value):
+    b = ToolResultBlock(tool_use_id=value, content="c")
+    assert type(b.tool_use_id) is str
+    assert b.tool_use_id == ""  # no conversion, no type-name reporting
+
+
+def test_tool_result_tool_use_id_refuses_plain_str_subclass():
+    b = ToolResultBlock(tool_use_id=_PlainStrSub("sub"), content="c")
+    assert type(b.tool_use_id) is str
+    assert b.tool_use_id == ""  # exact-type gate, not isinstance
+
+
+def test_tool_result_tool_use_id_refuses_hostile_str_subclass_without_hooks():
+    b = ToolResultBlock(tool_use_id=_HostileStr("evil"), content="c")
+    assert b.tool_use_id == ""
+
+
+def test_tool_result_tool_use_id_refuses_hostile_object_without_hooks():
+    b = ToolResultBlock(tool_use_id=_HostileValue(), content="c")
+    assert b.tool_use_id == ""
+
+
+def test_tool_result_tool_use_id_and_content_gated_independently():
+    # A hostile value in one field never disturbs a well-formed value in
+    # another, and no hook runs on the refused one.
+    b1 = ToolResultBlock(tool_use_id=_HostileValue(), content="keep")
+    assert b1.tool_use_id == ""
+    assert b1.content == "keep"
+    b2 = ToolResultBlock(tool_use_id="keep", content=_HostileValue())
+    assert b2.tool_use_id == "keep"
+    assert b2.content == ""
+
+
+def test_tool_result_tool_use_id_remains_frozen_after_normalization():
+    b = ToolResultBlock(tool_use_id=123, content="c")
+    assert b.tool_use_id == ""
+    with pytest.raises(Exception):
+        b.tool_use_id = "x"  # frozen dataclass → FrozenInstanceError
+
+
+# -- is_error: exact True / False retention ---------------------------------
+
+
+def test_tool_result_is_error_retains_exact_true_and_false():
+    bt = ToolResultBlock(tool_use_id="t", content="c", is_error=True)
+    assert type(bt.is_error) is bool
+    assert bt.is_error is True
+    bf = ToolResultBlock(tool_use_id="t", content="c", is_error=False)
+    assert type(bf.is_error) is bool
+    assert bf.is_error is False
+
+
+def test_tool_result_is_error_defaults_to_exact_false():
+    b = ToolResultBlock(tool_use_id="t", content="c")
+    assert type(b.is_error) is bool
+    assert b.is_error is False
+
+
+# -- is_error: refused shapes become exact False ----------------------------
+
+
+@pytest.mark.parametrize("value", _MALFORMED_IS_ERROR, ids=_MALFORMED_IS_ERROR_IDS)
+def test_tool_result_is_error_refuses_non_bool_builtins(value):
+    b = ToolResultBlock(tool_use_id="t", content="c", is_error=value)
+    assert type(b.is_error) is bool
+    assert b.is_error is False  # exact False; no bool()/==/hash on the value
+
+
+def test_tool_result_is_error_refuses_hostile_objects_without_hooks():
+    # Constructing must not raise _HookCalled: no bool()/==/hash()/repr on it.
+    for hostile in (_HostileValue(), _HostileBool()):
+        b = ToolResultBlock(tool_use_id="t", content="c", is_error=hostile)
+        assert type(b.is_error) is bool
+        assert b.is_error is False
+
+
+def test_tool_result_is_error_remains_frozen_after_normalization():
+    b = ToolResultBlock(tool_use_id="t", content="c", is_error="yes")
+    assert b.is_error is False
+    with pytest.raises(Exception):
+        b.is_error = True  # frozen dataclass → FrozenInstanceError
+
+
+# -- both encoders total over malformed tool_use_id (exact "" wire field) ---
+
+
+def test_anthropic_encoder_refused_tool_use_id_becomes_exact_empty_str():
+    for bad in (None, 123, _HostileValue(), _HostileStr("x"), _PlainStrSub("s"), ["l"]):
+        w = AnthropicBackend._block_to_wire(
+            ToolResultBlock(tool_use_id=bad, content="ok")
+        )
+        # exact empty string — NOT a converted, represented, or retained
+        # foreign object
+        assert type(w["tool_use_id"]) is str
+        assert w["tool_use_id"] == ""
+        assert w["content"] == "ok"
+        assert "is_error" not in w
+
+
+def test_openai_encoder_refused_tool_use_id_becomes_exact_empty_str():
+    for bad in (None, 123, _HostileValue(), _HostileStr("x"), _PlainStrSub("s"), ["l"]):
+        out = OpenAICompatBackend._message_to_wire(
+            Message(role="user", content=[ToolResultBlock(tool_use_id=bad, content="ok")])
+        )
+        assert out == [{"role": "tool", "tool_call_id": "", "content": "ok"}]
+
+
+# -- both encoders total over malformed is_error (no error semantics) -------
+
+
+def test_anthropic_encoder_malformed_is_error_never_flags_error():
+    # Pre-fix: `1`/`"yes"`/`[1]` set the flag; a hostile __bool__ escaped.
+    for bad in (1, "yes", "true", [1], {1: 1}, 3.14, _HostileValue(), _HostileBool()):
+        w = AnthropicBackend._block_to_wire(
+            ToolResultBlock(tool_use_id="t", content="ok", is_error=bad)
+        )
+        assert "is_error" not in w  # normalized False → no flag
+        assert w["content"] == "ok"
+
+
+def test_openai_encoder_malformed_is_error_never_prefixes_error():
+    for bad in (1, "yes", "true", [1], {1: 1}, 3.14, _HostileValue(), _HostileBool()):
+        out = OpenAICompatBackend._message_to_wire(
+            Message(role="user", content=[ToolResultBlock(tool_use_id="t", content="ok", is_error=bad)])
+        )
+        assert out == [{"role": "tool", "tool_call_id": "t", "content": "ok"}]
+
+
+# -- accepted-value wire retention (both providers) + exact True semantics ---
+
+
+def test_anthropic_encoder_accepted_metadata_wire_unchanged():
+    # Exact True retains the established Anthropic is_error:true flag.
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="tu_1", content="ok", is_error=True)
+    ) == {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok", "is_error": True}
+    # Exact False emits no flag (established behavior).
+    assert AnthropicBackend._block_to_wire(
+        ToolResultBlock(tool_use_id="tu_2", content="ok", is_error=False)
+    ) == {"type": "tool_result", "tool_use_id": "tu_2", "content": "ok"}
+
+
+def test_openai_encoder_accepted_metadata_wire_unchanged():
+    # Exact True retains the established OpenAI "[ERROR] " prefix.
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="user", content=[ToolResultBlock(tool_use_id="tu_1", content="ok", is_error=True)])
+    ) == [{"role": "tool", "tool_call_id": "tu_1", "content": "[ERROR] ok"}]
+    assert OpenAICompatBackend._message_to_wire(
+        Message(role="user", content=[ToolResultBlock(tool_use_id="tu_2", content="ok", is_error=False)])
+    ) == [{"role": "tool", "tool_call_id": "tu_2", "content": "ok"}]
+
+
+# -- integration: every field malformed at once stays total -----------------
+
+
+def test_both_encoders_total_over_fully_malformed_tool_result():
+    b = ToolResultBlock(
+        tool_use_id=_HostileValue(), content=_HostileValue(), is_error=_HostileValue()
+    )
+    assert AnthropicBackend._block_to_wire(b) == {
+        "type": "tool_result",
+        "tool_use_id": "",
+        "content": "",
+    }
+    assert OpenAICompatBackend._message_to_wire(Message(role="user", content=[b])) == [
+        {"role": "tool", "tool_call_id": "", "content": ""}
+    ]
+
+
+def test_tool_result_content_normalization_unchanged_alongside_metadata():
+    # The #412 content normalization (str byte-for-byte; exact-list filtered
+    # to exact built-in blocks, in order; else "") is unchanged while the two
+    # metadata fields normalize independently.
+    blocks = [TextBlock(text="a"), ToolUseBlock(id="u", name="n"), 5, "x", TextBlock(text="b")]
+    b = ToolResultBlock(tool_use_id=123, content=blocks, is_error="yes")
+    assert type(b.content) is list
+    assert [type(x) for x in b.content] == [TextBlock, ToolUseBlock, TextBlock]
+    assert [x for x in b.content if type(x) is TextBlock][0].text == "a"
+    assert b.content[-1].text == "b"  # order preserved
+    assert b.tool_use_id == ""
+    assert b.is_error is False
 
 
 # -- AgentBackend ABC --------------------------------------------------------
