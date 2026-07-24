@@ -179,10 +179,115 @@ def test_state_watcher_ignores_malformed_json(tmp_path):
     try:
         watcher = StateWatcher(pub, tmp_path)
         (tmp_path / "telemetry_bad.json").write_text("{not valid json")
-        # poll_once reports it as "attempted" but _seen is kept clean for retry;
-        # we just verify no event leaked out.
-        watcher.poll_once()
+        # A malformed file publishes nothing, is NOT counted as a published
+        # event, and is left retry-eligible (kept out of _seen) so a later poll
+        # can retry it once it becomes valid.
+        assert watcher.poll_once() == 0
         assert sub.recv(timeout_ms=100) is None
+        assert "telemetry_bad.json" not in watcher._seen
+    finally:
+        sub.close()
+        pub.close()
+
+
+def test_state_watcher_incomplete_then_completed_retries_and_emits_once(tmp_path):
+    """Regression (retry + accounting): a telemetry file caught mid-write must
+    not be consumed. The first poll returns 0 and leaves the name retry-eligible;
+    once the file is completed a later poll emits exactly one correct event and
+    marks it seen; a further poll is a no-op (no duplicate).
+    """
+    pub = EventPublisher(_unique_inproc_endpoint())
+    sub = EventSubscriber(pub.endpoint, topics=[TOPIC_TELEMETRY_5MIN])
+    time.sleep(0.05)
+    try:
+        watcher = StateWatcher(pub, tmp_path)
+        name = "telemetry_20260724T090000.json"
+        path = tmp_path / name
+
+        # 1. Incomplete (mid-write) JSON: no event, count 0, name retry-eligible.
+        path.write_text('{"gen": ')  # truncated → json.loads raises ValueError
+        assert watcher.poll_once() == 0
+        assert sub.recv(timeout_ms=100) is None
+        assert name not in watcher._seen
+
+        # 2. Complete the same file: the next poll emits exactly one event.
+        telemetry = {"gen": 1_500_001, "entropy": 0.5}
+        path.write_text(json.dumps(telemetry))
+        assert watcher.poll_once() == 1
+        msg = sub.recv(timeout_ms=500)
+        assert msg is not None
+        topic, _ts, payload = msg
+        assert topic == TOPIC_TELEMETRY_5MIN
+        assert payload["file"] == name
+        assert payload["telemetry"] == telemetry
+        assert name in watcher._seen
+
+        # 3. A further poll: no duplicate.
+        assert watcher.poll_once() == 0
+        assert sub.recv(timeout_ms=100) is None
+    finally:
+        sub.close()
+        pub.close()
+
+
+def test_state_watcher_mixed_poll_counts_only_valid_and_retains_incomplete(tmp_path):
+    """Regression (mixed batch): a single poll containing one valid and one
+    incomplete file counts/emits only the valid one and retains the incomplete
+    one for a later retry.
+    """
+    pub = EventPublisher(_unique_inproc_endpoint())
+    sub = EventSubscriber(pub.endpoint, topics=[TOPIC_TELEMETRY_5MIN])
+    time.sleep(0.05)
+    try:
+        watcher = StateWatcher(pub, tmp_path)
+        good_name = "telemetry_aaa_good.json"
+        bad_name = "telemetry_bbb_incomplete.json"
+        good = {"gen": 7, "ok": True}
+        (tmp_path / good_name).write_text(json.dumps(good))
+        (tmp_path / bad_name).write_text('{"gen":')  # incomplete
+
+        # Only the valid file is counted and emitted.
+        assert watcher.poll_once() == 1
+        msg = sub.recv(timeout_ms=500)
+        assert msg is not None
+        _topic, _ts, payload = msg
+        assert payload["file"] == good_name
+        assert payload["telemetry"] == good
+        assert sub.recv(timeout_ms=100) is None  # no second event
+
+        assert good_name in watcher._seen        # valid marked seen
+        assert bad_name not in watcher._seen      # incomplete retained for retry
+
+        # Completing the incomplete file lets a later poll emit it exactly once.
+        (tmp_path / bad_name).write_text(json.dumps({"gen": 8}))
+        assert watcher.poll_once() == 1
+        msg2 = sub.recv(timeout_ms=500)
+        assert msg2 is not None
+        assert msg2[2]["file"] == bad_name
+        assert bad_name in watcher._seen
+    finally:
+        sub.close()
+        pub.close()
+
+
+def test_state_watcher_transient_read_failure_is_retry_eligible(tmp_path):
+    """Regression (caught read-failure path): a glob-matching entry that cannot
+    be read as a text file (here a directory) exercises the OSError arm of
+    _publish_for. poll_once must count 0, emit nothing, and leave it
+    retry-eligible rather than consuming it.
+    """
+    pub = EventPublisher(_unique_inproc_endpoint())
+    sub = EventSubscriber(pub.endpoint, topics=[TOPIC_TELEMETRY_5MIN])
+    time.sleep(0.05)
+    try:
+        watcher = StateWatcher(pub, tmp_path)
+        # A directory whose name matches the telemetry glob: read_text() raises
+        # an OSError subclass (IsADirectoryError / PermissionError).
+        dir_name = "telemetry_readfail.json"
+        (tmp_path / dir_name).mkdir()
+        assert watcher.poll_once() == 0
+        assert sub.recv(timeout_ms=100) is None
+        assert dir_name not in watcher._seen
     finally:
         sub.close()
         pub.close()
