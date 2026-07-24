@@ -50,6 +50,21 @@ STATE_PRINT_COLORS = {
 STATE_NAMES = {0: "VOID", 1: "STRUCTURAL", 2: "COMPUTE", 3: "ENERGY", 4: "SENSOR"}
 
 
+class DandelionGenomeError(ValueError):
+    """Refusal for a non-object genome root on the compression / ``info`` path.
+
+    Raised by :func:`genome_to_compressed_bytes` (and the public ``info`` path)
+    when a genome JSON file's root is not a JSON object, before any object
+    operation such as ``.pop()``. A subclass of :class:`ValueError`; the public
+    ``qr`` / ``info`` CLI branches catch this type specifically.
+
+    Scope: this covers only the non-object-root refusal. It is NOT a claim of
+    whole-module or whole-pipeline totality — other malformed shapes (and the
+    separate empty-GLB-mesh residual) remain out of scope and keep their
+    existing behavior.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Seed 1: QR Code Generator
 # ---------------------------------------------------------------------------
@@ -58,6 +73,9 @@ def genome_to_compressed_bytes(genome_path: str) -> bytes:
     """Load a genome JSON, strip epigenetic data, minify, and zlib compress."""
     with open(genome_path, "r") as f:
         genome = json.load(f)
+
+    if type(genome) is not dict:
+        raise DandelionGenomeError("genome must be a JSON object")
 
     # Strip epigenetic snapshot (too large for QR)
     genome.pop("epigenetic_snapshot", None)
@@ -605,12 +623,19 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "qr":
-        meta = generate_qr(
-            args.genome,
-            output_path=args.output,
-            box_size=args.box_size,
-            error_correction=args.error_correction,
-        )
+        try:
+            meta = generate_qr(
+                args.genome,
+                output_path=args.output,
+                box_size=args.box_size,
+                error_correction=args.error_correction,
+            )
+        except DandelionGenomeError as exc:
+            # Route only the JSON-object refusal through argparse (exit code 2).
+            # The optional-qrcode ImportError and QR-library errors are NOT caught
+            # here; the qrcode dependency check keeps its original ordering (it
+            # runs first inside generate_qr, before the genome is loaded).
+            parser.error(str(exc))
         print(f"QR Code generated: {meta['output_path']}")
         print(f"  Original JSON:    {meta['original_json_bytes']:,} bytes")
         print(f"  Minified:         {meta['minified_bytes']:,} bytes")
@@ -624,13 +649,21 @@ def main(argv=None):
         print(f"  Compression:      {cr:.1f}% reduction")
 
     elif args.command == "info":
-        compressed = genome_to_compressed_bytes(args.genome)
-        b85 = compressed_to_b85(compressed)
-        with open(args.genome, "r") as f:
-            orig = f.read()
-        genome = json.loads(orig)
-        genome.pop("epigenetic_snapshot", None)
-        minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
+        try:
+            compressed = genome_to_compressed_bytes(args.genome)
+            b85 = compressed_to_b85(compressed)
+            with open(args.genome, "r") as f:
+                orig = f.read()
+            genome = json.loads(orig)
+            if type(genome) is not dict:
+                raise DandelionGenomeError("genome must be a JSON object")
+            genome.pop("epigenetic_snapshot", None)
+            minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
+        except DandelionGenomeError as exc:
+            # Only the JSON-object refusal routes through argparse (exit code 2).
+            # JSON syntax errors, filesystem errors and unrelated exceptions are
+            # deliberately NOT caught here.
+            parser.error(str(exc))
 
         print(f"Genome: {args.genome}")
         print(f"  Original:   {len(orig.encode()):,} bytes")
