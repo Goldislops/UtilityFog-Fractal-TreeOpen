@@ -220,7 +220,9 @@ class StateWatcher(threading.Thread):
             self._stop.wait(self.poll_interval_s)
 
     def poll_once(self) -> int:
-        """Run one polling iteration. Returns the number of events published.
+        """Run one polling iteration. Returns the number of telemetry artifacts
+        successfully decoded and handed to the publisher (not a proof of wire
+        delivery — see `_publish_for`).
         Exposed for tests — lets them drive the watcher synchronously without
         waiting for the real poll interval.
         """
@@ -233,23 +235,39 @@ class StateWatcher(threading.Thread):
         new_files = [p for p in current if p.name not in self._seen]
         count = 0
         for path in new_files:
-            self._publish_for(path)
-            self._seen.add(path.name)
-            count += 1
+            # Only mark a file seen (and count it) once it has decoded
+            # successfully and publisher.publish() has returned normally. A
+            # file caught mid-write returns failure here and stays unseen, so
+            # a later poll retries it.
+            if self._publish_for(path):
+                self._seen.add(path.name)
+                count += 1
         return count
 
-    def _publish_for(self, path: Path) -> None:
+    def _publish_for(self, path: Path) -> bool:
+        """Decode a telemetry artifact and hand it to the publisher.
+
+        Returns True iff the file decoded cleanly and publisher.publish
+        returned normally. Caught read/JSON failures (e.g. a file still
+        mid-write) return False, so `poll_once` leaves the name unseen and
+        retries it on a later pass; exceptions outside that caught set
+        propagate unchanged.
+
+        Note: a normally-returning publish is not proof of wire delivery — the
+        publisher deliberately drops when closed or at its high-water mark.
+        """
         try:
             raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (OSError, ValueError):
-            # File may still be mid-write; skip this round and try next poll.
-            self._seen.discard(path.name)
-            return
+            # File may still be mid-write or transiently unreadable; report
+            # failure so poll_once leaves the name unseen and retries it.
+            return False
         self.publisher.publish(
             TOPIC_TELEMETRY_5MIN,
             {"file": path.name, "telemetry": data},
         )
+        return True
 
     def stop(self) -> None:
         self._stop.set()
