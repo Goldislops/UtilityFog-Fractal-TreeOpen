@@ -44,12 +44,38 @@ def _bounded_exact_str(value: Any, limit: int) -> str:
     return ""
 
 
+def _exact_str(value: Any) -> str:
+    """Keep `value` unchanged only when it is exactly `str` — no length ceiling.
+
+    A `TextBlock` has no established maximum length, so an accepted exact
+    string is retained byte-for-byte (unlike `_bounded_exact_str`, this
+    applies no slice). str subclasses (whose methods may be overridden) and
+    every other type become "" without any truth, length, iteration,
+    conversion, representation, comparison, attribute, or type-name method
+    being requested on the value.
+    """
+    if type(value) is str:
+        return value
+    return ""
+
+
 @dataclass(frozen=True)
 class TextBlock:
-    """Plain-text assistant or user content."""
+    """Plain-text assistant or user content.
+
+    `text` is model-reachable (backends build these straight from wire/SDK
+    responses, which can yield any JSON/Python type), so construction keeps
+    it only when exactly `str` — byte-for-byte, with no length ceiling — and
+    replaces every other shape with "" without invoking any hook. This keeps
+    `AgentResponse.from_content` (whose text join would otherwise raise on a
+    non-str, or run a hostile `__bool__`) and both provider encoders total.
+    """
 
     text: str
     type: Literal["text"] = "text"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "text", _exact_str(self.text))
 
 
 @dataclass(frozen=True)
@@ -79,15 +105,71 @@ class ToolUseBlock:
 
 @dataclass(frozen=True)
 class ToolResultBlock:
-    """Result of a tool_use being fed back to the model."""
+    """Result of a tool_use being fed back to the model.
+
+    `content` is tool/model-reachable, so construction normalizes it to the
+    exact declared `str | list[ContentBlock]` contract (see
+    `_normalized_result_content`): an exact built-in `str` is kept
+    byte-for-byte; an exact built-in `list` is kept, retaining only its
+    exact built-in content-block elements in order; every other shape
+    becomes "" without invoking any hook. This keeps both provider encoders
+    total — the Anthropic encoder would otherwise iterate a non-list (or
+    a hostile `__iter__`) and raise, or hit `_block_to_wire`'s "unexpected
+    content block" on a foreign element; the OpenAI-compat encoder would
+    otherwise raise on a non-iterable content or emit corrupt output for
+    foreign elements. `tool_use_id` and `is_error` are outside this
+    normalization's scope (see the shape-totality tests).
+    """
 
     tool_use_id: str
     content: Union[str, list["ContentBlock"]]
     is_error: bool = False
     type: Literal["tool_result"] = "tool_result"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "content", _normalized_result_content(self.content)
+        )
+
 
 ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]
+
+
+def _normalized_result_content(value: Any) -> Union[str, list["ContentBlock"]]:
+    """Normalize `ToolResultBlock.content` to its exact declared contract.
+
+    - An exact built-in `str` is kept byte-for-byte (no length ceiling).
+    - An exact built-in `list` is kept, retaining only its exact built-in
+      content-block elements, in order. Foreign elements — including list
+      subclasses' items and hostile objects — are dropped by exact-type
+      identity (`type(x) is TextBlock/ToolUseBlock/ToolResultBlock`), so no
+      element hook runs and no content is manufactured from pair sequences
+      or other shapes. A fully valid block list is retained unchanged; an
+      exact-but-empty list stays an empty list.
+    - Every other shape — non-exact strings, list subclasses, mappings,
+      other containers, and hostile objects — becomes "" deterministically,
+      without invoking any truth, length, iteration, conversion,
+      representation, comparison, attribute, or type-name hook on the value,
+      and without exposing the value, its type, or any exception text.
+
+    Both provider encoders stay total for these cases: each sees either an
+    exact `str` or a list containing only encodable built-in blocks. (Nested
+    blocks were already normalized at their own construction.)
+    """
+    if type(value) is str:
+        return value
+    if type(value) is list:
+        kept: list[ContentBlock] = []
+        for element in value:
+            element_type = type(element)
+            if (
+                element_type is TextBlock
+                or element_type is ToolUseBlock
+                or element_type is ToolResultBlock
+            ):
+                kept.append(element)
+        return kept
+    return ""
 
 
 # -- messages ---------------------------------------------------------------
