@@ -233,23 +233,34 @@ class StateWatcher(threading.Thread):
         new_files = [p for p in current if p.name not in self._seen]
         count = 0
         for path in new_files:
-            self._publish_for(path)
-            self._seen.add(path.name)
-            count += 1
+            # Only mark a file seen (and count it) once it has actually been
+            # decoded and published. A file caught mid-write returns failure
+            # here and stays unseen, so a later poll retries it.
+            if self._publish_for(path):
+                self._seen.add(path.name)
+                count += 1
         return count
 
-    def _publish_for(self, path: Path) -> None:
+    def _publish_for(self, path: Path) -> bool:
+        """Decode a telemetry artifact and hand it to the publisher.
+
+        Returns True iff the file decoded cleanly and was published. Returns
+        False for a transient read/JSON failure (e.g. a file still mid-write),
+        so `poll_once` leaves the name unseen and retries it on a later pass.
+        Exceptions outside the caught read/JSON set propagate unchanged.
+        """
         try:
             raw = path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (OSError, ValueError):
-            # File may still be mid-write; skip this round and try next poll.
-            self._seen.discard(path.name)
-            return
+            # File may still be mid-write or transiently unreadable; report
+            # failure so poll_once leaves the name unseen and retries it.
+            return False
         self.publisher.publish(
             TOPIC_TELEMETRY_5MIN,
             {"file": path.name, "telemetry": data},
         )
+        return True
 
     def stop(self) -> None:
         self._stop.set()
