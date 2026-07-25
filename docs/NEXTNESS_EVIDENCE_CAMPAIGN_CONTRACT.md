@@ -147,19 +147,26 @@ separators, LF-only, no timestamp / random id / absolute path), **relative
 filenames only**, and its own explicit named ceiling `MAX_CAMPAIGN_MANIFEST_BYTES`
 = **64 KiB** (fail-closed; §3.9 exit 5). It records:
 
-- each input's byte size and SHA-256 (the **staged** log and protocol);
+- each **staged input's** relative filename, byte size and SHA-256 (the log and
+  protocol);
 - the campaign reader bounds (`max_rows`, `max_line_bytes`) actually applied;
 - the exact `receipt_config_label` and its configuration correspondence (§3.4);
 - the completeness evidence (§3.6);
-- every published artifact's relative filename, byte size and SHA-256;
-- the NP8 packet's SHA-256;
+- each **produced artifact's** relative filename, byte size and SHA-256 (the NP1
+  report, NP2 receipt, NP5 evaluation, NP6 lab report and NP8 packet — the
+  packet's hash being the inward pointer of *Direction of trust* below);
 - the **four NP8 link statuses** (§3.3), copied for auditability.
+
+Together the two input records and the five produced-artifact records cover the
+**seven non-manifest files**. The manifest, being a file, **does not and cannot
+record its own SHA-256** — it is the outermost, unhashed-within-itself layer.
 
 **Direction of trust.** The manifest **points inward** to the NP8 packet (it
 records the packet's hash and echoes the packet's link statuses). **NP8 does not
 authenticate or provenance-link the campaign manifest** — the manifest is the
 outermost layer, verified by nothing above it; a consumer that re-verifies the
-chain re-hashes the eight files against the manifest itself.
+chain re-hashes the **seven non-manifest files** against the manifest's records
+and takes the manifest itself as given.
 
 ### 3.3 The four NP8 provenance checks (existing at `main`)
 
@@ -346,7 +353,7 @@ this is a fifth distinct set, not a normalisation of the others)*:
 | Code | Category | Meaning |
 |---|---|---|
 | 0 | success | eight-file set built, all four provenance checks `verified`, packet self-validated, coherence gate satisfied, published to the (previously absent) final directory |
-| 2 | validation / campaign refusal | typed `CampaignInputError`: **malformed external input** (log / protocol / workspace) that arrives malformed; missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (excess physical rows, or an oversized-record ingestion termination — §3.6); **NP5 computed cross-artifact contradiction** refusal (§3.4) |
+| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed external input** (the log or protocol; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (excess physical rows, or an oversized-record ingestion termination — §3.6); **NP5 computed cross-artifact contradiction** refusal (§3.4) |
 | 3 | insufficient-history | `InsufficientHistoryError` surfaced from NP1 / NP2 / NP6 (the family's insufficiency semantics; never re-typed) |
 | 4 | containment | `--workspace-dir` is not an existing directory; the final directory already exists at validation time; a staging or final path outside the workspace, under the repository `data/` tree, or aliasing an input (resolved-path + `os.path.samefile`, fail-closed identity) |
 | 5 | ceiling (named) | a **serialized-byte ceiling** breach only: a produced instrument artifact over its **64 KiB** ceiling (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` / `LabReportTooLargeError` / `PacketTooLargeError`); the **campaign manifest** over `MAX_CAMPAIGN_MANIFEST_BYTES` (64 KiB); a JSON artifact over NP5/NP8 `MAX_INPUT_BYTES` (1 MiB); or the staged log over NP8 `MAX_LOG_BYTES` (16 MiB) |
