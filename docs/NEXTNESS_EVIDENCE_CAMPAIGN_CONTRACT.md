@@ -473,11 +473,27 @@ preflight** over the staged file using the **existing named ceilings** (§3.8):
 NP5 / NP8 `MAX_INPUT_BYTES` = 1 MiB for each JSON artifact it is about to hand
 over, and NP8 `MAX_LOG_BYTES` = 16 MiB for the staged log. A breach the preflight
 **confirms** is the campaign's **exit 5**. Anything the preflight passes goes to
-the existing typed loader or validator **unchanged**, and **malformed** content
-surfaces there as that module's own typed error → campaign **exit 2**. No NP5 or
-NP8 exception class, message, contract or exit code is changed, weakened or
-reinterpreted; the preflight only decides which *campaign* lane a *campaign*
-failure lands in.
+the existing typed loader or validator **unchanged**. No NP5 or NP8 exception
+class, message, contract or exit code is changed, weakened or reinterpreted; the
+preflight only decides which *campaign* lane a *campaign* failure lands in, and
+it never widens the catch set.
+
+**What a passed preflight does *not* buy — external input vs campaign-generated
+artifact.** The JSON artifacts handed to NP5 and NP8 (the NP1 report, the NP2
+receipt, the NP5 evaluation, the NP6 lab report) are artifacts the **campaign
+itself generated** from already-accepted staged inputs — they are **not**
+operator-supplied artifact inputs. Once the size preflight has passed, an
+`EvaluatorInputError` or `PacketInputError` raised while consuming one of them is
+therefore **not malformed external input**: it is a **loud internal invariant
+failure**. It is **not** translated into `CampaignInputError`, **not** admitted to
+the campaign's expected-failure catch set, and **never** exit 2 — it propagates
+(see *Which failures stay loud internal failures* below). **Campaign exit 2 stays
+reserved for genuinely external inputs** — the recorded log and the operator
+protocol, each through its own applicable typed boundary (NP1's reader and the
+§3.6 completeness preflight for the log; NP6's `load_protocol` →
+`LabInputError` for the protocol, including its 64 KiB `MAX_PROTOCOL_BYTES`
+ceiling) — **and for the expressly named campaign refusals** listed in the
+exit-2 row.
 
 **Proposed exit-code map** *(new; the family's non-harmonisation is respected —
 this is a fifth distinct set, not a normalisation of the others)*:
@@ -485,7 +501,7 @@ this is a fifth distinct set, not a normalisation of the others)*:
 | Code | Category | Meaning |
 |---|---|---|
 | 0 | success | eight-file set built, all four provenance checks `verified`, packet self-validated, coherence gate satisfied, published to the (previously absent) final directory |
-| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed or out-of-bounds external input** (the log or protocol — including a protocol over NP6's pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, which is NP6's `LabInputError` lane and **not** the exit-5 ceiling lane, §3.8; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (a physical record beyond `max_rows`, or a record whose content exceeds the campaign `max_line_bytes` — established by the §3.6 preflight); **NP5 `computed` cross-artifact `contradicted` verdict** refusal (§3.4) |
+| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed or out-of-bounds external input** (the log or protocol — including a protocol over NP6's pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, which is NP6's `LabInputError` lane and **not** the exit-5 ceiling lane, §3.8; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (a physical record beyond `max_rows`, or a record whose content exceeds the campaign `max_line_bytes` — established by the §3.6 preflight); **NP5 `computed` cross-artifact `contradicted` verdict** refusal (§3.4). **Never a campaign-*generated* artifact**: an `EvaluatorInputError` / `PacketInputError` raised while NP5 or NP8 consumes an artifact the runner itself produced — after that artifact's size preflight passed — is a loud internal invariant failure, not this lane |
 | 3 | insufficient-history | `InsufficientHistoryError` surfaced from NP1 / NP2 / NP6 (the family's insufficiency semantics; never re-typed) |
 | 4 | containment | `--workspace-dir` is not an existing directory; the final directory already exists at validation time; a staging or final path outside the workspace, under the repository `data/` tree, or aliasing an input (resolved-path + `os.path.samefile`, fail-closed identity) |
 | 5 | ceiling (named) | a **named byte-ceiling** breach only, from the source that owns it: a produced instrument artifact over its **64 KiB** serialization ceiling (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` / `LabReportTooLargeError` / `PacketTooLargeError`, each raised by the instrument itself); the **campaign manifest** over `MAX_CAMPAIGN_MANIFEST_BYTES` (64 KiB); or — **as confirmed by the campaign's own size preflight above, never by catching a loader's typed input error** — a JSON artifact over NP5/NP8 `MAX_INPUT_BYTES` (1 MiB) or the staged log over NP8 `MAX_LOG_BYTES` (16 MiB). NP6's protocol **input** ceiling (`MAX_PROTOCOL_BYTES`, 64 KiB) is **not** in this lane — it is exit 2 (§3.8) |
@@ -520,9 +536,15 @@ those loaders are ever called. Outside the catch set:
 - **Structural invalidity of a campaign-*generated* artifact** (an artifact the
   runner produced from already-validated staged inputs failing its validator) is
   likewise an **internal programming / contract failure, not malformed operator
-  input** — it propagates loudly, never exit 2. (Exit 2's validation lane is for
-  malformed **external** inputs and the explicit campaign refusals above, not for
-  the campaign's own generated output.)
+  input** — it propagates loudly, never exit 2. This **explicitly includes an
+  `EvaluatorInputError` or `PacketInputError` raised while NP5 or NP8 consumes a
+  campaign-generated artifact after that artifact's §3.9 size preflight has
+  passed**: the artifact came from the campaign, not from the operator, so a parse
+  or structure failure there is an internal invariant breach. It is **not** retyped
+  as `CampaignInputError` and **not** added to the catch set. (Exit 2's validation
+  lane is for malformed or out-of-bounds **external** inputs — the recorded log and
+  the operator protocol through their own typed boundaries — and the explicit
+  campaign refusals above, not for the campaign's own generated output.)
 - Any other exception outside the documented catch set — a plain `ValueError`, a
   `RuntimeError`, a `MemoryError` — **propagates loudly** rather than masquerading
   as a concise input failure.
@@ -556,10 +578,17 @@ execution. The suite must include tests for:
   counts `rows_read`, with **no** JSON parsing, rejection classification or
   accepted-row judgement performed by the preflight (malformed rows still reach
   NP1 and still land in its 12 `REJECT_REASONS`);
-- **size-preflight lane separation** (§3.9) — an oversize JSON artifact and an
-  oversize staged log yield **exit 5** through the campaign preflight, while a
-  **malformed** artifact of legal size yields **exit 2** from the existing typed
-  loader, with no exception-message parsing anywhere;
+- **size-preflight lane separation** (§3.9), with no exception-message parsing
+  anywhere:
+  - a **confirmed named input-ceiling breach** — an oversize JSON artifact, or a
+    staged log over `MAX_LOG_BYTES` — yields **exit 5** through the campaign
+    preflight;
+  - an **unexpected `EvaluatorInputError` / `PacketInputError` after a passed
+    preflight**, raised while consuming a campaign-**generated** artifact,
+    **propagates loudly** — neither exit 2 nor exit 5, and the catch set is not
+    widened to swallow it;
+  - a **malformed operator protocol** remains the NP6 `LabInputError` → **exit 2**
+    lane;
 - **protocol-input ceiling** — a protocol over NP6 `MAX_PROTOCOL_BYTES` (64 KiB)
   is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
   lane;
