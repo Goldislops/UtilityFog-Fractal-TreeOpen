@@ -501,7 +501,7 @@ this is a fifth distinct set, not a normalisation of the others)*:
 | Code | Category | Meaning |
 |---|---|---|
 | 0 | success | eight-file set built, all four provenance checks `verified`, packet self-validated, coherence gate satisfied, published to the (previously absent) final directory |
-| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed or out-of-bounds external input** (the log or protocol — including a protocol over NP6's pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, which is NP6's `LabInputError` lane and **not** the exit-5 ceiling lane, §3.8; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (a physical record beyond `max_rows`, or a record whose content exceeds the campaign `max_line_bytes` — established by the §3.6 preflight); **NP5 `computed` cross-artifact `contradicted` verdict** refusal (§3.4). **Never a campaign-*generated* artifact**: an `EvaluatorInputError` / `PacketInputError` raised while NP5 or NP8 consumes an artifact the runner itself produced — after that artifact's size preflight passed — is a loud internal invariant failure, not this lane |
+| 2 | validation / campaign refusal | **two typed classes, both caught directly**: the campaign's own `CampaignInputError` for its own validation and refusal lanes, **and NP6's `LabInputError` — caught directly, never translated** — for malformed or out-of-bounds **operator-protocol** input and any other NP6 typed external-input failure surfaced by `build_lab_report` (see *The campaign's expected-failure catch set* below). The lane covers a **malformed or out-of-bounds external input** (the log or protocol — including a protocol over NP6's pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, which is NP6's `LabInputError` lane and **not** the exit-5 ceiling lane, §3.8; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (a physical record beyond `max_rows`, or a record whose content exceeds the campaign `max_line_bytes` — established by the §3.6 preflight); **NP5 `computed` cross-artifact `contradicted` verdict** refusal (§3.4). **Never a campaign-*generated* artifact**: an `EvaluatorInputError` / `PacketInputError` raised while NP5 or NP8 consumes an artifact the runner itself produced — after that artifact's size preflight passed — is a loud internal invariant failure, not this lane |
 | 3 | insufficient-history | `InsufficientHistoryError` surfaced from NP1 / NP2 / NP6 (the family's insufficiency semantics; never re-typed) |
 | 4 | containment | `--workspace-dir` is not an existing directory; the final directory already exists at validation time; a staging or final path outside the workspace, under the repository `data/` tree, or aliasing an input (resolved-path + `os.path.samefile`, fail-closed identity) |
 | 5 | ceiling (named) | a **named byte-ceiling** breach only, from the source that owns it: a produced instrument artifact over its **64 KiB** serialization ceiling (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` / `LabReportTooLargeError` / `PacketTooLargeError`, each raised by the instrument itself); the **campaign manifest** over `MAX_CAMPAIGN_MANIFEST_BYTES` (64 KiB); or — **as confirmed by the campaign's own size preflight above, never by catching a loader's typed input error** — a JSON artifact over NP5/NP8 `MAX_INPUT_BYTES` (1 MiB) or the staged log over NP8 `MAX_LOG_BYTES` (16 MiB). NP6's protocol **input** ceiling (`MAX_PROTOCOL_BYTES`, 64 KiB) is **not** in this lane — it is exit 2 (§3.8) |
@@ -519,16 +519,48 @@ input, 16 MiB staged log) is the **ceiling lane → exit 5**, its input half
 established by the campaign's own size preflight. No lane is described by the
 bare word "oversized" alone.
 
-**Which failures stay loud internal failures (propagate, not exit 2).** Mirroring
-all six family `main()` clauses, the campaign `main()` catches **only** its
-documented typed classes (`CampaignInputError` and the instrument exceptions it
-deliberately surfaces — `InsufficientHistoryError`, the five `*TooLargeError`
-serialization classes, the containment/output classes, and the proposed
-staging/publication classes). The typed catch set is therefore **not** how the
-**input** half of exit 5 is decided: NP5's `EvaluatorInputError` and NP8's
-`PacketInputError` are deliberately **not** in it, precisely because each covers
-oversize and malformed alike — the size preflight above settles that lane before
-those loaders are ever called. Outside the catch set:
+**The campaign's expected-failure catch set.** Mirroring all six family `main()`
+clauses, the campaign `main()` catches **only** its documented typed classes —
+its own `CampaignInputError` plus the instrument exceptions it deliberately
+surfaces:
+
+- **`CampaignInputError`** *(proposed, new)* — the campaign's own validation and
+  refusal lanes → **exit 2**.
+- **`LabInputError`** *(existing at `main`, NP6)* → **exit 2**, **caught
+  directly and never translated into `CampaignInputError`**: its message and its
+  `__cause__` remain exactly what NP6 supplied. `LabInputError` is already NP6's
+  exact typed external-input boundary, so the campaign surfaces it rather than
+  wrapping it. Catching the **class**, not one call site, is deliberate — NP6
+  raises it from `load_protocol` (protocol over `MAX_PROTOCOL_BYTES`, invalid
+  UTF-8/JSON, duplicate JSON key, parser-depth, schema keys, `model` allowlist,
+  `smoothing` / `holdout_fraction` bounds, configuration shape, label length,
+  duplicate label, and `MonitorConfig.validate` failures) **and** from
+  `build_lab_report`, which calls `load_protocol` itself, translates NP1's
+  reader-bound `PredictorInputError` into `LabInputError` (message
+  byte-identical, cause preserved) and raises `LabInputError` when the replay
+  holdout exceeds `MAX_REPLAY_STEPS`. Catching only the campaign's own explicit
+  protocol load would leave those later raises uncovered and the promised
+  operator-protocol exit-2 lane unimplementable.
+- **`InsufficientHistoryError`** → exit 3.
+- The five **`*TooLargeError`** serialization classes → exit 5.
+- The containment/output classes → exit 4.
+- The proposed staging/publication classes → exits 6 and 7.
+
+**Deliberately excluded from the catch set:** NP5's `EvaluatorInputError` and
+NP8's `PacketInputError`. The typed catch set is therefore **not** how the
+**input** half of exit 5 is decided — each of those classes covers oversize and
+malformed alike, the size preflight above settles that lane before those loaders
+are ever called, and after a passed preflight such an error on a
+campaign-generated artifact is a loud internal invariant failure. Adding
+`LabInputError` **does not** relax that exclusion.
+
+**Nor does it broaden base-`ValueError` handling.** `LabInputError` is a
+`ValueError` **subclass** *(existing at `main`)*, and **only that exact subclass
+is caught** — a plain `ValueError` raised at the NP6 call seam still propagates,
+exactly as in all six family clauses.
+
+**Which failures stay loud internal failures (propagate, not exit 2).** Outside
+the catch set:
 
 - **NP8's emitted-packet self-validation failure** is the **existing loud
   internal `RuntimeError`** *(existing at `main`)* and is **not** reclassified as
@@ -588,10 +620,26 @@ execution. The suite must include tests for:
     **propagates loudly** — neither exit 2 nor exit 5, and the catch set is not
     widened to swallow it;
   - a **malformed operator protocol** remains the NP6 `LabInputError` → **exit 2**
-    lane;
+    lane (proved in detail by the direct-catch tests below);
 - **protocol-input ceiling** — a protocol over NP6 `MAX_PROTOCOL_BYTES` (64 KiB)
   is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
   lane;
+- **`LabInputError` caught directly, at every raise site that can reach the
+  campaign** — four cases, each asserting **exit 2**, exactly **one concise
+  `error:` line** on stderr and **no traceback**:
+  - a **malformed operator protocol** (bad schema key, unknown `model`,
+    out-of-range `smoothing` / `holdout_fraction`, malformed configuration,
+    over-long or duplicate label) → direct `LabInputError` catch → **exit 2**;
+  - a **protocol over `MAX_PROTOCOL_BYTES`** → the **same** direct exit-2 lane,
+    never the exit-5 ceiling lane;
+  - an **NP6 reader-bound failure translated internally** from NP1's
+    `PredictorInputError` into `LabInputError` (an out-of-bounds `max_rows` /
+    `max_line_bytes` at the reader call inside `build_lab_report`) → direct
+    campaign **exit 2**, with NP6's message and `__cause__` intact and **no**
+    re-typing into `CampaignInputError`;
+  - a **sentinel plain `ValueError` raised at the NP6 call seam propagates** and
+    is not swallowed — proving the campaign catches the exact `LabInputError`
+    subclass and not its `ValueError` base;
 - **metrics absent** from the eight-file set;
 - **input byte preservation** (originals byte-identical after every path);
 - **absent-final-directory requirement** and **no-overwrite at validation time**;
@@ -653,8 +701,11 @@ audit and a fresh Kev authorisation** — nothing below is authorised by this PR
   six-map table, **plus** the mechanical corrections that the addition forces —
   the map **count** ("four distinct code sets across six CLIs" → "five … across
   seven"), the affected **headings/summary** wording, and the
-  **catch-set / unexpected-error-propagation list** (adding the campaign's typed
-  catch classes). No other file's content is implied.
+  **catch-set / unexpected-error-propagation list** — adding the campaign's own
+  typed catch class **and the instrument classes it deliberately surfaces**,
+  `LabInputError` among them (caught directly, not translated), while recording
+  that `EvaluatorInputError` and `PacketInputError` are deliberately excluded and
+  that plain `ValueError` still propagates. No other file's content is implied.
 
 **No existing producer, validator, artifact schema, observer, calibration,
 metrics, or any other file is authorised to change** by this contract. The
