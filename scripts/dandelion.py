@@ -245,6 +245,11 @@ def lattice_to_glb(
     """Export organism as GLB (binary glTF) for web/VR viewing.
 
     Each state becomes a separate mesh with distinct material colors.
+
+    Refuses with ``ValueError("No non-void cells to export")`` when no geometry
+    was produced — the same exception type and message
+    :func:`lattice_to_stl` already raises, checked after the optional-dependency
+    imports and immediately before the export.
     """
     try:
         from skimage.measure import marching_cubes
@@ -259,6 +264,9 @@ def lattice_to_glb(
         states_to_include = [1, 2, 3, 4]
 
     scene = trimesh.Scene()
+    # Explicit witness that at least one geometry reached the scene. A scene
+    # with no geometry must refuse rather than export an empty GLB.
+    added_geometry = False
 
     for state_id in states_to_include:
         binary = (lattice == state_id).astype(np.float64)
@@ -278,6 +286,10 @@ def lattice_to_glb(
         r, g, b = STATE_PRINT_COLORS[state_id]
         mesh.visual.face_colors = np.array([r, g, b, 255], dtype=np.uint8)
         scene.add_geometry(mesh, node_name=STATE_NAMES[state_id])
+        added_geometry = True
+
+    if not added_geometry:
+        raise ValueError("No non-void cells to export")
 
     scene.export(output_path)
     print(f"GLB exported: {output_path} ({os.path.getsize(output_path):,} bytes)")
