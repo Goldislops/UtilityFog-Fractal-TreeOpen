@@ -26,6 +26,25 @@ exit-code map — is **newly proposed here** and exists only as this design. The
 prose marks these as *(existing at `main`)* or *(proposed, new)* wherever
 confusion is possible.
 
+**How the campaign uses the instruments (read this second).** The proposed
+runner is a **module-level composition**: it calls each instrument's existing
+public builders, loaders and canonical serializers in-process — `build_report`;
+`observations_from_log` + `build_receipt`; `build_evaluation`; `load_protocol` +
+`build_lab_report`; `build_packet`; each with its own `serialize_*`
+*(existing at `main`)*. It does **not** shell out to the six standalone CLIs, and
+**no obligation in this document may be read as requiring an artifact to be
+reproducible through a standalone CLI invocation.** The distinction is
+load-bearing, not stylistic: **NP2's CLI exposes only `log_path`, `--model`,
+`--smoothing` and `--holdout-fraction`** *(existing at `main`,
+`scripts/nextness_monitor.py`)* — no labelled `MonitorConfig`, no
+`min_history` / `window` / threshold values, and no reader-bound options — so a
+labelled-configuration receipt under campaign-selected bounds has **no CLI
+invocation that produces it**, while NP2's module-level
+`observations_from_log(..., max_rows=..., max_line_bytes=..., window=...)` and
+`build_receipt(..., config=MonitorConfig(...))` accept exactly those inputs.
+Composing the modules **adds nothing to, and changes nothing in,** any
+instrument's semantics, schema, validators or exit map.
+
 ## 1. What a "campaign" is — and is not
 
 A **campaign** is the deterministic, offline processing of **one
@@ -98,9 +117,11 @@ instrument interface.
   A path failing containment is a fail-closed refusal (§3.9, exit 4).
 - **Authoritative staged snapshot.** Before running **any** instrument, the
   runner copies the log and the protocol **byte-for-byte** into the unique
-  staging directory. **Every NP1 / NP2 / NP5 / NP6 / NP8 operation reads those
-  staged copies** (and the artifacts it writes into staging); it **never reopens
-  the original source paths** after the copy.
+  staging directory. **Every NP1 / NP2 / NP5 / NP6 / NP8 module-level call is
+  given those staged paths** (and the artifact paths written into staging); the
+  runner **never reopens the original source paths** after the copy. The §3.6
+  completeness preflight and the §3.9 size preflight likewise read staged bytes
+  only.
 - **Honest input-mutation statement.** The runner **never mutates the
   originals**. It does not, however, freeze the operator's filesystem: a
   concurrent actor that mutates or replaces a source **while its copy is being
@@ -112,12 +133,19 @@ instrument interface.
 ### 3.2 Exact output chain and the eight-file publication set
 
 From the staged inputs, the proposed v1 runner produces, in dependency order,
-each the **byte-identical** output of the existing instrument run on the staged
-copies:
+each the **byte-identical canonical output of that instrument's own
+module-level builder and serializer** applied to the staged copies — never a
+re-implementation, and never a standalone-CLI invocation (see *How the campaign
+uses the instruments*):
 
 1. **NP1 predictor report** (`nextness-predictor-v1`) over the staged log;
 2. **NP2 checkpoint receipt** (`nextness-monitor-v1`) for the single monitor
-   configuration selected by the exact `receipt_config_label` (§3.4, §3.5);
+   configuration selected by the exact `receipt_config_label` (§3.4, §3.5),
+   built through NP2's module-level `observations_from_log` +
+   `build_receipt(config=...)` + `serialize_receipt`, because NP2's CLI can
+   express neither a labelled configuration nor campaign reader bounds; the
+   emitted bytes are exactly NP2's own canonical receipt, and NP2's semantics and
+   schema are untouched;
 3. **NP5 evaluation** (`nextness-evaluation-v1`) over the report and that
    receipt;
 4. **NP6 replay-lab report** (`nextness-replay-lab-v1`) over the staged log and
@@ -151,10 +179,18 @@ filenames only**, and its own explicit named ceiling `MAX_CAMPAIGN_MANIFEST_BYTE
   protocol);
 - the campaign reader bounds (`max_rows`, `max_line_bytes`) actually applied;
 - the exact `receipt_config_label` and its configuration correspondence (§3.4);
-- the completeness evidence (§3.6);
+- the completeness evidence (§3.6) — the campaign bounds applied, the physical
+  record count the preflight observed (at most `max_rows`), and the *no record
+  beyond `max_rows`* / *no oversized record* outcomes it established; the
+  preflight is the campaign's **completeness witness** and this record is where
+  its evidence is published;
 - each **produced artifact's** relative filename, byte size and SHA-256 (the NP1
   report, NP2 receipt, NP5 evaluation, NP6 lab report and NP8 packet — the
   packet's hash being the inward pointer of *Direction of trust* below);
+- the **cross-artifact coherence outcome** (§3.4) exactly as NP5 recorded it:
+  for each of `ece_match` and `surprise_nll_match`, the envelope status and —
+  when `computed` — the verdicts present, so a reader can see that publication
+  was permitted because no verdict was `contradicted`;
 - the **four NP8 link statuses** (§3.3), copied for auditability.
 
 Together the two input records and the five produced-artifact records cover the
@@ -198,21 +234,45 @@ individual instruments do not cross-check:
 - The protocol's **`smoothing`** and **`holdout_fraction`** drive **NP1**.
 - The protocol's **`model`**, **`smoothing`** and **`holdout_fraction`**,
   together with the configuration identified by the exact `receipt_config_label`,
-  drive **NP2**.
-- **NP1, NP2 and NP6 use identical campaign `max_rows` and `max_line_bytes`.**
+  drive **NP2**. Because NP2's observation bridge and its receipt take the window
+  by separate arguments, the labelled configuration's **`window` must be passed
+  to `observations_from_log` as well as to `build_receipt`'s `MonitorConfig`**;
+  NP2's own bridge documents that requirement *(existing at `main`)*, nothing
+  downstream detects a mismatch, so the campaign owns it.
+- **NP1, NP2 and NP6 use identical campaign `max_rows` and `max_line_bytes`**,
+  passed to `build_report`, `observations_from_log` and `build_lab_report`
+  respectively. For NP2 this is reachable **only** through its module-level
+  interface — its CLI has no reader-bound options — which is why the campaign
+  composes modules rather than CLIs.
 - **NP6 retains every protocol configuration in operator order** (its existing
   descriptive guarantee, unchanged).
 - The manifest **records the selected label and its exact configuration
   correspondence**, because an **NP2 receipt records the configuration's *values*
   but not the protocol *label*** — without the manifest, the receipt could not be
   tied back to a named protocol configuration.
-- **Cross-artifact coherence gate.** If NP5 produces a **`computed`
-  cross-artifact contradiction** — a genuine disagreement the evaluator was able
-  to compute — where the campaign's same-source construction *should* have made
-  agreement possible, the runner **refuses publication** (§3.9, exit 2). A
-  legitimate **`not_computable`** result (for example `no_covering_receipt`, or
-  any typed absent-evidence reason) is an **evidence outcome, not a failure**:
-  the campaign still publishes, and the manifest carries it forward as recorded.
+- **Cross-artifact coherence gate (verdict-level).** NP5 reports each of its
+  cross-artifact checks (`ece_match`, `surprise_nll_match`) in the standard
+  **envelope** — `computed` or `not_computable` — and, inside a `computed`
+  envelope, carries **per-model results whose `verdict` is one of the three fixed
+  values `consistent` / `contradicted` / `unverifiable`** *(existing at `main`:
+  `nextness_evaluator.VERDICTS`)*. The gate is defined at the **verdict** level,
+  never at the envelope level:
+  - a `computed` result carrying a verdict of exactly **`contradicted`** — a
+    genuine disagreement the evaluator was able to compute, where the campaign's
+    same-source construction *should* have made agreement possible — **refuses
+    publication** (§3.9, exit 2);
+  - **`consistent`** permits publication;
+  - **`unverifiable`** — NP5's recorded-surprise-floor lane, where the comparison
+    cannot be decided in either direction — is an **evidence outcome**: it
+    permits publication and is **never** silently recast as `contradicted` or as
+    `not_computable`;
+  - **`not_computable`** (for example `no_covering_receipt`, or any typed
+    absent-evidence reason) is likewise an **evidence outcome, not a failure**.
+  In every permitting case the campaign publishes and the manifest carries the
+  outcome forward **exactly as NP5 recorded it** — envelope status and verdicts
+  unchanged. The campaign **invents no verdict, adds no verdict value and alters
+  no NP5 schema**; it only decides, from values NP5 already emits, whether to
+  publish.
 
 ### 3.5 No implicit winner
 
@@ -249,11 +309,41 @@ prefix — stated precisely:
   not fail the campaign; a fully-traversed log with rejected rows is still
   complete.
 - The **completeness preflight runs against the staged log** (the authoritative
-  captured bytes), under the campaign `max_rows` / `max_line_bytes`.
-- The runner **refuses** (§3.9, exit 2 — *complete-log refusal*) if the physical
-  record count would exceed `max_rows` (a prefix that is not the whole log) **or**
-  if an **oversized record** (content over `max_line_bytes`) terminated ingestion
-  — **before** treating the campaign as complete. NP1 on its own would silently
+  captured bytes), under the campaign `max_rows` / `max_line_bytes`, **before any
+  instrument is invoked**.
+- **Mechanism — campaign-owned, streaming, byte-level.** The preflight opens the
+  staged log in **binary** and frames records exactly as NP1's reader frames them
+  *(existing at `main`, `scripts/nextness_predictor.py`)*: records are
+  **LF-delimited** and read with bounded `readline(max_line_bytes + 2)` calls; a
+  record's **content** is the returned chunk with a trailing CRLF (two bytes) or
+  LF (one byte) removed, and a chunk that reached the read limit without a
+  terminator is content in full; a record whose **content** exceeds
+  `max_line_bytes` is the **oversized record** that terminates NP1 ingestion.
+  **Every physical record counts** — accepted, rejected and blank alike —
+  matching NP1's `rows_read` accounting. The preflight stops as soon as the
+  question is answered: it reads **at most `max_rows + 1` records**, so its work
+  is bounded by `(max_rows + 1) * (max_line_bytes + 2)` bytes.
+- **Why it is campaign-owned rather than an extra reader call.** It must work at
+  **every permitted bound, including `max_rows = MAX_ROWS_CEILING` = 1 000 000**.
+  NP1's reader cannot be asked to read `max_rows + 1` records there: a `max_rows`
+  above `MAX_ROWS_CEILING` is a typed `PredictorInputError` *(existing at
+  `main`)*, and the reader stops at `max_rows` without probing further, so
+  "exactly `max_rows` records" and "more than `max_rows` records" are
+  indistinguishable in its return value. The preflight is therefore the
+  campaign's own bounded scan — and it re-implements **no NP1 row semantics**,
+  only NP1's record framing.
+- **What the preflight must not do.** It performs **no JSON parsing, no rejection
+  classification, no model inference and no accepted-row judgement**. It answers
+  exactly two byte-level questions — *is there a physical record beyond
+  `max_rows`?* and *is there a record whose content exceeds `max_line_bytes`?*
+  Deciding whether a row is valid, and the **12 NP1 `REJECT_REASONS`**, remain
+  **entirely NP1's** *(existing at `main`)*; the preflight neither duplicates nor
+  reinterprets them and classifies nothing.
+- The runner **refuses** (§3.9, exit 2 — *complete-log refusal*) when the
+  preflight finds a **physical record beyond `max_rows`** (a prefix that is not
+  the whole log) **or** a **record whose content exceeds the campaign
+  `max_line_bytes`** (the oversized record that would terminate NP1 ingestion) —
+  **before** treating the campaign as complete, and before any instrument runs. NP1 on its own would silently
   read a `max_rows` prefix and emit an exit-0 report; the campaign adopts the
   stricter, metrics-style "complete run" discipline instead.
 - **NP8's `log`-role manifest entry is not the campaign completeness witness.**
@@ -285,8 +375,10 @@ prefix — stated precisely:
 - Publication happens **only after** every produced artifact validates through its
   own validator, the NP8 packet passes its **self-validation**, **all four
   provenance checks are `verified`**, and the cross-artifact coherence gate (§3.4)
-  is satisfied. A failure at any of these gates leaves the final directory
-  uncreated.
+  is satisfied — that gate being satisfied exactly when **no `computed`
+  cross-artifact result carries a `contradicted` verdict**, with `consistent`,
+  `unverifiable` and `not_computable` all permitting publication. A failure at
+  any of these gates leaves the final directory uncreated.
 - **No output — staging or final — is created under the repository `data/`
   tree** (guaranteed by the workspace containment of §3.1).
 - **Residuals (retained non-claims).** A hard kill (or power loss) mid-run may
@@ -313,13 +405,32 @@ prefix — stated precisely:
   `MAX_LINE_BYTES_CEILING` = 16 777 216); per-artifact serialized ceiling 64 KiB
   (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` /
   `LabReportTooLargeError` / `PacketTooLargeError`); NP5 `MAX_INPUT_BYTES` = 1 MiB
-  and `MAX_SERIES_RECEIPTS` = 256; NP6 `MAX_LAB_CONFIGS` = 8 and
-  `MAX_REPLAY_STEPS` = 2000; NP8 `MAX_INPUT_BYTES` = 1 MiB, `MAX_LOG_BYTES`
+  and `MAX_SERIES_RECEIPTS` = 256; NP6 `MAX_PROTOCOL_BYTES` = 64 KiB (the
+  protocol **input** ceiling, enforced pre-parse by NP6's own loader),
+  `MAX_LAB_CONFIGS` = 8 and `MAX_REPLAY_STEPS` = 2000; NP8 `MAX_INPUT_BYTES` = 1 MiB, `MAX_LOG_BYTES`
   = 16 MiB, `MAX_PACKET_ARTIFACTS` = 8, output ceiling 64 KiB.
 - **Declare campaign-level bounds explicitly** *(proposed, new)*, never inherited
   by implication: the manifest ceiling `MAX_CAMPAIGN_MANIFEST_BYTES` = 64 KiB
   (fail-closed), and the **fixed eight-file publication set** itself (an exact
   set, neither extended nor reduced).
+- **Four named ceiling families — never conflated** *(families 1-3 existing at
+  `main`; family 4 proposed, new)*:
+  1. **Generated-artifact serialization ceilings** — 64 KiB each, on what an
+     instrument *emits*: `ReportTooLargeError` / `ReceiptTooLargeError` /
+     `EvaluationTooLargeError` / `LabReportTooLargeError` /
+     `PacketTooLargeError`, each raised by that instrument itself → campaign
+     **exit 5**.
+  2. **JSON-artifact and staged-log input ceilings** — NP5 / NP8
+     `MAX_INPUT_BYTES` = 1 MiB and NP8 `MAX_LOG_BYTES` = 16 MiB → campaign
+     **exit 5**, established by the campaign's **own size preflight** (§3.9),
+     never by interpreting a typed loader exception.
+  3. **NP6's protocol *input* ceiling `MAX_PROTOCOL_BYTES` = 64 KiB** — the same
+     number as family 1 but a different lane: it bounds an **operator-supplied
+     external input**, is enforced pre-parse by NP6's own loader and raises
+     `LabInputError`, so it is a **malformed / out-of-bounds external input →
+     campaign exit 2**, *not* the exit-5 ceiling lane.
+  4. **The campaign manifest's own serialized ceiling**
+     `MAX_CAMPAIGN_MANIFEST_BYTES` = 64 KiB → campaign **exit 5**.
 
 ### 3.9 CLI and failure contract (proposed, explicit, non-harmonising)
 
@@ -340,12 +451,33 @@ implementation time under a separate gate.
   the run, inside the workspace, staging created in its parent).
 - **Reader-bound options**: `--max-rows` (default 100 000, ceiling 1 000 000) and
   `--max-line-bytes` (default 65 536, ceiling 16 777 216), applied identically to
-  NP1/NP2/NP6 and echoed into the manifest for the completeness evidence.
+  NP1/NP2/NP6 **through their module-level interfaces** (NP2's CLI has no
+  reader-bound options, so this is module-level by necessity — see *How the
+  campaign uses the instruments*), used by the §3.6 completeness preflight, and
+  echoed into the manifest for the completeness evidence.
 - **Success output**: one concise line naming the published final directory;
   exit 0.
 - **Error output**: exactly **one concise `error:` line** to stderr per expected
   failure, never a traceback (the campaign introduces no second prefix; it has no
   metrics-style `safety error:` lane).
+
+**Campaign-owned size preflight** *(proposed, new — how the input half of the
+exit-5 lane is decided)*. NP5's `load_json_artifact` and NP8's bounded JSON
+loader raise `EvaluatorInputError` / `PacketInputError` for an **oversize**
+artifact and for **malformed** content alike, and NP8's staged-log ceiling raises
+`PacketInputError` as well *(existing at `main`)* — one typed class per module
+covering both lanes. The campaign therefore **never infers a ceiling breach from
+an instrument exception, and never parses exception-message text**. Instead,
+**before invoking each affected loader**, it performs its own bounded **size
+preflight** over the staged file using the **existing named ceilings** (§3.8):
+NP5 / NP8 `MAX_INPUT_BYTES` = 1 MiB for each JSON artifact it is about to hand
+over, and NP8 `MAX_LOG_BYTES` = 16 MiB for the staged log. A breach the preflight
+**confirms** is the campaign's **exit 5**. Anything the preflight passes goes to
+the existing typed loader or validator **unchanged**, and **malformed** content
+surfaces there as that module's own typed error → campaign **exit 2**. No NP5 or
+NP8 exception class, message, contract or exit code is changed, weakened or
+reinterpreted; the preflight only decides which *campaign* lane a *campaign*
+failure lands in.
 
 **Proposed exit-code map** *(new; the family's non-harmonisation is respected —
 this is a fifth distinct set, not a normalisation of the others)*:
@@ -353,26 +485,34 @@ this is a fifth distinct set, not a normalisation of the others)*:
 | Code | Category | Meaning |
 |---|---|---|
 | 0 | success | eight-file set built, all four provenance checks `verified`, packet self-validated, coherence gate satisfied, published to the (previously absent) final directory |
-| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed external input** (the log or protocol; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (excess physical rows, or an oversized-record ingestion termination — §3.6); **NP5 computed cross-artifact contradiction** refusal (§3.4) |
+| 2 | validation / campaign refusal | typed `CampaignInputError`: a **malformed or out-of-bounds external input** (the log or protocol — including a protocol over NP6's pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, which is NP6's `LabInputError` lane and **not** the exit-5 ceiling lane, §3.8; a `--workspace-dir` or path *existence / containment* failure is exit 4, not here); missing / unknown / duplicate `receipt_config_label`; **provenance-not-verified**; **complete-log refusal** (a physical record beyond `max_rows`, or a record whose content exceeds the campaign `max_line_bytes` — established by the §3.6 preflight); **NP5 `computed` cross-artifact `contradicted` verdict** refusal (§3.4) |
 | 3 | insufficient-history | `InsufficientHistoryError` surfaced from NP1 / NP2 / NP6 (the family's insufficiency semantics; never re-typed) |
 | 4 | containment | `--workspace-dir` is not an existing directory; the final directory already exists at validation time; a staging or final path outside the workspace, under the repository `data/` tree, or aliasing an input (resolved-path + `os.path.samefile`, fail-closed identity) |
-| 5 | ceiling (named) | a **serialized-byte ceiling** breach only: a produced instrument artifact over its **64 KiB** ceiling (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` / `LabReportTooLargeError` / `PacketTooLargeError`); the **campaign manifest** over `MAX_CAMPAIGN_MANIFEST_BYTES` (64 KiB); a JSON artifact over NP5/NP8 `MAX_INPUT_BYTES` (1 MiB); or the staged log over NP8 `MAX_LOG_BYTES` (16 MiB) |
+| 5 | ceiling (named) | a **named byte-ceiling** breach only, from the source that owns it: a produced instrument artifact over its **64 KiB** serialization ceiling (`ReportTooLargeError` / `ReceiptTooLargeError` / `EvaluationTooLargeError` / `LabReportTooLargeError` / `PacketTooLargeError`, each raised by the instrument itself); the **campaign manifest** over `MAX_CAMPAIGN_MANIFEST_BYTES` (64 KiB); or — **as confirmed by the campaign's own size preflight above, never by catching a loader's typed input error** — a JSON artifact over NP5/NP8 `MAX_INPUT_BYTES` (1 MiB) or the staged log over NP8 `MAX_LOG_BYTES` (16 MiB). NP6's protocol **input** ceiling (`MAX_PROTOCOL_BYTES`, 64 KiB) is **not** in this lane — it is exit 2 (§3.8) |
 | 6 | staging | failure to create the unique staging directory, to **copy the log/protocol into it**, or to write a produced artifact inside it |
 | 7 | publication | the staging → final rename fails, or the OS **reports** a destination collision because the final directory appeared between the absence check and the rename (§3.7) |
 
-**"Oversized" disambiguated.** The word covers two **distinct** lanes that map to
-**different** codes: an **oversized record** (content over `max_line_bytes`, which
-terminates NP1 ingestion) is a **complete-log refusal → exit 2**; a
-**serialized-byte ceiling** breach (64 KiB artifact/manifest, 1 MiB input, 16 MiB
-log) is the **ceiling lane → exit 5**. No lane is described by the bare word
-"oversized" alone.
+**"Oversized" disambiguated.** The word covers **three** distinct lanes mapping
+to **different** codes: an **oversized record** (content over the campaign
+`max_line_bytes`, which terminates NP1 ingestion) is a **complete-log refusal →
+exit 2**, established by the §3.6 preflight; an **oversize protocol** (over NP6's
+pre-parse `MAX_PROTOCOL_BYTES` = 64 KiB, raising `LabInputError`) is a
+**malformed / out-of-bounds external input → exit 2**; and a **named
+byte-ceiling** breach (64 KiB generated artifact or campaign manifest, 1 MiB JSON
+input, 16 MiB staged log) is the **ceiling lane → exit 5**, its input half
+established by the campaign's own size preflight. No lane is described by the
+bare word "oversized" alone.
 
 **Which failures stay loud internal failures (propagate, not exit 2).** Mirroring
 all six family `main()` clauses, the campaign `main()` catches **only** its
 documented typed classes (`CampaignInputError` and the instrument exceptions it
-deliberately surfaces — `InsufficientHistoryError`, the `*TooLargeError` ceiling
-family, the containment/output classes, and the proposed staging/publication
-classes). Outside that set:
+deliberately surfaces — `InsufficientHistoryError`, the five `*TooLargeError`
+serialization classes, the containment/output classes, and the proposed
+staging/publication classes). The typed catch set is therefore **not** how the
+**input** half of exit 5 is decided: NP5's `EvaluatorInputError` and NP8's
+`PacketInputError` are deliberately **not** in it, precisely because each covers
+oversize and malformed alike — the size preflight above settles that lane before
+those loaders are ever called. Outside the catch set:
 
 - **NP8's emitted-packet self-validation failure** is the **existing loud
   internal `RuntimeError`** *(existing at `main`)* and is **not** reclassified as
@@ -405,10 +545,24 @@ execution. The suite must include tests for:
 - **all configurations retained by NP6** (every protocol configuration present,
   operator order, no winner/score field);
 - **all four NP8 provenance checks `verified`** on a well-formed campaign;
-- **complete-log enforcement** (staged log fully traversed under the bounds, or
-  refusal);
-- **oversized-record and excess-row refusal** (an oversized terminal record; a
-  log longer than `max_rows`);
+- **complete-log enforcement** (the §3.6 preflight confirms the staged log is
+  fully traversed under the campaign bounds, or refuses);
+- **oversized-record and excess-row refusal** (a record whose content exceeds the
+  campaign `max_line_bytes`; a log with a physical record beyond `max_rows`),
+  **including a case with `max_rows` set to `MAX_ROWS_CEILING`** — proving the
+  preflight is not itself bounded by NP1's `max_rows` parameter range;
+- **preflight framing fidelity** — LF-terminated, CRLF-terminated, final
+  unterminated and blank records all counted as physical records exactly as NP1
+  counts `rows_read`, with **no** JSON parsing, rejection classification or
+  accepted-row judgement performed by the preflight (malformed rows still reach
+  NP1 and still land in its 12 `REJECT_REASONS`);
+- **size-preflight lane separation** (§3.9) — an oversize JSON artifact and an
+  oversize staged log yield **exit 5** through the campaign preflight, while a
+  **malformed** artifact of legal size yields **exit 2** from the existing typed
+  loader, with no exception-message parsing anywhere;
+- **protocol-input ceiling** — a protocol over NP6 `MAX_PROTOCOL_BYTES` (64 KiB)
+  is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
+  lane;
 - **metrics absent** from the eight-file set;
 - **input byte preservation** (originals byte-identical after every path);
 - **absent-final-directory requirement** and **no-overwrite at validation time**;
@@ -433,8 +587,10 @@ execution. The suite must include tests for:
   protocol configuration;
 - **NP8 default-bound exception** — the NP8 `log` entry uses NP1 default bounds
   and is not the completeness witness;
-- **computed cross-check contradiction refusal** — a `computed` NP5 contradiction
-  refuses publication, while a `not_computable` outcome publishes;
+- **verdict-level coherence gate** — a `computed` cross-artifact result carrying
+  a **`contradicted`** verdict refuses publication, while **`consistent`**,
+  **`unverifiable`** and **`not_computable`** outcomes each publish and are
+  carried into the manifest unchanged;
 - **destination-race semantics** — a concurrently created destination yields a
   reported publication failure or a permitted empty-directory replacement, with
   the unobservable-replacement non-claim respected.
@@ -481,6 +637,12 @@ untouched; the campaign is purely additive and composes them as-is.
 These v1 decisions **coexist with the current-`main` contracts** — the reason
 this contract can be frozen without proposing any instrument change:
 
+- The campaign touches the instruments **only through their existing public
+  module-level entry points** — builders, loaders and canonical serializers — so
+  every artifact it publishes is that instrument's own canonical output. No
+  instrument CLI is extended, and none is invoked: NP2's CLI could not express a
+  labelled configuration or campaign reader bounds even if it were used, which is
+  why the composition is at module level.
 - The six packet roles and the four provenance checks are exactly those
   `nextness-evidence-packet-v1` already emits and verifies; the campaign supplies
   all six roles from staged copies so all four checks are checkable, and it adds
@@ -494,7 +656,10 @@ this contract can be frozen without proposing any instrument change:
 - The same-log / same-options coherence the NP8 hash links do **not** by
   themselves guarantee is supplied by the campaign construction and recorded in
   the manifest (§3.4) — an additive invariant, not a change to NP8.
-- The complete-log obligation is stricter than NP1's silent-prefix default but is
+- The complete-log obligation is proved by a campaign-owned byte-level preflight
+  (§3.6) that mirrors NP1's record framing while re-implementing none of its row
+  semantics, and it works at every permitted bound including
+  `max_rows = MAX_ROWS_CEILING`. It is stricter than NP1's silent-prefix default but is
   the discipline metrics already enforces; it is expressed as "fully traversed
   under the selected bounds" and runs against the staged log — it adds a
   campaign-level proof and contradicts no instrument.
