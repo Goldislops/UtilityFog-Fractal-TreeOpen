@@ -691,15 +691,13 @@ def main(argv=None):
 
     elif args.command == "info":
         try:
-            compressed = genome_to_compressed_bytes(args.genome)
+            # ONE authoritative read: every value printed below derives from
+            # this single capture, so one report can never describe two genome
+            # versions. Source coherence only — not an atomic snapshot, and no
+            # claim about the file after the read returns.
+            capture = _capture_genome(args.genome)
+            compressed = capture.compressed
             b85 = compressed_to_b85(compressed)
-            with open(args.genome, "r") as f:
-                orig = f.read()
-            genome = json.loads(orig)
-            if type(genome) is not dict:
-                raise DandelionGenomeError("genome must be a JSON object")
-            genome.pop("epigenetic_snapshot", None)
-            minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
         except DandelionGenomeError as exc:
             # Only the JSON-object refusal routes through argparse (exit code 2).
             # JSON syntax errors, filesystem errors and unrelated exceptions are
@@ -707,8 +705,8 @@ def main(argv=None):
             parser.error(str(exc))
 
         print(f"Genome: {args.genome}")
-        print(f"  Original:   {len(orig.encode()):,} bytes")
-        print(f"  Minified:   {len(minified.encode()):,} bytes")
+        print(f"  Original:   {len(capture.source_text.encode('utf-8')):,} bytes")
+        print(f"  Minified:   {len(capture.minified_bytes):,} bytes")
         print(f"  Compressed: {len(compressed):,} bytes")
         print(f"  Base85:     {len(b85):,} chars")
         print(f"  QR payload: {len(b85) + 5:,} chars (with UFG1: header)")
