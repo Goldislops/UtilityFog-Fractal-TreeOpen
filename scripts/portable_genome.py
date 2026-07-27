@@ -9,6 +9,7 @@ the organism on any compatible substrate.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -53,11 +54,79 @@ class PortableGenomeError(ValueError):
     :class:`ValueError` so existing callers that catch ``ValueError`` keep
     working; the public ``info`` CLI catches this type specifically.
 
-    This does NOT make the whole importer total. Malformed shapes elsewhere in
-    the genome (e.g. non-object ``stochastic``/``contagion``/``metadata`` config
-    sections or the epigenetic snapshot) remain outside this package's scope and
-    still surface as their original exceptions.
+    It also covers the nested configuration sections named in
+    :data:`_CONFIG_SECTIONS` and the structural surface of
+    :func:`extract_epigenetic_snapshot` (section shape, ``included``,
+    ``lattice_shape``, strict base64 for both encoded members, exact encoded
+    byte counts and ``memory_layout.num_channels``).
+
+    This does NOT make the whole importer total. It asserts nothing about the
+    semantic validity of configuration values, state ranges, transition policy,
+    genome authenticity, cryptographic integrity, input size, allocation
+    exhaustion, path containment, atomic reads or concurrent writers — and
+    nothing about the public CLI's ``np.load(..., allow_pickle=True)`` snapshot
+    export path, which remains a separate untouched residual.
     """
+
+
+#: Configuration sections that must be an exact JSON object when present.
+#: Each is proven BEFORE any ``.get()``, ``dict()`` conversion or dataclass
+#: construction consumes it.
+_CONFIG_SECTIONS = (
+    "metadata", "topology", "stochastic", "contagion", "decay",
+    "cosmic_garden", "experimental", "fitness", "memory_layout",
+)
+
+
+def _require_object_section(genome: Mapping[str, Any], name: str) -> dict:
+    """Return ``genome[name]`` proven to be an exact JSON object.
+
+    An absent section keeps its established empty-object/default behaviour. A
+    present section of any other JSON shape is a fixed, value-free refusal — the
+    supplied value is never rendered into the message.
+    """
+    if name not in genome:
+        return {}
+    value = genome[name]
+    if type(value) is not dict:
+        raise PortableGenomeError(f"{name} must be a JSON object")
+    return value
+
+
+def _require_strict_b64(value: Any, field: str) -> bytes:
+    """Decode ``value`` as STRICT base64.
+
+    ``base64.b64decode`` defaults to discarding characters outside the alphabet,
+    so ``"A!Q=="`` and ``"A Q=="`` would both decode silently. ``validate=True``
+    refuses them instead. Only the exact standard-library decode errors are
+    converted; no exception message is parsed.
+    """
+    if type(value) is not str:
+        raise PortableGenomeError(f"{field} must be a JSON string")
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise PortableGenomeError(f"{field} must be valid base64") from None
+
+
+def _require_lattice_shape(value: Any) -> tuple:
+    """Return a three-dimension shape tuple proven element-by-element.
+
+    ``bool`` is a subclass of ``int``; exact-type checks keep ``True``/``False``
+    from being accepted as dimensions.
+    """
+    if type(value) is not list or len(value) != 3:
+        raise PortableGenomeError(
+            "epigenetic_snapshot.lattice_shape must be a list of three integers")
+    for dim in value:
+        if type(dim) is not int:
+            raise PortableGenomeError(
+                "epigenetic_snapshot.lattice_shape must be a list of three integers")
+    for dim in value:
+        if dim < 0:
+            raise PortableGenomeError(
+                "epigenetic_snapshot.lattice_shape dimensions must be non-negative")
+    return tuple(value)
 
 
 def export_genome(filepath, rule_spec, generation=0, ca_step=0, best_fitness=0.0,
@@ -273,13 +342,19 @@ def import_genome(filepath):
         for count_str, target_name in mappings.items():
             transitions[src_name][count_str] = target_name
 
-    stoch_section = genome.get("stochastic", {})
-    contagion_section = genome.get("contagion", {})
-    decay_section = genome.get("decay", {})
-    cosmic_section = genome.get("cosmic_garden", {})
-    exp_section = genome.get("experimental", {})
-    meta = genome.get("metadata", {})
-    topo = genome.get("topology", {})
+    # Every nested configuration section is proven to be an exact JSON object
+    # BEFORE any .get(), dict() conversion or dataclass construction consumes
+    # it. Absent sections keep their established empty-object defaults.
+    sections = {name: _require_object_section(genome, name) for name in _CONFIG_SECTIONS}
+    meta = sections["metadata"]
+    topo = sections["topology"]
+    stoch_section = sections["stochastic"]
+    contagion_section = sections["contagion"]
+    decay_section = sections["decay"]
+    cosmic_section = sections["cosmic_garden"]
+    exp_section = sections["experimental"]
+    fitness_section = sections["fitness"]
+    memory_layout_section = sections["memory_layout"]
 
     rule_spec = {
         "rule": {
@@ -392,27 +467,72 @@ def import_genome(filepath):
 
     metadata = dict(meta)
     metadata["topology"] = topo
-    metadata["fitness"] = genome.get("fitness", {})
-    metadata["memory_layout"] = genome.get("memory_layout", {})
+    metadata["fitness"] = fitness_section
+    metadata["memory_layout"] = memory_layout_section
     return rule_spec, ca_config, metadata
 
 
 def extract_epigenetic_snapshot(filepath):
-    """Extract lattice and memory_grid from a genome epigenetic snapshot."""
+    """Extract lattice and memory_grid from a genome epigenetic snapshot.
+
+    Every structural condition is proven before NumPy sees a buffer, so a
+    malformed genome yields a fixed, value-free :class:`PortableGenomeError`
+    rather than an implementation-specific reshape message. JSON syntax errors,
+    filesystem errors, Unicode decode errors and ``MemoryError`` still propagate.
+    """
     filepath = Path(filepath)
     with open(filepath, "r", encoding="utf-8") as f:
         genome = json.load(f)
-    epi = genome.get("epigenetic_snapshot", {})
-    if not epi.get("included", False):
+
+    if type(genome) is not dict:
+        raise PortableGenomeError("genome must be a JSON object")
+
+    epi = _require_object_section(genome, "epigenetic_snapshot")
+    if "included" not in epi:
         return None
-    shape = tuple(epi["lattice_shape"])
-    lattice_bytes = base64.b64decode(epi["lattice_b64"])
+    included = epi["included"]
+    if type(included) is not bool:
+        raise PortableGenomeError("epigenetic_snapshot.included must be a boolean")
+    if included is False:
+        return None
+
+    if "lattice_shape" not in epi:
+        raise PortableGenomeError(
+            "epigenetic_snapshot.lattice_shape must be a list of three integers")
+    shape = _require_lattice_shape(epi["lattice_shape"])
+    if "lattice_b64" not in epi:
+        raise PortableGenomeError("epigenetic_snapshot.lattice_b64 must be a JSON string")
+    lattice_bytes = _require_strict_b64(
+        epi["lattice_b64"], "epigenetic_snapshot.lattice_b64")
+
+    element_count = 1
+    for dim in shape:
+        element_count *= dim
+    expected_lattice = element_count * np.dtype(np.uint8).itemsize
+    if len(lattice_bytes) != expected_lattice:
+        raise PortableGenomeError(
+            "epigenetic_snapshot.lattice_b64 byte count does not match lattice_shape")
     lattice = np.frombuffer(lattice_bytes, dtype=np.uint8).reshape(shape)
+
     memory_grid = None
     if "memory_grid_b64" in epi:
-        mg_bytes = base64.b64decode(epi["memory_grid_b64"])
-        num_channels = genome.get("memory_layout", {}).get("num_channels", MEMORY_CHANNELS)
-        memory_grid = np.frombuffer(mg_bytes, dtype=np.float32).reshape((num_channels,) + shape)
+        mg_bytes = _require_strict_b64(
+            epi["memory_grid_b64"], "epigenetic_snapshot.memory_grid_b64")
+        memory_layout = _require_object_section(genome, "memory_layout")
+        num_channels = MEMORY_CHANNELS
+        if "num_channels" in memory_layout:
+            num_channels = memory_layout["num_channels"]
+            if type(num_channels) is not int or num_channels <= 0:
+                raise PortableGenomeError(
+                    "memory_layout.num_channels must be a positive integer")
+        expected_memory = num_channels * element_count * np.dtype(np.float32).itemsize
+        if len(mg_bytes) != expected_memory:
+            raise PortableGenomeError(
+                "epigenetic_snapshot.memory_grid_b64 byte count does not match "
+                "memory_layout and lattice_shape")
+        memory_grid = np.frombuffer(mg_bytes, dtype=np.float32).reshape(
+            (num_channels,) + shape)
+
     snapshot_meta = {"generation": epi.get("snapshot_generation", 0), "ca_step": epi.get("snapshot_ca_step", 0)}
     return lattice.copy(), memory_grid.copy() if memory_grid is not None else None, snapshot_meta
 
