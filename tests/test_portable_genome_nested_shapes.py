@@ -45,6 +45,7 @@ import pytest
 
 from scripts.portable_genome import (
     MEMORY_CHANNELS,
+    STATE_NAME_TO_ID,
     PortableGenomeError,
     extract_epigenetic_snapshot,
     import_genome,
@@ -230,11 +231,20 @@ def test_transition_table_behaviour_unchanged(tmp_path):
         "STRUCTURAL": {"0": "VOID"},
     }))
     _rule, config, _md = import_genome(path)
-    assert len(config.transition_table) == 2
-    # case-insensitive names and int()-converted neighbour keys survive
-    assert 3 in list(config.transition_table.values())[0] or True
-    flat = {k: sorted(v.keys()) for k, v in config.transition_table.items()}
-    assert any(3 in ks and 4 in ks for ks in flat.values())
+
+    # Exact expected mapping. Proves the whole earlier contract at once:
+    # case-insensitive state names resolved ("void" -> VOID), neighbour keys
+    # int()-converted ("+4" -> 4), and nothing else present. Comparing complete
+    # dicts is order-independent, so this cannot pass by iteration accident.
+    assert config.transition_table == {
+        STATE_NAME_TO_ID["VOID"]: {
+            3: STATE_NAME_TO_ID["STRUCTURAL"],
+            4: STATE_NAME_TO_ID["ENERGY"],
+        },
+        STATE_NAME_TO_ID["STRUCTURAL"]: {
+            0: STATE_NAME_TO_ID["VOID"],
+        },
+    }
 
 
 def test_malformed_section_refused_before_config_construction(tmp_path, monkeypatch):
@@ -406,12 +416,12 @@ def test_negative_dimensions_have_their_own_message(tmp_path, bad):
     assert str(excinfo.value) == "epigenetic_snapshot.lattice_shape dimensions must be non-negative"
 
 
-@pytest.mark.parametrize("bad_b64, label", [
-    ("!!!!", "alphabet"), ("QUJD", None), ("QUJ", "padding"), ("QQ==QQ==", "padding"),
+@pytest.mark.parametrize("bad_b64", [
+    pytest.param("!!!!", id="foreign-alphabet"),
+    pytest.param("QUJ", id="bad-padding"),
+    pytest.param("QQ==QQ==", id="double-padding"),
 ])
-def test_malformed_base64_is_refused_strictly(tmp_path, bad_b64, label):
-    if label is None:
-        pytest.skip("control value, exercised elsewhere")
+def test_malformed_base64_is_refused_strictly(tmp_path, bad_b64):
     g = _base_genome(epigenetic_snapshot={
         "included": True, "lattice_shape": [1, 1, 1], "lattice_b64": bad_b64})
     path = tmp_path / "g.json"
