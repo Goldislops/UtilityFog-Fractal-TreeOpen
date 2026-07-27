@@ -46,17 +46,21 @@ MEMORY_CHANNEL_DEFS = [
 class PortableGenomeError(ValueError):
     """Structural refusal for malformed portable-genome shapes.
 
-    Raised by :func:`import_genome` for the narrow set of top-level and
-    transition-table structural shapes validated in this module: the genome
-    root, ``format``, ``transition_table``, each source-state mapping, and each
-    source/target state name and neighbor-count key. Subclasses
+    Raised by :func:`import_genome` for the narrow set of structural shapes
+    validated in this module: the genome root, ``format``, ``transition_table``,
+    each source-state mapping, each source/target state name and neighbor-count
+    key, and the container shape of the seven configuration sections
+    ``stochastic``, ``contagion``, ``decay``, ``cosmic_garden``,
+    ``experimental``, ``metadata`` and ``topology``. Subclasses
     :class:`ValueError` so existing callers that catch ``ValueError`` keep
     working; the public ``info`` CLI catches this type specifically.
 
-    This does NOT make the whole importer total. Malformed shapes elsewhere in
-    the genome (e.g. non-object ``stochastic``/``contagion``/``metadata`` config
-    sections or the epigenetic snapshot) remain outside this package's scope and
-    still surface as their original exceptions.
+    This does NOT make the whole importer total. Still outside this module's
+    structural boundary, and still surfacing as their original exceptions:
+    individual field values *inside* an otherwise correctly shaped section,
+    ``fitness``, ``memory_layout``, ``epigenetic_snapshot``,
+    :func:`extract_epigenetic_snapshot`, schema completeness, and any
+    semantic or numeric range validation.
     """
 
 
@@ -247,8 +251,35 @@ def export_genome(filepath, rule_spec, generation=0, ca_step=0, best_fitness=0.0
     return filepath
 
 
+def _require_json_object_section(genome: dict, section_name: str) -> dict:
+    """Return ``genome[section_name]`` only when it is a JSON object.
+
+    A missing section yields a fresh empty ``dict`` (the established default).
+    An exact built-in ``dict`` is returned by identity. Every other JSON value
+    -- array, string, number, Boolean, ``null`` -- and every ``dict`` subclass
+    is refused with :class:`PortableGenomeError`.
+
+    The refusal message is built from ``section_name`` alone: the supplied value
+    is never rendered, and none of its methods (``get``, ``__repr__``,
+    ``__str__``, ``__eq__``, ``__hash__``) is invoked while producing it.
+    """
+    section = genome.get(section_name, {})
+    if type(section) is not dict:
+        raise PortableGenomeError(f"{section_name} must be a JSON object")
+    return section
+
+
 def import_genome(filepath):
-    """Import a portable genome and reconstruct the rule_spec and CAConfig."""
+    """Import a portable genome and reconstruct the rule_spec and CAConfig.
+
+    Structural refusals raise :class:`PortableGenomeError` with an exact,
+    value-free message: the genome root, ``format``, the transition table and
+    its source mappings, and the container shape of the seven configuration
+    sections ``stochastic``, ``contagion``, ``decay``, ``cosmic_garden``,
+    ``experimental``, ``metadata`` and ``topology`` -- validated in that order,
+    each at its retrieval site, before any of its keys is read. Field values
+    *within* a correctly shaped section are not validated here.
+    """
     filepath = Path(filepath)
     with open(filepath, "r", encoding="utf-8") as f:
         genome = json.load(f)
@@ -273,13 +304,13 @@ def import_genome(filepath):
         for count_str, target_name in mappings.items():
             transitions[src_name][count_str] = target_name
 
-    stoch_section = genome.get("stochastic", {})
-    contagion_section = genome.get("contagion", {})
-    decay_section = genome.get("decay", {})
-    cosmic_section = genome.get("cosmic_garden", {})
-    exp_section = genome.get("experimental", {})
-    meta = genome.get("metadata", {})
-    topo = genome.get("topology", {})
+    stoch_section = _require_json_object_section(genome, "stochastic")
+    contagion_section = _require_json_object_section(genome, "contagion")
+    decay_section = _require_json_object_section(genome, "decay")
+    cosmic_section = _require_json_object_section(genome, "cosmic_garden")
+    exp_section = _require_json_object_section(genome, "experimental")
+    meta = _require_json_object_section(genome, "metadata")
+    topo = _require_json_object_section(genome, "topology")
 
     rule_spec = {
         "rule": {
