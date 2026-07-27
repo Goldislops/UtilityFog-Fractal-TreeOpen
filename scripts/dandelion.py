@@ -210,6 +210,26 @@ def decode_qr_payload(payload: str) -> dict:
 # Seed 2: 3D Print Export (STL + 3MF + Voxel Slices)
 # ---------------------------------------------------------------------------
 
+def _load_snapshot_lattice(snapshot_path: str) -> np.ndarray:
+    """Retrieve the ``lattice`` member from an NPZ snapshot, safely.
+
+    Two properties the public ``stl`` / ``glb`` / ``slices`` commands rely on:
+
+    * ``allow_pickle=False`` — an object-dtype member is refused by NumPy rather
+      than unpickled, and a file that is not a valid NPZ is never handed to the
+      unpickler. This is an object-array refusal, NOT whole-archive validation:
+      no claim is made about archive size, entry names or ZIP-bomb resistance.
+    * the archive is a context manager, so the handle is released before the
+      lattice is returned — on success, on a missing member, and on any other
+      exception raised while accessing it.
+
+    The retrieved array is returned as NumPy produced it: no dtype conversion,
+    copy, reshape or validation.
+    """
+    with np.load(snapshot_path, allow_pickle=False) as snapshot:
+        return snapshot["lattice"]
+
+
 def lattice_to_stl(
     lattice: np.ndarray,
     output_path: str = "organism.stl",
@@ -719,16 +739,16 @@ def main(argv=None):
             print(f"  QR codes needed:        {n_codes}")
 
     elif args.command == "stl":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_stl(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_stl(lattice, args.output)
 
     elif args.command == "glb":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_glb(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_glb(lattice, args.output)
 
     elif args.command == "slices":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_voxel_slices(snap["lattice"], args.output_dir, scale=args.scale)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_voxel_slices(lattice, args.output_dir, scale=args.scale)
 
     elif args.command == "wasm":
         print_wasm_guide()
