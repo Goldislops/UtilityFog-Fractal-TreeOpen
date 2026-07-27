@@ -34,7 +34,10 @@ from unittest import mock
 import numpy as np
 import pytest
 
+import scripts as _scripts_package
+
 _ENGINE = "scripts.continuous_evolution_ca"
+_ENGINE_ATTR = "continuous_evolution_ca"
 
 
 def _engine_stand_in():
@@ -319,7 +322,15 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None):
         })
         return lattice, inactivity, memory_grid, {"entropy": 0.5}
 
+    # `run_benchmarks` does `import scripts.continuous_evolution_ca as ca_module`.
+    # For that dotted `import ... as` form CPython resolves the binding via
+    # `getattr(scripts, "continuous_evolution_ca")` and only falls back to
+    # `sys.modules`, so patching `sys.modules` alone is not enough once any other
+    # test module has imported the real engine (which sets that attribute on the
+    # package). Both are patched here, and both are restored on exit, so the real
+    # engine's globals are never read or mutated by these tests.
     with mock.patch.dict(sys.modules, {_ENGINE: engine}), \
+         mock.patch.object(_scripts_package, _ENGINE_ATTR, engine, create=True), \
          mock.patch.object(gpu_benchmark.np, "load",
                            mock.Mock(return_value=archive)), \
          mock.patch.object(gpu_benchmark, "load_rule_spec", _load_rule_spec), \
