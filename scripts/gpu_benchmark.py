@@ -76,6 +76,42 @@ def benchmark_component(name: str, fn, warmup: int = 2, iterations: int = 10) ->
     return median
 
 
+def _load_snapshot(snapshot_path):
+    """Return (lattice, memory_grid, generation) with the archive already closed.
+
+    `run_benchmarks` previously did `snap = np.load(...)` inline and kept the
+    returned `NpzFile` referenced for the whole suite: the shape and cell-count
+    calculations, `load_rule_spec`, legacy memory-grid expansion, RNG and
+    inactivity construction, the temporary CPU/GPU global switch, every CPU and
+    optional GPU component benchmark with all its warmups and iterations, every
+    full `step_ca_lattice` step, the timing aggregation and the printed summary.
+    A benchmark run therefore held the input handle across an operator-selected
+    number of steps, released only by eventual object destruction. On Windows a
+    retained snapshot handle can interfere with deleting, rotating or replacing
+    that file.
+
+    The `with` block bounds the archive to extraction: the three values are
+    materialised while it is open and it is closed before this helper returns,
+    so no benchmark work holds the input handle. Closure is explicit, not left
+    to garbage collection.
+
+    Extraction is not guarded: a missing key or a failing `int()` conversion
+    propagates exactly as before, and the `with` block still closes the archive
+    on the way out. The supplied `snapshot_path` object is passed to `np.load`
+    unchanged (no path conversion introduced) and `allow_pickle=True` is
+    preserved verbatim.
+
+    The claim is archive resource lifetime relative to extraction — not an
+    indefinitely accumulating descriptor leak, not snapshot validation, and
+    nothing about the benchmark mathematics or timing methodology.
+    """
+    with np.load(snapshot_path, allow_pickle=True) as snap:
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap["generation"])
+    return lattice, memory_grid, generation
+
+
 def run_benchmarks(snapshot_path: str, num_steps: int = 10):
     """Run the full benchmark suite."""
     print("=" * 72)
@@ -93,10 +129,7 @@ def run_benchmarks(snapshot_path: str, num_steps: int = 10):
 
     # Load snapshot
     print(f"  Loading snapshot: {snapshot_path}")
-    snap = np.load(snapshot_path, allow_pickle=True)
-    lattice = snap["lattice"]
-    memory_grid = snap["memory_grid"]
-    generation = int(snap["generation"])
+    lattice, memory_grid, generation = _load_snapshot(snapshot_path)
     shape = lattice.shape
     N = shape[0]
     total_cells = lattice.size
