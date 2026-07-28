@@ -47,12 +47,12 @@ def _bounded_exact_str(value: Any, limit: int) -> str:
 def _exact_str(value: Any) -> str:
     """Keep `value` unchanged only when it is exactly `str` — no length ceiling.
 
-    A `TextBlock` has no established maximum length, so an accepted exact
-    string is retained byte-for-byte (unlike `_bounded_exact_str`, this
-    applies no slice). str subclasses (whose methods may be overridden) and
-    every other type become "" without any truth, length, iteration,
-    conversion, representation, comparison, attribute, or type-name method
-    being requested on the value.
+    A `TextBlock`'s text and a `ToolResultBlock`'s `tool_use_id` have no
+    established maximum length, so an accepted exact string is retained
+    byte-for-byte (unlike `_bounded_exact_str`, this applies no slice). str
+    subclasses (whose methods may be overridden) and every other type become
+    "" without any truth, length, iteration, conversion, representation,
+    comparison, attribute, or type-name method being requested on the value.
     """
     if type(value) is str:
         return value
@@ -117,8 +117,30 @@ class ToolResultBlock:
     a hostile `__iter__`) and raise, or hit `_block_to_wire`'s "unexpected
     content block" on a foreign element; the OpenAI-compat encoder would
     otherwise raise on a non-iterable content or emit corrupt output for
-    foreign elements. `tool_use_id` and `is_error` are outside this
-    normalization's scope (see the shape-totality tests).
+    foreign elements.
+
+    The two metadata fields are normalized at the same shared boundary so
+    the encoders' established paths are total over every constructed block:
+
+    - `tool_use_id` is kept only when exactly built-in `str` (byte-for-byte,
+      no length ceiling, via `_exact_str`); every other shape — including str
+      subclasses and hostile objects — becomes "" without any conversion,
+      length, comparison, or representation hook. A refused id can therefore
+      no longer flow as a foreign object into the Anthropic
+      `payload["tool_use_id"]` or the OpenAI-compat `"tool_call_id"` wire
+      field; it becomes an exact empty-string field.
+    - `is_error` is kept only when exactly built-in `bool` (`True`/`False`,
+      by `type(...) is bool` identity — `bool` cannot be subclassed);
+      every other shape becomes exact built-in `False` without calling
+      `bool()`, equality, hashing, iteration, or any supplied hook. Both
+      encoders truth-test `if b.is_error:`, so this stops a hostile
+      `__bool__` from escaping and stops a malformed truthy value (e.g. `1`,
+      `"yes"`) from producing the Anthropic `is_error: true` flag or the
+      OpenAI-compat `"[ERROR] "` prefix. Exact `True` retains both.
+
+    No supplied value, type name, representation, or exception text is ever
+    exposed; the claim is bounded to `tool_use_id` and `is_error` (plus the
+    unchanged `content` normalization) — not to any other field or block.
     """
 
     tool_use_id: str
@@ -127,9 +149,12 @@ class ToolResultBlock:
     type: Literal["tool_result"] = "tool_result"
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "tool_use_id", _exact_str(self.tool_use_id))
         object.__setattr__(
             self, "content", _normalized_result_content(self.content)
         )
+        if type(self.is_error) is not bool:
+            object.__setattr__(self, "is_error", False)
 
 
 ContentBlock = Union[TextBlock, ToolUseBlock, ToolResultBlock]
