@@ -130,6 +130,16 @@ class EventPublisher:
         self.close()
 
 
+# Inbound SUB-side wire boundary. Frames arrive from the network, so their
+# structure is not guaranteed by anything the publisher promises. These refusals
+# are fixed and value-free: none of them may expose a supplied frame count, any
+# frame bytes, a decoding position, or the text of an underlying decode error.
+_WIRE_FRAME_COUNT = 3
+WIRE_FRAME_COUNT_MESSAGE = "event wire message must have exactly three frames"
+TOPIC_DECODE_MESSAGE = "event wire topic frame is not valid UTF-8"
+TIMESTAMP_DECODE_MESSAGE = "event wire timestamp frame is not valid UTF-8"
+
+
 class EventSubscriber:
     """Helper SUB-side wrapper. Primarily used by tests and by future agent
     orchestration code. Production traffic goes through `EventPublisher`
@@ -150,19 +160,69 @@ class EventSubscriber:
         self._closed = False
 
     def recv(self, timeout_ms: int = 1000) -> Optional[tuple[str, str, dict]]:
-        """Return (topic, timestamp, payload) or None on timeout."""
+        """Return (topic, timestamp, payload) or None on timeout.
+
+        The three frames arrive off the network, so their shape is validated
+        here rather than assumed:
+
+        - Exactly `_WIRE_FRAME_COUNT` frames are required. Previously the frame
+          list was tuple-unpacked directly, so a message with zero, one, two or
+          four frames raised Python's own unpacking `ValueError` — whose text
+          reports the supplied frame count — instead of a fixed module refusal.
+        - `topic` and `timestamp` are decoded as strict UTF-8 *before* the
+          payload guard. Previously they were decoded in the `return` expression,
+          outside every guard, so invalid UTF-8 in either metadata frame raised
+          `UnicodeDecodeError` at the caller.
+        - The returned payload is always an exact built-in `dict`. Valid JSON
+          whose top-level value is an array, string, number, boolean or `null`
+          used to be returned as that value, contradicting the declared
+          `tuple[str, str, dict]` contract.
+
+        Metadata refusals are fixed, value-free `ValueError`s raised with
+        `from None`, so no frame bytes, decoding position or underlying
+        `UnicodeDecodeError` text reaches the caller. The `_raw` payload
+        fallback is deliberately unchanged: it is existing observability
+        behaviour, built from the decoded payload TEXT (never from a
+        representation of a decoded Python value).
+
+        No blanket `except` is used, so `MemoryError`, unexpected socket
+        failures and unrelated programming errors still propagate. The claim is
+        bounded to this method's frame structure, metadata UTF-8, and exact-dict
+        payload return shape.
+        """
         if self._closed:
             raise RuntimeError("subscriber is closed")
         self.sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
         try:
-            topic_b, ts_b, data_b = self.sock.recv_multipart()
+            frames = self.sock.recv_multipart()
         except zmq.Again:
             return None
+        if len(frames) != _WIRE_FRAME_COUNT:
+            raise ValueError(WIRE_FRAME_COUNT_MESSAGE)
+        topic_b, ts_b, data_b = frames
         try:
-            payload = json.loads(data_b.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+            topic = topic_b.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(TOPIC_DECODE_MESSAGE) from None
+        try:
+            timestamp = ts_b.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(TIMESTAMP_DECODE_MESSAGE) from None
+        try:
+            payload_text = data_b.decode("utf-8")
+        except UnicodeDecodeError:
             payload = {"_raw": data_b.decode("utf-8", errors="replace")}
-        return topic_b.decode("utf-8"), ts_b.decode("utf-8"), payload
+        else:
+            try:
+                decoded = json.loads(payload_text)
+            except ValueError:
+                payload = {"_raw": payload_text}
+            else:
+                # Only an exact JSON object can satisfy the declared dict
+                # contract; every other valid-JSON shape takes the established
+                # _raw form, built from the already-decoded text.
+                payload = decoded if type(decoded) is dict else {"_raw": payload_text}
+        return topic, timestamp, payload
 
     def close(self) -> None:
         if not self._closed:

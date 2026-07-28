@@ -217,6 +217,45 @@ class HaloPacket:
 
     @classmethod
     def from_bytes(cls, buf: bytes) -> "HaloPacket":
+        """Decode a wire frame, refusing every structurally invalid shape.
+
+        The structural refusals below are total over the header and the
+        declared payload length. Each raises `ValueError` with a FIXED,
+        value-free message: no supplied byte sequence, numeric field, type
+        name, representation, conversion result, or exception text is exposed.
+
+          - A frame shorter than `_HEADER_SIZE` is refused BEFORE
+            `struct.unpack` runs. Previously such a frame raised
+            `struct.error` — which is NOT a `ValueError` — straight out of a
+            transport's receive loop.
+          - A magic mismatch is refused ("bad magic ...").
+          - Unsupported dtype codes are refused.
+          - The decoded direction must be an EXACT member of
+            `NEIGHBOR_DIRECTIONS`, so every component is one of -1/0/1 and the
+            non-neighbor `(0, 0, 0)` is refused as well. Previously all 256
+            signed-byte values per component decoded silently, and
+            `_slab_slice` treats every component other than -1 and 0 as +1 —
+            so a corrupt direction wrote a halo into the WRONG face instead of
+            being refused, violating the module's bitwise-reproducibility
+            principle.
+          - The frame length must equal EXACTLY `_HEADER_SIZE` + the declared
+            state element count + 4 * the declared memory element count. This
+            refuses a truncated payload, trailing bytes, and an over-declared
+            shape before either `np.frombuffer` call, so no allocation is
+            attempted for a length the frame cannot satisfy.
+
+        No exception handler is added: `MemoryError` and internal programming
+        failures are never converted into input refusals. A valid frame
+        decodes exactly as before, byte for byte.
+
+        The claim is bounded to structural refusal inside this decoder. It is
+        NOT whole-protocol, transport, packet-authentication, or
+        distributed-execution totality: `source_coord`, `target_coord`, and
+        `generation` are not validated here, and a `HaloPacket` constructed
+        directly — bypassing this decoder — remains unchecked.
+        """
+        if len(buf) < _HEADER_SIZE:
+            raise ValueError("bad halo packet: frame shorter than the fixed header")
         (
             magic,
             sx, sy, sz,
@@ -229,23 +268,28 @@ class HaloPacket:
             msc, msx, msy, msz,
         ) = struct.unpack(_HEADER_FMT, buf[:_HEADER_SIZE])
         if magic != b"SHD1":
-            raise ValueError(f"bad magic {magic!r}; expected b'SHD1'")
+            raise ValueError("bad magic in halo packet header")
         if state_code != 0 or memory_code != 0:
-            raise ValueError(f"unsupported dtype codes state={state_code} memory={memory_code}")
-        offset = _HEADER_SIZE
+            raise ValueError("unsupported dtype codes in halo packet header")
+        direction = (dx, dy, dz)
+        if direction not in NEIGHBOR_DIRECTIONS:
+            raise ValueError("bad halo packet: direction is not a neighbor direction")
         state_size = ssx * ssy * ssz
+        memory_count = msc * msx * msy * msz
+        if len(buf) != _HEADER_SIZE + state_size + 4 * memory_count:
+            raise ValueError("bad halo packet: length does not match the declared shapes")
+        offset = _HEADER_SIZE
         state = np.frombuffer(buf, dtype=np.uint8, count=state_size, offset=offset).reshape(
             (ssx, ssy, ssz)
         ).copy()
         offset += state_size
-        memory_count = msc * msx * msy * msz
         memory = np.frombuffer(buf, dtype=np.float32, count=memory_count, offset=offset).reshape(
             (msc, msx, msy, msz)
         ).copy()
         return cls(
             source_coord=(sx, sy, sz),
             target_coord=(tx, ty, tz),
-            direction=(dx, dy, dz),
+            direction=direction,
             generation=generation,
             state_slab=state,
             memory_slab=memory,
