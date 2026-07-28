@@ -231,6 +231,54 @@ def _save_snapshot(lattice, memory_grid, generation, ca_step, best_fitness):
     return path
 
 
+def _load_resume_snapshot(snapshot_path):
+    """Materialise a resume snapshot, returning the archive already closed.
+
+    ``main()`` previously bound the ``NpzFile`` to one of its own locals with no
+    context manager and no ``close()``. Unlike a helper-local archive — whose
+    only reference disappears when the helper returns — that binding stays
+    reachable from the long-lived ``main()`` frame, so a resumed engine could
+    hold the input archive handle through legacy migration, GPU conversion,
+    population and telemetry setup, Acoustic Map construction, every simulation
+    step and every periodic save. Extraction and conversion failures had no
+    deterministic close either. The bounded claim is excessive and
+    nondeterministic handle lifetime — one invocation holds one resume archive,
+    and no unbounded accumulation is demonstrated or asserted.
+
+    ``allow_pickle`` is deliberately ``False`` here, changed from ``True``.
+    ``--resume`` takes an operator-supplied path, and ``_save_snapshot()`` writes
+    all five required members as ordinary numeric arrays and scalars, so no
+    legitimate engine-produced resume field needs pickle. An object-dtype
+    required member is now refused by NumPy before engine startup continues; that
+    refusal is not caught, translated or suppressed.
+
+    This narrows one deserialization sink only. It is **not** whole-NPZ safety:
+    it provides no archive-size control, ZIP-bomb resistance, entry-name
+    validation, path containment, atomic reading, concurrent-writer protection,
+    schema validation or state-range validation.
+
+    Everything else is preserved exactly: the supplied ``snapshot_path`` object
+    is passed to ``np.load`` unchanged, the five members are read in their
+    established order, ``int()``/``int()``/``float()`` conversions are unchanged,
+    the returned tuple order is unchanged, and the lattice and memory grid are
+    returned by identity. Missing members keep their natural ``KeyError``, and
+    archive, member-access and conversion errors propagate untouched.
+    """
+    with np.load(snapshot_path, allow_pickle=False) as snap:
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap["generation"])
+        ca_step_count = int(snap["ca_step"])
+        best_fitness_ever = float(snap["best_fitness"])
+    return (
+        lattice,
+        memory_grid,
+        generation,
+        ca_step_count,
+        best_fitness_ever,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -250,12 +298,15 @@ def main():
     rng = np.random.default_rng(seed=42)
 
     if args.resume:
-        snap = np.load(args.resume, allow_pickle=True)
-        lattice = snap["lattice"]
-        memory_grid = snap["memory_grid"]
-        generation = int(snap["generation"])
-        ca_step_count = int(snap["ca_step"])
-        best_fitness_ever = float(snap["best_fitness"])
+        # The archive is opened, materialised and closed inside the helper, so
+        # it is already released before any startup or engine work below.
+        (
+            lattice,
+            memory_grid,
+            generation,
+            ca_step_count,
+            best_fitness_ever,
+        ) = _load_resume_snapshot(args.resume)
         best_fitness_gen = 0
         # v0.7.5 migration: extend 3-channel memory grid to 5 channels
         old_channels = memory_grid.shape[0]

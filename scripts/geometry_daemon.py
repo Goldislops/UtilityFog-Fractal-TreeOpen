@@ -40,6 +40,42 @@ EXPORT_INTERVAL = 3600    # export geometry at most once per hour
 
 
 # ---------------------------------------------------------------------------
+# Snapshot loading
+# ---------------------------------------------------------------------------
+
+def _load_snapshot(path):
+    """Return (state, memory_grid, generation) with the archive already closed.
+
+    Both load sites previously did `snap = np.load(...)` and then kept the
+    returned `NpzFile` referenced in the calling frame — through the whole
+    export stage in the daemon, and until process teardown in `--once`. The
+    archive's underlying file handle therefore stayed open far longer than the
+    extraction needed, which on Windows can block cleanup, rotation or
+    replacement of that snapshot.
+
+    The `with` block bounds the archive's lifetime to the extraction itself:
+    the three values are materialised as real in-memory objects while the
+    archive is open, and it is closed before this function returns — so the
+    potentially long-running exporters never hold the input handle. Closure is
+    explicit, not left to garbage collection or interpreter shutdown.
+
+    Extraction failures are NOT caught, translated or suppressed: a missing key
+    or a failing `int()` conversion propagates exactly as before, and the `with`
+    block still closes the archive on the way out.
+
+    `allow_pickle=True` and the `str(path)` conversion are preserved verbatim;
+    changing that policy is out of scope. The claim here is archive resource
+    lifetime only — not snapshot validation, archive security, deterministic
+    export or atomic output.
+    """
+    with np.load(str(path), allow_pickle=True) as snap:
+        state = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap["generation"])
+    return state, memory_grid, generation
+
+
+# ---------------------------------------------------------------------------
 # Exporters
 # ---------------------------------------------------------------------------
 
@@ -228,11 +264,9 @@ def run_daemon():
 
             print(f"\n  [GEO] New snapshot: {latest.name}")
 
-            # Load snapshot
-            snap = np.load(str(latest), allow_pickle=True)
-            state = snap["lattice"]
-            mg = snap["memory_grid"]
-            gen = int(snap["generation"])
+            # Load snapshot. The archive is closed inside the helper, so it is
+            # already released before any exporter below runs.
+            state, mg, gen = _load_snapshot(latest)
 
             # Export geometry
             t0 = time.time()
@@ -287,10 +321,7 @@ if __name__ == "__main__":
             reverse=True,
         )
         if snapshots:
-            snap = np.load(str(snapshots[0]), allow_pickle=True)
-            state = snap["lattice"]
-            mg = snap["memory_grid"]
-            gen = int(snap["generation"])
+            state, mg, gen = _load_snapshot(snapshots[0])
 
             print(f"Exporting geometry for gen {gen:,}...")
 
