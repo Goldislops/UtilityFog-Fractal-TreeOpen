@@ -625,8 +625,8 @@ execution. The suite must include tests for:
   is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
   lane;
 - **`LabInputError` caught directly, at every raise site that can reach the
-  campaign** — four cases, each asserting **exit 2**, exactly **one concise
-  `error:` line** on stderr and **no traceback**:
+  campaign** — **three** cases, each asserting campaign **exit 2**, exactly
+  **one concise `error:` line** on stderr and **no traceback**:
   - a **malformed operator protocol** (bad schema key, unknown `model`,
     out-of-range `smoothing` / `holdout_fraction`, malformed configuration,
     over-long or duplicate label) → direct `LabInputError` catch → **exit 2**;
@@ -637,9 +637,14 @@ execution. The suite must include tests for:
     `max_line_bytes` at the reader call inside `build_lab_report`) → direct
     campaign **exit 2**, with NP6's message and `__cause__` intact and **no**
     re-typing into `CampaignInputError`;
-  - a **sentinel plain `ValueError` raised at the NP6 call seam propagates** and
-    is not swallowed — proving the campaign catches the exact `LabInputError`
-    subclass and not its `ValueError` base;
+- **plain-`ValueError` negative control** — a **separate** case, deliberately
+  **not** one of the three direct-catch cases above and **not** asserting
+  campaign exit 2: a **sentinel plain `ValueError` raised at the NP6 call seam
+  propagates** and is not swallowed, proving the campaign catches the exact
+  `LabInputError` subclass and not its `ValueError` base. Because it propagates
+  rather than being handled, this case asserts **propagation** and **explicitly
+  expects neither** campaign exit 2, **nor** a single concise `error:` line,
+  **nor** the absence of a traceback;
 - **metrics absent** from the eight-file set;
 - **input byte preservation** (originals byte-identical after every path);
 - **absent-final-directory requirement** and **no-overwrite at validation time**;
