@@ -314,14 +314,40 @@ class AcousticMap:
 # Standalone diagnostic: run on a snapshot
 # ---------------------------------------------------------------------------
 def run_acoustic_diagnostic(snapshot_path: str, num_steps: int = 200):
-    """Run acoustic analysis on a snapshot by simulating N steps."""
+    """Run acoustic analysis on a snapshot by simulating N steps.
+
+    The snapshot archive's lifetime is bounded to extraction. Previously the
+    ``NpzFile`` from ``np.load`` stayed referenced for the whole diagnostic —
+    lattice-size inspection, legacy memory-grid expansion, rule-spec loading,
+    RNG and inactivity construction, ``AcousticMap`` construction, every
+    simulated step, the summaries, the final report and the heatmap save — so a
+    default CLI run held the input handle across 100 steps (200 when the
+    function default is used), and callers may ask for more. Release depended on
+    eventual object destruction. On Windows a retained snapshot handle can
+    interfere with deleting, rotating or replacing that file.
+
+    The three values are now materialised while the archive is open and it is
+    closed before any post-extraction work begins — including the ``N =
+    lattice.shape[0]`` inspection. Closure is explicit, not left to garbage
+    collection.
+
+    Extraction is not guarded: a missing key or a failing ``int()`` conversion
+    propagates exactly as before, and the ``with`` block still closes the archive
+    on the way out. The ``snapshot_path`` argument is passed to ``np.load``
+    unchanged (no path conversion is introduced) and ``allow_pickle=True`` is
+    preserved verbatim.
+
+    The claim is archive resource lifetime relative to extraction — not an
+    indefinitely accumulating descriptor leak, not snapshot validation, and
+    nothing about the acoustic mathematics.
+    """
     from scripts.continuous_evolution_ca import step_ca_lattice, load_rule_spec, init_memory_grid
 
     print(f"Loading snapshot: {snapshot_path}")
-    snap = np.load(snapshot_path, allow_pickle=True)
-    lattice = snap["lattice"]
-    memory_grid = snap["memory_grid"]
-    gen = int(snap["generation"])
+    with np.load(snapshot_path, allow_pickle=True) as snap:
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        gen = int(snap["generation"])
     N = lattice.shape[0]
 
     if memory_grid.shape[0] < 8:

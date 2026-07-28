@@ -38,6 +38,14 @@ MAX_RESTART_ATTEMPTS = 10  # before giving up
 RESTART_COOLDOWN = 30      # seconds to wait before restart after crash
 PROCESS_NAME = "run_v070_engine.py"
 
+# Fixed status lines for a FAILED process query. A query failure means the
+# engine's real state is unknown -- it is never evidence that zero engines are
+# running -- so these are deliberately distinct from "ENGINE DOWN!".
+PROCESS_QUERY_FAILED_MESSAGE = "Process query FAILED: engine status unknown"
+ENGINE_STATUS_UNKNOWN_MESSAGE = (
+    "Engine status UNKNOWN: process query failed; no restart decision this cycle"
+)
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -57,16 +65,44 @@ log = logging.getLogger("watchdog")
 # ---------------------------------------------------------------------------
 
 def find_engine_processes():
-    """Find all running Medusa engine processes. Returns list of (pid, cmdline)."""
+    """Find all running Medusa engine processes.
+
+    Returns a list of ``(pid, cmdline)`` when the query SUCCEEDS — an ordinary
+    empty list when it succeeded and simply matched nothing — and ``None`` when
+    the query itself FAILED, so the engine's real state is unknown.
+
+    That distinction is the whole point: the watchdog restarts the engine when
+    it sees zero processes. Previously every failure — a PowerShell timeout, a
+    launch/OS error, a non-zero exit whose stdout happened to be empty, or
+    output whose PID would not parse — was converted into ``[]``, which the loop
+    read as proof that no engine was running. A monitoring failure could
+    therefore start a duplicate engine or drive a restart storm. ``None`` cannot
+    be mistaken for a successful count of zero.
+
+    Only expected process-query and parsing boundary failures are caught; there
+    is no blanket catch, so unrelated programming errors still surface.
+    """
     try:
         result = subprocess.run(
             ["powershell", "-Command",
              "Get-CimInstance Win32_Process | Where-Object {$_.CommandLine -like '*run_v070_engine*' -and $_.Name -eq 'python.exe'} | Select-Object ProcessId, CommandLine | Format-List"],
             capture_output=True, text=True, timeout=10
         )
-        processes = []
-        current_pid = None
-        current_cmd = None
+    except (subprocess.SubprocessError, OSError):
+        # Timeout, launch failure, or any other OS-level query failure.
+        log.error(PROCESS_QUERY_FAILED_MESSAGE)
+        return None
+
+    # A non-zero exit means the query did not run to completion, so its (often
+    # empty) stdout is NOT evidence that no engine is running.
+    if result.returncode != 0:
+        log.error(PROCESS_QUERY_FAILED_MESSAGE)
+        return None
+
+    processes = []
+    current_pid = None
+    current_cmd = None
+    try:
         for line in result.stdout.strip().split("\n"):
             line = line.strip()
             if line.startswith("ProcessId"):
@@ -77,10 +113,12 @@ def find_engine_processes():
                     processes.append((current_pid, current_cmd))
                 current_pid = None
                 current_cmd = None
-        return processes
-    except Exception as e:
-        log.error(f"Failed to query processes: {e}")
-        return []
+    except ValueError:
+        # A PID that will not parse means the listing cannot be trusted; report
+        # unknown rather than a silently partial count.
+        log.error(PROCESS_QUERY_FAILED_MESSAGE)
+        return None
+    return processes
 
 
 def find_latest_snapshot():
@@ -172,6 +210,17 @@ def run_watchdog():
         try:
             # 1. Find engine processes
             processes = find_engine_processes()
+
+            # 1a. A FAILED query is not proof the engine is down, so no restart
+            # or duplicate-kill decision may be made from it: no snapshot
+            # lookup, no start_engine, no kill_process, and restart_count /
+            # last_restart_time are left exactly as they were. Wait the normal
+            # cadence and re-query on the next cycle.
+            if processes is None:
+                log.error(ENGINE_STATUS_UNKNOWN_MESSAGE)
+                time.sleep(CHECK_INTERVAL)
+                continue
+
             num_engines = len(processes)
 
             # 2. Handle duplicate processes
@@ -241,6 +290,37 @@ def run_watchdog():
         time.sleep(CHECK_INTERVAL)
 
 
+def run_once():
+    """One-shot status check for ``--once``. Returns the process exit status.
+
+    A failed process query reports the fixed status-unknown line and exits
+    non-zero: it must never print "Engine NOT running!", which asserts a fact a
+    failed query cannot establish. A successful query keeps its established
+    output for zero, one or many processes and exits 0.
+
+    Split out of the ``__main__`` block only so the query-failure branch has a
+    return status to assert; argument parsing and dispatch are unchanged.
+    """
+    processes = find_engine_processes()
+    if processes is None:
+        print(PROCESS_QUERY_FAILED_MESSAGE)
+        return 1
+    if processes:
+        print(f"Engine running: {len(processes)} process(es)")
+        for pid, cmd in processes:
+            print(f"  PID {pid}: {cmd[:80]}...")
+        healthy, status = check_engine_health(processes)
+        print(f"  Health: {'OK' if healthy else 'WARNING'} — {status}")
+    else:
+        print("Engine NOT running!")
+        snapshot = find_latest_snapshot()
+        if snapshot:
+            print(f"  Latest snapshot: {snapshot.name}")
+        else:
+            print("  No snapshots found!")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
@@ -254,19 +334,6 @@ if __name__ == "__main__":
     CHECK_INTERVAL = args.check_interval
 
     if args.once:
-        processes = find_engine_processes()
-        if processes:
-            print(f"Engine running: {len(processes)} process(es)")
-            for pid, cmd in processes:
-                print(f"  PID {pid}: {cmd[:80]}...")
-            healthy, status = check_engine_health(processes)
-            print(f"  Health: {'OK' if healthy else 'WARNING'} — {status}")
-        else:
-            print("Engine NOT running!")
-            snapshot = find_latest_snapshot()
-            if snapshot:
-                print(f"  Latest snapshot: {snapshot.name}")
-            else:
-                print("  No snapshots found!")
+        sys.exit(run_once())
     else:
         run_watchdog()
