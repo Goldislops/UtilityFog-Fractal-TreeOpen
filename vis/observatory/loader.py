@@ -70,13 +70,37 @@ def load_npz(path: str | Path) -> ObservatorySnapshot:
 
     NPZ files contain: lattice, memory_grid, generation, ca_step, best_fitness.
     Auto-migrates old 3-channel or 5-channel memory grids to 8 channels.
+
+    The archive's lifetime is bounded to extraction. Previously the `NpzFile`
+    returned by `np.load` stayed referenced through legacy-grid migration (which
+    imports the engine and can be expensive), the fallback zero-padding, both
+    `.astype()` conversions, the metadata lookups and the return — released only
+    by eventual object destruction. `load_snapshot_series()` calls this function
+    once per file, so every series member inherits that behaviour. A retained
+    handle can interfere with deleting, rotating or replacing a snapshot on
+    Windows.
+
+    All five values are now materialised while the archive is open and it is
+    closed deterministically before any of that later work begins. Extraction
+    failures are not caught, translated or suppressed: a missing key or a failing
+    metadata conversion propagates exactly as before, and the `with` block still
+    closes the archive on the way out. `str(path)`, `allow_pickle=True`, the
+    `0` / `0` / `0.0` metadata defaults and the `int()` / `float()` conversions
+    are preserved verbatim.
+
+    The claim is archive resource lifetime relative to extraction — not an
+    indefinitely accumulating descriptor leak, and not snapshot validation.
     """
     path = Path(path)
-    snap = np.load(str(path), allow_pickle=True)
-    lattice = snap["lattice"]
-    memory_grid = snap["memory_grid"]
+    with np.load(str(path), allow_pickle=True) as snap:
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap.get("generation", 0))
+        ca_step = int(snap.get("ca_step", 0))
+        best_fitness = float(snap.get("best_fitness", 0.0))
 
-    # Auto-migrate old memory grid formats
+    # Auto-migrate old memory grid formats. The archive is already closed here,
+    # so neither the engine import nor the migration retains the file handle.
     if memory_grid.shape[0] != NUM_CHANNELS:
         try:
             from scripts.continuous_evolution_ca import _migrate_memory_grid
@@ -96,9 +120,9 @@ def load_npz(path: str | Path) -> ObservatorySnapshot:
     return ObservatorySnapshot(
         lattice=lattice.astype(np.uint8),
         memory_grid=memory_grid.astype(np.float32),
-        generation=int(snap.get("generation", 0)),
-        ca_step=int(snap.get("ca_step", 0)),
-        best_fitness=float(snap.get("best_fitness", 0.0)),
+        generation=generation,
+        ca_step=ca_step,
+        best_fitness=best_fitness,
         source_path=str(path),
     )
 
