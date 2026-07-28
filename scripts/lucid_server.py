@@ -156,6 +156,17 @@ async def handle_client(websocket):
         async for message in websocket:
             try:
                 event = json.loads(message)
+                # Valid JSON is not necessarily a JSON *object*. `null`, booleans,
+                # numbers, strings and arrays all decode successfully but have no
+                # .get(), so reaching for one raised AttributeError, escaped the
+                # JSONDecodeError guard below, and terminated this client's handler
+                # -- disconnecting the browser instead of ignoring one bad frame.
+                # Accept only an exact built-in dict; every other decoded shape is
+                # ignored silently (no reply, no event action, and nothing about the
+                # supplied value or its type is logged) and the loop keeps reading
+                # later messages from the same client, exactly like malformed JSON.
+                if type(event) is not dict:
+                    continue
                 event_type = event.get('type', '')
 
                 if event_type == 'click':

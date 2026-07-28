@@ -1224,41 +1224,63 @@ def load_snapshot(
 
     Raises ``ValueError`` if required keys are missing or shapes are
     inconsistent — defensive against passing the wrong file.
+
+    Archive ownership is deterministic. The ``NpzFile`` is held by a context
+    manager, so it is closed before this function returns on the success path
+    *and* on every failure path after the archive is opened: required-key
+    enumeration or refusal, any required-member access, the ``int()``
+    conversion, either shape validation, optional-member access, and scalar
+    ``.item()`` conversion. Previously the archive was bound to a local with no
+    ``close()``, so release depended on object destruction rather than an
+    explicit ownership boundary, and callers had no contractual guarantee that
+    the input file had been released before Observer processing began.
+
+    Nothing else changes: the pre-load path handling, ``allow_pickle=False``,
+    the required keys, the extraction order, every exception type and message,
+    the narrow skippable-``ValueError`` lane for pickled optional members, the
+    scalar ``.item()`` rule and the returned tuple are all preserved exactly. An
+    exception raised by ``np.load`` itself happens before context entry and
+    propagates unchanged.
+
+    The bounded claim is deterministic archive ownership and close-before-return
+    across this loader's existing contract — not whole-NPZ security, snapshot
+    authenticity, atomic reading, concurrent-writer protection, metadata-schema
+    totality, or any accumulating-descriptor-leak claim.
     """
     snapshot_path = pathlib.Path(snapshot_path)
     if not snapshot_path.is_file():
         raise FileNotFoundError(f"snapshot not found: {snapshot_path}")
-    snap = np.load(str(snapshot_path), allow_pickle=False)
-    keys = set(snap.files)
-    required = {"lattice", "memory_grid", "generation"}
-    missing = required - keys
-    if missing:
-        raise ValueError(
-            f"snapshot {snapshot_path.name} missing keys: {sorted(missing)}"
-        )
-    state = snap["lattice"]
-    memory = snap["memory_grid"]
-    generation = int(snap["generation"])
-    if state.ndim != 3:
-        raise ValueError(
-            f"snapshot {snapshot_path.name}: state must be 3D, got shape {state.shape}"
-        )
-    if memory.ndim != 4 or memory.shape[1:] != state.shape:
-        raise ValueError(
-            f"snapshot {snapshot_path.name}: memory shape {memory.shape} "
-            f"inconsistent with state shape {state.shape}"
-        )
-    # Optional metadata: only include keys that load without pickle.
-    # With allow_pickle=False any key requiring pickle will raise ValueError
-    # at access time; we catch + skip rather than fail the whole load.
-    meta: dict[str, object] = {}
-    for k in keys - required:
-        try:
-            val = snap[k]
-        except ValueError:
-            # Key needs pickle (object dtype); skip silently per §7 #7 spirit.
-            continue
-        meta[k] = val.item() if val.ndim == 0 else val
+    with np.load(str(snapshot_path), allow_pickle=False) as snap:
+        keys = set(snap.files)
+        required = {"lattice", "memory_grid", "generation"}
+        missing = required - keys
+        if missing:
+            raise ValueError(
+                f"snapshot {snapshot_path.name} missing keys: {sorted(missing)}"
+            )
+        state = snap["lattice"]
+        memory = snap["memory_grid"]
+        generation = int(snap["generation"])
+        if state.ndim != 3:
+            raise ValueError(
+                f"snapshot {snapshot_path.name}: state must be 3D, got shape {state.shape}"
+            )
+        if memory.ndim != 4 or memory.shape[1:] != state.shape:
+            raise ValueError(
+                f"snapshot {snapshot_path.name}: memory shape {memory.shape} "
+                f"inconsistent with state shape {state.shape}"
+            )
+        # Optional metadata: only include keys that load without pickle.
+        # With allow_pickle=False any key requiring pickle will raise ValueError
+        # at access time; we catch + skip rather than fail the whole load.
+        meta: dict[str, object] = {}
+        for k in keys - required:
+            try:
+                val = snap[k]
+            except ValueError:
+                # Key needs pickle (object dtype); skip silently per §7 #7 spirit.
+                continue
+            meta[k] = val.item() if val.ndim == 0 else val
     return state, memory, generation, meta
 
 

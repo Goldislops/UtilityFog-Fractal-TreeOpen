@@ -29,7 +29,7 @@ import os
 import sys
 import zlib
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 
@@ -69,10 +69,32 @@ class DandelionGenomeError(ValueError):
 # Seed 1: QR Code Generator
 # ---------------------------------------------------------------------------
 
-def genome_to_compressed_bytes(genome_path: str) -> bytes:
-    """Load a genome JSON, strip epigenetic data, minify, and zlib compress."""
+class _GenomeCapture(NamedTuple):
+    """One authoritative genome read and everything derived from that text.
+
+    ``source_text`` is exactly what the single read returned; ``minified_bytes``
+    are the canonical, ``epigenetic_snapshot``-stripped minified UTF-8 bytes;
+    ``compressed`` is the zlib payload built from those exact bytes. Every QR
+    size reported to a caller therefore describes one genome version.
+    """
+
+    source_text: str
+    minified_bytes: bytes
+    compressed: bytes
+
+
+def _capture_genome(genome_path: str) -> _GenomeCapture:
+    """Read the genome file ONCE and derive every QR artifact from that text.
+
+    A single read is the whole point: the payload and the reported sizes must
+    describe the same genome version. This is source coherence only — it is not
+    an atomic-snapshot, locking or filesystem-race guarantee, and it makes no
+    claim about what happens to the file after the read returns.
+    """
     with open(genome_path, "r") as f:
-        genome = json.load(f)
+        source_text = f.read()
+
+    genome = json.loads(source_text)
 
     if type(genome) is not dict:
         raise DandelionGenomeError("genome must be a JSON object")
@@ -82,10 +104,16 @@ def genome_to_compressed_bytes(genome_path: str) -> bytes:
 
     # Minify
     minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
+    minified_bytes = minified.encode("utf-8")
 
     # Compress
-    compressed = zlib.compress(minified.encode("utf-8"), level=9)
-    return compressed
+    compressed = zlib.compress(minified_bytes, level=9)
+    return _GenomeCapture(source_text, minified_bytes, compressed)
+
+
+def genome_to_compressed_bytes(genome_path: str) -> bytes:
+    """Load a genome JSON, strip epigenetic data, minify, and zlib compress."""
+    return _capture_genome(genome_path).compressed
 
 
 def compressed_to_b85(compressed: bytes) -> str:
@@ -102,7 +130,12 @@ def generate_qr(
 ) -> dict:
     """Generate a QR code containing the compressed genome.
 
-    Returns metadata dict with sizes and QR version info.
+    Returns metadata dict with sizes and QR version info. The payload and every
+    reported size come from **one** captured read of the genome file, so
+    ``original_json_bytes`` (the complete captured source text),
+    ``minified_bytes`` (the canonical ``epigenetic_snapshot``-stripped minified
+    bytes that are actually compressed) and ``compressed_bytes`` all describe
+    the same genome version as the QR itself.
     """
     try:
         import qrcode
@@ -125,9 +158,11 @@ def generate_qr(
     }
     ec_level = ec_map.get(error_correction.upper(), ERROR_CORRECT_L)
 
-    # Load, compress, encode
-    compressed = genome_to_compressed_bytes(genome_path)
-    b85_data = compressed_to_b85(compressed)
+    # Load, compress, encode — ONE authoritative read (after the optional
+    # dependency check above). The payload and every size reported below are
+    # derived from this single captured genome version.
+    capture = _capture_genome(genome_path)
+    b85_data = compressed_to_b85(capture.compressed)
 
     # Build QR with header for decoder
     qr_payload = f"UFG1:{b85_data}"  # UFG1 = UtilityFog Genome v1 prefix
@@ -144,16 +179,10 @@ def generate_qr(
     img = qr.make_image(fill_color="black", back_color="white")
     img.save(output_path)
 
-    # Read back original for size comparison
-    with open(genome_path, "r") as f:
-        original_size = len(f.read().encode("utf-8"))
-
     return {
-        "original_json_bytes": original_size,
-        "minified_bytes": len(json.dumps(
-            json.load(open(genome_path)), separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")),
-        "compressed_bytes": len(compressed),
+        "original_json_bytes": len(capture.source_text.encode("utf-8")),
+        "minified_bytes": len(capture.minified_bytes),
+        "compressed_bytes": len(capture.compressed),
         "b85_encoded_chars": len(b85_data),
         "qr_payload_chars": len(qr_payload),
         "qr_version": qr.version,
@@ -180,6 +209,26 @@ def decode_qr_payload(payload: str) -> dict:
 # ---------------------------------------------------------------------------
 # Seed 2: 3D Print Export (STL + 3MF + Voxel Slices)
 # ---------------------------------------------------------------------------
+
+def _load_snapshot_lattice(snapshot_path: str) -> np.ndarray:
+    """Retrieve the ``lattice`` member from an NPZ snapshot, safely.
+
+    Two properties the public ``stl`` / ``glb`` / ``slices`` commands rely on:
+
+    * ``allow_pickle=False`` — an object-dtype member is refused by NumPy rather
+      than unpickled, and a file that is not a valid NPZ is never handed to the
+      unpickler. This is an object-array refusal, NOT whole-archive validation:
+      no claim is made about archive size, entry names or ZIP-bomb resistance.
+    * the archive is a context manager, so the handle is released before the
+      lattice is returned — on success, on a missing member, and on any other
+      exception raised while accessing it.
+
+    The retrieved array is returned as NumPy produced it: no dtype conversion,
+    copy, reshape or validation.
+    """
+    with np.load(snapshot_path, allow_pickle=False) as snapshot:
+        return snapshot["lattice"]
+
 
 def lattice_to_stl(
     lattice: np.ndarray,
@@ -662,15 +711,13 @@ def main(argv=None):
 
     elif args.command == "info":
         try:
-            compressed = genome_to_compressed_bytes(args.genome)
+            # ONE authoritative read: every value printed below derives from
+            # this single capture, so one report can never describe two genome
+            # versions. Source coherence only — not an atomic snapshot, and no
+            # claim about the file after the read returns.
+            capture = _capture_genome(args.genome)
+            compressed = capture.compressed
             b85 = compressed_to_b85(compressed)
-            with open(args.genome, "r") as f:
-                orig = f.read()
-            genome = json.loads(orig)
-            if type(genome) is not dict:
-                raise DandelionGenomeError("genome must be a JSON object")
-            genome.pop("epigenetic_snapshot", None)
-            minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
         except DandelionGenomeError as exc:
             # Only the JSON-object refusal routes through argparse (exit code 2).
             # JSON syntax errors, filesystem errors and unrelated exceptions are
@@ -678,8 +725,8 @@ def main(argv=None):
             parser.error(str(exc))
 
         print(f"Genome: {args.genome}")
-        print(f"  Original:   {len(orig.encode()):,} bytes")
-        print(f"  Minified:   {len(minified.encode()):,} bytes")
+        print(f"  Original:   {len(capture.source_text.encode('utf-8')):,} bytes")
+        print(f"  Minified:   {len(capture.minified_bytes):,} bytes")
         print(f"  Compressed: {len(compressed):,} bytes")
         print(f"  Base85:     {len(b85):,} chars")
         print(f"  QR payload: {len(b85) + 5:,} chars (with UFG1: header)")
@@ -692,16 +739,16 @@ def main(argv=None):
             print(f"  QR codes needed:        {n_codes}")
 
     elif args.command == "stl":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_stl(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_stl(lattice, args.output)
 
     elif args.command == "glb":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_glb(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_glb(lattice, args.output)
 
     elif args.command == "slices":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_voxel_slices(snap["lattice"], args.output_dir, scale=args.scale)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_voxel_slices(lattice, args.output_dir, scale=args.scale)
 
     elif args.command == "wasm":
         print_wasm_guide()
