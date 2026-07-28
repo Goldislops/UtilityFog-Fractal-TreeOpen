@@ -624,9 +624,9 @@ execution. The suite must include tests for:
 - **protocol-input ceiling** — a protocol over NP6 `MAX_PROTOCOL_BYTES` (64 KiB)
   is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
   lane;
-- **`LabInputError` caught directly, at every raise site that can reach the
-  campaign** — **four** cases, each asserting campaign **exit 2**, exactly
-  **one concise `error:` line** on stderr and **no traceback**:
+- **`LabInputError` caught directly** — **four** required handled
+  `LabInputError` **failure families**, each asserting campaign **exit 2**,
+  exactly **one concise `error:` line** on stderr and **no traceback**:
   - a **malformed operator protocol** (bad schema key, unknown `model`,
     out-of-range `smoothing` / `holdout_fraction`, malformed configuration,
     over-long or duplicate label) → direct `LabInputError` catch → **exit 2**;
@@ -642,6 +642,10 @@ execution. The suite must include tests for:
     is reached only after the protocol has already loaded → the **same** direct
     campaign **exit 2** lane. It bounds a **step count** on operator-supplied
     input, not a serialized byte size, so the exit-5 ceiling lane never applies;
+- **Scope of those four (a bound on the claim, not a further test)** — they
+  cover the named semantic **failure families** at the campaign boundary, and
+  are **not** a one-to-one test of every literal `raise LabInputError`
+  statement in NP6, nor of every invocation of `load_protocol`;
 - **plain-`ValueError` negative control** — a **separate** case, deliberately
   **not** one of the four direct-catch cases above and **not** asserting
   campaign exit 2: a **sentinel plain `ValueError` raised at the NP6 call seam
