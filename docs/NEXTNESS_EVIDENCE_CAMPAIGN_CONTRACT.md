@@ -625,7 +625,7 @@ execution. The suite must include tests for:
   is refused on the **exit-2** lane (`LabInputError`), never the exit-5 ceiling
   lane;
 - **`LabInputError` caught directly, at every raise site that can reach the
-  campaign** — **three** cases, each asserting campaign **exit 2**, exactly
+  campaign** — **four** cases, each asserting campaign **exit 2**, exactly
   **one concise `error:` line** on stderr and **no traceback**:
   - a **malformed operator protocol** (bad schema key, unknown `model`,
     out-of-range `smoothing` / `holdout_fraction`, malformed configuration,
@@ -637,8 +637,13 @@ execution. The suite must include tests for:
     `max_line_bytes` at the reader call inside `build_lab_report`) → direct
     campaign **exit 2**, with NP6's message and `__cause__` intact and **no**
     re-typing into `CampaignInputError`;
+  - a **replay holdout over `MAX_REPLAY_STEPS`** (= 2000) — raised as
+    `LabInputError` by `build_lab_report` itself, not by `load_protocol`, so it
+    is reached only after the protocol has already loaded → the **same** direct
+    campaign **exit 2** lane. It bounds a **step count** on operator-supplied
+    input, not a serialized byte size, so the exit-5 ceiling lane never applies;
 - **plain-`ValueError` negative control** — a **separate** case, deliberately
-  **not** one of the three direct-catch cases above and **not** asserting
+  **not** one of the four direct-catch cases above and **not** asserting
   campaign exit 2: a **sentinel plain `ValueError` raised at the NP6 call seam
   propagates** and is not swallowed, proving the campaign catches the exact
   `LabInputError` subclass and not its `ValueError` base. Because it propagates
