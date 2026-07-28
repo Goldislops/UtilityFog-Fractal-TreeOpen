@@ -74,14 +74,38 @@ def _find_latest_snapshot():
 
 
 def _load_snapshot(path):
-    """Load a snapshot and return (state, memory_grid, gen, fitness)."""
-    snap = np.load(str(path), allow_pickle=True)
-    return (
-        snap["lattice"],
-        snap["memory_grid"],
-        int(snap["generation"]),
-        float(snap["best_fitness"]),
-    )
+    """Load a snapshot and return (state, memory_grid, gen, fitness).
+
+    This helper is shared by ``/api/census``, ``/api/equanimity``,
+    ``/api/acoustic`` (when no saved map is used) and ``/api/geometry/stl``.
+    Previously it returned while the ``NpzFile`` from ``np.load`` was still
+    referenced, so the archive stayed open through whatever the calling endpoint
+    did next — census counting and entropy, equanimity masks and elder sorting,
+    acoustic sector reshaping, geometry sampling and mesh construction — and was
+    released only by eventual object destruction. Every request repeated that.
+    On Windows a retained snapshot handle can interfere with deleting, rotating
+    or replacing that file.
+
+    The four values are now materialised while the archive is open and it is
+    closed before the ``return`` executes, so no endpoint computation holds the
+    input handle. Closure is explicit rather than left to garbage collection.
+
+    Extraction is not guarded: a missing key or a failing ``int()`` / ``float()``
+    conversion propagates exactly as before, and the ``with`` block still closes
+    the archive on the way out. ``str(path)``, ``allow_pickle=True``, the
+    required-key semantics, the extraction order, both conversions and the tuple
+    order are preserved verbatim.
+
+    The claim is archive resource lifetime relative to extraction — not an
+    indefinitely accumulating descriptor leak, not snapshot validation, endpoint
+    totality, API authentication or atomic file access.
+    """
+    with np.load(str(path), allow_pickle=True) as snap:
+        lattice = snap["lattice"]
+        memory_grid = snap["memory_grid"]
+        generation = int(snap["generation"])
+        best_fitness = float(snap["best_fitness"])
+    return (lattice, memory_grid, generation, best_fitness)
 
 
 def _read_engine_log():
