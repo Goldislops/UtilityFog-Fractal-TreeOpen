@@ -210,6 +210,26 @@ def decode_qr_payload(payload: str) -> dict:
 # Seed 2: 3D Print Export (STL + 3MF + Voxel Slices)
 # ---------------------------------------------------------------------------
 
+def _load_snapshot_lattice(snapshot_path: str) -> np.ndarray:
+    """Retrieve the ``lattice`` member from an NPZ snapshot, safely.
+
+    Two properties the public ``stl`` / ``glb`` / ``slices`` commands rely on:
+
+    * ``allow_pickle=False`` — an object-dtype member is refused by NumPy rather
+      than unpickled, and a file that is not a valid NPZ is never handed to the
+      unpickler. This is an object-array refusal, NOT whole-archive validation:
+      no claim is made about archive size, entry names or ZIP-bomb resistance.
+    * the archive is a context manager, so the handle is released before the
+      lattice is returned — on success, on a missing member, and on any other
+      exception raised while accessing it.
+
+    The retrieved array is returned as NumPy produced it: no dtype conversion,
+    copy, reshape or validation.
+    """
+    with np.load(snapshot_path, allow_pickle=False) as snapshot:
+        return snapshot["lattice"]
+
+
 def lattice_to_stl(
     lattice: np.ndarray,
     output_path: str = "organism.stl",
@@ -691,15 +711,13 @@ def main(argv=None):
 
     elif args.command == "info":
         try:
-            compressed = genome_to_compressed_bytes(args.genome)
+            # ONE authoritative read: every value printed below derives from
+            # this single capture, so one report can never describe two genome
+            # versions. Source coherence only — not an atomic snapshot, and no
+            # claim about the file after the read returns.
+            capture = _capture_genome(args.genome)
+            compressed = capture.compressed
             b85 = compressed_to_b85(compressed)
-            with open(args.genome, "r") as f:
-                orig = f.read()
-            genome = json.loads(orig)
-            if type(genome) is not dict:
-                raise DandelionGenomeError("genome must be a JSON object")
-            genome.pop("epigenetic_snapshot", None)
-            minified = json.dumps(genome, separators=(",", ":"), sort_keys=True)
         except DandelionGenomeError as exc:
             # Only the JSON-object refusal routes through argparse (exit code 2).
             # JSON syntax errors, filesystem errors and unrelated exceptions are
@@ -707,8 +725,8 @@ def main(argv=None):
             parser.error(str(exc))
 
         print(f"Genome: {args.genome}")
-        print(f"  Original:   {len(orig.encode()):,} bytes")
-        print(f"  Minified:   {len(minified.encode()):,} bytes")
+        print(f"  Original:   {len(capture.source_text.encode('utf-8')):,} bytes")
+        print(f"  Minified:   {len(capture.minified_bytes):,} bytes")
         print(f"  Compressed: {len(compressed):,} bytes")
         print(f"  Base85:     {len(b85):,} chars")
         print(f"  QR payload: {len(b85) + 5:,} chars (with UFG1: header)")
@@ -721,16 +739,16 @@ def main(argv=None):
             print(f"  QR codes needed:        {n_codes}")
 
     elif args.command == "stl":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_stl(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_stl(lattice, args.output)
 
     elif args.command == "glb":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_glb(snap["lattice"], args.output)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_glb(lattice, args.output)
 
     elif args.command == "slices":
-        snap = np.load(args.snapshot, allow_pickle=True)
-        lattice_to_voxel_slices(snap["lattice"], args.output_dir, scale=args.scale)
+        lattice = _load_snapshot_lattice(args.snapshot)
+        lattice_to_voxel_slices(lattice, args.output_dir, scale=args.scale)
 
     elif args.command == "wasm":
         print_wasm_guide()

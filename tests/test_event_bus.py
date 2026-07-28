@@ -26,10 +26,13 @@ except ImportError:
     pytest.skip("pyzmq not installed", allow_module_level=True)
 
 from scripts.event_bus import (
+    TIMESTAMP_DECODE_MESSAGE,
+    TOPIC_DECODE_MESSAGE,
     TOPIC_TELEMETRY_5MIN,
     TOPIC_TUNING_COMMITTED,
     TOPIC_TUNING_REJECTED,
     TOPIC_TUNING_ROLLED_BACK,
+    WIRE_FRAME_COUNT_MESSAGE,
     EventPublisher,
     EventSubscriber,
     StateWatcher,
@@ -439,3 +442,256 @@ def test_tuning_state_without_publisher_works(tmp_path):
     )
     entry = state.commit(proposal_id=prop["proposal_id"], approver="human:kevin")
     assert entry["effective_after"]["signal_interval"] == 15
+
+
+# -- EventSubscriber.recv inbound wire-shape totality ------------------------
+#
+# recv() decodes frames that arrive off the network, so their structure is not
+# guaranteed by anything the publisher promises. Before this package it
+# tuple-unpacked the frame list directly, decoded topic/timestamp in the return
+# expression outside every guard, and returned whatever json.loads produced:
+#
+#   - zero, one, two or four frames raised Python's own unpacking ValueError,
+#     whose text reports the SUPPLIED frame count ("expected 3, got 2") rather
+#     than a fixed module refusal;
+#   - invalid UTF-8 in the topic or timestamp frame raised UnicodeDecodeError
+#     carrying the offending byte and its position;
+#   - valid JSON whose top-level value was an array, string, number, boolean or
+#     null was returned as that value, contradicting the declared
+#     Optional[tuple[str, str, dict]].
+#
+# Every case below drives the genuine recv() through a controlled fake socket:
+# no ZMQ context, no socket, no endpoint, no port and no network. The existing
+# in-process PUB/SUB round trips above are untouched and still cover the real
+# transport.
+
+
+class _FakeSocket:
+    """Controlled stand-in for the SUB socket."""
+
+    def __init__(self, frames=None, error=None):
+        self.frames = frames
+        self.error = error
+        self.sockopts = []
+
+    def setsockopt(self, opt, value):
+        self.sockopts.append((opt, value))
+
+    def recv_multipart(self):
+        if self.error is not None:
+            raise self.error
+        return self.frames
+
+
+def _wire_subscriber(frames=None, error=None, closed=False) -> EventSubscriber:
+    """A real EventSubscriber wired to a fake socket.
+
+    Built with `object.__new__` so no context is created, no socket opened and
+    no endpoint connected -- the method under test is the genuine `recv()`, never
+    a replacement.
+    """
+    subscriber = object.__new__(EventSubscriber)
+    subscriber.sock = _FakeSocket(frames=frames, error=error)
+    subscriber._closed = closed
+    return subscriber
+
+
+_WIRE_TOPIC = b"tuning.committed"
+_WIRE_TS = b"2026-07-26T06:00:00Z"
+
+
+def _wire_recv(frames=None, error=None, closed=False):
+    return _wire_subscriber(frames, error, closed).recv()
+
+
+# -- preserved outcomes -------------------------------------------------------
+
+
+def test_wire_valid_three_frame_message_is_unchanged():
+    assert _wire_recv([_WIRE_TOPIC, _WIRE_TS, b'{"a": 1, "b": [2, 3]}']) == (
+        "tuning.committed",
+        "2026-07-26T06:00:00Z",
+        {"a": 1, "b": [2, 3]},
+    )
+
+
+def test_wire_topic_and_timestamp_are_exact_str():
+    topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, b"{}"])
+    assert type(topic) is str and type(timestamp) is str
+    assert topic == "tuning.committed"
+    assert timestamp == "2026-07-26T06:00:00Z"
+
+
+def test_wire_valid_non_ascii_utf8_metadata_is_accepted():
+    """No over-refusal: strict UTF-8 still accepts non-ASCII metadata."""
+    topic, timestamp, payload = _wire_recv(
+        ["tuning.check".encode("utf-8"), "2026-07-26T06:00:00Z✓".encode("utf-8"), b"{}"]
+    )
+    assert topic == "tuning.check"
+    assert timestamp == "2026-07-26T06:00:00Z✓"
+
+
+def test_wire_timeout_still_returns_none():
+    assert _wire_recv(error=zmq.Again()) is None
+
+
+def test_wire_closed_subscriber_still_raises_runtime_error():
+    with pytest.raises(RuntimeError, match="subscriber is closed"):
+        _wire_recv([_WIRE_TOPIC, _WIRE_TS, b"{}"], closed=True)
+
+
+def test_wire_recv_still_applies_the_receive_timeout():
+    subscriber = _wire_subscriber([_WIRE_TOPIC, _WIRE_TS, b"{}"])
+    subscriber.recv(timeout_ms=250)
+    assert (zmq.RCVTIMEO, 250) in subscriber.sock.sockopts
+
+
+@pytest.mark.parametrize(
+    "error",
+    [zmq.ZMQError(), RuntimeError("boom"), OSError("boom"), MemoryError("oom")],
+    ids=["zmq_error", "runtime_error", "os_error", "memory_error"],
+)
+def test_wire_unexpected_socket_error_still_propagates(error):
+    """Only zmq.Again is absorbed; no blanket except was added."""
+    with pytest.raises(type(error)):
+        _wire_recv(error=error)
+
+
+# -- multipart structure ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [],
+        [_WIRE_TOPIC],
+        [_WIRE_TOPIC, _WIRE_TS],
+        [_WIRE_TOPIC, _WIRE_TS, b"{}", b"extra"],
+        [_WIRE_TOPIC, _WIRE_TS, b"{}", b"x", b"y"],
+    ],
+    ids=["zero_frames", "one_frame", "two_frames", "four_frames", "five_frames"],
+)
+def test_wire_frame_count_other_than_three_is_refused(frames):
+    with pytest.raises(ValueError) as exc:
+        _wire_recv(frames)
+    assert type(exc.value) is ValueError
+    assert str(exc.value) == WIRE_FRAME_COUNT_MESSAGE
+
+
+def test_wire_frame_count_refusal_names_no_number():
+    """The supplied frame count must not appear -- the fixed message has no digits."""
+    assert not any(character.isdigit() for character in WIRE_FRAME_COUNT_MESSAGE)
+
+
+# -- metadata UTF-8 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "topic_bytes",
+    [b"\xff", b"\xff\xfe", b"valid\xffinvalid", b"\x80\x81\x82"],
+    ids=["single_bad_byte", "bom_like", "mid_string", "continuation_bytes"],
+)
+def test_wire_invalid_utf8_topic_is_refused(topic_bytes):
+    with pytest.raises(ValueError) as exc:
+        _wire_recv([topic_bytes, _WIRE_TS, b"{}"])
+    assert type(exc.value) is ValueError
+    assert str(exc.value) == TOPIC_DECODE_MESSAGE
+
+
+@pytest.mark.parametrize(
+    "ts_bytes",
+    [b"\xff", b"\xff\xfe", b"2026\xff07", b"\x80\x81\x82"],
+    ids=["single_bad_byte", "bom_like", "mid_string", "continuation_bytes"],
+)
+def test_wire_invalid_utf8_timestamp_is_refused(ts_bytes):
+    with pytest.raises(ValueError) as exc:
+        _wire_recv([_WIRE_TOPIC, ts_bytes, b"{}"])
+    assert type(exc.value) is ValueError
+    assert str(exc.value) == TIMESTAMP_DECODE_MESSAGE
+
+
+def test_wire_metadata_refusals_expose_nothing_supplied():
+    """No frame bytes, frame count, decoding position, representation or
+    underlying UnicodeDecodeError text may reach the caller."""
+    cases = [
+        ([_WIRE_TOPIC, _WIRE_TS], WIRE_FRAME_COUNT_MESSAGE),
+        ([_WIRE_TOPIC, _WIRE_TS, b"{}", b"LEAKFRAME"], WIRE_FRAME_COUNT_MESSAGE),
+        ([b"\xffLEAKTOPIC", _WIRE_TS, b"{}"], TOPIC_DECODE_MESSAGE),
+        ([_WIRE_TOPIC, b"\xffLEAKSTAMP", b"{}"], TIMESTAMP_DECODE_MESSAGE),
+    ]
+    for frames, expected in cases:
+        with pytest.raises(ValueError) as exc:
+            _wire_recv(frames)
+        message = str(exc.value)
+        assert message == expected
+        for token in ("LEAK", "0xff", "0x80", "position", "codec", "unpack",
+                      "expected 3", "invalid start byte"):
+            assert token not in message
+        # The underlying decode error must not be chained into the traceback.
+        assert exc.value.__cause__ is None
+        assert exc.value.__context__ is None or exc.value.__suppress_context__
+
+
+# -- payload result shape is always an exact dict -----------------------------
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (b'{"a": 1}', {"a": 1}),
+        (b"{}", {}),
+        (b'{"a": {"b": [1, 2]}, "c": null}', {"a": {"b": [1, 2]}, "c": None}),
+    ],
+    ids=["object", "empty_object", "nested_object"],
+)
+def test_wire_json_object_payload_is_returned_unchanged(body, expected):
+    topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, body])
+    assert type(payload) is dict
+    assert payload == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"[1, 2, 3]", b"[]", b'"text"', b'""', b"42", b"-7", b"3.14", b"0.0",
+     b"true", b"false", b"null"],
+    ids=["array", "empty_array", "string", "empty_string", "integer",
+         "negative_integer", "float", "zero_float", "true", "false", "null"],
+)
+def test_wire_valid_non_object_json_becomes_an_exact_raw_dict(body):
+    """Pre-fix these were returned as list/str/int/float/bool/None."""
+    topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, body])
+    assert type(payload) is dict
+    # Built from the decoded payload TEXT, never a representation of the decoded
+    # Python value: a JSON string keeps its quotes.
+    assert payload == {"_raw": body.decode("utf-8")}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"{not json", b"", b"   ", b"{'single': 1}", b"[1,", b'{"a": }'],
+    ids=["brace_text", "empty", "whitespace", "single_quotes", "unclosed_array",
+         "bad_value"],
+)
+def test_wire_malformed_json_preserves_the_raw_fallback(body):
+    topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, body])
+    assert type(payload) is dict
+    assert payload == {"_raw": body.decode("utf-8")}
+
+
+def test_wire_invalid_utf8_payload_preserves_the_replacement_raw_fallback():
+    body = b"\xff\xfe\x00"
+    topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, body])
+    assert type(payload) is dict
+    assert payload == {"_raw": body.decode("utf-8", errors="replace")}
+
+
+def test_wire_every_payload_category_returns_an_exact_dict():
+    """One sweep proving the declared dict contract holds for every shape."""
+    bodies = [
+        b'{"a": 1}', b"{}", b'{"n": {"d": 1}}',
+        b"[1, 2]", b"[]", b'"s"', b"1", b"1.5", b"true", b"false", b"null",
+        b"{not json", b"", b"\xff\xfe",
+    ]
+    for body in bodies:
+        topic, timestamp, payload = _wire_recv([_WIRE_TOPIC, _WIRE_TS, body])
+        assert type(payload) is dict, body
