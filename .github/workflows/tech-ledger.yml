@@ -28,8 +28,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install lab dependencies
-        run: pip install pytest
-      - name: Run lab-local suite
-        run: python -m pytest experiments/tech_ledger/tests -q
+        run: pip install pytest pytest-asyncio
+      - name: Run lab-local suite (warnings are errors)
+        run: python -m pytest experiments/tech_ledger/tests -q -W error
       - name: Validate committed exemplar entries
         run: python -m experiments.tech_ledger.validate experiments/tech_ledger/entries

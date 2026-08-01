@@ -68,22 +68,47 @@ python -m experiments.tech_ledger.validate experiments/tech_ledger/entries
 ```
 
 Direct `.json` files only, deterministic filename order, duplicate-key-
-rejecting parsing, symlink refusal, ceilings before parsing (256 entries,
-128 KiB per entry, 4 MiB total). Exit map: **0** all valid · **2** JSON /
-schema / cross-entry refusal · **4** path, symlink or inspection failure ·
-**5** ceiling breach. One concise `error:` line per expected failure; no
-writes; argparse usage errors keep argparse's own `SystemExit(2)`.
+rejecting parsing. Every candidate is captured through a **verified
+descriptor boundary** (symlinks refused before and during capture;
+`O_NOFOLLOW` where the platform supplies it; `st_dev`/`st_ino` identity
+agreement across pre-open, opened-descriptor and post-open inspections —
+any mismatch, replacement or incomplete identity inspection fails closed
+on exit 4; no protection is claimed against an unobservable filesystem or
+kernel violation). Ceilings (256 entries, 128 KiB per entry, 4 MiB total)
+are enforced over the **exact captured bytes** — cheap stat checks run
+first, but the authoritative aggregate is the captured total, reading
+stops as soon as that total necessarily breaches, and nothing is parsed
+until every candidate is captured and every actual-byte ceiling has
+passed; the summary's `total_entry_bytes` is the captured sum, never a
+stale stat size. Exit map: **0** all valid · **2** JSON / schema /
+cross-entry refusal · **4** path, symlink, replacement or inspection
+failure · **5** ceiling breach. Exactly **one physical `error:` stderr
+line** per expected failure (CR/LF in messages rendered as visible
+escapes); no writes; argparse usage errors keep argparse's own
+`SystemExit(2)`.
 
 ## Quarantine
 
-The lab imports **only the Python standard library** — nothing from
-`scripts/`, the engine, agents, CA, telemetry, Nextness or any other
-production path — and no maintained production module imports the lab
-(bidirectional, statically tested by
-`tests/test_import_quarantine.py`). Entry JSON files are data only and can
-never be imported as executable configuration. Lab tests live in
-`experiments/tech_ledger/tests/` under their own path-scoped workflow and
-are deliberately outside the main CI battery.
+Enforcement is two-part, matching how each direction can actually drift:
+
+- **Forward quarantine** (the lab imports only the Python standard
+  library — nothing from `scripts/`, the engine, agents, CA, telemetry,
+  Nextness or any other production path): lab-local static test
+  (`tests/test_import_quarantine.py` here) under the path-scoped
+  tech-ledger workflow, which triggers whenever the lab changes.
+- **Reverse quarantine** (no maintained production module imports the
+  lab): the **maintained main-suite guard**
+  `tests/test_tech_ledger_reverse_quarantine.py`, which runs on ordinary
+  repository CI and statically scans every maintained Python location —
+  so a production-only change can never bypass it merely because the lab
+  workflow did not trigger. (A fast lab-local snapshot of the same
+  direction also runs here.)
+
+Entry JSON files are data only and can never be imported as executable
+configuration. Lab tests live in `experiments/tech_ledger/tests/` under
+their own path-scoped workflow and are deliberately outside the main CI
+battery; the reverse guard is the one deliberate exception, living in the
+main battery by design.
 
 ## Growth discipline
 

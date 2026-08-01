@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import pathlib
+import stat as stat_module
 import sys
 from typing import Any, Final
 
@@ -58,6 +59,101 @@ class LedgerPathError(ValueError):
 
 class LedgerCeilingError(RuntimeError):
     """Entry-count, per-entry or total byte-ceiling breach (exit 5)."""
+
+
+def _pre_open_inspect(path: str) -> os.stat_result:
+    """The pre-open ``lstat`` of one candidate.
+
+    A deliberately narrow, production-neutral seam: behaviour is exactly
+    ``os.lstat(path)``; the capture-boundary race tests synchronize here.
+    """
+    return os.lstat(path)
+
+
+_READ_CHUNK_BYTES: Final[int] = 64 * 1024
+
+
+def _capture_entry(entries_dir: pathlib.Path, name: str) -> bytes:
+    """Capture one candidate through a verified descriptor (fail closed).
+
+    Sequence: pre-open ``lstat`` (symlinks and non-regular files refused);
+    ``os.open`` without following symlinks where the platform supplies
+    ``O_NOFOLLOW``; ``fstat`` of the opened descriptor must be a regular
+    file; post-open ``lstat`` must still be a regular non-link path; and
+    the three inspections must agree on stable filesystem identity
+    (``st_dev``/``st_ino``). Any mismatch, replacement, symlink or
+    incomplete identity inspection is a ``LedgerPathError`` (exit 4).
+    Bytes are read ONLY through the verified descriptor, bounded by the
+    per-entry ceiling plus one probe byte; the pathname is never reopened.
+    No protection is claimed against an unobservable filesystem or kernel
+    violation.
+    """
+    path = str(entries_dir / name)
+    pre = _pre_open_inspect(path)
+    if stat_module.S_ISLNK(pre.st_mode):
+        raise LedgerPathError(f"{name}: symbolic-link entry files are refused")
+    if not stat_module.S_ISREG(pre.st_mode):
+        raise LedgerPathError(f"{name}: entry path is not a regular file")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        # Under O_NOFOLLOW a symlink swapped in after the pre-open lstat
+        # surfaces here (ELOOP); any other open failure is equally a
+        # failed capture -- refuse, never fall through.
+        raise LedgerPathError(
+            f"{name}: entry could not be opened for verified capture "
+            f"(fail closed): {e}"
+        ) from e
+    try:
+        opened = os.fstat(fd)
+        if not stat_module.S_ISREG(opened.st_mode):
+            raise LedgerPathError(
+                f"{name}: opened descriptor is not a regular file"
+            )
+        post = _pre_open_inspect(path)
+        if stat_module.S_ISLNK(post.st_mode) or not stat_module.S_ISREG(post.st_mode):
+            raise LedgerPathError(
+                f"{name}: entry was replaced by a non-regular path during capture"
+            )
+        identities = {
+            (probe.st_dev, probe.st_ino) for probe in (pre, opened, post)
+        }
+        if len(identities) != 1:
+            raise LedgerPathError(
+                f"{name}: filesystem identity changed between inspection and "
+                f"capture (fail closed)"
+            )
+        if opened.st_ino == 0 and opened.st_dev == 0:
+            # Identity fields unavailable on this filesystem: identity
+            # verification would be vacuous, so the capture fails closed
+            # rather than silently weakening the symlink refusal.
+            raise LedgerPathError(
+                f"{name}: filesystem identity could not be established "
+                f"(fail closed)"
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_ENTRY_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_ENTRY_BYTES:
+        raise LedgerCeilingError(
+            f"{name}: grew past the {MAX_ENTRY_BYTES}-byte per-entry "
+            f"ceiling between inspection and read"
+        )
+    return raw
 
 
 def _parse_entry_bytes(raw: bytes, filename: str) -> Any:
@@ -142,21 +238,32 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
                 f"{MAX_TOTAL_ENTRY_BYTES}-byte ceiling"
             )
 
+        # Capture phase: every candidate is captured through the verified
+        # descriptor boundary with its EXACT byte count recorded, and the
+        # captured aggregate is enforced as it accumulates -- reading
+        # stops at the first file whose capture necessarily breaches the
+        # total ceiling. Memory stays bounded by the total ceiling plus at
+        # most one bounded probe read. NO JSON is parsed until every
+        # candidate has been captured and every actual-byte ceiling has
+        # passed.
+        captured: dict[str, bytes] = {}
+        captured_total = 0
+        for name in candidates:
+            raw = _capture_entry(entries_dir, name)
+            captured_total += len(raw)
+            if captured_total > MAX_TOTAL_ENTRY_BYTES:
+                raise LedgerCeilingError(
+                    f"{captured_total} captured total entry bytes exceed the "
+                    f"{MAX_TOTAL_ENTRY_BYTES}-byte ceiling"
+                )
+            captured[name] = raw
+
+        # Parse phase: captured bytes only; the summary's byte totals are
+        # the exact captured counts, never the earlier stat sizes.
         entries: list[dict[str, str]] = []
         seen_ids: dict[str, str] = {}
         for name in candidates:
-            # Bounded read: the stat-based ceiling above is re-enforced at
-            # the read itself, so a file grown between the stat and this
-            # read is refused without ever materializing more than the
-            # ceiling plus one probe byte (fail closed).
-            with (entries_dir / name).open("rb") as f:
-                raw = f.read(MAX_ENTRY_BYTES + 1)
-            if len(raw) > MAX_ENTRY_BYTES:
-                raise LedgerCeilingError(
-                    f"{name}: grew past the {MAX_ENTRY_BYTES}-byte per-entry "
-                    f"ceiling between inspection and read"
-                )
-            parsed = _parse_entry_bytes(raw, name)
+            parsed = _parse_entry_bytes(captured[name], name)
             if type(parsed) is not dict:
                 raise LedgerInputError(
                     f"{name}: entry root must be a JSON object"
@@ -186,7 +293,7 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
     return {
         "schema": SCHEMA_ID,
         "entry_count": len(entries),
-        "total_entry_bytes": total_bytes,
+        "total_entry_bytes": captured_total,
         "entries": entries,
     }
 
@@ -217,7 +324,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _fail(error: BaseException, code: int) -> int:
-    print(f"error: {error}", file=sys.stderr)
+    """Exactly ONE physical stderr line per expected failure: carriage
+    returns and newlines inside the message (for example from a hostile
+    filename) are rendered as visible escapes, then a single terminal
+    newline is printed."""
+    text = str(error).replace("\r", "\\r").replace("\n", "\\n")
+    print(f"error: {text}", file=sys.stderr)
     return code
 
 

@@ -47,7 +47,22 @@ def test_tlv4_008_zero_point_claims():
     assert entry["implementation_disposition"] == "prohibited"
     assert entry["implementation_seam"] is None
     assert entry["repository_placements"] == ["research-ledger"]
-    assert "Casimir" in entry["classification_rationale"]
+    # Conservative-substance pins: the F label is an evidence and
+    # engineering disposition for THIS repository, never a physical
+    # theorem or a categorical scientific verdict.
+    rationale = entry["classification_rationale"]
+    assert "no independently replicated demonstration" in rationale
+    assert "does not by itself demonstrate a cyclic net-work source" in rationale
+    assert "full-cycle energy accounting" in rationale
+    assert "not a declaration" in rationale
+    warnings = " ".join(entry["warnings"])
+    assert "separately audited reclassification" in warnings
+    assert "not a physical theorem" in warnings
+    # Categorical wording stays out.
+    assert "contradicts thermodynamics" not in rationale
+    assert "none known" not in " ".join(
+        entry["minimal_evidence_before_implementation"]
+    )
 
 
 def test_tlv4_016_deterministic_execution():

@@ -26,6 +26,7 @@ _ALLOWED_IMPORTS = {
     "os",
     "pathlib",
     "re",
+    "stat",
     "sys",
     "typing",
     "experiments.tech_ledger.schema",
@@ -96,9 +97,13 @@ def test_lab_tests_import_stdlib_pytest_and_lab_only():
 
 
 def test_no_production_module_imports_the_lab():
-    # Reverse quarantine: maintained production Python trees contain no
-    # reference to the lab package. Static text scan (cheap, total).
-    production_trees = ("scripts", "agent", "vis")
+    # Lab-local SNAPSHOT of the reverse direction over the highest-risk
+    # production trees. The CONTINUOUS, repository-wide reverse guard is
+    # tests/test_tech_ledger_reverse_quarantine.py in the maintained main
+    # battery (ordinary repository CI), which scans every maintained
+    # Python location automatically -- this lab-local check is a fast
+    # companion, not the enforcement boundary.
+    production_trees = ("scripts", "agent", "agents", "vis")
     offenders: list[str] = []
     for tree_name in production_trees:
         tree = _REPO_ROOT / tree_name

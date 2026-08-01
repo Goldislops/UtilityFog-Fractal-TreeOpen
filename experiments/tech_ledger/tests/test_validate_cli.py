@@ -268,3 +268,220 @@ def test_validate_directory_pure_and_reusable(tmp_path):
     assert first == second
     assert copy.deepcopy(first)["entry_count"] == 1
     assert _snapshot(tmp_path) == before
+
+
+# ---------------------------------------------------------------------------
+# Captured-byte aggregate enforcement and the capture-boundary races
+# (audit corrections 1 and 2) -- synchronized at the validator's real
+# pre-open inspection seam; no sleeps, no timing guesses.
+# ---------------------------------------------------------------------------
+
+
+def _mutate_once_at_capture(monkeypatch, mutate_once):
+    """Run ``mutate_once`` exactly once: after the initial stat pass, at
+    the first capture's pre-open inspection (the real race window)."""
+    real = validate_module._pre_open_inspect
+    state = {"done": False}
+
+    def _wrapped(path):
+        result = real(path)
+        if not state["done"]:
+            state["done"] = True
+            mutate_once()
+        return result
+
+    monkeypatch.setattr(validate_module, "_pre_open_inspect", _wrapped)
+
+
+def _padded_entry_bytes(entry_id, target_size=None, pad=0):
+    entry = _valid_entry(entry_id)
+    entry["classification_rationale"] = "Recorded rationale." + "a" * pad
+    raw = (json.dumps(entry, sort_keys=True, indent=1) + "\n").encode("utf-8")
+    if target_size is None:
+        return raw
+    base = len(raw) - pad
+    entry["classification_rationale"] = "Recorded rationale." + "a" * (
+        target_size - base
+    )
+    raw = (json.dumps(entry, sort_keys=True, indent=1) + "\n").encode("utf-8")
+    assert len(raw) == target_size
+    return raw
+
+
+def test_aggregate_growth_after_stat_refuses_exit5(tmp_path, capsys, monkeypatch):
+    # Stat total below 4 MiB; every file then grows (each staying under
+    # the 128 KiB per-entry ceiling) so the ACTUAL captured total breaches
+    # the aggregate ceiling. Content is junk: the refusal must arrive
+    # before any parse (proven by the exploding parser).
+    names = [f"junk-{i:03d}.json" for i in range(34)]
+    for name in names:
+        (tmp_path / name).write_bytes(b"x" * 100_000)  # stat total 3.4 MB
+
+    def _grow_all():
+        for name in names:
+            with (tmp_path / name).open("ab") as f:
+                f.write(b"y" * 27_000)  # each 127 000 < 131 072; total > 4 MiB
+
+    _mutate_once_at_capture(monkeypatch, _grow_all)
+
+    def _exploding(raw, filename):  # pragma: no cover - must never run
+        raise AssertionError("parse attempted despite aggregate breach")
+
+    monkeypatch.setattr(validate_module, "_parse_entry_bytes", _exploding)
+    rc = main([str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 5
+    _assert_one_error_line(err)
+    assert "total" in err
+
+
+def test_actual_total_exactly_at_ceiling_accepted(tmp_path, capsys):
+    for i in range(32):
+        (tmp_path / f"TLV4-{i:03d}.json").write_bytes(
+            _padded_entry_bytes(f"TLV4-{i:03d}", target_size=127_000)
+        )
+    last = MAX_TOTAL_ENTRY_BYTES - 32 * 127_000
+    assert last <= MAX_ENTRY_BYTES
+    (tmp_path / "TLV4-032.json").write_bytes(
+        _padded_entry_bytes("TLV4-032", target_size=last)
+    )
+    assert main([str(tmp_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["total_entry_bytes"] == MAX_TOTAL_ENTRY_BYTES
+
+
+def test_actual_total_one_byte_over_refuses_exit5(tmp_path, capsys):
+    for i in range(32):
+        (tmp_path / f"TLV4-{i:03d}.json").write_bytes(
+            _padded_entry_bytes(f"TLV4-{i:03d}", target_size=127_000)
+        )
+    last = MAX_TOTAL_ENTRY_BYTES - 32 * 127_000 + 1
+    (tmp_path / "TLV4-032.json").write_bytes(
+        _padded_entry_bytes("TLV4-032", target_size=last)
+    )
+    rc = main([str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 5
+    _assert_one_error_line(err)
+    assert "total" in err
+
+
+def test_summary_reports_captured_bytes_not_stat_size(
+    tmp_path, capsys, monkeypatch
+):
+    _write_entry(tmp_path, "TLV4-001")
+    stat_size = (tmp_path / "TLV4-001.json").stat().st_size
+    replacement = _padded_entry_bytes("TLV4-001", target_size=stat_size + 5_000)
+
+    def _rewrite():
+        (tmp_path / "TLV4-001.json").write_bytes(replacement)
+
+    _mutate_once_at_capture(monkeypatch, _rewrite)
+    assert main([str(tmp_path)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["total_entry_bytes"] == len(replacement)
+    assert summary["total_entry_bytes"] != stat_size
+
+
+def test_per_entry_growth_refusal_intact(tmp_path, capsys, monkeypatch):
+    _write_entry(tmp_path, "TLV4-001")
+
+    def _grow_past_entry_ceiling():
+        with (tmp_path / "TLV4-001.json").open("ab") as f:
+            f.write(b"z" * (MAX_ENTRY_BYTES + 10))
+
+    _mutate_once_at_capture(monkeypatch, _grow_past_entry_ceiling)
+    rc = main([str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 5
+    _assert_one_error_line(err)
+    assert "per-entry ceiling" in err
+
+
+def test_symlink_replacement_during_capture_refused_exit4(
+    tmp_path, capsys, monkeypatch
+):
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    outside = tmp_path / "outside-target.json"
+    outside.write_bytes(
+        (json.dumps(_valid_entry("TLV4-099"), sort_keys=True, indent=1) + "\n").encode()
+    )
+    probe = tmp_path / "symlink-probe"
+    try:
+        os.symlink(str(outside), str(probe))
+    except (OSError, NotImplementedError):  # pragma: no cover - privilege
+        pytest.skip("platform lacks symlink privilege")
+    os.remove(probe)
+
+    def _replace_with_symlink():
+        os.remove(entries / "TLV4-001.json")
+        os.symlink(str(outside), str(entries / "TLV4-001.json"))
+
+    _mutate_once_at_capture(monkeypatch, _replace_with_symlink)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    assert rc == 4
+    _assert_one_error_line(captured.err)
+    # The outside target was neither accepted nor parsed into a summary.
+    assert captured.out == ""
+    assert "TLV4-099" not in captured.out
+
+
+def test_regular_file_replacement_during_capture_refused_exit4(
+    tmp_path, capsys, monkeypatch
+):
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    decoy = tmp_path / "decoy.json"
+    decoy.write_bytes(
+        (json.dumps(_valid_entry("TLV4-098"), sort_keys=True, indent=1) + "\n").encode()
+    )
+
+    def _replace_with_other_file():
+        os.replace(str(decoy), str(entries / "TLV4-001.json"))
+
+    _mutate_once_at_capture(monkeypatch, _replace_with_other_file)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    assert rc == 4
+    _assert_one_error_line(captured.err)
+    assert "identity" in captured.err
+    assert captured.out == ""
+
+
+def test_stable_files_still_succeed_with_capture_boundary(tmp_path, capsys):
+    _write_entry(tmp_path, "TLV4-001")
+    _write_entry(tmp_path, "TLV4-002")
+    assert main([str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["entry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# One physical stderr line (audit correction 3)
+# ---------------------------------------------------------------------------
+
+
+def test_error_output_sanitizes_cr_and_lf(capsys):
+    from experiments.tech_ledger.validate import LedgerInputError, _fail
+
+    rc = _fail(LedgerInputError("bad\r\nsplit\nname"), 2)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert err == "error: bad\\r\\nsplit\\nname\n"
+    assert err.count("\n") == 1
+
+
+def test_newline_bearing_filename_yields_one_error_line(tmp_path, capsys):
+    evil_name = "TLV4-666\n.json"
+    try:
+        (tmp_path / evil_name).write_bytes(b"{not json")
+    except OSError:  # pragma: no cover - platform rejects the name
+        pytest.skip("filesystem rejects newline-bearing filenames")
+    rc = main([str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 2
+    _assert_one_error_line(err)
+    assert "\\n" in err
