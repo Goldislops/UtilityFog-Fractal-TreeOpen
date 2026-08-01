@@ -101,8 +101,12 @@ Enforcement is two-part, matching how each direction can actually drift:
   `tests/test_tech_ledger_reverse_quarantine.py`, which runs on ordinary
   repository CI and statically scans every maintained Python location —
   so a production-only change can never bypass it merely because the lab
-  workflow did not trigger. (A fast lab-local snapshot of the same
-  direction also runs here.)
+  workflow did not trigger. The guard resolves **both absolute and
+  relative imports** against each file's repository package context
+  (namespace-package aware), so `from .. import tech_ledger` inside the
+  `experiments` tree is caught exactly like
+  `import experiments.tech_ledger`. (A fast lab-local snapshot of the
+  same direction also runs here.)
 
 Entry JSON files are data only and can never be imported as executable
 configuration. Lab tests live in `experiments/tech_ledger/tests/` under
