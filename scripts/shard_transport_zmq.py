@@ -115,6 +115,33 @@ class ZMQHaloExchange(HaloExchange):
         Combines self-loop packets already in the local inbox with ZMQ-delivered
         packets. Raises `TimeoutError` if the full count isn't received within
         `recv_timeout_ms`. This is the implicit per-step barrier.
+
+        Extracting the local inbox transfers packet ownership to this call, so
+        an exceptional exit past that point would otherwise drop every packet
+        held in hand — the local ones AND any already decoded off the wire.
+        PUSH/PULL delivers each frame exactly once, so a dropped wire packet is
+        never re-sent and the barrier can never be satisfied afterwards. The
+        gather loop therefore runs under a cleanup-only handler that hands the
+        in-hand packets back to `_local_inbox[target]` before re-raising.
+
+        Retention is bounded to packets this call had already accepted:
+
+          - Restored packets are PREPENDED, so they precede any self-loop
+            packet `send()` placed into the replacement inbox while the receive
+            was in progress, and their relative order is preserved.
+          - Packets are moved, never copied, so no later call can return a
+            duplicate.
+          - The exception is re-raised bare: class, message and traceback are
+            untouched, and nothing is swallowed. `zmq.Again` stays an internal
+            retry and never triggers restoration.
+          - A frame `HaloPacket.from_bytes()` refuses is NOT restored or
+            replayed — only previously valid packets are handed back. Malformed
+            frames remain discarded, exactly as before.
+
+        The claim is bounded to retention across an exceptional receive exit.
+        Cleanup is not claimed to be total under a SECOND failure (e.g. an
+        allocation failure during restoration itself), and this changes no
+        caller retry policy, generation validation, or over-delivery behaviour.
         """
         if self._closed:
             raise RuntimeError("ZMQHaloExchange is closed")
@@ -124,19 +151,24 @@ class ZMQHaloExchange(HaloExchange):
         self._local_inbox[target] = []
         pull = self._pulls[target]
         deadline = time.monotonic() + self.recv_timeout_ms / 1000.0
-        while len(packets) < PACKETS_PER_SHARD_PER_STEP:
-            remaining_ms = int((deadline - time.monotonic()) * 1000)
-            if remaining_ms <= 0:
-                raise TimeoutError(
-                    f"ZMQHaloExchange.recv_all timed out for {target} "
-                    f"({len(packets)}/{PACKETS_PER_SHARD_PER_STEP} packets received)"
-                )
-            pull.setsockopt(zmq.RCVTIMEO, remaining_ms)
-            try:
-                buf = pull.recv()
-            except zmq.Again:
-                continue
-            packets.append(HaloPacket.from_bytes(buf))
+        try:
+            while len(packets) < PACKETS_PER_SHARD_PER_STEP:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise TimeoutError(
+                        f"ZMQHaloExchange.recv_all timed out for {target} "
+                        f"({len(packets)}/{PACKETS_PER_SHARD_PER_STEP} packets received)"
+                    )
+                pull.setsockopt(zmq.RCVTIMEO, remaining_ms)
+                try:
+                    buf = pull.recv()
+                except zmq.Again:
+                    continue
+                packets.append(HaloPacket.from_bytes(buf))
+        except BaseException:
+            # Cleanup only — give back what this call took, then propagate.
+            self._local_inbox[target] = packets + self._local_inbox[target]
+            raise
         return packets
 
     def barrier(self) -> None:
