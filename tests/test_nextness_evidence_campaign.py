@@ -136,11 +136,11 @@ def _staging_residue(parent: pathlib.Path) -> list[str]:
 
 def test_success_exact_eight_file_publication(ws, capsys):
     rc = campaign.main(_argv(ws))
-    out, err = capsys.readouterr().out, capsys.readouterr().err
+    captured = capsys.readouterr()
     assert rc == 0
-    assert err == ""
-    assert out.startswith("published: ")
-    assert out.count("\n") == 1
+    assert captured.err == ""
+    assert captured.out.startswith("published: ")
+    assert captured.out.count("\n") == 1
     published = _read_published(ws)
     assert sorted(published) == sorted(campaign.PUBLICATION_FILENAMES)
     assert len(published) == 8
@@ -905,6 +905,208 @@ def test_static_import_quarantine():
     for name in imported:
         for fragment in forbidden_fragments:
             assert fragment not in name, f"forbidden import {name}"
+
+
+# ---------------------------------------------------------------------------
+# Repository data/ exclusion: every campaign path independently (audit
+# correction 1 — the ancestor-workspace escape)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fake_data(tmp_path, monkeypatch):
+    """A patched repository data root under tmp_path (never the real data/).
+
+    tmp_path itself then acts as a workspace ANCESTOR of data/, the exact
+    configuration of the audited escape.
+    """
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    monkeypatch.setattr(campaign, "_repo_data_dir", lambda: data_root.resolve())
+    return data_root
+
+
+def _ancestor_argv(tmp_path, *, log, protocol, out):
+    return [
+        str(log),
+        str(protocol),
+        "--workspace-dir",
+        str(tmp_path),
+        "--receipt-config-label",
+        "primary",
+        "--output-dir",
+        str(out),
+    ]
+
+
+def test_data_escape_output_under_data_refused_exit4(tmp_path, fake_data, capsys):
+    _write_log(tmp_path / "log.jsonl")
+    _write_protocol(tmp_path / "protocol.json")
+    rc = campaign.main(
+        _ancestor_argv(
+            tmp_path,
+            log=tmp_path / "log.jsonl",
+            protocol=tmp_path / "protocol.json",
+            out=fake_data / "campaign-output",
+        )
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "data/" in err
+    # No staging residue and no final output was created under data/.
+    assert list(fake_data.iterdir()) == []
+    assert _staging_residue(tmp_path) == []
+
+
+def test_data_escape_log_under_data_refused_exit4(tmp_path, fake_data, capsys):
+    _write_log(fake_data / "log.jsonl")
+    _write_protocol(tmp_path / "protocol.json")
+    rc = campaign.main(
+        _ancestor_argv(
+            tmp_path,
+            log=fake_data / "log.jsonl",
+            protocol=tmp_path / "protocol.json",
+            out=tmp_path / "campaign-output",
+        )
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "data/" in err
+    assert not (tmp_path / "campaign-output").exists()
+    # Only the planted input remains under data/ (byte-identical).
+    assert [p.name for p in fake_data.iterdir()] == ["log.jsonl"]
+    assert _staging_residue(tmp_path) == []
+
+
+def test_data_escape_protocol_under_data_refused_exit4(tmp_path, fake_data, capsys):
+    _write_log(tmp_path / "log.jsonl")
+    _write_protocol(fake_data / "protocol.json")
+    rc = campaign.main(
+        _ancestor_argv(
+            tmp_path,
+            log=tmp_path / "log.jsonl",
+            protocol=fake_data / "protocol.json",
+            out=tmp_path / "campaign-output",
+        )
+    )
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "data/" in err
+    assert not (tmp_path / "campaign-output").exists()
+    assert [p.name for p in fake_data.iterdir()] == ["protocol.json"]
+    assert _staging_residue(tmp_path) == []
+
+
+def test_data_escape_sibling_workspace_still_succeeds(tmp_path, fake_data, capsys):
+    sibling = tmp_path / "side_ws"
+    sibling.mkdir()
+    _write_log(sibling / "log.jsonl")
+    _write_protocol(sibling / "protocol.json")
+    assert campaign.main(_argv(sibling)) == 0
+    capsys.readouterr()
+    assert sorted(_read_published(sibling)) == sorted(campaign.PUBLICATION_FILENAMES)
+    assert list(fake_data.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Resolved-path + os.path.samefile fail-closed identity (audit correction 2)
+# ---------------------------------------------------------------------------
+
+
+def test_samefile_alias_of_existing_input_refused_exit4(ws, capsys):
+    # A hard link to the log at the output path: resolved-path string
+    # comparison alone cannot see this alias -- os.path.samefile can. The
+    # refusal must be the identity lane, not a generic fall-through.
+    alias = ws / "out_alias"
+    try:
+        os.link(str(ws / "log.jsonl"), str(alias))
+    except (OSError, NotImplementedError):  # pragma: no cover - FS-dependent
+        pytest.skip("filesystem does not support hard links")
+    argv = _argv(ws)
+    argv[argv.index("--output-dir") + 1] = str(alias)
+    rc = campaign.main(argv)
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "aliases" in err
+
+
+def test_identity_inspection_failure_refuses_exit4(ws, capsys, monkeypatch):
+    # An identity inspection that cannot complete is itself a refusal,
+    # never a fall-through (fail-closed identity discipline).
+    decoy = ws / "existing_output"
+    decoy.write_bytes(b"occupied")
+
+    def _raiser(a, b):
+        raise OSError("identity probe failed")
+
+    monkeypatch.setattr(os.path, "samefile", _raiser)
+    argv = _argv(ws)
+    argv[argv.index("--output-dir") + 1] = str(decoy)
+    rc = campaign.main(argv)
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "could not complete" in err
+
+
+# ---------------------------------------------------------------------------
+# During-copy replacement residual (audit correction 3): captured bytes are
+# what the manifest describes -- synchronized at the real copy boundary
+# ---------------------------------------------------------------------------
+
+
+def test_during_copy_replacement_yields_captured_bytes(ws, capsys, monkeypatch):
+    original = (ws / "log.jsonl").read_bytes()
+    # Force a multi-chunk copy so a mid-copy replacement is expressible,
+    # then synchronize at the REAL _stage_copy read boundary: after the
+    # first chunk of the log has been captured, rewrite the source with a
+    # same-length variant differing in one byte BEFORE and one byte AFTER
+    # the chunk boundary. No sleeps, no timing guesses.
+    monkeypatch.setattr(campaign, "_COPY_CHUNK_BYTES", 256)
+    real_read = campaign._read_source_chunk
+    log_path = ws / "log.jsonl"
+    state: dict[str, bytes] = {}
+
+    def _sync_read(handle):
+        chunk = real_read(handle)
+        if chunk and "new" not in state:
+            data = bytearray(log_path.read_bytes())
+            i_first = data.find(b": 5}")
+            i_last = data.rfind(b": 5}")
+            assert i_first != -1 and i_first + 2 < 256 < i_last + 2
+            data[i_first + 2] = ord("7")
+            data[i_last + 2] = ord("7")
+            replacement = bytes(data)
+            log_path.write_bytes(replacement)
+            state["new"] = replacement
+        return chunk
+
+    monkeypatch.setattr(campaign, "_read_source_chunk", _sync_read)
+    rc = campaign.main(_argv(ws))
+    captured_streams = capsys.readouterr()
+    assert rc == 0, captured_streams.err
+    replacement = state["new"]
+
+    # The authoritative captured bytes: the already-read old prefix plus
+    # the replaced tail -- equal to NEITHER the complete old source NOR
+    # the complete replacement (which this test does not, and must not,
+    # require). The runner cannot freeze the operator filesystem during
+    # copying; it claims exactly the captured bytes.
+    expected_captured = original[:256] + replacement[256:]
+    assert expected_captured != original
+    assert expected_captured != replacement
+    published_log = (ws / "campaign_out" / campaign.LOG_FILENAME).read_bytes()
+    assert published_log == expected_captured
+    manifest = _load_json(ws, "campaign_out", campaign.MANIFEST_FILENAME)
+    assert (
+        manifest["inputs"]["log"]["sha256"]
+        == hashlib.sha256(expected_captured).hexdigest()
+    )
+    assert manifest["inputs"]["log"]["bytes"] == len(expected_captured)
 
 
 # ---------------------------------------------------------------------------

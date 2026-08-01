@@ -39,9 +39,13 @@ seventh CLI -- the family's maps are deliberately not harmonised):
 * 3 insufficient history (``InsufficientHistoryError`` surfaced from
   NP1 / NP2 / NP6, never re-typed)
 * 4 containment (``CampaignContainmentError``: workspace existence, resolved
-  path containment, the repository ``data/`` exclusion, final-directory
-  absence, input aliasing; a containment inspection that cannot complete is
-  itself a refusal)
+  path containment, the repository ``data/`` exclusion applied INDEPENDENTLY
+  to every applicable campaign path (log, protocol, final directory, staging
+  parent, and -- defensively -- the created staging directory; an
+  ancestor-of-``data/`` workspace confers no exemption), final-directory
+  absence, and input aliasing via resolved-path comparison plus
+  ``os.path.samefile`` where both ends exist; a containment or identity
+  inspection that cannot complete is itself a refusal)
 * 5 named byte-ceiling breach only (the five instrument ``*TooLargeError``
   serialization ceilings; the campaign's own size preflight confirming a
   JSON artifact over NP5/NP8 ``MAX_INPUT_BYTES`` or a staged log over NP8
@@ -224,6 +228,33 @@ def _is_within(child: str, root: str) -> bool:
     return child_n == root_n or child_n.startswith(root_n.rstrip(os.sep) + os.sep)
 
 
+def _refuse_under_data(resolved: str, name: str) -> None:
+    """No campaign path may be equal to or beneath the repository ``data/``
+    root -- checked INDEPENDENTLY for every applicable resolved path, so a
+    workspace that is an ANCESTOR of ``data/`` (the repository root, for
+    example) cannot smuggle an individual path under ``data/`` through
+    ordinary workspace containment."""
+    if _is_within(resolved, str(_repo_data_dir())):
+        raise CampaignContainmentError(
+            f"{name} resolves inside the repository data/ tree; no campaign "
+            f"path may lie under data/"
+        )
+
+
+def _paths_alias(candidate_given: pathlib.Path, candidate_resolved: str, input_resolved: str) -> bool:
+    """Fail-closed identity between a campaign output path and an input:
+    resolved-path comparison always applies; where BOTH ends exist,
+    ``os.path.samefile`` is consulted as well (it sees hard-link aliases
+    that no path-string comparison can). An inspection that raises is
+    handled by the caller's fail-closed ``OSError`` boundary -- a refusal,
+    never a fall-through."""
+    if os.path.normcase(candidate_resolved) == os.path.normcase(input_resolved):
+        return True
+    if os.path.exists(str(candidate_given)) and os.path.exists(input_resolved):
+        return os.path.samefile(str(candidate_given), input_resolved)
+    return False
+
+
 def _resolve_campaign_paths(
     log_path: pathlib.Path,
     protocol_path: pathlib.Path,
@@ -234,8 +265,11 @@ def _resolve_campaign_paths(
 
     Returns ``(workspace_root, log_resolved, protocol_resolved,
     final_resolved, staging_parent)``. Any ``OSError`` during an
-    inspection is itself a refusal -- the established fail-closed identity
-    discipline -- never a fall-through.
+    inspection -- including an ``os.path.samefile`` identity probe that
+    cannot complete -- is itself a refusal (the established fail-closed
+    identity discipline), never a fall-through. The repository ``data/``
+    exclusion is enforced per-path: a workspace that is an ancestor of
+    ``data/`` does not exempt the paths beneath it.
     """
     try:
         if not workspace_dir.is_dir():
@@ -259,6 +293,7 @@ def _resolve_campaign_paths(
                 raise CampaignContainmentError(
                     f"{name} path resolves outside the workspace: {path}"
                 )
+            _refuse_under_data(resolved, f"{name} path")
         log_resolved = os.path.realpath(str(log_path))
         protocol_resolved = os.path.realpath(str(protocol_path))
         final_resolved = os.path.realpath(str(output_dir))
@@ -266,23 +301,29 @@ def _resolve_campaign_paths(
             raise CampaignContainmentError(
                 f"--output-dir resolves outside the workspace: {output_dir}"
             )
-        if os.path.lexists(str(output_dir)) or os.path.lexists(final_resolved):
-            raise CampaignContainmentError(
-                f"--output-dir already exists at validation time: {output_dir}"
-            )
+        _refuse_under_data(final_resolved, "--output-dir")
+        # Identity BEFORE absence, so an existing alias of an input is
+        # refused on the identity lane (resolved-path + os.path.samefile,
+        # fail-closed) rather than falling through to the generic
+        # absent-final rule.
         for name, resolved in (
             ("log", log_resolved),
             ("protocol", protocol_resolved),
         ):
-            if os.path.normcase(final_resolved) == os.path.normcase(resolved):
+            if _paths_alias(output_dir, final_resolved, resolved):
                 raise CampaignContainmentError(
                     f"--output-dir aliases the {name} input path"
                 )
+        if os.path.lexists(str(output_dir)) or os.path.lexists(final_resolved):
+            raise CampaignContainmentError(
+                f"--output-dir already exists at validation time: {output_dir}"
+            )
         staging_parent = os.path.dirname(final_resolved)
         if not _is_within(staging_parent, workspace_root):
             raise CampaignContainmentError(
                 "the staging parent resolves outside the workspace"
             )
+        _refuse_under_data(staging_parent, "the staging parent")
     except (CampaignContainmentError, CampaignInputError):
         raise
     except OSError as e:
@@ -303,6 +344,16 @@ def _resolve_campaign_paths(
 # ---------------------------------------------------------------------------
 
 
+def _read_source_chunk(handle: Any) -> bytes:
+    """One bounded read at the staged-copy boundary.
+
+    A deliberately narrow, production-neutral seam: behaviour is exactly
+    ``handle.read(_COPY_CHUNK_BYTES)``; the during-copy replacement test
+    synchronizes here to exercise the captured-bytes residual without any
+    timing dependence."""
+    return handle.read(_COPY_CHUNK_BYTES)
+
+
 def _stage_copy(source: str, destination: pathlib.Path) -> tuple[int, str]:
     """Copy ``source`` into staging byte-for-byte, hashing the bytes as
     captured. Returns ``(byte_count, sha256_hex)`` of exactly the bytes
@@ -311,9 +362,13 @@ def _stage_copy(source: str, destination: pathlib.Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     total = 0
     try:
-        with open(source, "rb") as src, destination.open("wb") as dst:
+        # Unbuffered source handle: the copy loop does its own chunking, so
+        # interposing a prefetching buffer would only blur which bytes were
+        # actually read when -- the captured-bytes statement is exactly the
+        # OS-level read sequence this loop hashes.
+        with open(source, "rb", buffering=0) as src, destination.open("wb") as dst:
             while True:
-                chunk = src.read(_COPY_CHUNK_BYTES)
+                chunk = _read_source_chunk(src)
                 if not chunk:
                     break
                 digest.update(chunk)
@@ -541,6 +596,18 @@ def run_campaign(
         ) from e
 
     try:
+        # Defensive invariant: the just-created staging directory itself
+        # must not resolve under the repository data/ tree (its parent was
+        # already checked; this closes any resolution surprise between the
+        # check and the creation, fail closed).
+        try:
+            _refuse_under_data(
+                os.path.realpath(staging_dir), "the staging directory"
+            )
+        except OSError as e:
+            raise CampaignContainmentError(
+                f"containment inspection could not complete (fail closed): {e}"
+            ) from e
         staging = pathlib.Path(staging_dir)
         staged_log = staging / LOG_FILENAME
         staged_protocol = staging / PROTOCOL_FILENAME
