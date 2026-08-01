@@ -1,0 +1,39 @@
+{
+ "classification_qualifiers": [
+  "G"
+ ],
+ "classification_rationale": "The ingestion mechanics (local, provenance-preserving intake of public material) are demonstrated engineering (primary A); every ingested CLAIM is an external factual claim requiring primary-source verification before repository inclusion (qualifier G). The entire concern is deferred to a later, separately authorised V5 arc.",
+ "entry_id": "TLV4-029",
+ "implementation_disposition": "deferred",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "A future-watch marker recording that this concern exists and is deliberately deferred"
+ ],
+ "minimal_evidence_before_implementation": [
+  "A separate V5 authorisation from the operator",
+  "Per-item provenance and primary-source verification for every ingested claim"
+ ],
+ "neutral_name": "Local ingestion of publicly released footage and reports",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "future-watch"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "v5-deferred",
+ "unsuitable_uses": [
+  "Downloading, ingesting or analysing any footage, media, report or external dataset under this entry or before a separate V5 authorisation",
+  "Preloading either a conventional or an exotic conclusion about any deferred material"
+ ],
+ "warnings": [
+  "No footage, media, report or external dataset may be downloaded, ingested or analysed under this entry.",
+  "The G qualifier never upgrades verification_status; ingested claims remain unverified until primary-source verification."
+ ]
+}

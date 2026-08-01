@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Extraction of usable net energy from the vacuum has no credible demonstration and contradicts thermodynamics as established. Casimir-effect physics itself is real, established science; the claim classified here is specifically net-energy HARVESTING, which is unsupported -- the distinction is recorded so the F label cannot be misread as dismissing Casimir physics.",
+ "entry_id": "TLV4-008",
+ "implementation_disposition": "prohibited",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "A research-ledger record documenting why the harvesting claim is classified F, preserving the idea without endorsing it"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Reclassification would require a peer-reviewed, independently replicated demonstration of net energy extraction (none known)"
+ ],
+ "neutral_name": "Zero-point-energy harvesting claims",
+ "primary_classification": "F",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Any energy-budget model, simulation parameter, configuration default or roadmap item that assumes zero-point-energy input",
+  "Any language implying the repository endorses feasibility of net vacuum-energy extraction"
+ ],
+ "warnings": [
+  "Established Casimir-effect physics is distinct from unsupported net-energy-harvesting claims; only the latter is classified F here.",
+  "A prohibited F entry has no implementation seam by definition; validation of this record is not evidence about the claim."
+ ]
+}
