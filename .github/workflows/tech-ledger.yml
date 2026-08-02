@@ -1,0 +1,35 @@
+name: tech-ledger
+
+on:
+  pull_request:
+    paths:
+      - "experiments/tech_ledger/**"
+      - ".github/workflows/tech-ledger.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/tech_ledger/**"
+      - ".github/workflows/tech-ledger.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tech-ledger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger-lab:
+    name: tech-ledger (non-required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Install lab dependencies
+        run: pip install pytest pytest-asyncio
+      - name: Run lab-local suite (warnings are errors)
+        run: python -m pytest experiments/tech_ledger/tests -q -W error
+      - name: Validate committed exemplar entries
+        run: python -m experiments.tech_ledger.validate experiments/tech_ledger/entries
