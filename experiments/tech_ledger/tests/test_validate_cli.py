@@ -821,13 +821,16 @@ def test_transient_pathname_swap_during_enumeration_fd_mode(
 def _linux_shaped_capabilities():
     # The shape CPython v3.12.13 builds on Linux: os.stat (HAVE_FSTATAT)
     # and os.open (HAVE_OPENAT) registered dir_fd-capable, os.listdir
-    # (HAVE_FDOPENDIR) fd-capable, O_DIRECTORY present -- while os.lstat
-    # is absent from supports_dir_fd even though os.lstat(path, dir_fd=fd)
+    # (HAVE_FDOPENDIR) fd-capable, os.stat registered follow_symlinks-
+    # capable (HAVE_LSTAT/HAVE_FSTATAT -- the registry governing
+    # follow_symlinks=False), O_DIRECTORY present -- while os.lstat is
+    # absent from supports_dir_fd even though os.lstat(path, dir_fd=fd)
     # works there (fstatat with AT_SYMLINK_NOFOLLOW, the same capability
     # that registers os.stat).
     return {
         "supports_dir_fd": {os.open, os.stat},
         "supports_fd": {os.listdir, os.stat},
+        "supports_follow_symlinks": {os.stat},
         "has_o_directory": True,
     }
 
@@ -840,7 +843,7 @@ def test_predicate_true_on_linux_shaped_capability_sets():
 
 @pytest.mark.parametrize(
     "absent",
-    ["open", "stat", "listdir", "o_directory", "everything"],
+    ["open", "stat", "listdir", "follow_symlinks", "o_directory", "everything"],
 )
 def test_predicate_false_when_any_primitive_is_absent(absent):
     caps = _linux_shaped_capabilities()
@@ -850,12 +853,19 @@ def test_predicate_false_when_any_primitive_is_absent(absent):
         caps["supports_dir_fd"] = {os.open}
     elif absent == "listdir":
         caps["supports_fd"] = set()
+    elif absent == "follow_symlinks":
+        # dir_fd support alone is NOT enough: the lane's inspection call
+        # passes follow_symlinks=False, and an unregistered
+        # follow_symlinks raises NotImplementedError (not an OSError) at
+        # runtime -- the predicate must refuse the lane instead.
+        caps["supports_follow_symlinks"] = set()
     elif absent == "o_directory":
         caps["has_o_directory"] = False
     else:
         caps = {
             "supports_dir_fd": set(),
             "supports_fd": set(),
+            "supports_follow_symlinks": set(),
             "has_o_directory": False,
         }
     assert validate_module._dir_fd_binding_supported(**caps) is False
@@ -866,7 +876,10 @@ def test_compiled_flag_matches_real_platform_capabilities():
     # over the REAL capability sets -- neither under- nor over-claiming.
     assert validate_module._DIR_FD_SUPPORTED == (
         validate_module._dir_fd_binding_supported(
-            os.supports_dir_fd, os.supports_fd, hasattr(os, "O_DIRECTORY")
+            os.supports_dir_fd,
+            os.supports_fd,
+            os.supports_follow_symlinks,
+            hasattr(os, "O_DIRECTORY"),
         )
     )
 
@@ -879,6 +892,7 @@ def test_posix_with_dir_fd_primitives_must_select_fd_mode():
     if not (
         os.open in os.supports_dir_fd
         and os.stat in os.supports_dir_fd
+        and os.stat in os.supports_follow_symlinks
         and os.listdir in os.supports_fd
         and hasattr(os, "O_DIRECTORY")
     ):

@@ -77,24 +77,32 @@ def _pre_open_inspect(path: str, dir_fd: int | None = None) -> os.stat_result:
 def _dir_fd_binding_supported(
     supports_dir_fd: frozenset | set,
     supports_fd: frozenset | set,
+    supports_follow_symlinks: frozenset | set,
     has_o_directory: bool,
 ) -> bool:
-    """Whether every primitive the descriptor-bound lane actually calls
+    """Whether every capability the descriptor-bound lane actually needs
     is available: ``os.open(..., dir_fd=...)``, ``os.stat(..., dir_fd=...,
     follow_symlinks=False)`` and ``os.listdir(fd)``, plus ``O_DIRECTORY``.
 
     Membership is tested for exactly the functions this module calls with
-    those parameters.  ``os.lstat`` must NOT be consulted here: CPython
-    never registers it in ``os.supports_dir_fd`` on any build (its
-    ``dir_fd`` support is clinic-gated on the same ``fstatat`` capability
-    that registers ``os.stat``), so requiring its membership is False
-    everywhere -- including Linux, where all of these primitives work.
-    Pure and injectable so other platforms' capability shapes are
-    testable anywhere.
+    those parameters, in the registries the documentation assigns to each
+    parameter: ``supports_dir_fd`` governs ``dir_fd`` and
+    ``supports_follow_symlinks`` governs ``follow_symlinks=False`` -- an
+    unsupported ``follow_symlinks=False`` raises ``NotImplementedError``,
+    which is not an ``OSError`` and would propagate loudly instead of
+    failing closed, so BOTH halves of the inspection call must be
+    registered before the lane may be selected.  ``os.lstat`` must NOT be
+    consulted here: CPython never registers it in ``os.supports_dir_fd``
+    on any build (its ``dir_fd`` support is clinic-gated on the same
+    ``fstatat`` capability that registers ``os.stat``), so requiring its
+    membership is False everywhere -- including Linux, where all of these
+    primitives work.  Pure and injectable so other platforms' capability
+    shapes are testable anywhere.
     """
     return (
         os.open in supports_dir_fd
         and os.stat in supports_dir_fd
+        and os.stat in supports_follow_symlinks
         and os.listdir in supports_fd
         and has_o_directory
     )
@@ -105,7 +113,10 @@ def _dir_fd_binding_supported(
 #: the inspected directory object -- not a re-resolved pathname -- is what
 #: every operation acts on.
 _DIR_FD_SUPPORTED: Final[bool] = _dir_fd_binding_supported(
-    os.supports_dir_fd, os.supports_fd, hasattr(os, "O_DIRECTORY")
+    os.supports_dir_fd,
+    os.supports_fd,
+    os.supports_follow_symlinks,
+    hasattr(os, "O_DIRECTORY"),
 )
 
 try:  # Windows-only standard-library primitives (absent elsewhere)
