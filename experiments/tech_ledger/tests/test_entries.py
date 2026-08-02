@@ -1,4 +1,4 @@
-"""Committed exemplar entries: all validate; classifications exactly as
+"""Committed technology-ledger entries: all validate; classifications exactly as
 authorised. Validation here proves record structure only -- never the
 truth of any claim.
 """
@@ -19,7 +19,7 @@ def _load(entry_id):
     )
 
 
-def test_all_exemplars_validate_and_ids_match_filenames():
+def test_all_committed_entries_validate_and_ids_match_filenames():
     summary = validate_directory(_ENTRIES_DIR)
     assert summary["entry_count"] == 10
     for record in summary["entries"]:
