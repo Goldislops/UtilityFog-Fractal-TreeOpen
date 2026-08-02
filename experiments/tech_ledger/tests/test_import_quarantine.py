@@ -135,8 +135,29 @@ def test_forward_discovery_examines_new_modules(tmp_path):
     )
 
 
+def _test_tree_modules(tests_root: pathlib.Path) -> list[pathlib.Path]:
+    """Deterministic RECURSIVE discovery of every Python module under the
+    tests tree: a future nested module (e.g. ``tests/unit/test_helper.py``)
+    is examined automatically, exactly like the non-test discovery above.
+    Purely static -- nothing is imported or executed."""
+    return sorted(
+        path
+        for path in tests_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
+
+
 def test_lab_tests_import_stdlib_pytest_and_lab_only():
-    for path in sorted((_LAB_DIR / "tests").glob("*.py")):
+    modules = _test_tree_modules(_LAB_DIR / "tests")
+    names = {path.name for path in modules}
+    # Discovery must at minimum see today's modules; any future nested
+    # module is included automatically by construction.
+    assert {
+        "__init__.py",
+        "test_import_quarantine.py",
+        "test_validate_cli.py",
+    } <= names, names
+    for path in modules:
         imports = _imports_of(path)
         allowed = _ALLOWED_IMPORTS | {
             "pytest",
@@ -150,7 +171,46 @@ def test_lab_tests_import_stdlib_pytest_and_lab_only():
             if name not in allowed
             and not name.startswith("experiments.tech_ledger")
         }
-        assert not unexpected, f"{path.name}: unexpected imports {sorted(unexpected)}"
+        rel = path.relative_to(_LAB_DIR).as_posix()  # stable, lab-relative
+        assert not unexpected, f"{rel}: unexpected imports {sorted(unexpected)}"
+
+
+def test_tests_tree_discovery_examines_nested_modules(tmp_path):
+    # Synthetic positive control: a NESTED test module with a forbidden
+    # production import must be discovered and rejected -- proving the
+    # tests-tree scan cannot be evaded by directory depth. Purely
+    # static; nothing is imported or executed.
+    fake_tests = tmp_path / "tests"
+    (fake_tests / "unit").mkdir(parents=True)
+    (fake_tests / "test_direct.py").write_bytes(b"import json\n")
+    (fake_tests / "unit" / "test_helper.py").write_bytes(
+        b"import scripts.event_bus\n"
+    )
+    (fake_tests / "unit" / "__pycache__").mkdir()
+    (fake_tests / "unit" / "__pycache__" / "junk.py").write_bytes(
+        b"import socket\n"
+    )
+
+    discovered = _test_tree_modules(fake_tests)
+    rels = [p.relative_to(fake_tests).as_posix() for p in discovered]
+    # Deterministic order; nested module included; __pycache__ excluded.
+    assert rels == ["test_direct.py", "unit/test_helper.py"]
+    assert discovered == _test_tree_modules(fake_tests)  # repeatable
+
+    flagged = {
+        p.relative_to(fake_tests).as_posix(): sorted(
+            name for name in _imports_of(p) if name not in _ALLOWED_IMPORTS
+        )
+        for p in discovered
+    }
+    assert flagged["unit/test_helper.py"] == ["scripts.event_bus"]
+    assert flagged["test_direct.py"] == []  # direct children stay covered
+    # Negative control: a clean nested module passes.
+    (fake_tests / "unit" / "test_helper.py").write_bytes(b"import pathlib\n")
+    assert all(
+        not [n for n in _imports_of(p) if n not in _ALLOWED_IMPORTS]
+        for p in _test_tree_modules(fake_tests)
+    )
 
 
 def test_no_production_module_imports_the_lab():
