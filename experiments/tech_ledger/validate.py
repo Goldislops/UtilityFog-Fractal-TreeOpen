@@ -62,24 +62,50 @@ class LedgerCeilingError(RuntimeError):
 
 
 def _pre_open_inspect(path: str, dir_fd: int | None = None) -> os.stat_result:
-    """The pre-open ``lstat`` of one candidate.
+    """The pre-open no-follow inspection of one candidate.
 
     A deliberately narrow, production-neutral seam: behaviour is exactly
-    ``os.lstat(path, dir_fd=dir_fd)``; the capture-boundary race tests
+    ``os.stat(path, dir_fd=dir_fd, follow_symlinks=False)`` -- the
+    documented equivalent of ``os.lstat`` -- expressed through ``os.stat``
+    because that is the function whose ``dir_fd`` capability CPython
+    registers in ``os.supports_dir_fd``; the capture-boundary race tests
     synchronize here.
     """
-    return os.lstat(path, dir_fd=dir_fd)
+    return os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+
+
+def _dir_fd_binding_supported(
+    supports_dir_fd: frozenset | set,
+    supports_fd: frozenset | set,
+    has_o_directory: bool,
+) -> bool:
+    """Whether every primitive the descriptor-bound lane actually calls
+    is available: ``os.open(..., dir_fd=...)``, ``os.stat(..., dir_fd=...,
+    follow_symlinks=False)`` and ``os.listdir(fd)``, plus ``O_DIRECTORY``.
+
+    Membership is tested for exactly the functions this module calls with
+    those parameters.  ``os.lstat`` must NOT be consulted here: CPython
+    never registers it in ``os.supports_dir_fd`` on any build (its
+    ``dir_fd`` support is clinic-gated on the same ``fstatat`` capability
+    that registers ``os.stat``), so requiring its membership is False
+    everywhere -- including Linux, where all of these primitives work.
+    Pure and injectable so other platforms' capability shapes are
+    testable anywhere.
+    """
+    return (
+        os.open in supports_dir_fd
+        and os.stat in supports_dir_fd
+        and os.listdir in supports_fd
+        and has_o_directory
+    )
 
 
 #: Directory-relative descriptor support (POSIX): candidates are
 #: enumerated and opened relative to a verified directory descriptor, so
 #: the inspected directory object -- not a re-resolved pathname -- is what
 #: every operation acts on.
-_DIR_FD_SUPPORTED: Final[bool] = (
-    os.open in os.supports_dir_fd
-    and os.lstat in os.supports_dir_fd
-    and os.listdir in os.supports_fd
-    and hasattr(os, "O_DIRECTORY")
+_DIR_FD_SUPPORTED: Final[bool] = _dir_fd_binding_supported(
+    os.supports_dir_fd, os.supports_fd, hasattr(os, "O_DIRECTORY")
 )
 
 try:  # Windows-only standard-library primitives (absent elsewhere)
@@ -297,8 +323,8 @@ def _capture_entry(binding: _DirBinding, name: str) -> bytes:
     held directory descriptor (``dir_fd``), never by reconstructing
     ``entries_dir / name``; in ``identity`` mode the directory's identity
     is re-verified immediately before the capture. Then, per entry:
-    pre-open ``lstat`` (symlinks and non-regular files refused);
-    ``os.open`` without following symlinks where the platform supplies
+    pre-open no-follow inspection (symlinks and non-regular files
+    refused); ``os.open`` without following symlinks where the platform supplies
     ``O_NOFOLLOW``; ``fstat`` of the opened descriptor must be a regular
     file; post-open ``lstat`` must still be a regular non-link path; and
     the three inspections must agree on stable filesystem identity
@@ -441,9 +467,10 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
         for name in names:
             if not name.endswith(".json"):
                 continue  # only direct .json entry files are inspected
-            probe = os.lstat(
+            probe = os.stat(
                 name if binding.fd is not None else os.path.join(binding.path, name),
                 dir_fd=binding.fd,
+                follow_symlinks=False,
             )
             if stat_module.S_ISLNK(probe.st_mode):
                 raise LedgerPathError(

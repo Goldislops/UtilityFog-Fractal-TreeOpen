@@ -701,10 +701,13 @@ def test_fail_closed_without_any_binding_primitive(tmp_path, capsys, monkeypatch
     assert "binding" in err
 
 
-@pytest.mark.skipif(
+_dir_fd_only = pytest.mark.skipif(
     not validate_module._DIR_FD_SUPPORTED,
     reason="directory-relative descriptors unavailable on this platform",
 )
+
+
+@_dir_fd_only
 def test_capture_bound_to_inspected_directory_fd_mode(
     tmp_path, capsys, monkeypatch
 ):
@@ -735,14 +738,172 @@ def test_capture_bound_to_inspected_directory_fd_mode(
     assert summary["total_entry_bytes"] != len(replacement)
 
 
-def test_ordinary_directory_validates_under_identity_mode(
+@_dir_fd_only
+def test_fd_mode_inspections_go_through_directory_descriptor(
     tmp_path, capsys, monkeypatch
 ):
+    # Every candidate inspection must pass a real dir_fd and a bare
+    # filename -- never a reconstructed pathname -- when the descriptor
+    # lane is on.
+    _write_entry(tmp_path, "TLV4-001")
+    _write_entry(tmp_path, "TLV4-002")
+    seen = []
+    real = validate_module._pre_open_inspect
+
+    def _recording(path, dir_fd=None):
+        seen.append((path, dir_fd))
+        return real(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(validate_module, "_pre_open_inspect", _recording)
+    assert main([str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert seen, "captures must run through the inspection seam"
+    assert all(dir_fd is not None for _path, dir_fd in seen)
+    assert all(os.sep not in path for path, _dir_fd in seen)
+
+
+@_dir_fd_only
+def test_transient_pathname_swap_during_enumeration_fd_mode(
+    tmp_path, capsys, monkeypatch
+):
+    # fd mode: enumeration reads the HELD descriptor, so a pathname
+    # swap-and-restore around os.listdir cannot subset or replace the
+    # candidate set.  (POSIX permits the renames -- unlike the Windows
+    # hold lane, which forbids them -- but the binding makes them
+    # irrelevant: every later probe and open goes through the held fd.)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    _write_entry(entries, "TLV4-016")
+    aside = tmp_path / "aside"
+    transient = tmp_path / "transient"
+    transient.mkdir()
+    _write_entry(transient, "TLV4-001")  # deliberately omits TLV4-016
+
+    real_listdir = os.listdir
+    state = {"done": False}
+
+    def _swapping_listdir(target):
+        if state["done"]:
+            return real_listdir(target)
+        state["done"] = True
+        os.rename(str(entries), str(aside))
+        os.rename(str(transient), str(entries))
+        try:
+            return real_listdir(target)  # target is the held descriptor
+        finally:  # restore before any later pathname cross-check
+            os.rename(str(entries), str(transient))
+            os.rename(str(aside), str(entries))
+
+    monkeypatch.setattr(os, "listdir", _swapping_listdir)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    monkeypatch.undo()
+    assert state["done"] is True, "the swap window must actually run"
+    assert rc == 0, captured.err
+    summary = json.loads(captured.out)
+    assert summary["entry_count"] == 2  # nothing silently omitted
+    assert {e["entry_id"] for e in summary["entries"]} == {
+        "TLV4-001",
+        "TLV4-016",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Capability-predicate correspondence (Ubuntu regression): the compiled
+# flag must track the primitives the fd lane genuinely calls, on real and
+# simulated capability shapes alike.  CPython never registers os.lstat in
+# os.supports_dir_fd on any build, so a predicate consulting it is False
+# everywhere -- which made every Linux run refuse ordinary validation.
+# ---------------------------------------------------------------------------
+
+
+def _linux_shaped_capabilities():
+    # The shape CPython v3.12.13 builds on Linux: os.stat (HAVE_FSTATAT)
+    # and os.open (HAVE_OPENAT) registered dir_fd-capable, os.listdir
+    # (HAVE_FDOPENDIR) fd-capable, O_DIRECTORY present -- while os.lstat
+    # is absent from supports_dir_fd even though os.lstat(path, dir_fd=fd)
+    # works there (fstatat with AT_SYMLINK_NOFOLLOW, the same capability
+    # that registers os.stat).
+    return {
+        "supports_dir_fd": {os.open, os.stat},
+        "supports_fd": {os.listdir, os.stat},
+        "has_o_directory": True,
+    }
+
+
+def test_predicate_true_on_linux_shaped_capability_sets():
+    caps = _linux_shaped_capabilities()
+    assert os.lstat not in caps["supports_dir_fd"]  # the exact Ubuntu trap
+    assert validate_module._dir_fd_binding_supported(**caps) is True
+
+
+@pytest.mark.parametrize(
+    "absent",
+    ["open", "stat", "listdir", "o_directory", "everything"],
+)
+def test_predicate_false_when_any_primitive_is_absent(absent):
+    caps = _linux_shaped_capabilities()
+    if absent == "open":
+        caps["supports_dir_fd"] = {os.stat}
+    elif absent == "stat":
+        caps["supports_dir_fd"] = {os.open}
+    elif absent == "listdir":
+        caps["supports_fd"] = set()
+    elif absent == "o_directory":
+        caps["has_o_directory"] = False
+    else:
+        caps = {
+            "supports_dir_fd": set(),
+            "supports_fd": set(),
+            "has_o_directory": False,
+        }
+    assert validate_module._dir_fd_binding_supported(**caps) is False
+
+
+def test_compiled_flag_matches_real_platform_capabilities():
+    # On every platform the module-level flag must equal the predicate
+    # over the REAL capability sets -- neither under- nor over-claiming.
+    assert validate_module._DIR_FD_SUPPORTED == (
+        validate_module._dir_fd_binding_supported(
+            os.supports_dir_fd, os.supports_fd, hasattr(os, "O_DIRECTORY")
+        )
+    )
+
+
+def test_posix_with_dir_fd_primitives_must_select_fd_mode():
+    # Anti-skip sentinel: wherever the platform really provides the
+    # descriptor primitives (every Linux CI runner), the fd lane MUST be
+    # on -- otherwise the @_dir_fd_only tests above silently skip and
+    # ordinary validation refuses, exactly the Ubuntu regression.
+    if not (
+        os.open in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.listdir in os.supports_fd
+        and hasattr(os, "O_DIRECTORY")
+    ):
+        pytest.skip("platform genuinely lacks descriptor primitives")
+    assert validate_module._DIR_FD_SUPPORTED is True
+
+
+def test_ordinary_directory_without_dir_fd_binds_or_refuses(
+    tmp_path, capsys, monkeypatch
+):
+    # Without directory-relative descriptors the validator must either
+    # hold the fallback binding (Windows) or refuse before enumeration
+    # (platforms with neither primitive) -- never enumerate unbound.
     monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
     _write_entry(tmp_path, "TLV4-001")
     _write_entry(tmp_path, "TLV4-002")
-    assert main([str(tmp_path)]) == 0
-    assert json.loads(capsys.readouterr().out)["entry_count"] == 2
+    rc = main([str(tmp_path)])
+    captured = capsys.readouterr()
+    if validate_module._FALLBACK_BINDING_SUPPORTED:
+        assert rc == 0, captured.err
+        assert json.loads(captured.out)["entry_count"] == 2
+    else:
+        assert rc == 4
+        _assert_one_error_line(captured.err)
+        assert "binding" in captured.err
 
 
 # ---------------------------------------------------------------------------
