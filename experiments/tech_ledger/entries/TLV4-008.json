@@ -1,0 +1,37 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "The user-supplied audit supplies no independently replicated demonstration of a usable net-energy-harvesting technology. Casimir-effect physics is real but does not by itself demonstrate a cyclic net-work source, and idealised theoretical proposals and thermodynamic analyses require careful full-cycle energy accounting and do not establish an engineering technology. The F classification here is an evidence and engineering disposition for this repository, not a declaration that every idealised vacuum-work proposal is mathematically forbidden.",
+ "entry_id": "TLV4-008",
+ "implementation_disposition": "prohibited",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "A research-ledger record documenting why the harvesting claim is classified F, preserving the idea without endorsing it"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Primary-source review and independent replicated evidence of a usable net-energy-harvesting technology, justifying a later separately audited reclassification"
+ ],
+ "neutral_name": "Zero-point-energy harvesting claims",
+ "primary_classification": "F",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Any energy-budget model, simulation parameter, configuration default or roadmap item that assumes zero-point-energy input",
+  "Any language implying the repository endorses feasibility of net vacuum-energy extraction"
+ ],
+ "warnings": [
+  "Repository implementation remains prohibited unless primary-source review and independent replicated evidence justify a later separately audited reclassification.",
+  "Casimir-effect physics is real but does not by itself demonstrate a cyclic net-work source; the F label records this repository's evidence disposition, not a physical theorem.",
+  "A prohibited F entry has no implementation seam by definition; validation of this record is not evidence about the claim."
+ ]
+}
