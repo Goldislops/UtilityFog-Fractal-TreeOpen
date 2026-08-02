@@ -21,14 +21,19 @@ def _load(entry_id):
 
 def test_all_exemplars_validate_and_ids_match_filenames():
     summary = validate_directory(_ENTRIES_DIR)
-    assert summary["entry_count"] == 5
+    assert summary["entry_count"] == 10
     for record in summary["entries"]:
         assert record["filename"] == f"{record['entry_id']}.json"
     assert [r["entry_id"] for r in summary["entries"]] == [
         "TLV4-001",
         "TLV4-008",
+        "TLV4-011",
+        "TLV4-012",
         "TLV4-016",
+        "TLV4-017",
+        "TLV4-019",
         "TLV4-025",
+        "TLV4-027",
         "TLV4-029",
     ]
 
@@ -65,11 +70,82 @@ def test_tlv4_008_zero_point_claims():
     )
 
 
+def test_tlv4_011_stateless_protocol_boundaries():
+    entry = _load("TLV4-011")
+    assert entry["entry_id"] == "TLV4-011"
+    assert entry["primary_classification"] == "A"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Contract tests on a request/response schema"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["executable-code"]
+    warnings = " ".join(entry["warnings"])
+    assert "Offline verification paths must stay network-free" in warnings
+
+
+def test_tlv4_012_agent_orchestration_patterns():
+    entry = _load("TLV4-012")
+    assert entry["entry_id"] == "TLV4-012"
+    assert entry["primary_classification"] == "A"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Provenance-field validation for machine-authored ledger entries"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == [
+        "executable-code",
+        "research-ledger",
+    ]
+    warnings = " ".join(entry["warnings"])
+    assert "Agent output is never evidence by itself" in warnings
+
+
 def test_tlv4_016_deterministic_execution():
     entry = _load("TLV4-016")
     assert entry["primary_classification"] == "A"
     assert entry["implementation_disposition"] == "eligible"
     assert "byte-identical" in entry["implementation_seam"]
+
+
+def test_tlv4_017_local_first_air_gapped_operation():
+    entry = _load("TLV4-017")
+    assert entry["entry_id"] == "TLV4-017"
+    assert entry["primary_classification"] == "A"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Socket-guard test fixtures asserting no network access in "
+        "offline paths"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == [
+        "executable-code",
+        "research-ledger",
+    ]
+    warnings = " ".join(entry["warnings"])
+    assert "Offline claims are verified by tests" in warnings
+
+
+def test_tlv4_019_hardware_aware_resource_budgeting():
+    entry = _load("TLV4-019")
+    assert entry["entry_id"] == "TLV4-019"
+    assert entry["primary_classification"] == "A"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Budget-configuration schema validation"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["executable-code"]
+    warnings = " ".join(entry["warnings"])
+    assert "Budgets describe machines, not truths" in warnings
 
 
 def test_tlv4_025_conventional_explanations_first():
@@ -81,6 +157,22 @@ def test_tlv4_025_conventional_explanations_first():
     text = json.dumps(entry)
     assert "never a predetermined outcome" in text
     assert "refuses anomaly escalation until" in entry["implementation_seam"]
+
+
+def test_tlv4_027_provenance_chain_of_custody():
+    entry = _load("TLV4-027")
+    assert entry["entry_id"] == "TLV4-027"
+    assert entry["primary_classification"] == "A"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Append-only custody-event list with hash-chain verification tests"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "executable-code"]
+    warnings = " ".join(entry["warnings"])
+    assert "Say provenance-recorded" in warnings
 
 
 def test_tlv4_029_v5_deferred_ingestion():
