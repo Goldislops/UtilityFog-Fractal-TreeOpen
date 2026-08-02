@@ -13,6 +13,7 @@ Requires: pyzmq >= 27.0.0
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
 from typing import Iterable, Mapping
@@ -72,6 +73,11 @@ class ZMQHaloExchange(HaloExchange):
         self._pulls: dict[ShardCoord, zmq.Socket] = {}
         self._pushes: dict[ShardCoord, zmq.Socket] = {}
         self._local_inbox: dict[ShardCoord, list[HaloPacket]] = defaultdict(list)
+        # Serializes every local-inbox transition against a concurrent
+        # self-loop `send()`. Held only for the O(1)/O(n) list handovers below —
+        # never across a ZMQ call, a frame decode or the receive deadline.
+        # Scope is the local inbox alone; see `recv_all` for what is NOT claimed.
+        self._inbox_lock = threading.Lock()
         self._closed = False
 
         # Bind one PULL socket per owned coord.
@@ -99,8 +105,11 @@ class ZMQHaloExchange(HaloExchange):
             raise RuntimeError("ZMQHaloExchange is closed")
         target = packet.target_coord
         if target in self.own_coords:
-            # Self-loop: skip ZMQ entirely.
-            self._local_inbox[target].append(packet)
+            # Self-loop: skip ZMQ entirely. Serialized against `recv_all`'s
+            # extraction and restoration so an append can never be discarded by
+            # a concurrent replacement of the inbox list.
+            with self._inbox_lock:
+                self._local_inbox[target].append(packet)
             return
         sock = self._pushes.get(target)
         if sock is None:
@@ -115,28 +124,83 @@ class ZMQHaloExchange(HaloExchange):
         Combines self-loop packets already in the local inbox with ZMQ-delivered
         packets. Raises `TimeoutError` if the full count isn't received within
         `recv_timeout_ms`. This is the implicit per-step barrier.
+
+        Extracting the local inbox transfers packet ownership to this call, so
+        an exceptional exit past that point would otherwise drop every packet
+        held in hand — the local ones AND any already decoded off the wire.
+        PUSH/PULL delivers each frame exactly once, so a dropped wire packet is
+        never re-sent and the barrier can never be satisfied afterwards.
+
+        The protected ownership interval therefore begins IMMEDIATELY after the
+        stored inbox is cleared and covers everything up to the return: the
+        `_pulls[target]` lookup, the initial deadline construction, timeout
+        handling, socket operations and packet decoding. A cleanup-only handler
+        hands the in-hand packets back to `_local_inbox[target]` before
+        re-raising.
+
+        Retention is bounded to packets this call had already accepted:
+
+          - Restored packets are PREPENDED, so they precede any self-loop
+            packet `send()` placed into the replacement inbox while the receive
+            was in progress, and their relative order is preserved.
+          - Packets are moved, never copied, so no later call can return a
+            duplicate.
+          - The exception is re-raised bare: class, message and traceback are
+            untouched, and nothing is swallowed. `zmq.Again` stays an internal
+            retry and never triggers restoration.
+          - A frame `HaloPacket.from_bytes()` refuses is NOT restored or
+            replayed — only previously valid packets are handed back. Malformed
+            frames remain discarded, exactly as before.
+
+        Both local-inbox handovers — the extraction/clear above and the
+        restoration below — run under `_inbox_lock`, the same lock a self-loop
+        `send()` takes around its append. Each handover replaces the stored list
+        wholesale, so without that mutual exclusion an append landing between
+        the read and the store would be silently dropped. The lock is released
+        before the gather loop and is NEVER held across a ZMQ call, a frame
+        decode or the receive deadline.
+
+        The claim is bounded to retention across an exceptional receive exit and
+        to serializing local-inbox transitions against self-loop `send()`.
+        Cleanup is not claimed to be total under a SECOND failure (e.g. an
+        allocation failure during restoration itself), and this changes no
+        caller retry policy, generation validation, or over-delivery behaviour.
+        Broader thread-safety is explicitly NOT claimed: the PULL/PUSH sockets,
+        `close()` and the rest of the object lifecycle remain unsynchronized,
+        and concurrent `recv_all()` calls for the same target are unsupported.
         """
         if self._closed:
             raise RuntimeError("ZMQHaloExchange is closed")
         if target not in self.own_coords:
             raise ValueError(f"cannot recv for non-owned coord {target}")
-        packets = list(self._local_inbox[target])
-        self._local_inbox[target] = []
-        pull = self._pulls[target]
-        deadline = time.monotonic() + self.recv_timeout_ms / 1000.0
-        while len(packets) < PACKETS_PER_SHARD_PER_STEP:
-            remaining_ms = int((deadline - time.monotonic()) * 1000)
-            if remaining_ms <= 0:
-                raise TimeoutError(
-                    f"ZMQHaloExchange.recv_all timed out for {target} "
-                    f"({len(packets)}/{PACKETS_PER_SHARD_PER_STEP} packets received)"
-                )
-            pull.setsockopt(zmq.RCVTIMEO, remaining_ms)
-            try:
-                buf = pull.recv()
-            except zmq.Again:
-                continue
-            packets.append(HaloPacket.from_bytes(buf))
+        with self._inbox_lock:
+            packets = list(self._local_inbox[target])
+            self._local_inbox[target] = []
+        try:
+            pull = self._pulls[target]
+            deadline = time.monotonic() + self.recv_timeout_ms / 1000.0
+            while len(packets) < PACKETS_PER_SHARD_PER_STEP:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise TimeoutError(
+                        f"ZMQHaloExchange.recv_all timed out for {target} "
+                        f"({len(packets)}/{PACKETS_PER_SHARD_PER_STEP} packets received)"
+                    )
+                pull.setsockopt(zmq.RCVTIMEO, remaining_ms)
+                try:
+                    buf = pull.recv()
+                except zmq.Again:
+                    continue
+                packets.append(HaloPacket.from_bytes(buf))
+        except BaseException:
+            # Cleanup only — give back what this call took, then propagate.
+            # The read/concatenate/store is one critical section, so a self-loop
+            # append racing this handover is never overwritten: it either lands
+            # before the read (and is preserved after the restored packets) or
+            # after the store (and is appended to the restored list).
+            with self._inbox_lock:
+                self._local_inbox[target] = packets + self._local_inbox[target]
+            raise
         return packets
 
     def barrier(self) -> None:
