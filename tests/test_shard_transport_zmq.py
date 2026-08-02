@@ -357,6 +357,69 @@ def _wired_exchange(monkeypatch, script=(), timeout_ms=10_000):
     return exchange, pull, clock
 
 
+class _SentinelError(Exception):
+    """Distinct type so the propagated object can be identity-checked."""
+
+
+class _ExplodingClock:
+    """Clock boundary that fails on the very first `monotonic()` call, i.e.
+    while the initial deadline is being constructed."""
+
+    def __init__(self, error):
+        self.error = error
+
+    def monotonic(self):
+        raise self.error
+
+
+class _RaisingPulls(dict):
+    """PULL-registry boundary whose lookup fails.
+
+    Subclasses `dict` so `close()` still finds working `values()`/`clear()`.
+    """
+
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def __getitem__(self, key):
+        raise self.error
+
+
+def test_recv_all_restores_packets_when_deadline_construction_fails(monkeypatch):
+    """The protected interval starts at the inbox clear, not at the loop: a
+    failure while building the initial deadline must still restore packets."""
+    exchange, pull, clock = _wired_exchange(monkeypatch)
+    for gen in (0, 1, 2):
+        exchange.send(_packet(gen))
+    sentinel = _SentinelError("clock unavailable")
+    monkeypatch.setattr(shard_transport_zmq, "time", _ExplodingClock(sentinel))
+
+    with pytest.raises(_SentinelError) as excinfo:
+        exchange.recv_all(_OWN)
+
+    assert excinfo.value is sentinel  # identical object, unwrapped
+    assert _gens(exchange._local_inbox[_OWN]) == [0, 1, 2]
+    exchange.close()
+
+
+def test_recv_all_restores_packets_when_pull_lookup_fails(monkeypatch):
+    """A `_pulls[target]` lookup failure occurs after extraction but before the
+    loop; the packets must still come back in order."""
+    exchange, pull, clock = _wired_exchange(monkeypatch)
+    for gen in (0, 1, 2):
+        exchange.send(_packet(gen))
+    sentinel = _SentinelError("pull socket missing")
+    exchange._pulls = _RaisingPulls(sentinel)
+
+    with pytest.raises(_SentinelError) as excinfo:
+        exchange.recv_all(_OWN)
+
+    assert excinfo.value is sentinel  # identical object, unwrapped
+    assert _gens(exchange._local_inbox[_OWN]) == [0, 1, 2]
+    exchange.close()
+
+
 def test_recv_all_restores_local_and_decoded_packets_on_timeout(monkeypatch):
     """Regression: a timeout must hand back the local packets AND every wire
     packet already decoded during the same call."""

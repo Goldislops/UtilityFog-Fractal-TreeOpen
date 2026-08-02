@@ -120,9 +120,14 @@ class ZMQHaloExchange(HaloExchange):
         an exceptional exit past that point would otherwise drop every packet
         held in hand — the local ones AND any already decoded off the wire.
         PUSH/PULL delivers each frame exactly once, so a dropped wire packet is
-        never re-sent and the barrier can never be satisfied afterwards. The
-        gather loop therefore runs under a cleanup-only handler that hands the
-        in-hand packets back to `_local_inbox[target]` before re-raising.
+        never re-sent and the barrier can never be satisfied afterwards.
+
+        The protected ownership interval therefore begins IMMEDIATELY after the
+        stored inbox is cleared and covers everything up to the return: the
+        `_pulls[target]` lookup, the initial deadline construction, timeout
+        handling, socket operations and packet decoding. A cleanup-only handler
+        hands the in-hand packets back to `_local_inbox[target]` before
+        re-raising.
 
         Retention is bounded to packets this call had already accepted:
 
@@ -149,9 +154,9 @@ class ZMQHaloExchange(HaloExchange):
             raise ValueError(f"cannot recv for non-owned coord {target}")
         packets = list(self._local_inbox[target])
         self._local_inbox[target] = []
-        pull = self._pulls[target]
-        deadline = time.monotonic() + self.recv_timeout_ms / 1000.0
         try:
+            pull = self._pulls[target]
+            deadline = time.monotonic() + self.recv_timeout_ms / 1000.0
             while len(packets) < PACKETS_PER_SHARD_PER_STEP:
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
