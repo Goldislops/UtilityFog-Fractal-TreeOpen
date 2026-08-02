@@ -107,6 +107,31 @@ def test_deterministic_filename_order(tmp_path, capsys):
     ]
 
 
+def test_first_invalid_refusal_is_enumeration_order_independent(
+    tmp_path, capsys, monkeypatch
+):
+    # Two ordinary non-regular .json paths (directories -- no symlink
+    # privilege needed).  Whatever raw order enumeration returns, the
+    # FIRST reported refusal must be the lexically first invalid name:
+    # filename ordering is established before any per-entry inspection,
+    # so refusal order can never depend on filesystem enumeration order.
+    (tmp_path / "a.json").mkdir()
+    (tmp_path / "b.json").mkdir()
+
+    for raw_order in (("a.json", "b.json"), ("b.json", "a.json")):
+        def _forced_order(target, _order=raw_order):
+            return list(_order)
+
+        monkeypatch.setattr(os, "listdir", _forced_order)
+        rc = main([str(tmp_path)])
+        err = capsys.readouterr().err
+        monkeypatch.undo()
+        assert rc == 4
+        _assert_one_error_line(err)
+        assert err.startswith("error: a.json:"), err  # lexically first, pinned
+        assert "not a regular file" in err
+
+
 def test_duplicate_json_key_refused_exit2(tmp_path, capsys):
     _write_entry(tmp_path, "TLV4-001")
     raw = (tmp_path / "TLV4-001.json").read_text(encoding="utf-8")
