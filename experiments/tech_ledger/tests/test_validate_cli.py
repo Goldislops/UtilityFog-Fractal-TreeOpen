@@ -500,39 +500,205 @@ def test_junction_entries_dir_refused_exit4(tmp_path, capsys):
     assert "reparse point" in err
 
 
+_fallback_only = pytest.mark.skipif(
+    not validate_module._FALLBACK_BINDING_SUPPORTED,
+    reason="platform has no non-dir_fd directory-binding primitive",
+)
+
+
+def _force_fallback(monkeypatch):
+    """Exercise the non-dir_fd binding lane explicitly."""
+    monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
+
+
 def test_directory_replacement_between_enumeration_and_capture_refused(
     tmp_path, capsys, monkeypatch
 ):
-    # Cross-platform via the fail-closed identity mechanism (forced), so
-    # the detection lane is exercised even where dir_fd exists.
-    monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
+    # The binding must PREVENT the swap outright (or the validator must
+    # refuse before reading); an identity recheck alone is insufficient.
+    _force_fallback(monkeypatch)
     entries = tmp_path / "entries"
     entries.mkdir()
     _write_entry(entries, "TLV4-001")
     _write_entry(entries, "TLV4-002")
     aside = tmp_path / "aside"
 
-    # Synchronize at the phase-boundary binding check itself: the swap
-    # happens exactly between enumeration/ceilings and the capture phase,
-    # then the REAL verification runs against the swapped directory.
     real_verify = validate_module._verify_binding
-    state = {"done": False}
+    state = {"done": False, "blocked": None}
 
     def _swapping_verify(binding):
         if not state["done"]:
             state["done"] = True
-            os.rename(str(entries), str(aside))
-            entries.mkdir()
-            _write_entry(entries, "TLV4-001")
-            _write_entry(entries, "TLV4-002")
+            try:
+                os.rename(str(entries), str(aside))
+                state["blocked"] = False
+                entries.mkdir()
+                _write_entry(entries, "TLV4-001")
+                _write_entry(entries, "TLV4-002")
+            except OSError:
+                state["blocked"] = True
         return real_verify(binding)
 
     monkeypatch.setattr(validate_module, "_verify_binding", _swapping_verify)
     rc = main([str(entries)])
+    captured = capsys.readouterr()
+    if state["blocked"]:
+        assert rc == 0, captured.err  # binding held; nothing to detect
+        assert json.loads(captured.out)["entry_count"] == 2
+    else:
+        assert rc == 4
+        _assert_one_error_line(captured.err)
+
+
+@_fallback_only
+def test_persistent_late_replacement_prevented(tmp_path, capsys, monkeypatch):
+    # Residual finding 1: swap the inspected directory AFTER the last
+    # binding check but BEFORE the first candidate inspection. A held
+    # binding must make the rename impossible; the captured bytes must be
+    # the ORIGINAL directory's.
+    _force_fallback(monkeypatch)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    original_size = (entries / "TLV4-001.json").stat().st_size
+    aside = tmp_path / "aside"
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    replacement_bytes = _padded_entry_bytes(
+        "TLV4-001", target_size=original_size + 2_700
+    )
+    (replacement_dir / "TLV4-001.json").write_bytes(replacement_bytes)
+    assert len(replacement_bytes) != original_size
+
+    real_probe = validate_module._pre_open_inspect
+    state = {"done": False, "blocked": None}
+
+    def _swap_then_probe(path, dir_fd=None):
+        if not state["done"]:
+            state["done"] = True
+            try:
+                os.rename(str(entries), str(aside))
+                os.rename(str(replacement_dir), str(entries))
+                state["blocked"] = False
+            except OSError:
+                state["blocked"] = True
+        return real_probe(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(validate_module, "_pre_open_inspect", _swap_then_probe)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    assert state["blocked"] is True, "the held binding must prevent the rename"
+    assert rc == 0, captured.err
+    summary = json.loads(captured.out)
+    assert summary["total_entry_bytes"] == original_size
+    assert summary["total_entry_bytes"] != len(replacement_bytes)
+
+
+@_fallback_only
+def test_transient_enumeration_swap_and_restore_prevented(
+    tmp_path, capsys, monkeypatch
+):
+    # Residual finding 2: replace the directory ONLY while os.listdir
+    # runs (subset of filenames), then restore before any identity
+    # recheck. Before/after checks cannot see this; a held binding must
+    # prevent it, so the full candidate set is enumerated.
+    _force_fallback(monkeypatch)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    _write_entry(entries, "TLV4-016")
+    aside = tmp_path / "aside"
+    transient = tmp_path / "transient"
+    transient.mkdir()
+    _write_entry(transient, "TLV4-001")  # deliberately omits TLV4-016
+
+    real_listdir = os.listdir
+    state = {"done": False, "blocked": None}
+
+    def _swapping_listdir(target):
+        if state["done"]:
+            return real_listdir(target)
+        state["done"] = True
+        try:
+            os.rename(str(entries), str(aside))
+            os.rename(str(transient), str(entries))
+            state["blocked"] = False
+        except OSError:
+            state["blocked"] = True
+            return real_listdir(target)
+        try:
+            return real_listdir(target)
+        finally:  # restore before any later identity recheck
+            os.rename(str(entries), str(transient))
+            os.rename(str(aside), str(entries))
+
+    monkeypatch.setattr(os, "listdir", _swapping_listdir)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    monkeypatch.undo()
+    assert state["blocked"] is True, "the held binding must prevent the swap"
+    assert rc == 0, captured.err
+    summary = json.loads(captured.out)
+    assert summary["entry_count"] == 2  # nothing silently omitted
+    assert {e["entry_id"] for e in summary["entries"]} == {"TLV4-001", "TLV4-016"}
+
+
+@_fallback_only
+def test_binding_released_after_success(tmp_path, capsys, monkeypatch):
+    _force_fallback(monkeypatch)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    assert main([str(entries)]) == 0
+    capsys.readouterr()
+    os.rename(str(entries), str(tmp_path / "moved"))  # released, no error
+
+
+@_fallback_only
+@pytest.mark.parametrize(
+    "sabotage",
+    ["enumeration", "capture", "parse"],
+)
+def test_binding_released_after_failures(tmp_path, capsys, monkeypatch, sabotage):
+    _force_fallback(monkeypatch)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    if sabotage == "enumeration":
+        (entries / "TLV4-001.json").write_bytes(b"x" * (MAX_ENTRY_BYTES + 1))
+        expected = 5
+    elif sabotage == "capture":
+        _write_entry(entries, "TLV4-001")
+
+        def _boom(path, dir_fd=None):
+            raise OSError("synthetic capture failure")
+
+        monkeypatch.setattr(validate_module, "_pre_open_inspect", _boom)
+        expected = 4
+    else:
+        (entries / "TLV4-001.json").write_bytes(b"{not json")
+        expected = 2
+    assert main([str(entries)]) == expected
+    capsys.readouterr()
+    os.rename(str(entries), str(tmp_path / "moved"))  # released on failure paths
+
+
+def test_fail_closed_without_any_binding_primitive(tmp_path, capsys, monkeypatch):
+    # No dir_fd and no fallback primitive: refuse BEFORE enumeration
+    # rather than retaining identity-only checks as a "binding".
+    monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
+    monkeypatch.setattr(validate_module, "_FALLBACK_BINDING_SUPPORTED", False)
+    _write_entry(tmp_path, "TLV4-001")
+
+    def _must_not_run(target):  # pragma: no cover - must never execute
+        raise AssertionError("enumeration ran without a binding")
+
+    monkeypatch.setattr(os, "listdir", _must_not_run)
+    rc = main([str(tmp_path)])
     err = capsys.readouterr().err
+    monkeypatch.undo()
     assert rc == 4
     _assert_one_error_line(err)
-    assert "renamed or replaced" in err
+    assert "binding" in err
 
 
 @pytest.mark.skipif(

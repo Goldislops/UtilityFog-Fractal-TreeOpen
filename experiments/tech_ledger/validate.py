@@ -71,17 +71,42 @@ def _pre_open_inspect(path: str, dir_fd: int | None = None) -> os.stat_result:
     return os.lstat(path, dir_fd=dir_fd)
 
 
-#: Directory-relative descriptor support (POSIX): candidates can be
-#: enumerated and opened relative to a verified directory descriptor.
-#: Where unsupported (Windows), a fail-closed identity mechanism
-#: re-verifies the directory before every capture instead -- the claim is
-#: never silently weakened.
+#: Directory-relative descriptor support (POSIX): candidates are
+#: enumerated and opened relative to a verified directory descriptor, so
+#: the inspected directory object -- not a re-resolved pathname -- is what
+#: every operation acts on.
 _DIR_FD_SUPPORTED: Final[bool] = (
     os.open in os.supports_dir_fd
     and os.lstat in os.supports_dir_fd
     and os.listdir in os.supports_fd
     and hasattr(os, "O_DIRECTORY")
 )
+
+try:  # Windows-only standard-library primitives (absent elsewhere)
+    import _winapi
+    import msvcrt
+except ImportError:  # pragma: no cover - non-Windows
+    _winapi = None  # type: ignore[assignment]
+    msvcrt = None  # type: ignore[assignment]
+
+#: Fallback directory BINDING for platforms without directory-relative
+#: descriptors. A Windows directory handle opened without
+#: ``FILE_SHARE_DELETE`` denies rename/delete of that directory for as
+#: long as it is held, which is a genuine binding over the whole
+#: enumeration-to-capture interval -- not an identity recheck. Identity
+#: rechecks alone cannot see a swap-and-restore window, so where no
+#: binding primitive exists the validator fails closed instead.
+_FALLBACK_BINDING_SUPPORTED: Final[bool] = (
+    _winapi is not None
+    and msvcrt is not None
+    and hasattr(_winapi, "CreateFile")
+    and hasattr(msvcrt, "open_osfhandle")
+)
+
+#: Win32 constants not re-exported by ``_winapi`` (documented values).
+_FILE_SHARE_READ: Final[int] = 0x00000001
+_FILE_SHARE_WRITE: Final[int] = 0x00000002  # FILE_SHARE_DELETE deliberately absent
+_FILE_FLAG_BACKUP_SEMANTICS: Final[int] = 0x02000000  # required to open a directory
 
 
 def _identity_of(probe: os.stat_result, what: str) -> tuple[int, int]:
@@ -106,27 +131,93 @@ def _refuse_reparse_dir(probe: os.stat_result, what: str) -> None:
 
 
 class _DirBinding:
-    """The verified, bound entries directory.
+    """The verified, BOUND entries directory.
 
     ``fd`` mode (POSIX): enumeration and every candidate open go through
-    the held directory descriptor, so capture is inherently bound to the
-    originally inspected directory; a path-identity cross-check before
-    the capture phase detects rename/replacement. ``identity`` mode
-    (platforms without dir_fd): the directory's ``st_dev``/``st_ino``
-    identity and non-reparse status are re-verified before every capture,
-    failing closed on any change. Neither mode claims protection against
-    an unobservable filesystem or kernel violation.
+    the held directory descriptor, so every operation acts on the
+    inspected directory object itself. ``hold`` mode (Windows): a
+    directory handle that denies delete/rename sharing is held for the
+    whole interval from before enumeration until after the last capture,
+    so the directory cannot be renamed or replaced meanwhile -- including
+    during a transient swap-and-restore that no before/after identity
+    check could observe. Exactly one of ``fd`` / ``hold_fd`` is set, and
+    each is closed exactly once. Neither mode claims protection against a
+    genuinely unobservable filesystem or kernel violation.
     """
 
-    def __init__(self, path: str, fd: int | None, identity: tuple[int, int]):
+    def __init__(
+        self,
+        path: str,
+        fd: int | None,
+        identity: tuple[int, int],
+        hold_fd: int | None = None,
+    ):
         self.path = path
         self.fd = fd
         self.identity = identity
+        self.hold_fd = hold_fd
 
     def close(self) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        for attribute in ("fd", "hold_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor is not None:
+                setattr(self, attribute, None)  # never close twice
+                os.close(descriptor)
+
+
+def _acquire_fallback_binding(path: str, pre_identity: tuple[int, int]) -> int:
+    """Hold the inspected directory open with delete/rename sharing denied.
+
+    Returns a file descriptor owning the directory handle (closing the
+    descriptor closes the handle exactly once). The bound object's own
+    identity is read via ``os.fstat`` on that descriptor -- not by
+    re-resolving the pathname -- and must equal the inspected identity;
+    the pathname is then re-inspected once so a reparse point swapped in
+    between inspection and acquisition is refused.
+    """
+    try:
+        handle = _winapi.CreateFile(
+            path,
+            _winapi.GENERIC_READ,
+            _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            0,
+            _winapi.OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS,
+            0,
+        )
+    except OSError as e:
+        raise LedgerPathError(
+            f"entries directory could not be bound (fail closed): {e}"
+        ) from e
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except OSError as e:  # pragma: no cover - handle ownership not transferred
+        _winapi.CloseHandle(handle)
+        raise LedgerPathError(
+            f"entries directory binding could not be retained (fail closed): {e}"
+        ) from e
+    try:
+        bound = os.fstat(fd)
+        if not stat_module.S_ISDIR(bound.st_mode):
+            raise LedgerPathError(
+                "bound entries handle is not a directory (fail closed)"
+            )
+        if _identity_of(bound, "entries directory") != pre_identity:
+            raise LedgerPathError(
+                "entries directory changed between inspection and binding "
+                "(fail closed)"
+            )
+        post = os.lstat(path)
+        _refuse_reparse_dir(post, "entries directory")
+        if _identity_of(post, "entries directory") != pre_identity:
+            raise LedgerPathError(
+                "entries directory changed between inspection and binding "
+                "(fail closed)"
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _open_entries_dir(entries_dir: pathlib.Path) -> _DirBinding:
@@ -162,21 +253,25 @@ def _open_entries_dir(entries_dir: pathlib.Path) -> _DirBinding:
             os.close(fd)
             raise
         return _DirBinding(path, fd, identity)
-    post = os.stat(path)
-    identity = _identity_of(post, "entries directory")
-    if identity != pre_identity:
+    if not _FALLBACK_BINDING_SUPPORTED:
+        # No directory-relative descriptors and no fallback binding
+        # primitive: refuse BEFORE enumeration rather than presenting
+        # identity-only rechecks as a binding they cannot provide.
         raise LedgerPathError(
-            "entries directory changed between inspections (fail closed)"
+            "no directory-binding primitive is available on this platform; "
+            "refusing to enumerate (fail closed)"
         )
-    return _DirBinding(path, None, identity)
+    hold_fd = _acquire_fallback_binding(path, pre_identity)
+    return _DirBinding(path, None, pre_identity, hold_fd=hold_fd)
 
 
 def _verify_binding(binding: _DirBinding) -> None:
-    """Re-verify the bound directory (rename/replacement detection).
+    """Cross-check that the bound directory is still the inspected one.
 
-    In ``fd`` mode the original directory object is held open, so this
-    check detects a pathname now pointing elsewhere; in ``identity`` mode
-    it is the per-capture fail-closed identity mechanism itself.
+    Defence in depth in BOTH modes: the binding itself (held descriptor
+    or held delete-denying handle) is what prevents rename/replacement;
+    this check merely surfaces a pathname that no longer resolves to the
+    bound object. It is not, and must not be presented as, the binding.
     """
     probe = os.lstat(binding.path)
     _refuse_reparse_dir(probe, "entries directory")
@@ -218,7 +313,9 @@ def _capture_entry(binding: _DirBinding, name: str) -> bytes:
         dir_fd: int | None = binding.fd
         probe_path = name
     else:
-        _verify_binding(binding)  # per-capture fail-closed identity check
+        # The held delete-denying handle is the binding; this cross-check
+        # is defence in depth, not the guarantee.
+        _verify_binding(binding)
         dir_fd = None
         probe_path = os.path.join(binding.path, name)
     pre = _pre_open_inspect(probe_path, dir_fd=dir_fd)

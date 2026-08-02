@@ -23,12 +23,14 @@ _ALLOWED_IMPORTS = {
     "copy",
     "datetime",
     "json",
+    "msvcrt",  # stdlib: Windows directory-binding handle ownership
     "os",
     "pathlib",
     "re",
     "stat",
     "sys",
     "typing",
+    "_winapi",  # stdlib: Windows directory-binding primitive
     "experiments.tech_ledger.schema",
     "experiments.tech_ledger.validate",
 }

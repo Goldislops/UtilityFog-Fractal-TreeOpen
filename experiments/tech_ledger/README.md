@@ -72,9 +72,13 @@ rejecting parsing. The **entries directory itself is verified and bound**:
 a symbolic-link, junction or equivalent reparse-path directory is refused;
 where directory-relative descriptors are supported, candidates are
 enumerated and opened relative to the verified directory descriptor, and
-elsewhere a fail-closed identity mechanism re-verifies the directory
-before every capture; a rename or replacement between enumeration and
-capture is detected and refused. Every candidate is then captured through
+elsewhere a directory handle that denies delete/rename sharing is **held
+for the whole interval** from before enumeration until after the last
+capture — so the inspected directory cannot be renamed or replaced
+meanwhile, including during a transient swap-and-restore that no
+before/after identity check could observe. Where neither binding
+primitive exists the validator **fails closed before enumeration** rather
+than presenting identity rechecks as a binding. Every candidate is then captured through
 a **verified descriptor boundary** (symlinks refused before and during
 capture; `O_NOFOLLOW` where the platform supplies it; `st_dev`/`st_ino`
 identity agreement across pre-open, opened-descriptor and post-open
