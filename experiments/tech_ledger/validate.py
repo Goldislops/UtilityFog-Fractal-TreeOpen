@@ -61,22 +61,148 @@ class LedgerCeilingError(RuntimeError):
     """Entry-count, per-entry or total byte-ceiling breach (exit 5)."""
 
 
-def _pre_open_inspect(path: str) -> os.stat_result:
+def _pre_open_inspect(path: str, dir_fd: int | None = None) -> os.stat_result:
     """The pre-open ``lstat`` of one candidate.
 
     A deliberately narrow, production-neutral seam: behaviour is exactly
-    ``os.lstat(path)``; the capture-boundary race tests synchronize here.
+    ``os.lstat(path, dir_fd=dir_fd)``; the capture-boundary race tests
+    synchronize here.
     """
-    return os.lstat(path)
+    return os.lstat(path, dir_fd=dir_fd)
+
+
+#: Directory-relative descriptor support (POSIX): candidates can be
+#: enumerated and opened relative to a verified directory descriptor.
+#: Where unsupported (Windows), a fail-closed identity mechanism
+#: re-verifies the directory before every capture instead -- the claim is
+#: never silently weakened.
+_DIR_FD_SUPPORTED: Final[bool] = (
+    os.open in os.supports_dir_fd
+    and os.lstat in os.supports_dir_fd
+    and os.listdir in os.supports_fd
+    and hasattr(os, "O_DIRECTORY")
+)
+
+
+def _identity_of(probe: os.stat_result, what: str) -> tuple[int, int]:
+    identity = (probe.st_dev, probe.st_ino)
+    if identity == (0, 0):
+        raise LedgerPathError(
+            f"{what}: filesystem identity could not be established (fail closed)"
+        )
+    return identity
+
+
+def _refuse_reparse_dir(probe: os.stat_result, what: str) -> None:
+    """Refuse a symbolic-link or reparse-point (junction) directory."""
+    if stat_module.S_ISLNK(probe.st_mode):
+        raise LedgerPathError(f"{what} is a symbolic link (refused)")
+    attributes = getattr(probe, "st_file_attributes", 0)
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if attributes & reparse_flag:
+        raise LedgerPathError(
+            f"{what} is a reparse point (junction or equivalent; refused)"
+        )
+
+
+class _DirBinding:
+    """The verified, bound entries directory.
+
+    ``fd`` mode (POSIX): enumeration and every candidate open go through
+    the held directory descriptor, so capture is inherently bound to the
+    originally inspected directory; a path-identity cross-check before
+    the capture phase detects rename/replacement. ``identity`` mode
+    (platforms without dir_fd): the directory's ``st_dev``/``st_ino``
+    identity and non-reparse status are re-verified before every capture,
+    failing closed on any change. Neither mode claims protection against
+    an unobservable filesystem or kernel violation.
+    """
+
+    def __init__(self, path: str, fd: int | None, identity: tuple[int, int]):
+        self.path = path
+        self.fd = fd
+        self.identity = identity
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _open_entries_dir(entries_dir: pathlib.Path) -> _DirBinding:
+    path = str(entries_dir)
+    if not entries_dir.exists():
+        raise LedgerPathError(f"entries directory does not exist: {entries_dir}")
+    pre = os.lstat(path)
+    _refuse_reparse_dir(pre, "entries directory")
+    if not stat_module.S_ISDIR(pre.st_mode):
+        raise LedgerPathError(f"entries path is not a directory: {entries_dir}")
+    pre_identity = _identity_of(pre, "entries directory")
+    if _DIR_FD_SUPPORTED:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if not stat_module.S_ISDIR(opened.st_mode):
+                raise LedgerPathError(
+                    "entries directory descriptor is not a directory (fail closed)"
+                )
+            identity = _identity_of(opened, "entries directory")
+            if identity != pre_identity:
+                raise LedgerPathError(
+                    "entries directory changed between inspection and open "
+                    "(fail closed)"
+                )
+        except BaseException:
+            os.close(fd)
+            raise
+        return _DirBinding(path, fd, identity)
+    post = os.stat(path)
+    identity = _identity_of(post, "entries directory")
+    if identity != pre_identity:
+        raise LedgerPathError(
+            "entries directory changed between inspections (fail closed)"
+        )
+    return _DirBinding(path, None, identity)
+
+
+def _verify_binding(binding: _DirBinding) -> None:
+    """Re-verify the bound directory (rename/replacement detection).
+
+    In ``fd`` mode the original directory object is held open, so this
+    check detects a pathname now pointing elsewhere; in ``identity`` mode
+    it is the per-capture fail-closed identity mechanism itself.
+    """
+    probe = os.lstat(binding.path)
+    _refuse_reparse_dir(probe, "entries directory")
+    if not stat_module.S_ISDIR(probe.st_mode):
+        raise LedgerPathError(
+            "entries directory was replaced by a non-directory (fail closed)"
+        )
+    if _identity_of(probe, "entries directory") != binding.identity:
+        raise LedgerPathError(
+            "entries directory was renamed or replaced between enumeration "
+            "and capture (fail closed)"
+        )
 
 
 _READ_CHUNK_BYTES: Final[int] = 64 * 1024
 
 
-def _capture_entry(entries_dir: pathlib.Path, name: str) -> bytes:
-    """Capture one candidate through a verified descriptor (fail closed).
+def _capture_entry(binding: _DirBinding, name: str) -> bytes:
+    """Capture one candidate through a verified descriptor (fail closed),
+    bound to the inspected entries directory.
 
-    Sequence: pre-open ``lstat`` (symlinks and non-regular files refused);
+    In ``fd`` mode the candidate is inspected and opened RELATIVE to the
+    held directory descriptor (``dir_fd``), never by reconstructing
+    ``entries_dir / name``; in ``identity`` mode the directory's identity
+    is re-verified immediately before the capture. Then, per entry:
+    pre-open ``lstat`` (symlinks and non-regular files refused);
     ``os.open`` without following symlinks where the platform supplies
     ``O_NOFOLLOW``; ``fstat`` of the opened descriptor must be a regular
     file; post-open ``lstat`` must still be a regular non-link path; and
@@ -88,8 +214,14 @@ def _capture_entry(entries_dir: pathlib.Path, name: str) -> bytes:
     No protection is claimed against an unobservable filesystem or kernel
     violation.
     """
-    path = str(entries_dir / name)
-    pre = _pre_open_inspect(path)
+    if binding.fd is not None:
+        dir_fd: int | None = binding.fd
+        probe_path = name
+    else:
+        _verify_binding(binding)  # per-capture fail-closed identity check
+        dir_fd = None
+        probe_path = os.path.join(binding.path, name)
+    pre = _pre_open_inspect(probe_path, dir_fd=dir_fd)
     if stat_module.S_ISLNK(pre.st_mode):
         raise LedgerPathError(f"{name}: symbolic-link entry files are refused")
     if not stat_module.S_ISREG(pre.st_mode):
@@ -101,7 +233,10 @@ def _capture_entry(entries_dir: pathlib.Path, name: str) -> bytes:
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        fd = os.open(path, flags)
+        if dir_fd is not None:
+            fd = os.open(name, flags, dir_fd=dir_fd)
+        else:
+            fd = os.open(probe_path, flags)
     except OSError as e:
         # Under O_NOFOLLOW a symlink swapped in after the pre-open lstat
         # surfaces here (ELOOP); any other open failure is equally a
@@ -116,7 +251,7 @@ def _capture_entry(entries_dir: pathlib.Path, name: str) -> bytes:
             raise LedgerPathError(
                 f"{name}: opened descriptor is not a regular file"
             )
-        post = _pre_open_inspect(path)
+        post = _pre_open_inspect(probe_path, dir_fd=dir_fd)
         if stat_module.S_ISLNK(post.st_mode) or not stat_module.S_ISREG(post.st_mode):
             raise LedgerPathError(
                 f"{name}: entry was replaced by a non-regular path during capture"
@@ -192,28 +327,36 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
     refusal classes documented in the module docstring. Performs no
     writes and no network access; reads nothing outside ``entries_dir``.
     """
+    binding: _DirBinding | None = None
     try:
-        if not entries_dir.exists():
-            raise LedgerPathError(
-                f"entries directory does not exist: {entries_dir}"
-            )
-        if not entries_dir.is_dir():
-            raise LedgerPathError(
-                f"entries path is not a directory: {entries_dir}"
-            )
-        candidates: list[str] = []
-        for child in entries_dir.iterdir():
-            if not child.name.endswith(".json"):
+        # Verify and BIND the entries directory itself: a symbolic-link,
+        # junction or equivalent reparse-path directory is refused, and
+        # the inspected directory stays bound throughout enumeration and
+        # capture (descriptor-relative on platforms that support it,
+        # fail-closed identity re-verification elsewhere).
+        binding = _open_entries_dir(entries_dir)
+
+        candidates = []
+        if binding.fd is not None:
+            names = os.listdir(binding.fd)
+        else:
+            names = os.listdir(binding.path)
+        for name in names:
+            if not name.endswith(".json"):
                 continue  # only direct .json entry files are inspected
-            if os.path.islink(str(child)):
+            probe = os.lstat(
+                name if binding.fd is not None else os.path.join(binding.path, name),
+                dir_fd=binding.fd,
+            )
+            if stat_module.S_ISLNK(probe.st_mode):
                 raise LedgerPathError(
-                    f"{child.name}: symbolic-link entry files are refused"
+                    f"{name}: symbolic-link entry files are refused"
                 )
-            if not child.is_file():
+            if not stat_module.S_ISREG(probe.st_mode):
                 raise LedgerPathError(
-                    f"{child.name}: entry path is not a regular file"
+                    f"{name}: entry path is not a regular file"
                 )
-            candidates.append(child.name)
+            candidates.append((name, probe.st_size))
         candidates.sort()  # deterministic filename order
 
         # Ceilings BEFORE any parsing (cheap stat-based checks first).
@@ -222,21 +365,22 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
                 f"{len(candidates)} entry files exceed the {MAX_ENTRIES}-entry "
                 f"ceiling"
             )
-        sizes: dict[str, int] = {}
-        for name in candidates:
-            size = os.lstat(str(entries_dir / name)).st_size
+        for name, size in candidates:
             if size > MAX_ENTRY_BYTES:
                 raise LedgerCeilingError(
                     f"{name}: {size} bytes exceed the {MAX_ENTRY_BYTES}-byte "
                     f"per-entry ceiling"
                 )
-            sizes[name] = size
-        total_bytes = sum(sizes.values())
+        total_bytes = sum(size for _, size in candidates)
         if total_bytes > MAX_TOTAL_ENTRY_BYTES:
             raise LedgerCeilingError(
                 f"{total_bytes} total entry bytes exceed the "
                 f"{MAX_TOTAL_ENTRY_BYTES}-byte ceiling"
             )
+
+        # Rename/replacement detection between enumeration and capture:
+        # the bound directory must still be exactly the inspected one.
+        _verify_binding(binding)
 
         # Capture phase: every candidate is captured through the verified
         # descriptor boundary with its EXACT byte count recorded, and the
@@ -248,8 +392,8 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
         # passed.
         captured: dict[str, bytes] = {}
         captured_total = 0
-        for name in candidates:
-            raw = _capture_entry(entries_dir, name)
+        for name, _size in candidates:
+            raw = _capture_entry(binding, name)
             captured_total += len(raw)
             if captured_total > MAX_TOTAL_ENTRY_BYTES:
                 raise LedgerCeilingError(
@@ -262,7 +406,7 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
         # the exact captured counts, never the earlier stat sizes.
         entries: list[dict[str, str]] = []
         seen_ids: dict[str, str] = {}
-        for name in candidates:
+        for name, _size in candidates:
             parsed = _parse_entry_bytes(captured[name], name)
             if type(parsed) is not dict:
                 raise LedgerInputError(
@@ -289,6 +433,9 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
         raise LedgerPathError(
             f"filesystem inspection could not complete (fail closed): {e}"
         ) from e
+    finally:
+        if binding is not None:
+            binding.close()
 
     return {
         "schema": SCHEMA_ID,

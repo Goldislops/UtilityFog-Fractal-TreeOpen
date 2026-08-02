@@ -277,15 +277,16 @@ def test_validate_directory_pure_and_reusable(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _mutate_once_at_capture(monkeypatch, mutate_once):
-    """Run ``mutate_once`` exactly once: after the initial stat pass, at
-    the first capture's pre-open inspection (the real race window)."""
+def _mutate_once_at_capture(monkeypatch, mutate_once, *, on_call=1):
+    """Run ``mutate_once`` exactly once, at the ``on_call``-th pre-open
+    inspection (the real race window; call 1 = first capture's pre-lstat)."""
     real = validate_module._pre_open_inspect
-    state = {"done": False}
+    state = {"calls": 0, "done": False}
 
-    def _wrapped(path):
-        result = real(path)
-        if not state["done"]:
+    def _wrapped(path, dir_fd=None):
+        result = real(path, dir_fd=dir_fd)
+        state["calls"] += 1
+        if not state["done"] and state["calls"] == on_call:
             state["done"] = True
             mutate_once()
         return result
@@ -453,6 +454,125 @@ def test_regular_file_replacement_during_capture_refused_exit4(
 
 
 def test_stable_files_still_succeed_with_capture_boundary(tmp_path, capsys):
+    _write_entry(tmp_path, "TLV4-001")
+    _write_entry(tmp_path, "TLV4-002")
+    assert main([str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["entry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Entries-directory binding (review finding 1): symlink/junction refusal,
+# rename/replacement detection, capture bound to the inspected directory
+# ---------------------------------------------------------------------------
+
+
+def test_symlink_entries_dir_refused_exit4(tmp_path, capsys):
+    real = tmp_path / "real_entries"
+    real.mkdir()
+    _write_entry(real, "TLV4-001")
+    link = tmp_path / "linked_entries"
+    try:
+        os.symlink(str(real), str(link), target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - privilege
+        pytest.skip("platform lacks symlink privilege")
+    rc = main([str(link)])
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "symbolic link" in err
+
+
+def test_junction_entries_dir_refused_exit4(tmp_path, capsys):
+    try:
+        import _winapi
+        create_junction = _winapi.CreateJunction
+    except (ImportError, AttributeError):  # pragma: no cover - non-Windows
+        pytest.skip("platform has no directory junctions")
+    real = tmp_path / "real_entries"
+    real.mkdir()
+    _write_entry(real, "TLV4-001")
+    junction = tmp_path / "junction_entries"
+    create_junction(str(real), str(junction))
+    rc = main([str(junction)])
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "reparse point" in err
+
+
+def test_directory_replacement_between_enumeration_and_capture_refused(
+    tmp_path, capsys, monkeypatch
+):
+    # Cross-platform via the fail-closed identity mechanism (forced), so
+    # the detection lane is exercised even where dir_fd exists.
+    monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    _write_entry(entries, "TLV4-002")
+    aside = tmp_path / "aside"
+
+    # Synchronize at the phase-boundary binding check itself: the swap
+    # happens exactly between enumeration/ceilings and the capture phase,
+    # then the REAL verification runs against the swapped directory.
+    real_verify = validate_module._verify_binding
+    state = {"done": False}
+
+    def _swapping_verify(binding):
+        if not state["done"]:
+            state["done"] = True
+            os.rename(str(entries), str(aside))
+            entries.mkdir()
+            _write_entry(entries, "TLV4-001")
+            _write_entry(entries, "TLV4-002")
+        return real_verify(binding)
+
+    monkeypatch.setattr(validate_module, "_verify_binding", _swapping_verify)
+    rc = main([str(entries)])
+    err = capsys.readouterr().err
+    assert rc == 4
+    _assert_one_error_line(err)
+    assert "renamed or replaced" in err
+
+
+@pytest.mark.skipif(
+    not validate_module._DIR_FD_SUPPORTED,
+    reason="directory-relative descriptors unavailable on this platform",
+)
+def test_capture_bound_to_inspected_directory_fd_mode(
+    tmp_path, capsys, monkeypatch
+):
+    # fd mode: after enumeration and the phase identity check, the
+    # pathname is swapped to a different directory whose same-named entry
+    # has DIFFERENT content. Captures go through the held descriptor, so
+    # the summary must describe the ORIGINAL directory's bytes.
+    entries = tmp_path / "entries"
+    entries.mkdir()
+    _write_entry(entries, "TLV4-001")
+    original_size = (entries / "TLV4-001.json").stat().st_size
+    aside = tmp_path / "aside"
+    replacement = _padded_entry_bytes("TLV4-001", target_size=original_size + 4_000)
+
+    def _swap_directory():
+        os.rename(str(entries), str(aside))
+        entries.mkdir()
+        (entries / "TLV4-001.json").write_bytes(replacement)
+
+    # First pre-open inspection happens inside capture 1, AFTER the
+    # phase-level binding check -- exactly the bound-capture window.
+    _mutate_once_at_capture(monkeypatch, _swap_directory, on_call=1)
+    rc = main([str(entries)])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+    summary = json.loads(captured.out)
+    assert summary["total_entry_bytes"] == original_size  # original dir bytes
+    assert summary["total_entry_bytes"] != len(replacement)
+
+
+def test_ordinary_directory_validates_under_identity_mode(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(validate_module, "_DIR_FD_SUPPORTED", False)
     _write_entry(tmp_path, "TLV4-001")
     _write_entry(tmp_path, "TLV4-002")
     assert main([str(tmp_path)]) == 0

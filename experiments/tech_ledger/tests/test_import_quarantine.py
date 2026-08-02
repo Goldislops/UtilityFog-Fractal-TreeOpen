@@ -69,14 +69,68 @@ def _imports_of(path: pathlib.Path) -> set[str]:
     return found
 
 
+def _non_test_lab_modules(lab_root: pathlib.Path) -> list[pathlib.Path]:
+    """Deterministic discovery of every non-test Python module under the
+    lab: any future module (e.g. helpers.py) is examined automatically.
+    The tests tree is excluded here and scanned through its own separate
+    allowlist below."""
+    tests_root = lab_root / "tests"
+    return sorted(
+        path
+        for path in lab_root.rglob("*.py")
+        if tests_root not in path.parents
+        and "__pycache__" not in path.parts
+    )
+
+
+def _forward_violations(path: pathlib.Path) -> list[str]:
+    """Every import of a lab module that falls outside the standard-library
+    + lab-local allowlist, or that matches a forbidden production/network
+    fragment. Purely static: nothing is imported."""
+    violations: list[str] = []
+    for name in _imports_of(path):
+        if name not in _ALLOWED_IMPORTS:
+            violations.append(name)
+            continue
+        for fragment in _FORBIDDEN_FRAGMENTS:
+            if fragment in name:
+                violations.append(name)
+    return violations
+
+
 def test_lab_modules_import_stdlib_only():
-    for module in ("__init__.py", "schema.py", "validate.py"):
-        imports = _imports_of(_LAB_DIR / module)
-        unexpected = imports - _ALLOWED_IMPORTS
-        assert not unexpected, f"{module}: unexpected imports {sorted(unexpected)}"
-        for name in imports:
-            for fragment in _FORBIDDEN_FRAGMENTS:
-                assert fragment not in name, f"{module}: forbidden import {name}"
+    modules = _non_test_lab_modules(_LAB_DIR)
+    names = {path.name for path in modules}
+    # Discovery must at minimum see today's modules; any future module is
+    # included automatically by construction.
+    assert {"__init__.py", "schema.py", "validate.py"} <= names, names
+    for path in modules:
+        violations = _forward_violations(path)
+        assert not violations, f"{path.name}: {violations}"
+
+
+def test_forward_discovery_examines_new_modules(tmp_path):
+    # Synthetic positive control: a NEWLY INTRODUCED non-test module with
+    # a production import must fail the forward guard -- proving the
+    # discovery actually examines modules that did not exist when the
+    # guard was written.
+    fake_lab = tmp_path / "fake_lab"
+    (fake_lab / "tests").mkdir(parents=True)
+    (fake_lab / "__init__.py").write_bytes(b"import json\n")
+    (fake_lab / "helpers.py").write_bytes(b"import scripts.event_bus\n")
+    (fake_lab / "tests" / "test_x.py").write_bytes(b"import subprocess\n")
+    discovered = {p.name for p in _non_test_lab_modules(fake_lab)}
+    assert discovered == {"__init__.py", "helpers.py"}  # tests tree excluded
+    flagged = {
+        p.name: _forward_violations(p) for p in _non_test_lab_modules(fake_lab)
+    }
+    assert flagged["helpers.py"] == ["scripts.event_bus"]
+    assert flagged["__init__.py"] == []
+    # Negative control: a clean new module passes.
+    (fake_lab / "helpers.py").write_bytes(b"import pathlib\n")
+    assert all(
+        not _forward_violations(p) for p in _non_test_lab_modules(fake_lab)
+    )
 
 
 def test_lab_tests_import_stdlib_pytest_and_lab_only():
@@ -84,6 +138,7 @@ def test_lab_tests_import_stdlib_pytest_and_lab_only():
         imports = _imports_of(path)
         allowed = _ALLOWED_IMPORTS | {
             "pytest",
+            "_winapi",  # Windows junction creation in one capability test
             "experiments.tech_ledger",
             "experiments.tech_ledger.tests",
         }

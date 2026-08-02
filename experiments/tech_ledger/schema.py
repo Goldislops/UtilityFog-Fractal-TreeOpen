@@ -68,8 +68,16 @@ VERIFICATION_STATUSES: Final[tuple[str, ...]] = (
     "not-computable",
 )
 
-ENTRY_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"\ATLV4-\d{3}\Z")
-_DATE_PATTERN: Final[re.Pattern[str]] = re.compile(r"\A(\d{4})-(\d{2})-(\d{2})\Z")
+#: Wire-format digits are ASCII ONLY. ``\d`` in Python str patterns
+#: matches every Unicode decimal digit (Arabic-Indic, Devanagari,
+#: Bengali, ...), and ``int()`` parses them too -- so explicit [0-9]
+#: classes are load-bearing here, not style: a ledger identifier or date
+#: written with non-ASCII digits is refused even though Python could
+#: parse it.
+ENTRY_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"\ATLV4-[0-9]{3}\Z")
+_DATE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})\Z"
+)
 
 _ROOT_KEYS: Final[frozenset[str]] = frozenset(
     {

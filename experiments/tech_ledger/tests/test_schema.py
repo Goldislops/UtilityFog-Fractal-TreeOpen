@@ -170,6 +170,29 @@ def test_entry_id_form_enforced():
         _refused(_valid_entry(entry_id=bad), match="TLV4-NNN")
 
 
+def test_wire_formats_ascii_digits_only():
+    # Python's \d and int() both accept Unicode decimal digits; the wire
+    # formats must not. Valid ASCII forms stay valid.
+    assert validate_entry(_valid_entry(entry_id="TLV4-042")) is None
+    arabic_indic = "TLV4-٠١٦"  # TLV4-016 in Arabic-Indic digits
+    _refused(_valid_entry(entry_id=arabic_indic), match="TLV4-NNN")
+    devanagari = "TLV4-०१६"
+    _refused(_valid_entry(entry_id=devanagari), match="TLV4-NNN")
+    entry = _valid_entry()
+    entry["provenance"]["recorded_date"] = (
+        "২০২৬-০৮-০১"  # Bengali 2026-08-01
+    )
+    _refused(entry, match="ISO YYYY-MM-DD")
+    entry = _valid_entry()
+    entry["provenance"]["recorded_date"] = (
+        "2026-٠٨-01"  # mixed ASCII/Arabic-Indic
+    )
+    _refused(entry, match="ISO YYYY-MM-DD")
+    entry = _valid_entry()
+    entry["provenance"]["recorded_date"] = "2026-08-01"
+    assert validate_entry(entry) is None
+
+
 def test_malformed_and_impossible_dates_refused():
     for bad in ("2026-8-01", "01-08-2026", "2026/08/01", "not-a-date"):
         entry = _valid_entry()

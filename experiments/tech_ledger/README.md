@@ -68,13 +68,19 @@ python -m experiments.tech_ledger.validate experiments/tech_ledger/entries
 ```
 
 Direct `.json` files only, deterministic filename order, duplicate-key-
-rejecting parsing. Every candidate is captured through a **verified
-descriptor boundary** (symlinks refused before and during capture;
-`O_NOFOLLOW` where the platform supplies it; `st_dev`/`st_ino` identity
-agreement across pre-open, opened-descriptor and post-open inspections —
-any mismatch, replacement or incomplete identity inspection fails closed
-on exit 4; no protection is claimed against an unobservable filesystem or
-kernel violation). Ceilings (256 entries, 128 KiB per entry, 4 MiB total)
+rejecting parsing. The **entries directory itself is verified and bound**:
+a symbolic-link, junction or equivalent reparse-path directory is refused;
+where directory-relative descriptors are supported, candidates are
+enumerated and opened relative to the verified directory descriptor, and
+elsewhere a fail-closed identity mechanism re-verifies the directory
+before every capture; a rename or replacement between enumeration and
+capture is detected and refused. Every candidate is then captured through
+a **verified descriptor boundary** (symlinks refused before and during
+capture; `O_NOFOLLOW` where the platform supplies it; `st_dev`/`st_ino`
+identity agreement across pre-open, opened-descriptor and post-open
+inspections — any mismatch, replacement or incomplete identity inspection
+fails closed on exit 4; no protection is claimed against an unobservable
+filesystem or kernel violation). Ceilings (256 entries, 128 KiB per entry, 4 MiB total)
 are enforced over the **exact captured bytes** — cheap stat checks run
 first, but the authoritative aggregate is the captured total, reading
 stops as soon as that total necessarily breaches, and nothing is parsed
@@ -95,7 +101,10 @@ Enforcement is two-part, matching how each direction can actually drift:
   library — nothing from `scripts/`, the engine, agents, CA, telemetry,
   Nextness or any other production path): lab-local static test
   (`tests/test_import_quarantine.py` here) under the path-scoped
-  tech-ledger workflow, which triggers whenever the lab changes.
+  tech-ledger workflow, which triggers whenever the lab changes. The scan
+  **discovers every non-test lab module automatically** (a future
+  `helpers.py` is examined the moment it exists — proven by synthetic
+  controls); the tests tree is scanned through its own separate allowlist.
 - **Reverse quarantine** (no maintained production module imports the
   lab): the **maintained main-suite guard**
   `tests/test_tech_ledger_reverse_quarantine.py`, which runs on ordinary
