@@ -149,13 +149,16 @@ def cli(monkeypatch, tmp_path):
 
     snap_path = tmp_path / "snap.npz"
     snap_path.write_bytes(b"not really an npz -- the loader is faked")
-    anim_dir = tmp_path / "frames"
-    anim_dir.mkdir()
+    # Distinct from the class attribute below: a class body resolves names in
+    # its own namespace first, so `anim_dir = str(anim_dir)` would raise
+    # NameError rather than reading the enclosing local.
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
 
     class _Driver:
         calls = None
         snapshot_path = str(snap_path)
-        anim_dir = str(anim_dir)
+        anim_dir = str(frames_dir)
         tmp = tmp_path
         fig = None
 
