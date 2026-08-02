@@ -475,9 +475,11 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
             names = os.listdir(binding.fd)
         else:
             names = os.listdir(binding.path)
-        for name in names:
-            if not name.endswith(".json"):
-                continue  # only direct .json entry files are inspected
+        # Deterministic filename order is established BEFORE any per-entry
+        # inspection (only direct .json entry files are considered): the
+        # first symlink / non-regular-file refusal must never depend on
+        # raw filesystem enumeration order.
+        for name in sorted(n for n in names if n.endswith(".json")):
             probe = os.stat(
                 name if binding.fd is not None else os.path.join(binding.path, name),
                 dir_fd=binding.fd,
@@ -492,7 +494,8 @@ def validate_directory(entries_dir: pathlib.Path) -> dict[str, Any]:
                     f"{name}: entry path is not a regular file"
                 )
             candidates.append((name, probe.st_size))
-        candidates.sort()  # deterministic filename order
+        # candidates was built in sorted filename order above; no later
+        # sort is needed (and none could repair refusal-order determinism).
 
         # Ceilings BEFORE any parsing (cheap stat-based checks first).
         if len(candidates) > MAX_ENTRIES:
