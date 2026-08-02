@@ -17,7 +17,9 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import threading
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -527,26 +529,127 @@ def test_recv_all_socket_failure_restores_valid_packets(monkeypatch):
     exchange.close()
 
 
-def test_recv_all_restored_packets_precede_concurrent_self_loop_arrivals(monkeypatch):
-    """Restored original-local packets precede restored decoded-wire packets,
-    which precede self-loop packets that landed in the replacement inbox while
-    the failed call was in progress."""
+# -- genuine concurrency: self-loop send vs. inbox handover -------------------
+#
+# Both local-inbox handovers replace the stored list wholesale:
+#
+#     packets = list(self._local_inbox[target]); self._local_inbox[target] = []
+#     self._local_inbox[target] = packets + self._local_inbox[target]
+#
+# An unsynchronized `send()` append landing between the read and the store is
+# discarded by the store. The two tests below drive that window from a real
+# thread. They substitute only the inbox mapping — an existing dependency
+# boundary — so the production `recv_all` under test is the genuine one.
+
+# Bounded wait used at the assign point. An UNBOUNDED wait would deadlock by
+# construction once the handover is serialized, because the concurrent `send()`
+# is blocked on the very lock the handover holds. Expiry is therefore the
+# expected, correct outcome; prompt return means the append was NOT serialized.
+_ASSIGN_WINDOW_S = 0.25
+_JOIN_S = 10.0
+
+
+class _CoordinatedInbox(defaultdict):
+    """`_local_inbox` view that exposes the read-then-store window.
+
+    `on_assign` fires immediately before a replacement list is stored — exactly
+    the instant at which a racing `send()` append would be lost. Only `recv_all`
+    ever stores; `send()` appends in place, so the hook never fires on the
+    worker thread.
+    """
+
+    def __init__(self, source):
+        super().__init__(list, source)
+        self.on_assign = None
+
+    def __setitem__(self, key, value):
+        if self.on_assign is not None:
+            self.on_assign(key)
+        super().__setitem__(key, value)
+
+
+def _start_self_loop_sender(exchange, packet, release, done):
+    """Thread that performs one self-loop `send()` once `release` is set."""
+
+    def _worker():
+        release.wait(_JOIN_S)
+        exchange.send(packet)
+        done.set()
+
+    thread = threading.Thread(target=_worker, name="self-loop-sender", daemon=True)
+    thread.start()
+    return thread
+
+
+def test_concurrent_self_loop_send_survives_inbox_extraction(monkeypatch):
+    """Window 1 — a self-loop `send()` racing the extraction/clear at the start
+    of `recv_all()` must not be lost."""
+    wire = [_packet(100 + i).to_bytes() for i in range(PACKETS_PER_SHARD_PER_STEP - 3)]
+    exchange, pull, clock = _wired_exchange(monkeypatch, wire)
+    for gen in (0, 1, 2):
+        exchange.send(_packet(gen))
+    exchange._local_inbox = _CoordinatedInbox(exchange._local_inbox)
+
+    release, done = threading.Event(), threading.Event()
+    worker = _start_self_loop_sender(exchange, _packet(300), release, done)
+
+    def _on_assign(key):
+        # The extraction clear is the first (and here only) store.
+        if not release.is_set():
+            release.set()
+            done.wait(_ASSIGN_WINDOW_S)
+
+    exchange._local_inbox.on_assign = _on_assign
+
+    out = exchange.recv_all(_OWN)
+    worker.join(_JOIN_S)
+    assert not worker.is_alive()
+
+    # The barrier set is unaffected; the racing packet is retained for next step.
+    assert _gens(out) == [0, 1, 2] + [
+        100 + i for i in range(PACKETS_PER_SHARD_PER_STEP - 3)
+    ]
+    assert _gens(exchange._local_inbox[_OWN]) == [300]
+    exchange.close()
+
+
+def test_concurrent_self_loop_send_survives_exceptional_restoration(monkeypatch):
+    """Window 2 — a self-loop `send()` racing the exceptional restoration must
+    not be overwritten, and restored packets still precede it."""
     exchange, pull, clock = _wired_exchange(
         monkeypatch, [_packet(100).to_bytes()], timeout_ms=1_000
     )
-
-    def _arrive_then_expire():
-        # A self-loop send lands in the replacement inbox mid-call.
-        exchange.send(_packet(300))
-        clock.advance(2.0)
-
-    pull.on_exhausted = _arrive_then_expire
     for gen in (0, 1, 2):
         exchange.send(_packet(gen))
+    exchange._local_inbox = _CoordinatedInbox(exchange._local_inbox)
+
+    armed = threading.Event()
+
+    def _expire():
+        clock.advance(2.0)  # force the deadline past, triggering TimeoutError
+        armed.set()
+
+    pull.on_exhausted = _expire
+
+    release, done = threading.Event(), threading.Event()
+    worker = _start_self_loop_sender(exchange, _packet(300), release, done)
+
+    def _on_assign(key):
+        # Ignore the extraction store; coordinate only on the restoration store.
+        if armed.is_set() and not release.is_set():
+            release.set()
+            done.wait(_ASSIGN_WINDOW_S)
+
+    exchange._local_inbox.on_assign = _on_assign
 
     with pytest.raises(TimeoutError):
         exchange.recv_all(_OWN)
 
+    worker.join(_JOIN_S)
+    assert not worker.is_alive()
+
+    # Restored local packets, then the restored wire packet, then the racing
+    # self-loop arrival — none lost, none duplicated.
     assert _gens(exchange._local_inbox[_OWN]) == [0, 1, 2, 100, 300]
     exchange.close()
 
