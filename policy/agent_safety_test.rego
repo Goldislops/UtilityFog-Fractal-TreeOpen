@@ -116,6 +116,129 @@ test_encoded_payload_mixed_text_not_detected if {
 }
 
 # ---------------------------------------------------------------------------
+# Whole-payload contract — REJECTION boundary (issue #157)
+#
+# The cases below pin the anchoring itself. Each payload contains a
+# well-formed base64 token that an embedded/substring scanner WOULD flag;
+# under the whole-payload contract none of them is an encoded payload. They
+# are what makes the contract executable rather than merely commented: an
+# unanchored regex, a tokenizer, or an entropy scan added to is_base64_like
+# would turn every one of these red.
+# ---------------------------------------------------------------------------
+
+# Command-like content wrapped in ordinary words — the obfuscation shape the
+# issue raised. Deliberately NOT detected: the token is embedded, not whole.
+test_encoded_payload_embedded_command_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "run dGVzdGluZw== now"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Trailing punctuation breaks the whole-payload match ($ anchor).
+test_encoded_payload_trailing_punctuation_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "SGVsbG8gV29ybGQ=."} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Surrounding brackets break the whole-payload match (^ and $ anchors).
+test_encoded_payload_bracketed_token_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "(SGVsbG8gV29ybGQ=)"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Non-ASCII text around an ASCII base64 token still fails the anchors; the
+# regex is byte/rune-agnostic here because the anchors do the work.
+test_encoded_payload_unicode_surrounded_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "héllo SGVsbG8gV29ybGQ= wörld"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# ---------------------------------------------------------------------------
+# Whole-payload contract — MALFORMED candidates (issue #157)
+#
+# '=' is not a member of the character class, so padding is only ever legal
+# as the 0-2 trailing characters. These pin that padding placement is not
+# merely conventional but structurally enforced.
+# ---------------------------------------------------------------------------
+
+# Padding in an interior position: the leading run is too short to satisfy {4,}.
+test_encoded_payload_interior_padding_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "dGV=zdA="} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Leading padding: '^' requires the alphabet run to start the payload.
+test_encoded_payload_leading_padding_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "=dGVzdA="} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Three padding characters exceed the {0,2} bound.
+test_encoded_payload_triple_padding_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "dGVzdA==="} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Padding with no alphabet run at all.
+test_encoded_payload_padding_only_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "===="} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# Interior whitespace breaks the run.
+test_encoded_payload_internal_space_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "dGVzd A=="} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# ---------------------------------------------------------------------------
+# Length floor — the boundary is exactly 8 (issue #157)
+# ---------------------------------------------------------------------------
+
+# 4 chars: matches the regex but is below the count floor.
+test_encoded_payload_four_char_token_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "abcd"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# ---------------------------------------------------------------------------
+# CHARACTERIZATION — the retained over-inclusive surface (issue #157)
+#
+# These assert what the policy DOES today, not what is ideal. The length
+# floor bounds the false-positive surface by length only, so any whole
+# payload of 8+ characters drawn entirely from [A-Za-z0-9+/] is classified
+# base64-like — including ordinary words, hex hashes and slash-separated
+# paths. That is retained deliberately: detection means denial, so the bias
+# is fail-closed, and the rule is gated behind a flag that is not set
+# anywhere in this repository.
+#
+# They are NOT an endorsement. If a future decision narrows the matcher
+# (entropy, decode-and-verify, dictionary rejection), these tests must be
+# updated deliberately — which is the point of pinning them.
+# ---------------------------------------------------------------------------
+
+# An ordinary 8-letter English word is currently classified base64-like.
+test_encoded_payload_plain_word_is_currently_detected if {
+	safety.encoded_payload_detected with input as {"payload": "password"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# A hex digest is currently classified base64-like.
+test_encoded_payload_hex_hash_is_currently_detected if {
+	safety.encoded_payload_detected with input as {"payload": "deadbeefdeadbeef"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# '/' is a base64 alphabet member, so a bare path is currently classified
+# base64-like.
+test_encoded_payload_path_segment_is_currently_detected if {
+	safety.encoded_payload_detected with input as {"payload": "usr/local/bin"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# A hyphen is NOT in the alphabet, so slugs are not classified — this is the
+# other side of the same boundary.
+test_encoded_payload_hyphenated_slug_not_detected if {
+	not safety.encoded_payload_detected with input as {"payload": "my-blog-post-title"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# ---------------------------------------------------------------------------
+# URL-encoding boundary — lowercase hex digits (issue #157 matrix gap)
+# ---------------------------------------------------------------------------
+
+# The %XX class accepts lowercase hex; pins that the detector is not
+# uppercase-only and remains unanchored.
+test_encoded_payload_url_lowercase_hex if {
+	safety.encoded_payload_detected with input as {"payload": "a%2fb"} with data.agent_limits.enforce_encoded_payload as true
+}
+
+# ---------------------------------------------------------------------------
 # encoded_payload_detected isolated tests — flag disabled
 # ---------------------------------------------------------------------------
 
