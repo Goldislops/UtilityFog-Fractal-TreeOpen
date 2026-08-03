@@ -1,0 +1,38 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated engineering practice, including in this project's own workflow tooling.",
+ "entry_id": "TLV4-012",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Provenance-field validation for machine-authored ledger entries",
+ "legitimate_uses": [
+  "Research-workflow tooling outside the deterministic engine",
+  "Provenance-stamped machine-authored ledger records"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Parallel-agent and cloud-agent orchestration patterns",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Agent orchestration inside simulation-correctness paths",
+  "Machine-authored records without provenance fields"
+ ],
+ "warnings": [
+  "Agent output is never evidence by itself; provenance and audit remain mandatory.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

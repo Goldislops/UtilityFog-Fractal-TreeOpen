@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated engineering discipline, aligned with the repository's offline evidence conventions.",
+ "entry_id": "TLV4-017",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Socket-guard test fixtures asserting no network access in offline paths",
+ "legitimate_uses": [
+  "Standing constraint for evidence-lane tooling: no cloud dependency in verification paths"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Local-first and air-gapped operation",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Silent network calls inside nominally offline tools"
+ ],
+ "warnings": [
+  "Offline claims are verified by tests, never assumed.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
