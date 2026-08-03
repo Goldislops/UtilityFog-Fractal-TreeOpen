@@ -1,0 +1,39 @@
+{
+ "classification_qualifiers": [
+  "D"
+ ],
+ "classification_rationale": "Established methodological standard (B); its use as a subsystem-boundary design analogy is inspiration only (D face).",
+ "entry_id": "TLV4-006",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Schema-level requirement that physics-model records carry a non-empty scales-and-validity field (presence, never truth)",
+ "legitimate_uses": [
+  "Requiring every physics-model record to declare scales, validity limits and what is integrated out",
+  "Review criteria for physics-adjacent proposals"
+ ],
+ "minimal_evidence_before_implementation": [
+  "None beyond ordinary test evidence: the discipline constrains records, not physics"
+ ],
+ "neutral_name": "Effective-field-theory power counting, scale separation and controlled cutoffs",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Invoking EFT vocabulary as rhetorical cover for models with no controlled expansion"
+ ],
+ "warnings": [
+  "The schema enforces declaration, never the correctness of the declared model.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

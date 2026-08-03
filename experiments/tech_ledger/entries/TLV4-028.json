@@ -1,0 +1,38 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Established statistical methods (calibration curves, proper scoring, model comparison). No belief-confidence scoring exists in this repository and none is introduced by recording this entry.",
+ "entry_id": "TLV4-028",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Schema requiring at least two recorded hypotheses (including a conventional one) before comparative fields validate",
+ "legitimate_uses": [
+  "Schema discipline: comparative-confidence fields validate only with at least two recorded hypotheses including a conventional one, with the method recorded"
+ ],
+ "minimal_evidence_before_implementation": [
+  "None beyond ordinary test evidence: the schema enforces structure, not belief"
+ ],
+ "neutral_name": "Confidence calibration and competing-hypothesis comparison",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Unanchored numeric confidence values",
+  "Single-hypothesis scoring",
+  "Any winner-crowning over hypotheses"
+ ],
+ "warnings": [
+  "The ledger compares records; it never crowns a winner.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

@@ -1,0 +1,37 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Methodological cornerstone: anomaly claims are measured against conventional baselines before anything else.",
+ "entry_id": "TLV4-010",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Schema-level requirement that anomaly-type records carry non-empty baseline-model and conventional-explanation fields",
+ "legitimate_uses": [
+  "Schema support requiring baseline and residual fields on anomaly-type records",
+  "Methodology sections of evidence schemas"
+ ],
+ "minimal_evidence_before_implementation": [
+  "None beyond ordinary test evidence: the gate enforces recording, not outcomes"
+ ],
+ "neutral_name": "Conventional baseline models for anomaly measurement",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Comparing exotic models directly to raw data without baselines"
+ ],
+ "warnings": [
+  "Enforce process and recording, never a predetermined outcome.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
