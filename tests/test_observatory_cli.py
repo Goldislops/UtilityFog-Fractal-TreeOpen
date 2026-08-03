@@ -26,6 +26,8 @@ deliberately inert so it cannot be mistaken for a dispatch target.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import runpy
 import subprocess
@@ -46,6 +48,10 @@ from vis.observatory import loader as loader_mod
 from vis.observatory.loader import ObservatorySnapshot
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Captured before any fixture patches it, so a test can opt back in to the
+# genuine loader and exercise the real decode path end to end.
+_REAL_LOAD_SNAPSHOT = loader_mod.load_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +204,11 @@ def cli(monkeypatch, tmp_path):
         @staticmethod
         def set_loader(fn):
             monkeypatch.setattr(loader_mod, "load_snapshot", fn)
+
+        @staticmethod
+        def use_real_loader():
+            """Restore the genuine loader so the real decode path runs."""
+            monkeypatch.setattr(loader_mod, "load_snapshot", _REAL_LOAD_SNAPSHOT)
 
         @staticmethod
         def patch_render(module_name, attr, fn):
@@ -605,6 +616,127 @@ def test_error_stays_one_line_for_path_with_cr_lf(cli, capsys):
     assert "Traceback (most recent call last)" not in err
 
 
+# ---------------------------------------------------------------------------
+# Malformed portable-genome JSON, through the REAL loader
+#
+# Reachability half of the contract in
+# tests/test_portable_genome_epigenetic_snapshot.py. The fixture replaces
+# `load_snapshot` with a double for speed; `use_real_loader()` puts the genuine
+# function back, so a `.json` snapshot really is decoded by the real
+# `load_genome()` -> `extract_epigenetic_snapshot()` path. These therefore prove
+# the end-to-end lane rather than a patched-away boundary.
+#
+# Before the fix a non-object JSON root reached `genome.get(...)` and raised an
+# ambient `AttributeError`, which is not in the CLI's translated set, so the
+# command emitted a traceback instead of the promised one-line status 1.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        pytest.param([], id="array-empty"),
+        pytest.param([1, 2, 3], id="array"),
+        pytest.param("genome", id="string"),
+        pytest.param(5, id="number"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_non_object_json_snapshot_is_a_one_line_user_error(cli, capsys, root):
+    cli.use_real_loader()
+    path = cli.tmp / "bad_root.json"
+    path.write_text(json.dumps(root), encoding="utf-8")
+    assert cli.run(["info", str(path)]) == 1
+    err = _assert_user_error(capsys)
+    # Assert the specific refusal, not just the CLI's prefix: a weaker check
+    # would pass for any translated exception and would not notice the
+    # structural refusal disappearing.
+    assert "genome must be a JSON object" in err
+
+
+def _epi(**overrides):
+    shape = (2, 2, 2)
+    epi = {
+        "included": True,
+        "lattice_shape": list(shape),
+        "lattice_b64": base64.b64encode(
+            np.zeros(shape, dtype=np.uint8).tobytes()
+        ).decode("ascii"),
+        "snapshot_generation": 9,
+        "snapshot_ca_step": 21,
+    }
+    epi.update(overrides)
+    return epi
+
+
+@pytest.mark.parametrize(
+    "document, expected",
+    [
+        pytest.param({"epigenetic_snapshot": []},
+                     "epigenetic_snapshot must be a JSON object", id="epi-array"),
+        pytest.param({"epigenetic_snapshot": "x"},
+                     "epigenetic_snapshot must be a JSON object", id="epi-string"),
+        pytest.param({"epigenetic_snapshot": _epi(lattice_shape=5)},
+                     "lattice_shape must be a JSON array", id="shape-scalar"),
+        pytest.param({"epigenetic_snapshot": _epi(lattice_shape=[2, "2", 2])},
+                     "lattice_shape entries must be integers", id="shape-entry"),
+        pytest.param({"epigenetic_snapshot": _epi(lattice_b64=5)},
+                     "lattice_b64 must be a JSON string", id="b64-number"),
+        pytest.param({"epigenetic_snapshot": _epi(snapshot_generation="x")},
+                     "snapshot_generation must be an integer", id="counter"),
+        pytest.param({"epigenetic_snapshot": _epi(memory_grid_b64="AAAA"),
+                      "memory_layout": []},
+                     "memory_layout must be a JSON object", id="layout-array"),
+        pytest.param({"epigenetic_snapshot": _epi(memory_grid_b64="AAAA"),
+                      "memory_layout": {"num_channels": "eight"}},
+                     "num_channels must be an integer", id="channels"),
+    ],
+)
+def test_malformed_extraction_shape_is_a_one_line_user_error(
+    cli, capsys, document, expected
+):
+    """Each refusal reaches the CLI's status-1 lane with its own message."""
+    cli.use_real_loader()
+    path = cli.tmp / "bad_section.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert cli.run(["info", str(path)]) == 1
+    assert expected in _assert_user_error(capsys)
+
+
+def test_valid_genome_without_epigenetic_data_keeps_established_outcome(cli, capsys):
+    """Unchanged behaviour: a well-formed genome that simply has no epigenetic
+    snapshot is still the established `ValueError` -> status 1 lane."""
+    cli.use_real_loader()
+    path = cli.tmp / "no_epi.json"
+    path.write_text(json.dumps({"format": {"format_id": "x"}}), encoding="utf-8")
+    assert cli.run(["info", str(path)]) == 1
+    assert "no epigenetic snapshot" in _assert_user_error(capsys)
+
+
+def test_valid_genome_with_epigenetic_data_still_loads(cli, capsys):
+    """The positive control: a well-formed genome decodes through the real
+    extractor and `info` reports it."""
+    cli.use_real_loader()
+    shape = (2, 2, 2)
+    document = {
+        "epigenetic_snapshot": {
+            "included": True,
+            "lattice_shape": list(shape),
+            "lattice_b64": base64.b64encode(
+                np.zeros(shape, dtype=np.uint8).tobytes()
+            ).decode("ascii"),
+            "snapshot_generation": 9,
+            "snapshot_ca_step": 21,
+        }
+    }
+    path = cli.tmp / "good.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert cli.run(["info", str(path)]) == 0
+    assert "Generation: 9" in capsys.readouterr().out
+
+
 class _Sentinel(Exception):
     """A stand-in for a programming defect, not a user error."""
 
@@ -625,6 +757,37 @@ def test_unexpected_exception_from_loader_propagates(cli):
     cli.set_loader(_boom)
     with pytest.raises(_Sentinel, match="defect inside the loader"):
         cli.run(["info", cli.snapshot_path])
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        AttributeError("'Widget' object has no attribute 'get'"),
+        TypeError("unsupported operand type(s)"),
+    ],
+)
+def test_ambient_defect_classes_still_propagate_from_the_loader(cli, boom):
+    """The fix must NOT have widened the translated set. `AttributeError` and
+    `TypeError` are the exact classes the malformed-genome shapes used to raise
+    ambiently; they remain defect signals and must keep their traceback."""
+
+    def _raise(_path):
+        raise boom
+
+    cli.set_loader(_raise)
+    with pytest.raises(type(boom)) as excinfo:
+        cli.run(["info", cli.snapshot_path])
+    assert excinfo.value is boom
+
+
+@pytest.mark.parametrize(
+    "defect", [AttributeError, TypeError, IndexError, RecursionError, NameError]
+)
+def test_translated_error_set_never_covers_a_defect_class(defect):
+    """Guards the boundary by SUBCLASS, not identity: adding `Exception`,
+    `LookupError` or `ArithmeticError` would slip past a `not in` check."""
+    translated = cli_mod._unreadable_input_errors()
+    assert not any(issubclass(defect, caught) for caught in translated)
 
 
 # ---------------------------------------------------------------------------
