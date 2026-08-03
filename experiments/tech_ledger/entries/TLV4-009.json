@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Standard mathematical analysis tooling.",
+ "entry_id": "TLV4-009",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Transform-pair round-trip tests against known analytic pairs",
+ "legitimate_uses": [
+  "Ordinary analysis inside experiments and utilities"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary numerical validation"
+ ],
+ "neutral_name": "Laplace transforms and algebraic or spectral simplification methods",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "None specific beyond ordinary numerical care"
+ ],
+ "warnings": [
+  "Standard mathematics; no physics claim attaches to its use.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

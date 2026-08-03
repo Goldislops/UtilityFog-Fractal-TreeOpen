@@ -21,13 +21,18 @@ def _load(entry_id):
 
 def test_all_committed_entries_validate_and_ids_match_filenames():
     summary = validate_directory(_ENTRIES_DIR)
-    assert summary["entry_count"] == 15
+    assert summary["entry_count"] == 20
     for record in summary["entries"]:
         assert record["filename"] == f"{record['entry_id']}.json"
     assert [r["entry_id"] for r in summary["entries"]] == [
         "TLV4-001",
+        "TLV4-002",
+        "TLV4-003",
+        "TLV4-004",
+        "TLV4-005",
         "TLV4-006",
         "TLV4-008",
+        "TLV4-009",
         "TLV4-010",
         "TLV4-011",
         "TLV4-012",
@@ -49,6 +54,73 @@ def test_tlv4_001_topology_models():
     assert entry["classification_qualifiers"] == ["B", "F"]
     assert entry["implementation_disposition"] == "evidence-gated"
     assert "physical evidence" in " ".join(entry["warnings"])
+
+
+def test_tlv4_002_wkb_tunnelling_models():
+    entry = _load("TLV4-002")
+    assert entry["entry_id"] == "TLV4-002"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "evidence-gated"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "WKB transmission coefficient checked against the exact "
+        "rectangular-barrier solution to stated tolerance"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["experiment", "research-ledger"]
+    warnings = " ".join(entry["warnings"])
+    assert "regime-bounded" in warnings
+
+
+def test_tlv4_003_gaussian_wave_packets():
+    entry = _load("TLV4-003")
+    assert entry["entry_id"] == "TLV4-003"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Free-packet variance growth checked against the analytic formula"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["experiment"]
+    warnings = " ".join(entry["warnings"])
+    assert "beyond the toy" in warnings
+
+
+def test_tlv4_004_page_wootters_relational_time():
+    entry = _load("TLV4-004")
+    assert entry["entry_id"] == "TLV4-004"
+    assert entry["primary_classification"] == "C"
+    assert entry["classification_qualifiers"] == ["E"]
+    assert entry["implementation_disposition"] == "evidence-gated"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Two-qubit clock/system conditional-state toy matching ordinary "
+        "evolution in the validated regime"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["research-ledger", "experiment"]
+    warnings = " ".join(entry["warnings"])
+    assert "no time-mechanism truth claim" in warnings
+
+
+def test_tlv4_005_landau_lifshitz_pseudotensor():
+    entry = _load("TLV4-005")
+    assert entry["entry_id"] == "TLV4-005"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == ["F"]
+    assert entry["implementation_disposition"] == "evidence-gated"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Numerical quadrupole-formula check against the analytic "
+        "binary-inspiral leading order"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["research-ledger", "experiment"]
+    warnings = " ".join(entry["warnings"])
+    assert "coordinate-dependence caveat must travel" in warnings
 
 
 def test_tlv4_006_effective_field_theory_scale_separation():
@@ -90,6 +162,22 @@ def test_tlv4_008_zero_point_claims():
     assert "none known" not in " ".join(
         entry["minimal_evidence_before_implementation"]
     )
+
+
+def test_tlv4_009_laplace_spectral_tooling():
+    entry = _load("TLV4-009")
+    assert entry["entry_id"] == "TLV4-009"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Transform-pair round-trip tests against known analytic pairs"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["executable-code", "experiment"]
+    warnings = " ".join(entry["warnings"])
+    assert "no physics claim attaches to its use" in warnings
 
 
 def test_tlv4_010_conventional_baseline_models():
