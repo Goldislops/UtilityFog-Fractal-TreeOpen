@@ -89,6 +89,26 @@ def _snapshot(shape=(4, 5, 6)):
     )
 
 
+def _write_frames(directory, count=2):
+    """Write real .npz frames the genuine loader can read.
+
+    The animate path deliberately runs the real `load_snapshot_series`, so its
+    input must be real files -- patching the loader away would stop exercising
+    the boundary whose contract is under test.
+    """
+    snap = _snapshot()
+    for index in range(count):
+        np.savez(
+            directory / f"v070_{index:03d}.npz",
+            lattice=snap.lattice,
+            memory_grid=snap.memory_grid,
+            generation=snap.generation + index,
+            ca_step=snap.ca_step,
+            best_fitness=snap.best_fitness,
+        )
+    return directory
+
+
 @pytest.fixture
 def cli(monkeypatch, tmp_path):
     """Install boundary doubles and return a small driver.
@@ -127,8 +147,13 @@ def cli(monkeypatch, tmp_path):
     dashboard = types.ModuleType("vis.observatory.dashboard")
     dashboard.observatory_dashboard = _record("observatory_dashboard", fig)
 
+    # Only the render/save phase is faked. `load_snapshot_series` is NOT
+    # patched, so the animate path exercises the genuine input boundary.
+    # `animate_from_directory` is deliberately NOT provided: the CLI must not
+    # use it (it fuses the load and render phases). If a regression reached for
+    # it again, the import would fail loudly instead of passing silently.
     animation = types.ModuleType("vis.observatory.animation")
-    animation.animate_from_directory = _record("animate_from_directory", None)
+    animation.animate_slices = _record("animate_slices", "out.gif")
 
     # Inert on purpose: recording here would overwrite `calls.name` and mask
     # which renderer the CLI actually dispatched to.
@@ -154,11 +179,15 @@ def cli(monkeypatch, tmp_path):
     # NameError rather than reading the enclosing local.
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()
+    _write_frames(frames_dir)          # real, loadable frames
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()                  # exists, but holds no matching frames
 
     class _Driver:
         calls = None
         snapshot_path = str(snap_path)
         anim_dir = str(frames_dir)
+        empty_anim_dir = str(empty_dir)
         tmp = tmp_path
         fig = None
 
@@ -227,10 +256,39 @@ def test_channel_subcommand_dispatches(cli, mode, expected_renderer):
 
 
 def test_animate_dispatches_and_returns_zero(cli):
+    """Real frames are discovered and loaded by the genuine loader; only the
+    render/save phase is faked, so no GIF is produced."""
     assert cli.run(["animate", cli.anim_dir]) == 0
-    assert cli.calls.name == "animate_from_directory"
-    assert cli.calls.kwargs["fps"] == 4
-    assert cli.calls.kwargs["max_frames"] == 50
+    assert cli.calls.name == "animate_slices"
+    snapshots = cli.calls.args[0]
+    assert len(snapshots) == 2
+    assert all(isinstance(s, ObservatorySnapshot) for s in snapshots)
+    assert cli.calls.kwargs == {
+        "output_path": "observatory_timelapse.gif",
+        "fps": 4,
+        "overlay_channel": None,
+        "axis": "z",
+    }
+
+
+def test_animate_passes_options_through_unchanged(cli):
+    assert cli.run([
+        "animate", cli.anim_dir,
+        "--output", "custom.gif", "--fps", "7",
+        "--channel", "2", "--axis", "x",
+    ]) == 0
+    assert cli.calls.kwargs == {
+        "output_path": "custom.gif",
+        "fps": 7,
+        "overlay_channel": 2,
+        "axis": "x",
+    }
+
+
+def test_animate_max_frames_limits_the_series(cli):
+    """`--max-frames` is the series limit, applied during loading."""
+    assert cli.run(["animate", cli.anim_dir, "--max-frames", "1"]) == 0
+    assert len(cli.calls.args[0]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -348,28 +406,58 @@ def test_file_where_animation_directory_expected_is_user_error(cli, capsys):
     assert "not a directory" in _assert_user_error(capsys)
 
 
+def test_animation_directory_without_matching_frames_is_user_error(cli, capsys):
+    """Discovery failure, raised by the REAL loader against a real directory."""
+    assert cli.run(["animate", cli.empty_anim_dir]) == 1
+    err = _assert_user_error(capsys)
+    assert "cannot animate" in err
+    assert "No files matching" in err
+
+
+def test_unreadable_series_member_is_user_error(cli, capsys):
+    """A frame that is not a readable archive, decoded by the REAL loader."""
+    broken = cli.tmp / "broken"
+    broken.mkdir()
+    (broken / "v070_000.npz").write_bytes(b"this is not an npz archive")
+    assert cli.run(["animate", str(broken)]) == 1
+    err = _assert_user_error(capsys)
+    assert "cannot animate" in err
+
+
+def test_empty_series_member_is_user_error(cli, capsys):
+    """A zero-byte frame -- NumPy raises EOFError, which is not an OSError."""
+    broken = cli.tmp / "empty_member"
+    broken.mkdir()
+    (broken / "v070_000.npz").write_bytes(b"")
+    assert cli.run(["animate", str(broken)]) == 1
+    assert "cannot animate" in _assert_user_error(capsys)
+
+
+# --- render phase: NOT part of the input-translation boundary ---------------
+#
+# Regression for the boundary defect: `animate_from_directory()` performs both
+# discovery/loading and rendering/saving in one call, so wrapping it translated
+# renderer defects into user errors and swallowed their tracebacks. The classes
+# below are all members of `_unreadable_input_errors()`, which is precisely why
+# a custom sentinel would not have caught this.
+
+
 @pytest.mark.parametrize(
-    "boom, fragment",
+    "boom",
     [
-        (FileNotFoundError("No files matching 'v070_*.npz' in frames"), "No files matching"),
-        (KeyError("memory_grid"), "memory_grid"),
-        (EOFError("No data left in file"), "No data left"),
+        ValueError("renderer defect: inconsistent frame shape"),
+        OSError("cannot write output gif"),
+        KeyError("palette"),
     ],
 )
-def test_unreadable_animation_input_is_user_error(cli, capsys, boom, fragment):
-    """No frames at all, or one unreadable frame, is the same input class."""
-
+def test_render_phase_exception_propagates(cli, boom):
     def _raise(*a, **k):
         raise boom
 
-    # Reach the double through sys.modules: `import pkg.sub as x` binds the
-    # package attribute, which may be the REAL module if another test imported
-    # it first, so plain attribute assignment could miss the double entirely.
-    cli.patch_render("vis.observatory.animation", "animate_from_directory", _raise)
-    assert cli.run(["animate", cli.anim_dir]) == 1
-    err = _assert_user_error(capsys)
-    assert "cannot animate" in err
-    assert fragment in err
+    cli.patch_render("vis.observatory.animation", "animate_slices", _raise)
+    with pytest.raises(type(boom)) as excinfo:
+        cli.run(["animate", cli.anim_dir])
+    assert excinfo.value is boom
 
 
 # ---------------------------------------------------------------------------

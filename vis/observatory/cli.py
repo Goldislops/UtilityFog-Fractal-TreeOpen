@@ -315,8 +315,12 @@ def _dispatch(args):
     Raises `_UserError` for expected, actionable user failures. Every other
     exception propagates untouched so genuine defects stay visible.
     """
-    # Validate user-supplied paths BEFORE paying for the heavy lazy imports:
-    # an unusable path should not first cost a NumPy/matplotlib import.
+    # Validate user-supplied paths before the per-command imports performed
+    # below by this module. This does NOT mean an invalid path avoids NumPy or
+    # matplotlib altogether: running `python -m vis.observatory` first executes
+    # the `vis` and `vis.observatory` package initializers, which import the
+    # loader (and, through sibling `vis` modules, matplotlib). Narrowing that
+    # is a separate change to package initialization and is not made here.
     if getattr(args, "snapshot", None) is not None:
         _validated_snapshot_path(args.snapshot)
     if getattr(args, "data_dir", None) is not None:
@@ -458,21 +462,34 @@ def _dispatch(args):
         return 0
 
     if args.command == "animate":
-        from vis.observatory.animation import animate_from_directory
+        # Two phases with different contracts, so they are invoked separately.
+        # `animate_from_directory()` performs both in a single call, which is
+        # why it is not used here: wrapping it would translate a renderer or
+        # output defect into a user error and swallow its traceback.
+        #
+        # Phase 1 -- discovery and loading. This is input handling, so the same
+        # unreadable-input set the single-snapshot path uses applies. Omitting
+        # `pattern` keeps the loader's own default, which is the value
+        # `animate_from_directory()` would have passed.
+        from vis.observatory.loader import load_snapshot_series
+
         try:
-            animate_from_directory(
-                args.data_dir,
-                max_frames=args.max_frames,
-                output_path=args.output,
-                fps=args.fps,
-                overlay_channel=args.channel,
-                axis=args.axis,
-            )
+            snapshots = load_snapshot_series(args.data_dir, max_count=args.max_frames)
         except _unreadable_input_errors() as exc:
-            # No matching frames in the directory, or one of the frames is
-            # itself unreadable -- the same input class the single-snapshot
-            # path already reports as a user error.
             raise _UserError(f"cannot animate {args.data_dir}: {exc}") from exc
+
+        # Phase 2 -- rendering and saving. Deliberately OUTSIDE the translation
+        # boundary: a failure here is a defect, not bad user input, and must
+        # keep its traceback.
+        from vis.observatory.animation import animate_slices
+
+        animate_slices(
+            snapshots,
+            output_path=args.output,
+            fps=args.fps,
+            overlay_channel=args.channel,
+            axis=args.axis,
+        )
         return 0
 
     # argparse enforces `required=True` on the subcommand, so this is
