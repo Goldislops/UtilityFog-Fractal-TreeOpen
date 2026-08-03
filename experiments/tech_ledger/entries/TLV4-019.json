@@ -1,0 +1,35 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated engineering practice (benchmarking and budget configuration).",
+ "entry_id": "TLV4-019",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Budget-configuration schema validation",
+ "legitimate_uses": [
+  "Benchmarking and budget notes for local runs"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Hardware-aware resource budgeting",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Hard-coding one machine's budget as a portability assumption"
+ ],
+ "warnings": [
+  "Budgets describe machines, not truths; keep them per-host and explicit.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

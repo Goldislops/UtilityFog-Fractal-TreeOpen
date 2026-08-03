@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated engineering pattern, already present in this repository's service surfaces.",
+ "entry_id": "TLV4-011",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Contract tests on a request/response schema",
+ "legitimate_uses": [
+  "Future service surfaces where a boundary is actually needed"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary contract-test evidence"
+ ],
+ "neutral_name": "Stateless HTTP and tool-call execution with MCP-style protocol boundaries",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Network surface inside deterministic engine or evidence paths",
+  "Conflating protocol statelessness with engine determinism"
+ ],
+ "warnings": [
+  "Offline verification paths must stay network-free regardless of this pattern.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
