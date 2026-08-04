@@ -1,0 +1,40 @@
+{
+ "classification_qualifiers": [
+  "E"
+ ],
+ "classification_rationale": "Peer-reviewed quantum-foundations framework under active research (C); any claim that it enables a device or physical effect is a speculative hypothesis (E face).",
+ "entry_id": "TLV4-004",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "Two-qubit clock/system conditional-state toy matching ordinary evolution in the validated regime",
+ "legitimate_uses": [
+  "A hypothesis-labelled research-ledger entry",
+  "A small conditional-state toy model reproducing a published result"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Reproduction of a published toy-model result before any extension"
+ ],
+ "neutral_name": "Page-Wootters relational-time models",
+ "primary_classification": "C",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Wiring relational-time interpretations into engine semantics",
+  "Claiming device implications"
+ ],
+ "warnings": [
+  "Foundations exploration only; no time-mechanism truth claim.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
