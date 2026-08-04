@@ -21,19 +21,24 @@ def _load(entry_id):
 
 def test_all_committed_entries_validate_and_ids_match_filenames():
     summary = validate_directory(_ENTRIES_DIR)
-    assert summary["entry_count"] == 10
+    assert summary["entry_count"] == 15
     for record in summary["entries"]:
         assert record["filename"] == f"{record['entry_id']}.json"
     assert [r["entry_id"] for r in summary["entries"]] == [
         "TLV4-001",
+        "TLV4-006",
         "TLV4-008",
+        "TLV4-010",
         "TLV4-011",
         "TLV4-012",
         "TLV4-016",
         "TLV4-017",
         "TLV4-019",
+        "TLV4-023",
+        "TLV4-024",
         "TLV4-025",
         "TLV4-027",
+        "TLV4-028",
         "TLV4-029",
     ]
 
@@ -44,6 +49,23 @@ def test_tlv4_001_topology_models():
     assert entry["classification_qualifiers"] == ["B", "F"]
     assert entry["implementation_disposition"] == "evidence-gated"
     assert "physical evidence" in " ".join(entry["warnings"])
+
+
+def test_tlv4_006_effective_field_theory_scale_separation():
+    entry = _load("TLV4-006")
+    assert entry["entry_id"] == "TLV4-006"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == ["D"]
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Schema-level requirement that physics-model records carry a "
+        "non-empty scales-and-validity field (presence, never truth)"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "research-ledger"]
+    warnings = " ".join(entry["warnings"])
+    assert "The schema enforces declaration" in warnings
 
 
 def test_tlv4_008_zero_point_claims():
@@ -68,6 +90,23 @@ def test_tlv4_008_zero_point_claims():
     assert "none known" not in " ".join(
         entry["minimal_evidence_before_implementation"]
     )
+
+
+def test_tlv4_010_conventional_baseline_models():
+    entry = _load("TLV4-010")
+    assert entry["entry_id"] == "TLV4-010"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Schema-level requirement that anomaly-type records carry non-empty "
+        "baseline-model and conventional-explanation fields"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "research-ledger"]
+    warnings = " ".join(entry["warnings"])
+    assert "Enforce process and recording" in warnings
 
 
 def test_tlv4_011_stateless_protocol_boundaries():
@@ -148,6 +187,38 @@ def test_tlv4_019_hardware_aware_resource_budgeting():
     assert "Budgets describe machines, not truths" in warnings
 
 
+def test_tlv4_023_timestamp_uncertainty_propagation():
+    entry = _load("TLV4-023")
+    assert entry["entry_id"] == "TLV4-023"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Uncertainty-propagation unit tests on simple composition cases"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "executable-code"]
+    warnings = " ".join(entry["warnings"])
+    assert "A missing uncertainty field is a refusal" in warnings
+
+
+def test_tlv4_024_cross_sensor_artefact_rejection():
+    entry = _load("TLV4-024")
+    assert entry["entry_id"] == "TLV4-024"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Validator requiring artefact-review status on observation records"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "research-ledger"]
+    warnings = " ".join(entry["warnings"])
+    assert "Enforce recording and sequence" in warnings
+
+
 def test_tlv4_025_conventional_explanations_first():
     entry = _load("TLV4-025")
     assert entry["primary_classification"] == "B"
@@ -173,6 +244,23 @@ def test_tlv4_027_provenance_chain_of_custody():
     assert entry["repository_placements"] == ["schema", "executable-code"]
     warnings = " ".join(entry["warnings"])
     assert "Say provenance-recorded" in warnings
+
+
+def test_tlv4_028_confidence_calibration_competing_hypotheses():
+    entry = _load("TLV4-028")
+    assert entry["entry_id"] == "TLV4-028"
+    assert entry["primary_classification"] == "B"
+    assert entry["classification_qualifiers"] == []
+    assert entry["implementation_disposition"] == "eligible"
+    assert entry["status"] == "active"
+    assert entry["implementation_seam"] == (
+        "Schema requiring at least two recorded hypotheses (including a "
+        "conventional one) before comparative fields validate"
+    )
+    assert entry["provenance"]["verification_status"] == "unverified"
+    assert entry["repository_placements"] == ["schema", "research-ledger"]
+    warnings = " ".join(entry["warnings"])
+    assert "The ledger compares records" in warnings
 
 
 def test_tlv4_029_v5_deferred_ingestion():

@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Established measurement methods.",
+ "entry_id": "TLV4-023",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Uncertainty-propagation unit tests on simple composition cases",
+ "legitimate_uses": [
+  "Uncertainty-bearing record types in evidence schemas (every timestamp carries an uncertainty)"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Timestamp synchronisation and uncertainty propagation",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "executable-code"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Fusing unsynchronised streams as if synchronised"
+ ],
+ "warnings": [
+  "A missing uncertainty field is a refusal, never a silent zero.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
