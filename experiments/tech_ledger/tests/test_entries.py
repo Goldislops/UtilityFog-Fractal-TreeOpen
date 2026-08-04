@@ -93,12 +93,18 @@ def test_tlv4_004_page_wootters_relational_time():
     entry = _load("TLV4-004")
     assert entry["entry_id"] == "TLV4-004"
     assert entry["primary_classification"] == "C"
-    assert entry["classification_qualifiers"] == ["E"]
+    assert entry["classification_qualifiers"] == ["E", "G"]
     assert entry["implementation_disposition"] == "evidence-gated"
     assert entry["status"] == "active"
     assert entry["implementation_seam"] == (
-        "Two-qubit clock/system conditional-state toy matching ordinary "
-        "evolution in the validated regime"
+        "Two-qubit clock/system conditional-state toy reproducing the "
+        "finite two-photon conditional-state experiment of Moreva et al., "
+        "Phys. Rev. A 89, 052122 (2014), including its finite-clock "
+        "visibility reduction; separately, the exact ordinary-evolution "
+        "equivalence theorem (Page-Wootters 1983 Sec. III; "
+        "Giovannetti-Lloyd-Maccone, Phys. Rev. D 92, 045033 (2015)) applies "
+        "only to a non-interacting clock, ideal in the continuous-clock "
+        "limit; no device capability or physical validation is implied"
     )
     assert entry["provenance"]["verification_status"] == "unverified"
     assert entry["repository_placements"] == ["research-ledger", "experiment"]
