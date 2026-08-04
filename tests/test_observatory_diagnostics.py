@@ -992,10 +992,30 @@ def test_huge_integer_fitness_is_reported_not_raised():
     assert not checks["best_fitness_finite"].ok
 
 
-def test_huge_integer_counter_still_serializes_strictly():
-    snap = _snapshot(generation=10 ** 400)
-    assert not _named(diagnostics.diagnose(snap))["generation_non_negative_int"].ok
-    _dumps(diagnostics.info_report(snap, "/s"))
+def test_huge_integer_counter_passes_and_is_reported_verbatim():
+    """A 401-digit integer IS a genuine non-negative integer, so the check
+    passes and the true value is emitted -- a Python int of any magnitude is a
+    legal JSON number. Forcing it through `float()` would raise OverflowError,
+    and rounding it would report a counter the snapshot does not have.
+
+    (My first draft of this test asserted the check should FAIL. Analysing the
+    contract showed that was wrong: nothing about the value violates
+    "non-negative integer", and failing it would have been an invented defect.)
+    """
+    huge = 10 ** 400
+    snap = _snapshot(generation=huge)
+    assert _named(diagnostics.diagnose(snap))["generation_non_negative_int"].ok
+    document = json.loads(_dumps(diagnostics.info_report(snap, "/s")))
+    assert document["generation"] == huge
+
+
+def test_a_counter_too_long_to_render_does_not_break_the_detail():
+    """`f"{n}"` raises ValueError past CPython's integer-to-string limit."""
+    snap = _snapshot(generation=10 ** 100000)
+    check = _named(diagnostics.diagnose(snap))["generation_non_negative_int"]
+    assert check.ok
+    assert len(check.detail) < 200
+    diagnostics.format_doctor(diagnostics.diagnose(snap), "/s")
 
 
 def test_boolean_fitness_is_not_silently_treated_as_one_point_zero():
@@ -1071,6 +1091,90 @@ def test_a_source_path_cannot_forge_report_lines(hostile):
     assert len(body) == 13, f"forged check rows: {len(body)}"
     summaries = [ln for ln in lines if ln.startswith(("OK:", "FAILED:"))]
     assert len(summaries) == 1, f"forged summary lines: {len(summaries)}"
+
+
+def test_a_hostile_detail_cannot_forge_report_rows():
+    """Details interpolate caller-supplied text too -- a structured dtype's
+    field names reach one -- so they are collapsed on the same basis."""
+    forged = "bad\n  [PASS] lattice_is_array  forged\nOK: all 13 checks passed."
+    lines = diagnostics.format_doctor([diagnostics.Check("n", False, forged)], "/s")
+    assert len([ln for ln in lines if ln.startswith("  [")]) == 1
+    assert len([ln for ln in lines if ln.startswith(("OK:", "FAILED:"))]) == 1
+
+
+def test_every_formatted_line_is_exactly_one_physical_line():
+    lines = diagnostics.format_doctor(diagnostics.diagnose(_snapshot()), "/s\n\nx")
+    for line in lines:
+        assert len(line.splitlines()) <= 1
+
+
+# --- statistics seam: unavailable, not fabricated ---------------------------
+
+
+@pytest.mark.parametrize("dtype", ["<U5", "S5", "datetime64[s]"])
+def test_uncountable_lattice_reports_null_counts_not_fabricated_zeros(dtype):
+    """`lattice > 0` raises TypeError for these dtypes. The rows must still be
+    present, reported as unavailable -- never as a fabricated count of 0,
+    which would read as a real measurement of an unreadable array."""
+    lattice = np.zeros((2, 3, 4), dtype=dtype)
+    stats = diagnostics.snapshot_statistics(_raw(
+        lattice, np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=np.float32)
+    ))
+    assert len(stats["state_counts"]) == len(STATE_NAMES)
+    assert all(entry["count"] is None for entry in stats["state_counts"])
+    assert all(entry["percent"] is None for entry in stats["state_counts"])
+    assert stats["non_void_count"] is None
+    assert all(c["populated"] is False for c in stats["channels"])
+
+
+@pytest.mark.parametrize("dtype", ["<U5", "S5", "complex128", "datetime64[s]"])
+def test_shape_matching_memory_of_a_wrong_dtype_is_not_aggregated(dtype):
+    """A shape-only gate let these through: `.min()`/`.max()` succeed and only
+    `float()` failed, one layer down inside `json_number`."""
+    lattice = np.zeros((2, 3, 4), dtype=np.uint8)
+    lattice[0, 0, 0] = 1
+    memory = np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=dtype)
+    stats = diagnostics.snapshot_statistics(_raw(lattice, memory))
+    assert all(c["populated"] is False for c in stats["channels"])
+
+
+def test_rank_zero_lattice_does_not_index_a_scalar_channel():
+    """A rank-0 lattice paired with a rank-1 grid satisfied the old
+    `ndim + 1` gate, then indexed a numpy scalar and raised IndexError."""
+    snap = _raw(np.array(1, dtype=np.uint8), np.zeros((NUM_CHANNELS,),
+                                                      dtype=np.float32))
+    stats = diagnostics.snapshot_statistics(snap)
+    assert all(c["populated"] is False for c in stats["channels"])
+    _assert_total(snap)
+
+
+def test_statistics_key_set_is_invariant_across_hostile_inputs():
+    """The document shape must not depend on how broken the snapshot is."""
+    healthy = set(diagnostics.snapshot_statistics(_snapshot()))
+    for lattice in (None, "x", np.zeros((2, 2), dtype="<U5"), np.array(1)):
+        assert set(diagnostics.snapshot_statistics(_raw(lattice, None))) == healthy
+
+
+def test_healthy_statistics_are_unchanged_by_the_gating():
+    """The gates must not cost exactness on well-formed data."""
+    lattice = np.zeros((2, 3, 4), dtype=np.uint8)
+    lattice[0, 0, 0] = 1
+    lattice[1, 1, 1] = 2
+    memory = np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=np.float32)
+    memory[0] = 2.5
+    stats = diagnostics.snapshot_statistics(_raw(lattice, memory))
+    assert stats["total_cells"] == 24
+    assert stats["non_void_count"] == 2
+    assert sum(e["count"] for e in stats["state_counts"]) == 24
+    assert stats["channels"][0]["populated"] is True
+    assert stats["channels"][0]["mean"] == pytest.approx(2.5)
+
+
+def test_format_count_preserves_the_established_columns():
+    assert diagnostics.format_count(1234, 8) == f"{1234:>8,}"
+    assert diagnostics.format_count(1234) == f"{1234:,}"
+    assert len(diagnostics.format_count(None, 8)) == 8
+    assert diagnostics.format_count(None).strip() == "n/a"
 
 
 def test_json_mode_keeps_a_hostile_path_as_ordinary_escaped_data():

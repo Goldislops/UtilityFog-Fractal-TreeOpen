@@ -23,6 +23,7 @@ finite values are perfectly legal snapshots and are reported as passing.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -50,6 +51,78 @@ LOAD_ROUTES: Dict[str, str] = {".npz": "npz", ".json": "portable-genome JSON"}
 #: corrupt lattice cannot turn a report into a dump of its own cell values.
 _MAX_REPORTED_STATE_IDS = 8
 
+#: Cap on any single interpolated token in a ``detail``. A structured dtype
+#: renders every one of its fields, a pathological suffix can be arbitrarily
+#: long, and ``f"{value}"`` on an integer past ~4300 digits raises ValueError
+#: outright. Capping keeps ``Check.detail``'s promise unconditional.
+_MAX_DETAIL_TOKEN = 60
+
+_FLOAT_MAX = sys.float_info.max
+
+# --- dtype gating ----------------------------------------------------------
+#
+# `dtype.kind` characters: b bool, i signed int, u unsigned int, f float,
+# c complex, m timedelta, M datetime, O object, S bytes, U unicode, V void.
+#
+# These two sets are the prerequisites for the only two value-inspecting
+# operations in this module. They are deliberately narrow: a check that cannot
+# be evaluated safely is reported as FAILED, never skipped into a pass.
+
+#: Kinds whose values can be enumerated and converted to `int` exactly.
+#: `np.unique()` sorts, and its sort raises for object dtype; `int()` then
+#: raises for unicode, bytes, complex, datetime and void. Float is excluded
+#: too, and that exclusion is load-bearing: `int(nan)` raises ValueError,
+#: `int(inf)` raises OverflowError, and `int(2.7)` would silently fabricate
+#: the valid state id 2 out of a value that is not a state id at all.
+_STATE_INSPECTABLE_KINDS = frozenset("biu")
+
+#: Kinds `np.isfinite()` accepts AND whose reductions yield real numbers.
+#: numpy also accepts complex, but complex is excluded because `float()` on a
+#: complex reduction raises TypeError one layer later, and because a complex
+#: memory grid violates the dtype contract regardless.
+_NUMERIC_KINDS = frozenset("biuf")
+
+
+def _clip(value: Any) -> str:
+    """Render one interpolated token, bounded and on a single line.
+
+    Everything a ``detail`` interpolates goes through here. Two reasons, both
+    demonstrated: a structured dtype's ``str()`` grows without limit and its
+    field names are caller-supplied text that may contain newlines, which would
+    forge report rows; and ``f"{n}"`` on a sufficiently large integer raises
+    ``ValueError`` under CPython's integer-to-string limit.
+    """
+    try:
+        text = str(value)
+    except ValueError:
+        # CPython's int->str digit limit. Narrow and named: the only operation
+        # guarded is this one conversion, for the one documented failure.
+        return "<unrenderable>"
+    text = " ".join(text.splitlines())
+    if len(text) > _MAX_DETAIL_TOKEN:
+        text = text[:_MAX_DETAIL_TOKEN] + "..."
+    return text
+
+
+def one_line(text: Any) -> str:
+    """Collapse anything ``str.splitlines()`` treats as a line boundary.
+
+    A source path is untrusted data: rendered verbatim into the human report it
+    can inject text that looks like an extra check row or a second summary
+    line, so a reader (or a grep) would see a verdict the run never reached.
+    The boundary set is wider than CR/LF -- ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``,
+    ``\\x85``, ``\\u2028`` and ``\\u2029`` all split -- so `splitlines()` is used
+    rather than replacing the two obvious characters.
+
+    This matches ``cli._one_line`` exactly. The duplication is deliberate: this
+    module imports NumPy at module scope and the CLI must stay importable, and
+    usable for argparse errors, without paying that cost.
+
+    JSON output needs no equivalent: ordinary string escaping already makes
+    these characters inert, and the value must round-trip verbatim.
+    """
+    return " ".join(str(text).splitlines()).strip()
+
 
 @dataclass(frozen=True)
 class Check:
@@ -74,20 +147,38 @@ class Check:
 
 
 def json_number(value: Any) -> Optional[float]:
-    """Return a JSON-safe float, or ``None`` for anything non-finite.
+    """Return a JSON-safe float, or ``None`` for anything not finitely
+    representable as one.
 
     ``NaN``, ``Infinity`` and ``-Infinity`` have no representation in strict
     JSON; Python's encoder emits the non-standard bare tokens ``NaN`` /
     ``Infinity`` unless told otherwise. Mapping them to ``null`` here means the
     document stays valid for every consumer, and the serializer can then run
     with ``allow_nan=False`` as a genuine assertion rather than a formality.
+
+    Admission is POSITIVE rather than try/except: only the types this module
+    can convert exactly are converted at all. That matters because ``float()``
+    has three distinct failure modes here -- ``TypeError`` for a complex or an
+    arbitrary object, ``ValueError`` for a non-numeric string, and
+    ``OverflowError`` for an integer larger than ``sys.float_info.max``. The
+    last is an ``ArithmeticError``, so a ``(TypeError, ValueError)`` handler
+    would not have caught it, and ``math.isfinite()`` raises on the same value.
+    The magnitude test below compares an ``int`` against a ``float``, which
+    Python evaluates exactly and without conversion, so it cannot overflow.
+
+    ``bool`` is deliberately not admitted: ``True`` is not the number 1.0, and
+    silently reporting it as a fitness value would fabricate data.
     """
     if value is None:
         return None
-    number = float(value)
-    if not math.isfinite(number):
-        return None
-    return number
+    if type(value) is int:
+        if not -_FLOAT_MAX <= value <= _FLOAT_MAX:
+            return None
+        return float(value)
+    if isinstance(value, (float, np.floating, np.integer)):
+        number = float(value)          # np.integer maxes out far below float
+        return number if math.isfinite(number) else None
+    return None
 
 
 def _is_exact_int(value: Any) -> bool:
@@ -119,11 +210,13 @@ def json_scalar(value: Any) -> Any:
     the checks are designed to flag.
     """
     if _is_exact_int(value):
+        # Emitted verbatim, at any magnitude. A Python int of any size is a
+        # legal JSON number, and it is the true value; forcing it through
+        # float() would raise OverflowError above ~1.8e308 and would lose
+        # precision well before that. Reporting the real counter beats
+        # reporting a rounded one.
         return value
-    try:
-        return json_number(value)
-    except (TypeError, ValueError):
-        return None
+    return json_number(value)
 
 
 def format_stat(value: Optional[float]) -> str:
@@ -140,6 +233,20 @@ def format_stat(value: Optional[float]) -> str:
 def format_percent(value: Optional[float]) -> str:
     """As :func:`format_stat`, for the percentage column."""
     return f"{value:5.1f}" if value is not None else "  n/a"
+
+
+def format_count(value: Optional[int], width: int = 0) -> str:
+    """Fixed-width rendering of a count for the human ``info`` table.
+
+    ``None`` means the count could not be computed -- a lattice dtype the
+    statistics cannot compare against an integer. The existing column layout is
+    preserved exactly: ``width`` reproduces the previous ``{:>8,}`` for the
+    per-state rows, and the default reproduces the unpadded ``{:,}`` used on
+    the ``Non-void:`` line.
+    """
+    if value is None:
+        return "n/a".rjust(width)
+    return f"{value:>{width},}" if width else f"{value:,}"
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +282,19 @@ def diagnose(snapshot) -> List[Check]:
     # anything else before loading. Lower-casing here would report `RUN.NPZ` as
     # loadable when the public route actually refuses it -- a check that fails
     # open is worse than no check.
+    # `isinstance` before any truth test: `if source` on an ndarray raises
+    # ValueError ("truth value ... is ambiguous"), and on an arbitrary object
+    # `__bool__` can raise anything at all.
     source = getattr(snapshot, "source_path", None)
-    suffix = Path(str(source)).suffix if source else ""
+    has_source = isinstance(source, (str, Path)) and str(source) != ""
+    suffix = Path(str(source)).suffix if has_source else ""
     route = LOAD_ROUTES.get(suffix)
     checks.append(Check(
         "source_loadable",
         route is not None,
         f"source is a {route} snapshot" if route is not None
-        else (f"source suffix {suffix!r} is not a public load route "
-              f"({', '.join(sorted(LOAD_ROUTES))})" if source
+        else (f"source suffix {_clip(suffix)!r} is not a public load route "
+              f"({', '.join(sorted(LOAD_ROUTES))})" if has_source
               else "snapshot carries no source path"),
     ))
 
@@ -218,12 +329,25 @@ def diagnose(snapshot) -> List[Check]:
         "lattice_dtype",
         lattice_dtype_ok,
         f"lattice dtype is {np.dtype(LATTICE_DTYPE).name}" if lattice_dtype_ok
-        else (f"lattice dtype is {lattice.dtype}, expected "
+        else (f"lattice dtype is {_clip(lattice.dtype)}, expected "
               f"{np.dtype(LATTICE_DTYPE).name}" if lattice_is_array
               else "lattice is not an array"),
     ))
 
-    if lattice_is_array and lattice.size:
+    # Prerequisite gate. `np.unique()` sorts, and its sort raises TypeError on
+    # an object array whose elements cannot be ordered; `int(v)` then raises
+    # for unicode, bytes, complex, datetime, void, and for the NaN and +/-Inf
+    # a float array may carry. Inspecting values at all is therefore
+    # conditional on a dtype where both operations are total.
+    #
+    # When the gate closes, the check reports FAILURE, not success: a
+    # dependent evaluation that was deliberately not performed is not a pass.
+    # The dtype violation is already reported by `lattice_dtype` above, so the
+    # two rows agree rather than one silently fabricating a verdict.
+    lattice_inspectable = (
+        lattice_is_array and lattice.dtype.kind in _STATE_INSPECTABLE_KINDS
+    )
+    if lattice_inspectable and lattice.size:
         present = sorted(int(v) for v in np.unique(lattice))
         unknown = [v for v in present if v not in STATE_NAMES]
         states_ok = not unknown
@@ -237,8 +361,12 @@ def diagnose(snapshot) -> List[Check]:
             f"all state ids within {list(KNOWN_STATE_IDS)}" if states_ok
             else f"state ids [{shown}] outside {list(KNOWN_STATE_IDS)}"
         )
-    elif lattice_is_array:
+    elif lattice_inspectable:
         states_ok, detail = True, "lattice is empty; no state ids to check"
+    elif lattice_is_array:
+        states_ok = False
+        detail = (f"lattice dtype {_clip(lattice.dtype)} cannot be inspected "
+                  "for state ids")
     else:
         states_ok, detail = False, "lattice is not an array"
     checks.append(Check("lattice_states_known", states_ok, detail))
@@ -273,36 +401,59 @@ def diagnose(snapshot) -> List[Check]:
         "memory_dtype",
         memory_dtype_ok,
         f"memory dtype is {np.dtype(MEMORY_DTYPE).name}" if memory_dtype_ok
-        else (f"memory dtype is {memory.dtype}, expected "
+        else (f"memory dtype is {_clip(memory.dtype)}, expected "
               f"{np.dtype(MEMORY_DTYPE).name}" if memory_is_array
               else "memory grid is not an array"),
     ))
 
-    if memory_is_array and memory.size:
+    # Prerequisite gate. `np.isfinite()` raises TypeError for object, unicode,
+    # bytes, datetime64, timedelta64 and void dtypes -- for object it raises
+    # even when every element is a Python float, because the object loop looks
+    # for an `isfinite` method on the element. Complex is accepted by numpy but
+    # excluded here: it violates the dtype contract anyway, and its reductions
+    # would fail one layer later inside the statistics.
+    #
+    # As above, a closed gate reports FAILURE rather than skipping to a pass.
+    memory_numeric = memory_is_array and memory.dtype.kind in _NUMERIC_KINDS
+    if memory_numeric and memory.size:
         finite_mask = np.isfinite(memory)
         non_finite = int(memory.size - int(np.count_nonzero(finite_mask)))
         finite_ok = non_finite == 0
         detail = ("all memory values are finite" if finite_ok
                   else f"{non_finite} non-finite memory value(s)")
-    elif memory_is_array:
+    elif memory_numeric:
         finite_ok, detail = True, "memory grid is empty; no values to check"
+    elif memory_is_array:
+        finite_ok = False
+        detail = (f"memory dtype {_clip(memory.dtype)} cannot be inspected "
+                  "for finiteness")
     else:
         finite_ok, detail = False, "memory grid is not an array"
     checks.append(Check("memory_values_finite", finite_ok, detail))
 
     for field in ("generation", "ca_step"):
         value = getattr(snapshot, field, None)
+        # `and` short-circuits, so `>= 0` only ever runs on a genuine int.
         ok = _is_exact_int(value) and value >= 0
         if _is_exact_int(value):
-            detail = f"{field} is {value}" if ok else f"{field} is negative"
+            # `_clip` because `f"{value}"` raises ValueError past CPython's
+            # integer-to-string digit limit.
+            detail = f"{field} is {_clip(value)}" if ok else f"{field} is negative"
         else:
             detail = f"{field} is {type(value).__name__}, expected a non-negative int"
         checks.append(Check(f"{field}_non_negative_int", ok, detail))
 
+    # `float(fitness)` is NOT called here. `_is_real_number` admits any Python
+    # int, and `float(10**400)` raises OverflowError -- an ArithmeticError, so
+    # neither a TypeError nor a ValueError handler would catch it, and
+    # `math.isfinite()` raises on the same value. `json_number` performs the
+    # magnitude test by exact int/float comparison instead, which cannot
+    # overflow, and returns None for anything not finitely representable.
     fitness = getattr(snapshot, "best_fitness", None)
     if _is_real_number(fitness):
-        ok = math.isfinite(float(fitness))
-        detail = "best_fitness is finite" if ok else "best_fitness is not finite"
+        ok = json_number(fitness) is not None
+        detail = ("best_fitness is finite" if ok
+                  else "best_fitness is not a finite representable number")
     else:
         ok = False
         detail = f"best_fitness is {type(fitness).__name__}, expected a real number"
@@ -338,22 +489,49 @@ def snapshot_statistics(snapshot) -> Dict[str, Any]:
     ``populated: false`` and ``null`` aggregates rather than being omitted, so
     the JSON shape is the same for every snapshot; the human renderer skips
     those rows exactly as it always has.
+
+    Preconditions and totality boundary
+    -----------------------------------
+    NONE. This function is total over every input :func:`diagnose` accepts,
+    which is the contract that matters: :func:`doctor_report` embeds these
+    statistics, so any input the checks are designed to *report* must not make
+    the report itself unconstructible. It previously assumed strictly more than
+    ``diagnose`` guaranteed -- bare attribute access, an orderable lattice
+    dtype, and a memory dtype whose reductions are real numbers -- and raised
+    ``AttributeError``/``TypeError`` on inputs the checks were built to flag.
+
+    The key set is INVARIANT. When a statistic cannot be computed it is
+    reported as ``null`` and the row still appears; nothing is fabricated and
+    no invalid array is coerced into apparently valid scientific data. For a
+    healthy snapshot every value is exact, unchanged from before.
     """
-    lattice = snapshot.lattice
-    shape = tuple(int(d) for d in lattice.shape)
-    total_cells = 1
-    for dim in shape:
-        total_cells *= dim
-    non_void_mask = lattice > 0
+    # Read exactly as `diagnose` reads: a library caller may pass a partial or
+    # duck-typed object, and the two must accept the same inputs.
+    lattice = getattr(snapshot, "lattice", None)
+    memory = getattr(snapshot, "memory_grid", None)
+
+    lattice_is_array = isinstance(lattice, np.ndarray)
+    shape = tuple(int(d) for d in lattice.shape) if lattice_is_array else ()
+    # `size` rather than a product over `shape`: it is exact for a rank-0
+    # array, where the empty product would coincidentally also give 1 but for
+    # the wrong reason, and it is 0 for a non-array.
+    total_cells = int(lattice.size) if lattice_is_array else 0
+
+    # `lattice > 0` and `lattice == state_id` need an orderable numeric dtype.
+    # Unicode, bytes, object-holding-strings, datetime64 and void all raise
+    # TypeError on `>`; that is the dtype `lattice_dtype` already reports.
+    countable = lattice_is_array and lattice.dtype.kind in _NUMERIC_KINDS
+    non_void_mask = (lattice > 0) if countable else None
 
     state_counts = []
     for state_id in sorted(STATE_NAMES):
-        count = int(np.sum(lattice == state_id))
+        count = int(np.count_nonzero(lattice == state_id)) if countable else None
         state_counts.append({
             "id": int(state_id),
             "name": STATE_NAMES[state_id],
             "count": count,
-            "percent": json_number(count / total_cells * 100) if total_cells else None,
+            "percent": (json_number(count / total_cells * 100)
+                        if countable and total_cells else None),
         })
 
     # A report must survive every input its own checks are designed to flag.
@@ -363,9 +541,18 @@ def snapshot_statistics(snapshot) -> Dict[str, Any]:
     # lattice` exists to report. Without this gate, `doctor --json` died with a
     # traceback and emitted no document at all on exactly those files, while
     # human `doctor` reported them correctly.
-    memory = getattr(snapshot, "memory_grid", None)
+    #
+    # The dtype term is equally load-bearing and was the later discovery: for a
+    # SHAPE-MATCHING grid of unicode, bytes, complex or datetime64, `.min()`
+    # and `.max()` succeed and only `float()` fails one layer down, so a
+    # shape-only gate let a wrong dtype through to raise inside `json_number`.
+    # The rank term keeps a rank-0 lattice from pairing with a rank-1 grid and
+    # indexing a numpy scalar.
     channels_usable = (
-        isinstance(memory, np.ndarray)
+        countable
+        and lattice.ndim >= 1
+        and isinstance(memory, np.ndarray)
+        and memory.dtype.kind in _NUMERIC_KINDS
         and memory.ndim == lattice.ndim + 1
         and tuple(int(d) for d in memory.shape[1:]) == shape
     )
@@ -386,14 +573,17 @@ def snapshot_statistics(snapshot) -> Dict[str, Any]:
             "mean": json_number(values.mean()) if values is not None else None,
         })
 
+    fitness = getattr(snapshot, "best_fitness", None)
     return {
         "shape": list(shape),
         "total_cells": total_cells,
-        "non_void_count": int(np.sum(non_void_mask)),
-        "generation": json_scalar(snapshot.generation),
-        "ca_step": json_scalar(snapshot.ca_step),
-        "best_fitness": json_number(snapshot.best_fitness)
-        if _is_real_number(snapshot.best_fitness) else None,
+        "non_void_count": (int(np.count_nonzero(non_void_mask))
+                           if countable else None),
+        "generation": json_scalar(getattr(snapshot, "generation", None)),
+        "ca_step": json_scalar(getattr(snapshot, "ca_step", None)),
+        # Gated on the exact-type test, not merely passed to `json_number`, so
+        # a `bool` is reported as null rather than as the number 1.0.
+        "best_fitness": json_number(fitness) if _is_real_number(fitness) else None,
         "state_counts": state_counts,
         "channels": channels,
     }
@@ -435,12 +625,24 @@ def format_doctor(checks: List[Check], source: str) -> List[str]:
     Every check is listed whether it passed or failed, so a reader sees the
     full contract rather than only what broke, and the closing line states the
     verdict unambiguously.
+
+    Every returned element is exactly one physical line. The source path is
+    untrusted data -- on POSIX a filename may contain CR/LF, and even on
+    Windows it may contain U+0085, U+2028 or U+2029, all of which
+    ``str.splitlines()` treats as boundaries -- so rendered verbatim it could
+    inject a convincing extra ``[PASS]`` row or a second summary line and make
+    a reader, or a grep, see a verdict the run never reached. Details are
+    collapsed for the same reason: a structured dtype's field names reach a
+    detail as caller-supplied text.
+
+    The exit status was never at risk: `cli` computes it from `all_ok`, not
+    from this text. The integrity of the report a human reads is the point.
     """
-    lines = [f"Snapshot: {source}", ""]
+    lines = [f"Snapshot: {one_line(source)}", ""]
     width = max((len(c.name) for c in checks), default=0)
     for check in checks:
         mark = "PASS" if check.ok else "FAIL"
-        lines.append(f"  [{mark}] {check.name:<{width}}  {check.detail}")
+        lines.append(f"  [{mark}] {check.name:<{width}}  {one_line(check.detail)}")
     counts = summarize(checks)
     lines.append("")
     if counts["failed"]:

@@ -1211,6 +1211,84 @@ def test_memory_spatial_mismatch_still_produces_a_json_document(tmp_path):
     assert "Traceback (most recent call last)" not in human.stderr
 
 
+@pytest.mark.parametrize("command", ["info", "doctor"])
+@pytest.mark.parametrize(
+    "shape", [(0, 3, 4), (3, 0, 4), (3, 4, 0), (0, 0, 0)]
+)
+def test_zero_size_lattice_does_not_crash_either_command(tmp_path, command, shape):
+    """Settles a limitation the PR body claimed was outstanding.
+
+    On the base, human `info` raised ZeroDivisionError computing a percentage
+    over zero cells. The shared-statistics refactor made the percentage `None`
+    and `format_percent` renders that as `n/a`, so `info` now exits 0. `doctor`
+    reports the zero dimension as a failed check and exits 1. Neither
+    tracebacks -- which is what the body should have said.
+    """
+    lattice = np.zeros(shape, dtype=np.uint8)
+    memory = np.zeros((8,) + shape, dtype=np.float32)
+    path = _write_snapshot(tmp_path / "empty.npz", lattice=lattice, memory=memory)
+
+    proc = _run_module(command, path)
+    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
+    assert proc.returncode == (0 if command == "info" else 1)
+    if command == "info":
+        assert "n/a" in proc.stdout
+
+    js = _run_module(command, path, "--json")
+    assert "Traceback (most recent call last)" not in js.stderr, js.stderr
+    assert json.loads(js.stdout)["total_cells" if command == "info"
+                                 else "snapshot"] is not None
+
+
+# --- untrusted pathnames may not forge output rows -------------------------
+
+
+FORGED_SOURCE = (
+    "/tmp/snap\n\n  [PASS] lattice_states_known  all state ids within [0, 1, 2, "
+    "3, 4]\n\nOK: all 13 checks passed.\n\nquarantined.npz"
+)
+
+
+def test_a_source_path_cannot_forge_doctor_report_lines(cli, capsys):
+    """A pathname is untrusted data. Rendered verbatim it could inject a
+    convincing extra PASS row and a second summary line ahead of the real
+    report, so a reader -- or a grep -- would see a verdict the run never
+    reached. The exit status was never at risk; the report's integrity was.
+    """
+    bad = _snapshot()
+    bad.lattice[0, 0, 0] = 99                      # genuinely fails a check
+    object.__setattr__(bad, "source_path", FORGED_SOURCE)
+    cli.set_loader(lambda _p: bad)
+
+    assert cli.run(["doctor", cli.snapshot_path]) == 1
+    out = capsys.readouterr().out
+    assert out.count("[PASS]") == 12
+    assert out.count("[FAIL]") == 1
+    assert "OK: all 13 checks passed." not in out
+    assert len([ln for ln in out.splitlines()
+                if ln.startswith(("OK:", "FAILED:"))]) == 1
+
+
+def test_a_source_path_cannot_forge_info_rows(cli, capsys):
+    bad = _snapshot()
+    object.__setattr__(bad, "source_path", "/tmp/a\n  Void        :       99 (99.9%)")
+    cli.set_loader(lambda _p: bad)
+    assert cli.run(["info", cli.snapshot_path]) == 0
+    out = capsys.readouterr().out
+    assert out.count("Void") == 1
+
+
+def test_json_mode_round_trips_a_hostile_path_verbatim(cli, capsys):
+    """JSON needs no collapsing -- escaping already makes it inert -- and the
+    value must survive unchanged so a consumer sees the real path."""
+    bad = _snapshot()
+    object.__setattr__(bad, "source_path", FORGED_SOURCE)
+    cli.set_loader(lambda _p: bad)
+    assert cli.run(["doctor", cli.snapshot_path, "--json"]) == 0
+    document, _ = _only_json(capsys)
+    assert document["source"] == FORGED_SOURCE
+
+
 def test_doctor_end_to_end_malformed_snapshot_is_status_one(tmp_path):
     path = tmp_path / "junk.npz"
     path.write_bytes(b"not an npz at all")

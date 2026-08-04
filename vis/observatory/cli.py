@@ -372,19 +372,24 @@ def _dispatch(args):
 
         stats = diagnostics.snapshot_statistics(snap)
         total = stats["total_cells"]
-        print(f"Source:     {snap.source_path}")
+        # `_one_line` on the path for the same reason the error lane uses it:
+        # a filename is untrusted data and must not forge extra output rows.
+        print(f"Source:     {_one_line(snap.source_path)}")
         print(f"Shape:      {snap.shape}")
         print(f"Generation: {snap.generation:,}")
         print(f"CA Step:    {snap.ca_step:,}")
         print(f"Fitness:    {snap.best_fitness:.4f}")
-        print(f"Non-void:   {stats['non_void_count']:,} / {total:,}")
+        print(f"Non-void:   {diagnostics.format_count(stats['non_void_count'])}"
+              f" / {diagnostics.format_count(total)}")
         print()
         # Rendered through the shared formatters: the statistics are JSON-safe,
-        # so a non-finite channel value arrives as None. Formatting None with a
-        # numeric spec raises, which would turn `info` on a snapshot carrying
-        # NaN into a traceback -- the very snapshot `doctor` exists to report.
+        # so a value that could not be computed arrives as None. Formatting
+        # None with a numeric spec raises, which would turn `info` on a
+        # snapshot carrying NaN into a traceback -- the very snapshot `doctor`
+        # exists to report.
         for entry in stats["state_counts"]:
-            print(f"  {entry['name']:12s}: {entry['count']:>8,} "
+            print(f"  {entry['name']:12s}: "
+                  f"{diagnostics.format_count(entry['count'], 8)} "
                   f"({diagnostics.format_percent(entry['percent'])}%)")
         print()
         for channel in stats["channels"]:
