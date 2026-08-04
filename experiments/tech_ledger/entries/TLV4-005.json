@@ -1,0 +1,39 @@
+{
+ "classification_qualifiers": [
+  "F"
+ ],
+ "classification_rationale": "Established general-relativity method (B) with a hard caveat: the pseudotensor is coordinate-dependent, so only suitably integrated or asymptotic quantities are meaningful; reading local values as physical energy density, or citing them to support extraction or propulsion claims, is technically mismatched (F face).",
+ "entry_id": "TLV4-005",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "Numerical quadrupole-formula check against the analytic binary-inspiral leading order",
+ "legitimate_uses": [
+  "Experiments reproducing standard results with the caveat recorded"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Match to a textbook asymptotic result before any extension"
+ ],
+ "neutral_name": "Landau-Lifshitz gravitational pseudotensor calculations",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Reading local pseudotensor values as physical energy density",
+  "Supporting energy-extraction or propulsion claims"
+ ],
+ "warnings": [
+  "The coordinate-dependence caveat must travel with every use of this method.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

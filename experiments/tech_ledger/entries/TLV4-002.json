@@ -1,0 +1,39 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Standard semiclassical method; established mathematics with a known validity regime.",
+ "entry_id": "TLV4-002",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "WKB transmission coefficient checked against the exact rectangular-barrier solution to stated tolerance",
+ "legitimate_uses": [
+  "Quarantined experiments computing tunnelling probabilities for well-specified potentials",
+  "Teaching or validation fixtures with known closed-form limits"
+ ],
+ "minimal_evidence_before_implementation": [
+  "A statement of the potential and a validity-regime check",
+  "Agreement with a known analytic case before extension"
+ ],
+ "neutral_name": "WKB approximation and tunnelling models",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "experiment",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Applying WKB outside its validity regime and treating output as ground truth",
+  "Using toy results to support exotic transport claims"
+ ],
+ "warnings": [
+  "Method validity is regime-bounded; results outside the regime are not evidence.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

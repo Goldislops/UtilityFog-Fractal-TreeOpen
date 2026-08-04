@@ -1,0 +1,35 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Established quantum toy models with analytic baselines; ordinary numerics.",
+ "entry_id": "TLV4-003",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Free-packet variance growth checked against the analytic formula",
+ "legitimate_uses": [
+  "Deterministic wave-packet evolution and interference baselines in quarantined experiments"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary numerical checks: norm conservation and dispersion against analytic forms"
+ ],
+ "neutral_name": "Gaussian wave-packet and interference models",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Presenting toy interference as evidence of macroscopic quantum effects"
+ ],
+ "warnings": [
+  "Toy models carry no claim about any physical system beyond the toy.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
