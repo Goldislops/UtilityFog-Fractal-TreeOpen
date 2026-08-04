@@ -46,21 +46,26 @@ MEMORY_CHANNEL_DEFS = [
 class PortableGenomeError(ValueError):
     """Structural refusal for malformed portable-genome shapes.
 
-    Raised by :func:`import_genome` for the narrow set of structural shapes
-    validated in this module: the genome root, ``format``, ``transition_table``,
-    each source-state mapping, each source/target state name and neighbor-count
-    key, and the container shape of the seven configuration sections
+    Raised by :func:`import_genome` for the narrow set of structural shapes it
+    validates: the genome root, ``format``, ``transition_table``, each
+    source-state mapping, each source/target state name and neighbor-count key,
+    and the container shape of the seven configuration sections
     ``stochastic``, ``contagion``, ``decay``, ``cosmic_garden``,
-    ``experimental``, ``metadata`` and ``topology``. Subclasses
-    :class:`ValueError` so existing callers that catch ``ValueError`` keep
-    working; the public ``info`` CLI catches this type specifically.
+    ``experimental``, ``metadata`` and ``topology``.
 
-    This does NOT make the whole importer total. Still outside this module's
-    structural boundary, and still surfacing as their original exceptions:
-    individual field values *inside* an otherwise correctly shaped section,
-    ``fitness``, ``memory_layout``, ``epigenetic_snapshot``,
-    :func:`extract_epigenetic_snapshot`, schema completeness, and any
-    semantic or numeric range validation.
+    Also raised by :func:`extract_epigenetic_snapshot` for the shapes IT
+    dereferences: the genome root, ``epigenetic_snapshot``, ``memory_layout``,
+    ``lattice_shape``, the two base64 payload fields, ``num_channels`` and the
+    two snapshot-metadata counters.
+
+    Subclasses :class:`ValueError` so existing callers that catch ``ValueError``
+    keep working; the public ``info`` CLI catches this type specifically.
+
+    This does NOT make the module total. Still outside its structural boundary,
+    and still surfacing as their original exceptions: individual field values
+    *inside* an otherwise correctly shaped section, ``fitness``, schema
+    completeness, base64 payload lengths, dimension magnitudes, cross-field
+    consistency, and any semantic or numeric range validation.
     """
 
 
@@ -269,6 +274,90 @@ def _require_json_object_section(genome: dict, section_name: str) -> dict:
     return section
 
 
+def _require_json_string(section: dict, field_name: str) -> str:
+    """Return ``section[field_name]`` only when it is a JSON string.
+
+    A missing key still raises ``KeyError`` exactly as before -- absence is not
+    this helper's concern, shape is. Every non-string JSON value is refused,
+    because ``base64.b64decode`` raises an ambient ``TypeError`` on a number,
+    array, Boolean or ``null`` instead of a structural refusal.
+
+    The message is built from ``field_name`` alone; the supplied value is never
+    rendered and none of its methods is invoked.
+    """
+    value = section[field_name]
+    if type(value) is not str:
+        raise PortableGenomeError(f"{field_name} must be a JSON string")
+    return value
+
+
+def _require_lattice_shape(section: dict) -> Tuple[int, ...]:
+    """Return ``section['lattice_shape']`` only when it is a JSON array of ints.
+
+    ``tuple()`` and the later ``reshape`` both dereference this value, so a
+    scalar, ``null`` or a non-integer entry raises an ambient ``TypeError``
+    from inside ``tuple``/NumPy rather than a structural refusal.
+
+    ``bool`` is excluded because the check is ``type(dim) is int``, matching the
+    exact-type convention used elsewhere in this module. That is a deliberate
+    narrowing, NOT the removal of a ``TypeError``: ``bool`` implements
+    ``__index__``, so NumPy would have accepted ``True`` as the dimension ``1``.
+    No exporter emits Booleans here.
+
+    A missing key still raises ``KeyError``. Dimension *magnitudes* are NOT
+    checked: a negative dimension remains NumPy's ``ValueError``, and one
+    exceeding the platform index range remains its ``OverflowError``. An empty
+    array is likewise accepted and yields a 0-d lattice. Those are value-range
+    concerns, deliberately outside this structural boundary.
+    """
+    raw = section["lattice_shape"]
+    if type(raw) is not list:
+        raise PortableGenomeError("lattice_shape must be a JSON array")
+    for dim in raw:
+        if type(dim) is not int:
+            raise PortableGenomeError("lattice_shape entries must be integers")
+    return tuple(raw)
+
+
+def _require_counter(section: dict, field_name: str) -> int:
+    """Return ``section[field_name]`` only when it is a JSON integer.
+
+    Absent yields ``0``, the established default. These counters are carried
+    into the returned snapshot metadata and are formatted with ``:,`` by
+    consumers, so a string yields ``ValueError: Cannot specify ',' with 's'``
+    and ``null``/array/object yield ``TypeError`` -- ambient defect signals
+    raised far from this file. Validating the shape here keeps the refusal
+    where the value is read.
+    """
+    if field_name not in section:
+        return 0
+    value = section[field_name]
+    if type(value) is not int:
+        raise PortableGenomeError(f"{field_name} must be an integer")
+    return value
+
+
+def _require_channel_count(layout: dict) -> int:
+    """Return ``layout['num_channels']`` only when it is a JSON integer.
+
+    Absent yields the established ``MEMORY_CHANNELS`` default. The value is
+    dereferenced by ``reshape``, so a string, array or ``null`` would otherwise
+    surface as an ambient ``TypeError``.
+
+    ``bool`` is excluded because the check is ``type(value) is int``, matching
+    the exact-type convention used elsewhere in this module. That is a
+    deliberate narrowing, NOT the removal of a ``TypeError``: ``bool``
+    implements ``__index__``, so NumPy would have accepted ``True`` as the
+    dimension ``1``. No exporter emits a Boolean here.
+    """
+    if "num_channels" not in layout:
+        return MEMORY_CHANNELS
+    value = layout["num_channels"]
+    if type(value) is not int:
+        raise PortableGenomeError("num_channels must be an integer")
+    return value
+
+
 def import_genome(filepath):
     """Import a portable genome and reconstruct the rule_spec and CAConfig.
 
@@ -429,22 +518,70 @@ def import_genome(filepath):
 
 
 def extract_epigenetic_snapshot(filepath):
-    """Extract lattice and memory_grid from a genome epigenetic snapshot."""
+    """Extract lattice and memory_grid from a genome epigenetic snapshot.
+
+    Structural refusals raise :class:`PortableGenomeError` -- a ``ValueError``
+    subclass -- with an exact, value-free message, each validated at the site
+    that dereferences it and before any of its contents is read:
+
+      - the genome root, ``epigenetic_snapshot`` and (when a memory grid is
+        present) ``memory_layout`` must be JSON objects. Previously each was
+        dereferenced with ``.get()``, so any other JSON root -- an array,
+        string, number, Boolean or ``null`` -- raised an ambient
+        ``AttributeError``;
+      - ``lattice_shape`` must be a JSON array of integers, because ``tuple()``
+        and ``reshape`` dereference it;
+      - ``lattice_b64`` / ``memory_grid_b64`` must be JSON strings, because
+        ``base64.b64decode`` raises ``TypeError`` on other types;
+      - ``num_channels`` must be an integer when present, because ``reshape``
+        dereferences it;
+      - ``snapshot_generation`` / ``snapshot_ca_step`` must be integers when
+        present, because consumers format them with ``:,``.
+
+    Each check runs immediately before the value it guards is dereferenced.
+    They are not all front-loaded: ``memory_layout`` and ``num_channels`` are
+    validated at the point the memory grid is decoded, which is after the
+    lattice has already been reshaped.
+
+    Those ambient ``AttributeError`` and ``TypeError`` classes are programming
+    -defect signals, so a caller that translates malformed input cannot catch
+    them without also masking real bugs. Raising the module's existing domain
+    error instead lets an ordinary ``ValueError`` handler translate a bad file
+    while genuine defects keep propagating.
+
+    Unchanged: an absent ``epigenetic_snapshot`` and one with
+    ``included`` false both return ``None``; an absent ``memory_layout`` still
+    yields the ``MEMORY_CHANNELS`` default; a missing required key still raises
+    ``KeyError``; and a validly shaped genome decodes exactly as before.
+
+    This does NOT make the extractor total. Value ranges, base64 payload
+    lengths, dimension magnitudes and cross-field consistency are still
+    NumPy's or the caller's concern.
+    """
     filepath = Path(filepath)
     with open(filepath, "r", encoding="utf-8") as f:
         genome = json.load(f)
-    epi = genome.get("epigenetic_snapshot", {})
+
+    if type(genome) is not dict:
+        raise PortableGenomeError("genome must be a JSON object")
+
+    epi = _require_json_object_section(genome, "epigenetic_snapshot")
     if not epi.get("included", False):
         return None
-    shape = tuple(epi["lattice_shape"])
-    lattice_bytes = base64.b64decode(epi["lattice_b64"])
+    shape = _require_lattice_shape(epi)
+    lattice_bytes = base64.b64decode(_require_json_string(epi, "lattice_b64"))
     lattice = np.frombuffer(lattice_bytes, dtype=np.uint8).reshape(shape)
     memory_grid = None
     if "memory_grid_b64" in epi:
-        mg_bytes = base64.b64decode(epi["memory_grid_b64"])
-        num_channels = genome.get("memory_layout", {}).get("num_channels", MEMORY_CHANNELS)
+        mg_bytes = base64.b64decode(_require_json_string(epi, "memory_grid_b64"))
+        num_channels = _require_channel_count(
+            _require_json_object_section(genome, "memory_layout")
+        )
         memory_grid = np.frombuffer(mg_bytes, dtype=np.float32).reshape((num_channels,) + shape)
-    snapshot_meta = {"generation": epi.get("snapshot_generation", 0), "ca_step": epi.get("snapshot_ca_step", 0)}
+    snapshot_meta = {
+        "generation": _require_counter(epi, "snapshot_generation"),
+        "ca_step": _require_counter(epi, "snapshot_ca_step"),
+    }
     return lattice.copy(), memory_grid.copy() if memory_grid is not None else None, snapshot_meta
 
 

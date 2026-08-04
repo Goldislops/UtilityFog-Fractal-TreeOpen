@@ -380,10 +380,28 @@ def test_hostile_section_does_not_alter_the_message(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
+def _section_helper_names(tree: ast.Module) -> list:
+    """Private refusal helpers with this package's section signature.
+
+    A later package added sibling private refusal helpers for the
+    epigenetic-snapshot extraction contract (see
+    ``tests/test_portable_genome_epigenetic_snapshot.py``), so "private function
+    that raises PortableGenomeError" is no longer a singleton. This package's
+    helper is still uniquely identified by its ``(genome, section_name)``
+    signature -- structure, not name.
+    """
+    return [
+        name
+        for name in _private_error_raising_function_names(tree)
+        if [arg.arg for arg in _function_node(tree, name).args.args]
+        == ["genome", "section_name"]
+    ]
+
+
 def _helper():
     """Resolve the private section-validation helper by structure, not name."""
     tree = ast.parse(inspect.getsource(pg))
-    names = _private_error_raising_function_names(tree)
+    names = _section_helper_names(tree)
     assert len(names) == 1
     return getattr(pg, names[0])
 
@@ -987,7 +1005,7 @@ def _ordered_helper_calls(func: ast.FunctionDef, helper_name: str) -> list:
 
 
 def test_exactly_one_private_section_validation_helper():
-    assert len(_private_error_raising_function_names(_module_tree())) == 1
+    assert len(_section_helper_names(_module_tree())) == 1
 
 
 def test_helper_uses_an_exact_builtin_dict_check():
@@ -1140,19 +1158,28 @@ def test_public_cli_still_catches_only_portable_genome_error():
     assert len(routed) == 1
 
 
-def test_extract_epigenetic_snapshot_untouched_by_this_package():
+def test_extract_epigenetic_snapshot_reuses_this_packages_section_helper():
+    """Superseded lock, updated deliberately.
+
+    This test previously asserted the extractor was *untouched* by this
+    package. A later package -- the epigenetic-snapshot extraction contract in
+    ``tests/test_portable_genome_epigenetic_snapshot.py`` -- extended into it on
+    purpose, reusing this package's section helper rather than duplicating it,
+    and added its own structural refusals. What this module still owns is that
+    the shared helper is the one reused and that the extractor's own decode
+    landmarks are intact.
+    """
     tree = _module_tree()
-    helper_name = _private_error_raising_function_names(tree)[0]
+    helper_name = _section_helper_names(tree)[0]
     fn = _function_node(tree, "extract_epigenetic_snapshot")
     called = {
         node.func.id
         for node in ast.walk(fn)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    # The package did not extend into it …
-    assert helper_name not in called
-    assert not [node for node in ast.walk(fn) if isinstance(node, ast.Raise)]
-    # … and its own landmarks are still in place.
+    # The shared section helper is reused, not re-implemented …
+    assert helper_name in called
+    # … and the extractor's own landmarks are still in place.
     attrs = {
         node.func.attr
         for node in ast.walk(fn)
