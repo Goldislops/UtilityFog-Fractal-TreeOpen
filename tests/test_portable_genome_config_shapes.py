@@ -1185,7 +1185,12 @@ def test_extract_epigenetic_snapshot_reuses_this_packages_section_helper():
         for node in ast.walk(fn)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    assert {"b64decode", "frombuffer", "reshape", "load"} <= attrs
+    assert {"frombuffer", "reshape", "load"} <= attrs
+    # `b64decode` was a landmark here until the wire-integrity package moved
+    # decoding into `_decode_base64_strict` so it could be validated rather
+    # than run permissively. The extractor still owns the decode, now by
+    # delegation — assert that rather than the raw call it replaced.
+    assert "_decode_base64_strict" in called
 
 
 def test_export_genome_untouched_by_this_package():
