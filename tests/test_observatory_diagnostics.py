@@ -693,3 +693,393 @@ def test_diagnostics_module_references_no_renderer():
     for banned in ("scatter3d", "slicer", "dashboard", "animation",
                    "matplotlib", "plotly", "pyplot"):
         assert banned not in source, f"diagnostics references {banned}"
+
+
+# ===========================================================================
+# Totality under hostile input
+#
+# The seam's whole promise is that a malformed runtime-contract value becomes
+# a FAILED CHECK, never a traceback. That promise was false: several wrong
+# dtypes reached `np.isfinite()`, `np.unique()` or `int()` and raised before
+# the check that exists to reject them could be reported.
+#
+# These assert TOTALITY, not specific verdicts: for every input the checks are
+# designed to reject, the whole pipeline -- diagnose, report construction,
+# strict serialization, human formatting -- must complete. Which checks fail
+# is asserted separately above; the claim here is that a report exists at all.
+# ===========================================================================
+
+
+class _Partial:
+    """A snapshot-shaped object with fields deliberately missing.
+
+    `diagnose()` reads its inputs with `getattr(..., None)`, so a library
+    caller can hand it an incomplete object. The report builders must accept
+    exactly what the checks accept.
+    """
+
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+def _raw(lattice, memory, generation=7, ca_step=11, best_fitness=0.5,
+         source="/x/snap.npz"):
+    """Build a snapshot with NO defaulting.
+
+    `_snapshot()` substitutes a valid array when it is handed `None`, which
+    would quietly turn the `non-array-none` cases into healthy snapshots and
+    make them prove nothing. Here `None` means None.
+    """
+    return ObservatorySnapshot(
+        lattice=lattice,
+        memory_grid=memory,
+        generation=generation,
+        ca_step=ca_step,
+        best_fitness=best_fitness,
+        source_path=source,
+    )
+
+
+def _hostile_lattices():
+    good = (2, 3, 4)
+    return [
+        ("uint8-valid", np.zeros(good, dtype=np.uint8)),
+        ("int8", np.zeros(good, dtype=np.int8)),
+        ("int16", np.zeros(good, dtype=np.int16)),
+        ("int32", np.zeros(good, dtype=np.int32)),
+        ("int64", np.zeros(good, dtype=np.int64)),
+        ("uint16", np.zeros(good, dtype=np.uint16)),
+        ("uint64", np.zeros(good, dtype=np.uint64)),
+        ("int8-negative", np.full(good, -3, dtype=np.int8)),
+        ("float32-integral", np.zeros(good, dtype=np.float32)),
+        ("float64-fractional", np.full(good, 0.5, dtype=np.float64)),
+        ("float-nan", np.full(good, np.nan, dtype=np.float64)),
+        ("float-posinf", np.full(good, np.inf, dtype=np.float64)),
+        ("float-neginf", np.full(good, -np.inf, dtype=np.float64)),
+        ("bool", np.zeros(good, dtype=bool)),
+        ("unicode", np.full(good, "x", dtype="<U5")),
+        ("bytes", np.full(good, b"x", dtype="S5")),
+        ("object-ints", np.array([[[1, 2], [3, 4]]], dtype=object)),
+        ("object-strings", np.array([[["a", "b"], ["c", "d"]]], dtype=object)),
+        # Jack's witness: elements that cannot be ordered against each other,
+        # so `np.unique()`'s sort raises.
+        ("object-mixed-unorderable", np.array([[["x", 1]]], dtype=object)),
+        ("object-none", np.array([[[None, None]]], dtype=object)),
+        ("complex64", np.zeros(good, dtype=np.complex64)),
+        ("complex128", np.zeros(good, dtype=np.complex128)),
+        ("datetime64", np.zeros(good, dtype="datetime64[s]")),
+        ("rank0", np.array(1, dtype=np.uint8)),
+        ("rank1", np.zeros((6,), dtype=np.uint8)),
+        ("rank2", np.zeros((3, 4), dtype=np.uint8)),
+        ("rank4", np.zeros((2, 2, 2, 2), dtype=np.uint8)),
+        ("zero-size", np.zeros((0, 3, 4), dtype=np.uint8)),
+        ("zero-size-all", np.zeros((0, 0, 0), dtype=np.uint8)),
+        ("unknown-states", np.full(good, 200, dtype=np.uint8)),
+        ("non-array-list", [[[1]]]),
+        ("non-array-none", None),
+        ("non-array-str", "lattice"),
+    ]
+
+
+def _hostile_memories():
+    good = (2, 3, 4)
+    ok_shape = (NUM_CHANNELS,) + good
+    return [
+        ("float32-valid", np.zeros(ok_shape, dtype=np.float32)),
+        ("float64", np.zeros(ok_shape, dtype=np.float64)),
+        ("float16", np.zeros(ok_shape, dtype=np.float16)),
+        ("int32", np.zeros(ok_shape, dtype=np.int32)),
+        ("uint8", np.zeros(ok_shape, dtype=np.uint8)),
+        ("bool", np.zeros(ok_shape, dtype=bool)),
+        ("complex64", np.zeros(ok_shape, dtype=np.complex64)),
+        ("complex128", np.zeros(ok_shape, dtype=np.complex128)),
+        ("datetime64", np.zeros(ok_shape, dtype="datetime64[s]")),
+        ("unicode", np.full(ok_shape, "x", dtype="<U5")),
+        ("bytes", np.full(ok_shape, b"x", dtype="S5")),
+        ("object-numbers", np.array([[[[1.0]]]], dtype=object)),
+        # Jack's witness: `np.isfinite()` raises TypeError on object dtype.
+        ("object-strings", np.array([[[["x"]]]], dtype=object)),
+        ("object-mixed", np.array([[[["x", 1.0]]]], dtype=object)),
+        ("object-none", np.array([[[[None]]]], dtype=object)),
+        ("nan", np.full(ok_shape, np.nan, dtype=np.float32)),
+        ("posinf", np.full(ok_shape, np.inf, dtype=np.float32)),
+        ("neginf", np.full(ok_shape, -np.inf, dtype=np.float32)),
+        ("zero-size", np.zeros((NUM_CHANNELS, 0, 3, 4), dtype=np.float32)),
+        ("rank0", np.array(1.0, dtype=np.float32)),
+        ("wrong-rank-3", np.zeros((NUM_CHANNELS, 3, 4), dtype=np.float32)),
+        ("wrong-rank-5", np.zeros((NUM_CHANNELS, 2, 3, 4, 1), dtype=np.float32)),
+        ("wrong-channels-3", np.zeros((3,) + good, dtype=np.float32)),
+        ("wrong-channels-9", np.zeros((9,) + good, dtype=np.float32)),
+        ("wrong-spatial", np.zeros((NUM_CHANNELS, 9, 9, 9), dtype=np.float32)),
+        ("non-array-list", [0.0]),
+        ("non-array-none", None),
+        ("non-array-str", "memory"),
+    ]
+
+
+class _Uncoercible:
+    """A hostile counter whose float conversion fails."""
+
+    def __float__(self):
+        raise ValueError("no float for you")
+
+
+def _hostile_metadata():
+    return [
+        ("int", 7),
+        ("zero", 0),
+        ("negative", -1),
+        ("bool-true", True),
+        ("bool-false", False),
+        ("float", 1.5),
+        ("float-nan", float("nan")),
+        ("float-inf", float("inf")),
+        ("float-neginf", float("-inf")),
+        ("str", "9"),
+        ("none", None),
+        ("np-int64", np.int64(5)),
+        ("np-float32", np.float32(1.5)),
+        ("np-bool", np.bool_(True)),
+        # `float()` raises OverflowError -- an ArithmeticError, so NOT caught
+        # by a (TypeError, ValueError) handler.
+        ("huge-int", 10 ** 400),
+        ("huge-negative-int", -(10 ** 400)),
+        ("complex", complex(1, 2)),
+        ("uncoercible", _Uncoercible()),
+        ("object", object()),
+        ("list", [1, 2]),
+    ]
+
+
+def _assert_total(snapshot, source="/x/snap.npz"):
+    """The seam must produce a complete, strict, deterministic report.
+
+    Asserts the whole promise at once: diagnose returns rather than raises,
+    all 13 checks are present in the established order, both report kinds
+    build, strict serialization succeeds, human formatting succeeds, and a
+    second run over the same input produces identical bytes.
+    """
+    checks = diagnostics.diagnose(snapshot)
+    assert len(checks) == 13
+    assert [c.name for c in checks] == [c.name for c in diagnostics.diagnose(snapshot)]
+    assert all(type(c.ok) is bool for c in checks), "check.ok must be a real bool"
+    assert all(type(c.detail) is str for c in checks)
+
+    report = diagnostics.doctor_report(snapshot, source, checks)
+    text = _dumps(report)                     # strict: allow_nan=False
+    assert json.loads(text) == report
+    assert "NaN" not in text and "Infinity" not in text
+
+    info = _dumps(diagnostics.info_report(snapshot, source))
+    assert "NaN" not in info and "Infinity" not in info
+
+    lines = diagnostics.format_doctor(checks, source)
+    assert lines[-1].startswith(("OK:", "FAILED:"))
+    assert len([ln for ln in lines if ln.startswith("  [")]) == 13
+
+    # Deterministic: byte-identical on a second pass over the same input.
+    assert _dumps(diagnostics.doctor_report(
+        snapshot, source, diagnostics.diagnose(snapshot))) == text
+    return checks, report, lines
+
+
+@pytest.mark.parametrize(
+    "lattice", [pytest.param(v, id=k) for k, v in _hostile_lattices()]
+)
+def test_diagnose_is_total_over_lattice_representations(lattice):
+    """Jack's witness among them: a mixed object lattice reached `np.unique()`
+    and raised TypeError before `lattice_dtype` could be reported failed."""
+    memory = np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=np.float32)
+    _assert_total(_raw(lattice, memory))
+
+
+@pytest.mark.parametrize(
+    "memory", [pytest.param(v, id=k) for k, v in _hostile_memories()]
+)
+def test_diagnose_is_total_over_memory_representations(memory):
+    """Jack's witness among them: an object-dtype grid reached `np.isfinite()`
+    and raised TypeError."""
+    lattice = np.zeros((2, 3, 4), dtype=np.uint8)
+    lattice[0, 0, 0] = 1
+    _assert_total(_raw(lattice, memory))
+
+
+@pytest.mark.parametrize(
+    "value", [pytest.param(v, id=k) for k, v in _hostile_metadata()]
+)
+@pytest.mark.parametrize("field", ["generation", "ca_step", "best_fitness"])
+def test_diagnose_is_total_over_metadata(field, value):
+    """`float()` raises OverflowError for a huge int and TypeError for a
+    complex; neither may escape the checks or the report builders."""
+    _assert_total(_snapshot(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "lattice", [pytest.param(v, id=k) for k, v in _hostile_lattices()[:12]]
+)
+@pytest.mark.parametrize(
+    "memory", [pytest.param(v, id=k) for k, v in _hostile_memories()[:12]]
+)
+def test_diagnose_is_total_over_combined_hostility(lattice, memory):
+    """Malformed lattice and malformed memory together: no gate may depend on
+    the other side being well-formed."""
+    _assert_total(_raw(lattice, memory))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"lattice": np.zeros((2, 3, 4), dtype=np.uint8)},
+        {"memory_grid": np.zeros((8, 2, 3, 4), dtype=np.float32)},
+        {"generation": 1, "ca_step": 2, "best_fitness": 0.5},
+    ],
+    ids=["nothing", "lattice-only", "memory-only", "metadata-only"],
+)
+def test_reports_survive_a_snapshot_with_missing_attributes(fields):
+    """`diagnose()` reads with `getattr(..., None)`, so it accepts an
+    incomplete object; the report builders must accept the same."""
+    _assert_total(_Partial(**fields))
+
+
+# --- the two reproduced blockers, named explicitly -------------------------
+
+
+def test_object_memory_grid_does_not_reach_isfinite():
+    """Reproducer: `np.isfinite(np.array([[[["x"]]]], dtype=object))` raises
+    TypeError. The finiteness check must report a failure instead."""
+    snap = _snapshot(memory=np.array([[[["x"]]]], dtype=object))
+    checks = _named(diagnostics.diagnose(snap))
+    assert not checks["memory_values_finite"].ok
+    assert not checks["memory_dtype"].ok
+
+
+def test_unorderable_object_lattice_does_not_reach_unique():
+    """Reproducer: `np.unique(np.array([[["x", 1]]], dtype=object))` sorts and
+    raises TypeError comparing str with int. `lattice_dtype` and
+    `lattice_states_known` must both be reported failed instead."""
+    snap = _snapshot(
+        lattice=np.array([[["x", 1]]], dtype=object),
+        memory=np.zeros((NUM_CHANNELS, 1, 1, 2), dtype=np.float32),
+    )
+    checks = _named(diagnostics.diagnose(snap))
+    assert not checks["lattice_dtype"].ok
+    assert not checks["lattice_states_known"].ok
+
+
+@pytest.mark.parametrize("dtype", ["<U5", "S5", "O", "complex128", "datetime64[s]"])
+def test_unsupported_lattice_dtype_never_passes_the_vocabulary_check(dtype):
+    """A skipped dependent evaluation is not a passing result: when a dtype is
+    unsafe to inspect, the vocabulary check reports failure, never success."""
+    lattice = np.zeros((2, 3, 4), dtype=dtype)
+    checks = _named(diagnostics.diagnose(_snapshot(lattice=lattice)))
+    assert not checks["lattice_dtype"].ok
+    assert not checks["lattice_states_known"].ok
+
+
+@pytest.mark.parametrize("dtype", ["<U5", "S5", "O", "complex128", "datetime64[s]"])
+def test_unsupported_memory_dtype_never_passes_the_finiteness_check(dtype):
+    memory = np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=dtype)
+    checks = _named(diagnostics.diagnose(_snapshot(memory=memory)))
+    assert not checks["memory_dtype"].ok
+    assert not checks["memory_values_finite"].ok
+
+
+def test_huge_integer_fitness_is_reported_not_raised():
+    """`float(10**400)` raises OverflowError, an ArithmeticError, so it is not
+    caught by a (TypeError, ValueError) handler."""
+    checks = _named(diagnostics.diagnose(_snapshot(best_fitness=10 ** 400)))
+    assert not checks["best_fitness_finite"].ok
+
+
+def test_huge_integer_counter_still_serializes_strictly():
+    snap = _snapshot(generation=10 ** 400)
+    assert not _named(diagnostics.diagnose(snap))["generation_non_negative_int"].ok
+    _dumps(diagnostics.info_report(snap, "/s"))
+
+
+def test_boolean_fitness_is_not_silently_treated_as_one_point_zero():
+    """`True` is not a fitness value. The check must fail, and the report must
+    not present it as the number 1.0."""
+    snap = _snapshot(best_fitness=True)
+    assert not _named(diagnostics.diagnose(snap))["best_fitness_finite"].ok
+    assert diagnostics.info_report(snap, "/s")["best_fitness"] is None
+
+
+def test_fractional_float_counter_is_not_silently_truncated():
+    snap = _snapshot(generation=2.7)
+    assert not _named(diagnostics.diagnose(snap))["generation_non_negative_int"].ok
+    assert diagnostics.info_report(snap, "/s")["generation"] != 2
+
+
+def test_hostile_inputs_are_not_modified():
+    """Side-effect freedom under hostile input, not merely healthy input."""
+    lattice = np.array([[["x", 1]]], dtype=object)
+    memory = np.array([[[["x"]]]], dtype=object)
+    lattice_before = lattice.tolist()
+    memory_before = memory.tolist()
+    _assert_total(_snapshot(lattice=lattice, memory=memory))
+    assert lattice.tolist() == lattice_before
+    assert memory.tolist() == memory_before
+
+
+@pytest.mark.parametrize(
+    "lattice", [pytest.param(v, id=k) for k, v in _hostile_lattices()]
+)
+def test_no_detail_grows_with_the_payload(lattice):
+    """No detail may grow with the data, however hostile or large."""
+    memory = np.zeros((NUM_CHANNELS, 2, 3, 4), dtype=np.float32)
+    checks = diagnostics.diagnose(_raw(lattice, memory))
+    for check in checks:
+        assert len(check.detail) < 200, f"{check.name}: {check.detail[:80]}"
+
+
+# --- human output must not be forgeable ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        "/x/a\nOK: all 13 checks passed.npz",
+        "/x/a\r\n  [PASS] lattice_is_array  forged.npz",
+        "/x/a\rFAILED: 0 of 13 checks did not pass.npz",
+        "/x/a\u2028  [PASS] forged.npz",
+        "/x/a\u2029  [PASS] forged.npz",
+        "/x/a\x85OK: all 13 checks passed.npz",
+        "/x/a\v  [PASS] forged.npz",
+        "/x/a\f  [PASS] forged.npz",
+        "/x/a\x1c  [PASS] forged.npz",
+        "/x/a\x1d  [PASS] forged.npz",
+        "/x/a\x1e  [PASS] forged.npz",
+    ],
+    ids=["lf", "crlf", "cr", "line-sep", "para-sep", "nel", "vtab",
+         "formfeed", "file-sep", "group-sep", "record-sep"],
+)
+def test_a_source_path_cannot_forge_report_lines(hostile):
+    """A pathname is untrusted data. Human `doctor` output must not let one
+    inject what looks like an extra check row or a second summary line.
+
+    `str.splitlines()` splits on more than \\n and \\r -- \\v, \\f, \\x1c-\\x1e,
+    \\x85, \\u2028 and \\u2029 all count -- so the header line is checked
+    against that full set, not just the obvious two.
+    """
+    checks = diagnostics.diagnose(_snapshot())
+    lines = diagnostics.format_doctor(checks, hostile)
+
+    assert len(lines[0].splitlines()) == 1, "header spans more than one line"
+    body = [ln for ln in lines if ln.startswith("  [")]
+    assert len(body) == 13, f"forged check rows: {len(body)}"
+    summaries = [ln for ln in lines if ln.startswith(("OK:", "FAILED:"))]
+    assert len(summaries) == 1, f"forged summary lines: {len(summaries)}"
+
+
+def test_json_mode_keeps_a_hostile_path_as_ordinary_escaped_data():
+    """JSON needs no sanitising -- ordinary escaping already makes the newline
+    inert -- but it must round-trip to exactly what was supplied."""
+    hostile = "/x/a\nOK: all 13 checks passed.npz"
+    report = diagnostics.doctor_report(
+        _snapshot(), hostile, diagnostics.diagnose(_snapshot())
+    )
+    text = _dumps(report)
+    assert "\n" not in text, "raw newline leaked into the JSON document"
+    assert json.loads(text)["source"] == hostile
