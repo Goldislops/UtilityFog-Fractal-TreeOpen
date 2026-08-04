@@ -9,8 +9,11 @@ scope -- it asserted the function was *untouched* by its package. That lock has
 been updated there, deliberately, to record that this package extends into the
 extractor and reuses its section helper rather than duplicating it.
 
-Whole-schema validation, value ranges, payload lengths, dimension magnitudes
-and cross-field consistency remain out of scope and are not asserted here.
+Wire integrity — base64 validity, payload lengths, lattice rank and dimension
+positivity — is now in scope and asserted here. Whole-schema validation,
+scientific value ranges and cross-field semantic consistency remain out of
+scope. Which *positive* channel counts the Observatory can consume is a
+separate layer; see ``tests/test_observatory_genome_loader.py``.
 
 Before this package every one of those was dereferenced without a shape check,
 so a genome that parsed as valid JSON with the wrong type raised an ambient
@@ -238,6 +241,177 @@ def test_absent_snapshot_counter_defaults_to_zero(tmp_path, field):
 
 
 # ---------------------------------------------------------------------------
+# Wire integrity: rank, positivity, strict base64, payload lengths
+#
+# Everything below is settled in Python before NumPy is asked for anything, so
+# a hostile shape can neither allocate nor overflow first.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param([], id="rank-0-empty"),
+        pytest.param([8], id="rank-1"),
+        pytest.param([2, 4], id="rank-2"),
+        pytest.param([2, 2, 2, 1], id="rank-4"),
+    ],
+)
+def test_lattice_shape_must_have_exactly_three_dimensions(tmp_path, shape):
+    """A non-3D lattice used to decode silently and break in a consumer."""
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_shape"] = shape
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(
+        PortableGenomeError, match="lattice_shape must have exactly three dimensions"
+    ):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param([2, 0, 2], id="zero"),
+        pytest.param([0, 0, 0], id="all-zero"),
+        pytest.param([2, -2, 2], id="negative"),
+        pytest.param([-1, -1, -1], id="all-negative"),
+    ],
+)
+def test_lattice_shape_dimensions_must_be_positive(tmp_path, shape):
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_shape"] = shape
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(
+        PortableGenomeError, match="lattice_shape entries must be positive"
+    ):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize("field", ["lattice_b64", "memory_grid_b64"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("!!!!!!!!", id="out-of-alphabet"),
+        pytest.param("AAAA=", id="excess-padding"),
+        pytest.param("AA=A", id="discontinuous-padding"),
+        pytest.param("AAA", id="truncated-group"),
+        pytest.param("AA AA", id="embedded-space"),
+    ],
+)
+def test_base64_is_decoded_strictly(tmp_path, field, text):
+    """`b64decode` defaults to validate=False, which silently DISCARDS
+    out-of-alphabet characters -- '!!!!!!!!' decoded to b'' and 'AAAA=' to
+    three bytes, both surfacing much later as a reshape mismatch, if at all."""
+    epi = _valid_epi()
+    epi[field] = text
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(PortableGenomeError, match=f"{field} is not valid base64"):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize("nbytes", [0, 1, 7, 9, 64])
+def test_lattice_payload_length_must_match_the_declared_shape(tmp_path, nbytes):
+    """SHAPE is (2,2,2) -> exactly 8 uint8 bytes."""
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_b64"] = base64.b64encode(b"\x00" * nbytes).decode("ascii")
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(
+        PortableGenomeError,
+        match="lattice_b64 payload length does not match the declared shape",
+    ):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize("nbytes", [0, 4, 252, 260])
+def test_memory_payload_length_must_match_shape_and_channels(tmp_path, nbytes):
+    """8 channels x 8 cells x 4 bytes == 256."""
+    epi = _valid_epi()
+    epi["memory_grid_b64"] = base64.b64encode(b"\x00" * nbytes).decode("ascii")
+    path = _write(tmp_path, {
+        "epigenetic_snapshot": epi,
+    })
+    with pytest.raises(
+        PortableGenomeError,
+        match="memory_grid_b64 payload length does not match the declared shape",
+    ):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param([10 ** 7, 10 ** 7, 10 ** 7], id="1e21-cells"),
+        pytest.param([2 ** 62, 2, 2], id="beyond-ssize-t"),
+        pytest.param([2 ** 200, 1, 1], id="astronomically-large"),
+    ],
+)
+def test_enormous_dimensions_are_refused_without_overflow_or_allocation(tmp_path, shape):
+    """The expected byte count is computed with unbounded Python integers, so
+    an enormous declared dimension is rejected by comparison instead of
+    reaching NumPy and raising an untranslatable OverflowError -- and nothing
+    of that size is ever allocated."""
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_shape"] = shape
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(PortableGenomeError) as excinfo:
+        extract_epigenetic_snapshot(path)
+    assert "payload length does not match" in str(excinfo.value)
+
+
+def test_enormous_dimension_message_does_not_echo_the_value(tmp_path):
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_shape"] = [10 ** 7, 10 ** 7, 10 ** 7]
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(PortableGenomeError) as excinfo:
+        extract_epigenetic_snapshot(path)
+    message = str(excinfo.value)
+    assert "10000000" not in message
+    assert len(message.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param("yes", id="string"), pytest.param(1, id="number-one"),
+     pytest.param(0, id="number-zero"), pytest.param([], id="array"),
+     pytest.param({}, id="object"), pytest.param(None, id="null")],
+)
+def test_included_must_be_an_actual_json_boolean(tmp_path, value):
+    """Truthiness used to decide this: `"included": "no"` enabled extraction."""
+    epi = _valid_epi(with_memory=False)
+    epi["included"] = value
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(PortableGenomeError, match="included must be a JSON boolean"):
+        extract_epigenetic_snapshot(path)
+
+
+@pytest.mark.parametrize("value", [0, -1, -8])
+def test_num_channels_must_be_positive(tmp_path, value):
+    path = _write(tmp_path, {
+        "epigenetic_snapshot": _valid_epi(),
+        "memory_layout": {"num_channels": value},
+    })
+    with pytest.raises(PortableGenomeError, match="num_channels must be positive"):
+        extract_epigenetic_snapshot(path)
+
+
+def test_deeply_nested_json_is_a_domain_refusal(tmp_path):
+    """CPython's JSON scanner recurses per level, so a deeply nested document
+    raises RecursionError -- a RuntimeError no caller sanely translates."""
+    path = tmp_path / "deep.json"
+    path.write_text("[" * 60000 + "]" * 60000, encoding="utf-8")
+    with pytest.raises(PortableGenomeError, match="genome JSON is nested too deeply"):
+        extract_epigenetic_snapshot(path)
+
+
+def test_ordinary_json_syntax_error_is_unchanged(tmp_path):
+    """Anti-vacuity: the nesting guard did not swallow normal decode errors."""
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        extract_epigenetic_snapshot(path)
+
+
+# ---------------------------------------------------------------------------
 # Absence is still KeyError -- shape checks did not swallow it
 # ---------------------------------------------------------------------------
 
@@ -309,15 +483,53 @@ def _handlers(func):
 @pytest.mark.parametrize(
     "func",
     [
-        extract_epigenetic_snapshot,
         pg._require_json_object_section,
         pg._require_json_string,
         pg._require_lattice_shape,
         pg._require_channel_count,
         pg._require_counter,
+        pg._require_json_boolean,
+        pg._require_payload_length,
     ],
 )
 def test_no_exception_handler_in_the_refusal_path(func):
-    """The refusals are type checks, not caught-and-retranslated exceptions:
-    nothing here can swallow an unrelated defect."""
+    """Every shape refusal is a plain type check, not a caught-and-retranslated
+    exception: none of these can swallow an unrelated defect."""
     assert _handlers(func) == []
+
+
+@pytest.mark.parametrize(
+    "func, expected",
+    [
+        # `ValueError`, not just `binascii.Error`: a non-ASCII string fails in
+        # `_bytes_from_decode_data` with a plain, value-quoting `ValueError`,
+        # which would otherwise escape the value-free message contract.
+        # `binascii.Error` subclasses `ValueError`, so one clause covers both.
+        (pg._decode_base64_strict, ["ValueError"]),
+        (extract_epigenetic_snapshot, ["RecursionError"]),
+    ],
+)
+def test_the_only_handlers_are_narrow_and_input_specific(func, expected):
+    """Two handlers exist in the whole path, each wrapping a single call on
+    already-validated input. Neither catches `Exception`, `BaseException`,
+    `TypeError`, `AttributeError` or a bare `except`."""
+    caught = []
+    for handler in _handlers(func):
+        assert handler.type is not None, "bare except introduced"
+        caught.append(ast.unparse(handler.type))
+    assert caught == expected
+    for banned in ("Exception", "BaseException", "TypeError", "AttributeError"):
+        assert banned not in caught
+
+
+def test_non_ascii_base64_is_still_a_domain_refusal(tmp_path):
+    """Anti-regression for the widened catch: a non-ASCII payload must not
+    escape as a bare ValueError quoting the argument."""
+    epi = _valid_epi(with_memory=False)
+    epi["lattice_b64"] = "AAA€"
+    path = _write(tmp_path, {"epigenetic_snapshot": epi})
+    with pytest.raises(PortableGenomeError) as excinfo:
+        extract_epigenetic_snapshot(path)
+    message = str(excinfo.value)
+    assert message == "lattice_b64 is not valid base64"
+    assert "€" not in message

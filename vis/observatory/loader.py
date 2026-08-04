@@ -62,6 +62,48 @@ class ObservatorySnapshot:
 
 
 # ---------------------------------------------------------------------------
+# Channel compatibility
+# ---------------------------------------------------------------------------
+
+def _normalize_memory_grid(memory_grid, shape) -> np.ndarray:
+    """Return an 8-channel NumPy memory grid for any supported legacy shape.
+
+    Every Observatory consumer indexes channels 0-7, so this is the single
+    contract both snapshot formats must satisfy. The migration itself belongs
+    to the engine and is NOT reimplemented here: this delegates to
+    ``scripts.continuous_evolution_ca._migrate_memory_grid``, which owns the
+    established Phase-5-to-Phase-6 and historic 3-channel mappings.
+
+    Extracted verbatim from ``load_npz``, where it previously lived inline, so
+    that ``load_genome`` gets the same guarantee. Before this, a portable-genome
+    JSON snapshot carrying a legacy 3- or 5-channel grid reached the Observatory
+    unnormalised and failed later inside a consumer with an ``IndexError``.
+
+    Behaviour preserved exactly, including the fallback's scope: the ``try``
+    still spans the import, the migration and the device-array conversion, so
+    an ``ImportError`` raised anywhere in that block still selects the
+    zero-padding fallback. An unsupported channel count raises the engine's
+    ``ValueError`` -- a translatable, actionable loading failure -- rather than
+    surfacing as a renderer ``IndexError``.
+    """
+    if memory_grid.shape[0] == NUM_CHANNELS:
+        return memory_grid
+    try:
+        from scripts.continuous_evolution_ca import _migrate_memory_grid
+        migrated = _migrate_memory_grid(memory_grid, tuple(shape))
+        if not isinstance(migrated, np.ndarray):
+            # engine helper may return a GPU device array; the snapshot contract is NumPy
+            migrated = migrated.get()
+        return migrated
+    except ImportError:
+        # Fallback: zero-pad to 8 channels
+        old_ch = memory_grid.shape[0]
+        new_grid = np.zeros((NUM_CHANNELS,) + tuple(shape), dtype=np.float32)
+        new_grid[:old_ch] = memory_grid[:old_ch]
+        return new_grid
+
+
+# ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
 
@@ -101,21 +143,7 @@ def load_npz(path: str | Path) -> ObservatorySnapshot:
 
     # Auto-migrate old memory grid formats. The archive is already closed here,
     # so neither the engine import nor the migration retains the file handle.
-    if memory_grid.shape[0] != NUM_CHANNELS:
-        try:
-            from scripts.continuous_evolution_ca import _migrate_memory_grid
-            memory_grid = _migrate_memory_grid(memory_grid, lattice.shape)
-            if not isinstance(memory_grid, np.ndarray):
-                # engine helper may return a GPU device array; the snapshot contract is NumPy
-                memory_grid = memory_grid.get()
-        except ImportError:
-            # Fallback: zero-pad to 8 channels
-            old_ch = memory_grid.shape[0]
-            new_grid = np.zeros(
-                (NUM_CHANNELS,) + lattice.shape, dtype=np.float32
-            )
-            new_grid[:old_ch] = memory_grid[:old_ch]
-            memory_grid = new_grid
+    memory_grid = _normalize_memory_grid(memory_grid, lattice.shape)
 
     return ObservatorySnapshot(
         lattice=lattice.astype(np.uint8),
@@ -132,6 +160,12 @@ def load_genome(path: str | Path) -> ObservatorySnapshot:
 
     Delegates to ``scripts.portable_genome.extract_epigenetic_snapshot()``.
     Raises ValueError if the genome has no epigenetic data.
+
+    Legacy 3- and 5-channel grids are normalised through the same seam the NPZ
+    path uses, so both formats hand the Observatory the identical 8-channel
+    contract. An absent memory grid still yields the established 8-channel
+    zero grid; an unsupported channel count fails here, during loading, rather
+    than later inside a renderer or metadata consumer.
     """
     from scripts.portable_genome import extract_epigenetic_snapshot
 
@@ -145,9 +179,12 @@ def load_genome(path: str | Path) -> ObservatorySnapshot:
     lattice, memory_grid, meta = result
     if memory_grid is None:
         memory_grid = np.zeros((NUM_CHANNELS,) + lattice.shape, dtype=np.float32)
+    else:
+        # Same 8-channel Observatory contract the NPZ path has always had.
+        memory_grid = _normalize_memory_grid(memory_grid, lattice.shape)
     return ObservatorySnapshot(
-        lattice=lattice,
-        memory_grid=memory_grid,
+        lattice=lattice.astype(np.uint8),
+        memory_grid=memory_grid.astype(np.float32),
         generation=meta.get("generation", 0),
         ca_step=meta.get("ca_step", 0),
         best_fitness=0.0,

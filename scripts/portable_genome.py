@@ -9,6 +9,7 @@ the organism on any compatible substrate.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -64,8 +65,9 @@ class PortableGenomeError(ValueError):
     This does NOT make the module total. Still outside its structural boundary,
     and still surfacing as their original exceptions: individual field values
     *inside* an otherwise correctly shaped section, ``fitness``, schema
-    completeness, base64 payload lengths, dimension magnitudes, cross-field
-    consistency, and any semantic or numeric range validation.
+    completeness, cross-field consistency, and any semantic or numeric range
+    validation. (Base64 validity, payload lengths and dimension positivity ARE
+    now covered, by the epigenetic-snapshot wire-integrity checks.)
     """
 
 
@@ -274,6 +276,64 @@ def _require_json_object_section(genome: dict, section_name: str) -> dict:
     return section
 
 
+# Wire-integrity constants for the epigenetic snapshot payload.
+_LATTICE_RANK = 3
+_UINT8_BYTES = 1
+_FLOAT32_BYTES = 4
+
+
+def _require_json_boolean(section: dict, field_name: str, default: bool = False) -> bool:
+    """Return ``section[field_name]`` only when it is an actual JSON Boolean.
+
+    Absent yields ``default``. Truthiness is deliberately not accepted: a
+    string, number or array would otherwise silently enable or disable a code
+    path the exporter never wrote.
+    """
+    if field_name not in section:
+        return default
+    value = section[field_name]
+    if type(value) is not bool:
+        raise PortableGenomeError(f"{field_name} must be a JSON boolean")
+    return value
+
+
+def _decode_base64_strict(section: dict, field_name: str) -> bytes:
+    """Return the strictly decoded base64 payload of ``section[field_name]``.
+
+    ``base64.b64decode`` defaults to ``validate=False``, which silently DISCARDS
+    every character outside the alphabet and tolerates excess padding -- so
+    ``"!!!!!!!!"`` decodes to ``b""`` and ``"AAAA="`` to three bytes. Both then
+    fail much later, as a NumPy reshape mismatch, if at all. Strict decoding
+    refuses them deterministically at the field that owns them.
+
+    ``ValueError`` is the caught type, not merely ``binascii.Error``: for a
+    non-ASCII string ``b64decode`` fails in ``_bytes_from_decode_data`` and
+    raises a plain ``ValueError`` whose message quotes the argument, so
+    catching only ``binascii.Error`` would let a value-bearing message escape.
+    ``binascii.Error`` subclasses ``ValueError``, so one clause covers both,
+    and the scope is a single call on already-validated string input.
+    """
+    text = _require_json_string(section, field_name)
+    try:
+        return base64.b64decode(text, validate=True)
+    except ValueError as exc:
+        raise PortableGenomeError(f"{field_name} is not valid base64") from exc
+
+
+def _require_payload_length(payload: bytes, expected: int, field_name: str) -> None:
+    """Refuse a payload whose decoded length disagrees with the declared shape.
+
+    ``expected`` is computed with unbounded Python integers, so an enormous
+    declared dimension is compared exactly instead of reaching NumPy and
+    raising ``OverflowError`` -- and neither the expected nor the actual count
+    appears in the message.
+    """
+    if len(payload) != expected:
+        raise PortableGenomeError(
+            f"{field_name} payload length does not match the declared shape"
+        )
+
+
 def _require_json_string(section: dict, field_name: str) -> str:
     """Return ``section[field_name]`` only when it is a JSON string.
 
@@ -304,18 +364,28 @@ def _require_lattice_shape(section: dict) -> Tuple[int, ...]:
     ``__index__``, so NumPy would have accepted ``True`` as the dimension ``1``.
     No exporter emits Booleans here.
 
-    A missing key still raises ``KeyError``. Dimension *magnitudes* are NOT
-    checked: a negative dimension remains NumPy's ``ValueError``, and one
-    exceeding the platform index range remains its ``OverflowError``. An empty
-    array is likewise accepted and yields a 0-d lattice. Those are value-range
-    concerns, deliberately outside this structural boundary.
+    The lattice is a 3-D volume by construction, so the rank is fixed at three
+    and every dimension must be positive. Previously any rank was accepted --
+    a rank-2 or rank-4 array decoded silently into a non-3D lattice that broke
+    much later inside a consumer -- and a zero, negative or enormous dimension
+    was left for NumPy, surfacing as a ``ValueError`` echoing the supplied
+    values or, past the platform index range, an untranslatable
+    ``OverflowError``.
+
+    A missing key still raises ``KeyError``. Dimension magnitudes beyond
+    positivity are not checked here: the payload-length check that follows is
+    what bounds them, and it does so with exact Python integer arithmetic.
     """
     raw = section["lattice_shape"]
     if type(raw) is not list:
         raise PortableGenomeError("lattice_shape must be a JSON array")
+    if len(raw) != _LATTICE_RANK:
+        raise PortableGenomeError("lattice_shape must have exactly three dimensions")
     for dim in raw:
         if type(dim) is not int:
             raise PortableGenomeError("lattice_shape entries must be integers")
+        if dim <= 0:
+            raise PortableGenomeError("lattice_shape entries must be positive")
     return tuple(raw)
 
 
@@ -349,12 +419,21 @@ def _require_channel_count(layout: dict) -> int:
     deliberate narrowing, NOT the removal of a ``TypeError``: ``bool``
     implements ``__index__``, so NumPy would have accepted ``True`` as the
     dimension ``1``. No exporter emits a Boolean here.
+
+    A count of zero or less is refused: it cannot describe a memory grid, and
+    it previously reached NumPy as a degenerate or negative dimension. Which
+    POSITIVE counts the Observatory can actually consume is a separate,
+    downstream question -- see ``vis.observatory.loader``, which owns channel
+    compatibility. This function only guarantees the wire value is a usable
+    positive integer.
     """
     if "num_channels" not in layout:
         return MEMORY_CHANNELS
     value = layout["num_channels"]
     if type(value) is not int:
         raise PortableGenomeError("num_channels must be an integer")
+    if value <= 0:
+        raise PortableGenomeError("num_channels must be positive")
     return value
 
 
@@ -538,10 +617,9 @@ def extract_epigenetic_snapshot(filepath):
       - ``snapshot_generation`` / ``snapshot_ca_step`` must be integers when
         present, because consumers format them with ``:,``.
 
-    Each check runs immediately before the value it guards is dereferenced.
-    They are not all front-loaded: ``memory_layout`` and ``num_channels`` are
-    validated at the point the memory grid is decoded, which is after the
-    lattice has already been reshaped.
+    Every check now runs before ANY NumPy call: the wire-integrity package
+    moved both `frombuffer`/`reshape` pairs to the end of the function, so a
+    hostile shape can neither allocate nor overflow ahead of validation.
 
     Those ambient ``AttributeError`` and ``TypeError`` classes are programming
     -defect signals, so a caller that translates malformed input cannot catch
@@ -554,34 +632,78 @@ def extract_epigenetic_snapshot(filepath):
     yields the ``MEMORY_CHANNELS`` default; a missing required key still raises
     ``KeyError``; and a validly shaped genome decodes exactly as before.
 
-    This does NOT make the extractor total. Value ranges, base64 payload
-    lengths, dimension magnitudes and cross-field consistency are still
-    NumPy's or the caller's concern.
+    Wire integrity is settled in Python BEFORE NumPy is asked for anything:
+
+      - ``included`` must be an actual JSON Boolean when present;
+      - ``lattice_shape`` must be exactly three positive integers;
+      - both base64 payloads decode strictly, so an out-of-alphabet character
+        or bad padding is refused instead of being silently discarded;
+      - each decoded payload length must equal exactly what the declared shape
+        implies -- one byte per cell for the lattice, and
+        ``num_channels x cells x 4`` for the memory grid -- computed with
+        unbounded Python integers, so an enormous declared dimension is
+        rejected by comparison rather than reaching NumPy and raising
+        ``OverflowError``;
+      - ``num_channels`` must be a positive integer when a grid is present.
+
+    A deeply nested JSON document is translated at the single ``json.load``
+    call, because CPython's scanner raises ``RecursionError`` -- a
+    ``RuntimeError`` -- which no reasonable caller translates.
+
+    This does NOT make the extractor total, and it makes no claim about which
+    channel counts the Observatory can render: that is
+    ``vis.observatory.loader``'s boundary. Scientific value ranges, dimension
+    plausibility and cross-field semantics remain unvalidated.
     """
     filepath = Path(filepath)
     with open(filepath, "r", encoding="utf-8") as f:
-        genome = json.load(f)
+        try:
+            genome = json.load(f)
+        except RecursionError as exc:
+            # Scoped to this one decode call and to this input: CPython's JSON
+            # scanner recurses per nesting level, so a deeply nested document
+            # exhausts the stack. `RecursionError` is a `RuntimeError`, outside
+            # every sane translated set, so it would otherwise escape as a
+            # traceback for what is purely malformed input. Nothing else in
+            # this function is inside the handler.
+            raise PortableGenomeError("genome JSON is nested too deeply") from exc
 
     if type(genome) is not dict:
         raise PortableGenomeError("genome must be a JSON object")
 
     epi = _require_json_object_section(genome, "epigenetic_snapshot")
-    if not epi.get("included", False):
+    if not _require_json_boolean(epi, "included"):
         return None
+
+    # Wire integrity is settled entirely in Python before NumPy is asked for
+    # anything, so a hostile shape can neither allocate nor overflow first.
     shape = _require_lattice_shape(epi)
-    lattice_bytes = base64.b64decode(_require_json_string(epi, "lattice_b64"))
-    lattice = np.frombuffer(lattice_bytes, dtype=np.uint8).reshape(shape)
+    cells = shape[0] * shape[1] * shape[2]
+    lattice_bytes = _decode_base64_strict(epi, "lattice_b64")
+    _require_payload_length(lattice_bytes, cells * _UINT8_BYTES, "lattice_b64")
+
     memory_grid = None
+    mg_bytes = None
+    num_channels = None
     if "memory_grid_b64" in epi:
-        mg_bytes = base64.b64decode(_require_json_string(epi, "memory_grid_b64"))
+        mg_bytes = _decode_base64_strict(epi, "memory_grid_b64")
         num_channels = _require_channel_count(
             _require_json_object_section(genome, "memory_layout")
         )
-        memory_grid = np.frombuffer(mg_bytes, dtype=np.float32).reshape((num_channels,) + shape)
+        _require_payload_length(
+            mg_bytes, num_channels * cells * _FLOAT32_BYTES, "memory_grid_b64"
+        )
+
     snapshot_meta = {
         "generation": _require_counter(epi, "snapshot_generation"),
         "ca_step": _require_counter(epi, "snapshot_ca_step"),
     }
+
+    lattice = np.frombuffer(lattice_bytes, dtype=np.uint8).reshape(shape)
+    if mg_bytes is not None:
+        memory_grid = np.frombuffer(mg_bytes, dtype=np.float32).reshape(
+            (num_channels,) + shape
+        )
     return lattice.copy(), memory_grid.copy() if memory_grid is not None else None, snapshot_meta
 
 
