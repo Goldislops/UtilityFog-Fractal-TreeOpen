@@ -11,13 +11,15 @@ Usage:
     python -m vis.observatory channel <snapshot> <channel_index>
     python -m vis.observatory dashboard <snapshot>
     python -m vis.observatory animate <data_dir> [--max-frames 50]
-    python -m vis.observatory info <snapshot>
+    python -m vis.observatory info <snapshot> [--json]
+    python -m vis.observatory doctor <snapshot> [--json]
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import sys
 from pathlib import Path
 
@@ -30,9 +32,15 @@ from pathlib import Path
 #                 unknown flag, missing argument, out-of-range option value
 #   1  runtime -- an expected, actionable user error discovered while running:
 #                 unusable snapshot path or data, unusable animation directory,
-#                 slice level outside the selected axis
+#                 slice level outside the selected axis -- and, for `doctor`,
+#                 a snapshot that loaded but failed one or more diagnostics
 #
 # `--help` keeps argparse's conventional exit status 0.
+#
+# `doctor` is the one command that can return 1 after a fully successful load:
+# a completed diagnostic run with at least one failed requirement is a reported
+# result, not an error, so it prints its report normally (to stdout) and its
+# status alone tells a caller whether the snapshot is usable.
 #
 # Expected failures print ONE physical stderr line and no traceback. Unexpected
 # failures are deliberately NOT caught: only the narrow operations known to fail
@@ -129,6 +137,21 @@ def _suggest_command(parser, argv, commands):
     parser.error(
         f"unknown command {_one_line(token)!r}. Did you mean {matches[0]!r}?"
     )
+
+
+def _emit_json(report) -> None:
+    """Write exactly one JSON document to stdout, and nothing else.
+
+    ``allow_nan=False`` is a genuine assertion, not decoration: Python's
+    encoder otherwise emits the bare tokens ``NaN`` / ``Infinity``, which are
+    not valid JSON and break strict parsers. The report builders already map
+    every non-finite value to ``null``, so this raises only if that mapping is
+    ever missed -- a defect, which is exactly what should propagate.
+
+    ``sort_keys=True`` makes the byte output a function of the content alone,
+    so equivalent snapshots serialize identically.
+    """
+    print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(",", ":")))
 
 
 def _validated_snapshot_path(raw: str) -> Path:
@@ -295,6 +318,17 @@ def main(argv=None):
     # ---- info: snapshot metadata ------------------------------------------
     p_info = sub.add_parser("info", help="Show snapshot metadata and statistics")
     p_info.add_argument("snapshot")
+    p_info.add_argument("--json", action="store_true",
+                        help="Emit one JSON document on stdout instead of text")
+
+    # ---- doctor: runtime-data-contract preflight ---------------------------
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Preflight a snapshot against the Observatory data contract",
+    )
+    p_doctor.add_argument("snapshot")
+    p_doctor.add_argument("--json", action="store_true",
+                          help="Emit one JSON document on stdout instead of text")
 
     if argv is None:
         argv = sys.argv[1:]
@@ -326,37 +360,57 @@ def _dispatch(args):
     if getattr(args, "data_dir", None) is not None:
         _validated_directory(args.data_dir)
 
-    # Lazy imports to keep CLI fast
-    from vis.observatory.constants import (
-        STATE_NAMES, CHANNEL_NAMES, SIGNAL_FIELD_CHANNEL, WARMTH_CHANNEL,
-        COMPUTE_AGE_CHANNEL,
-    )
-
     # ---- Dispatch ---------------------------------------------------------
 
     if args.command == "info":
         snap = _load_snapshot_checked(args.snapshot)
+        from vis.observatory import diagnostics
+
+        if args.json:
+            _emit_json(diagnostics.info_report(snap, str(snap.source_path)))
+            return 0
+
+        stats = diagnostics.snapshot_statistics(snap)
+        total = stats["total_cells"]
         print(f"Source:     {snap.source_path}")
         print(f"Shape:      {snap.shape}")
         print(f"Generation: {snap.generation:,}")
         print(f"CA Step:    {snap.ca_step:,}")
         print(f"Fitness:    {snap.best_fitness:.4f}")
-        print(f"Non-void:   {snap.non_void_count:,} / {int(__import__('numpy').prod(snap.shape)):,}")
+        print(f"Non-void:   {stats['non_void_count']:,} / {total:,}")
         print()
-        for sid, name in STATE_NAMES.items():
-            cnt = snap.state_count(sid)
-            pct = cnt / int(__import__('numpy').prod(snap.shape)) * 100
-            print(f"  {name:12s}: {cnt:>8,} ({pct:5.1f}%)")
+        # Rendered through the shared formatters: the statistics are JSON-safe,
+        # so a non-finite channel value arrives as None. Formatting None with a
+        # numeric spec raises, which would turn `info` on a snapshot carrying
+        # NaN into a traceback -- the very snapshot `doctor` exists to report.
+        for entry in stats["state_counts"]:
+            print(f"  {entry['name']:12s}: {entry['count']:>8,} "
+                  f"({diagnostics.format_percent(entry['percent'])}%)")
         print()
-        import numpy as _np
-        for ci, cname in enumerate(CHANNEL_NAMES):
-            ch = snap.channel(ci)
-            nonvoid = ch[snap.lattice > 0]
-            if len(nonvoid) > 0:
-                print(f"  Ch {ci} {cname:22s}: "
-                      f"min={nonvoid.min():+.4f}  max={nonvoid.max():+.4f}  "
-                      f"mean={nonvoid.mean():+.4f}")
+        for channel in stats["channels"]:
+            if not channel["populated"]:
+                continue
+            print(f"  Ch {channel['index']} {channel['name']:22s}: "
+                  f"min={diagnostics.format_stat(channel['min'])}  "
+                  f"max={diagnostics.format_stat(channel['max'])}  "
+                  f"mean={diagnostics.format_stat(channel['mean'])}")
         return 0
+
+    if args.command == "doctor":
+        # Preflight only: the snapshot is loaded through the ordinary public
+        # route and inspected. No renderer is imported, no window opens, no
+        # file is written.
+        snap = _load_snapshot_checked(args.snapshot)
+        from vis.observatory import diagnostics
+
+        checks = diagnostics.diagnose(snap)
+        source = str(snap.source_path)
+        if args.json:
+            _emit_json(diagnostics.doctor_report(snap, source, checks))
+        else:
+            for line in diagnostics.format_doctor(checks, source):
+                print(line)
+        return 0 if diagnostics.all_ok(checks) else 1
 
     if args.command == "slice":
         snap = _load_snapshot_checked(args.snapshot)
