@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 
 import pytest
 
@@ -844,6 +845,11 @@ def _hostile_metadata():
         # by a (TypeError, ValueError) handler.
         ("huge-int", 10 ** 400),
         ("huge-negative-int", -(10 ** 400)),
+        # Past CPython's int-to-str digit ceiling, so `str()`, `f"{n}"` and
+        # `json.dumps(n)` all raise ValueError. `_assert_total` serializes, so
+        # this row is what makes the matrix actually cover the defect.
+        ("oversized-int", 10 ** 100000),
+        ("oversized-negative-int", -(10 ** 100000)),
         ("complex", complex(1, 2)),
         ("uncoercible", _Uncoercible()),
         ("object", object()),
@@ -1009,13 +1015,99 @@ def test_huge_integer_counter_passes_and_is_reported_verbatim():
     assert document["generation"] == huge
 
 
-def test_a_counter_too_long_to_render_does_not_break_the_detail():
-    """`f"{n}"` raises ValueError past CPython's integer-to-string limit."""
-    snap = _snapshot(generation=10 ** 100000)
-    check = _named(diagnostics.diagnose(snap))["generation_non_negative_int"]
-    assert check.ok
+# ---------------------------------------------------------------------------
+# Oversized counters -- CPython's integer-to-string ceiling
+#
+# Past `sys.get_int_max_str_digits()` (4300 by default) `str(n)`, `f"{n}"` and
+# `json.dumps(n)` all raise ValueError. A counter of that magnitude therefore
+# has to be reported as unavailable rather than emitted verbatim, or the
+# report dies inside the serializer describing a snapshot it claimed was fine.
+#
+# `10**400` is 401 digits and stays comfortably inside the ceiling: it remains
+# a valid exact counter and must keep round-tripping verbatim. The boundary is
+# a JSON *text* limit, not a float limit, so it is deliberately not tied to
+# `sys.float_info.max`.
+# ---------------------------------------------------------------------------
+
+OVERSIZED = 10 ** 100000
+LARGE_BUT_SAFE = 10 ** 400
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+def test_large_but_representable_counter_stays_exact(field):
+    """The deliberately accepted case: 401 digits, well inside the ceiling."""
+    snap = _snapshot(**{field: LARGE_BUT_SAFE})
+    assert _named(diagnostics.diagnose(snap))[f"{field}_non_negative_int"].ok
+    document = json.loads(_dumps(diagnostics.info_report(snap, "/s")))
+    assert document[field] == LARGE_BUT_SAFE
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+def test_oversized_counter_fails_its_check_with_a_bounded_detail(field):
+    """A counter that cannot be rendered as decimal text is not a usable
+    counter. The detail must describe it without converting it."""
+    snap = _snapshot(**{field: OVERSIZED})
+    check = _named(diagnostics.diagnose(snap))[f"{field}_non_negative_int"]
+    assert not check.ok
     assert len(check.detail) < 200
-    diagnostics.format_doctor(diagnostics.diagnose(snap), "/s")
+    assert field in check.detail
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+@pytest.mark.parametrize("builder", ["info", "doctor"])
+def test_oversized_counter_serializes_as_null(field, builder):
+    """The defect: `json_scalar` returned the integer verbatim, so strict
+    serialization raised ValueError instead of producing the promised report.
+    """
+    snap = _snapshot(**{field: OVERSIZED})
+    report = (diagnostics.info_report(snap, "/s") if builder == "info"
+              else diagnostics.doctor_report(snap, "/s",
+                                             diagnostics.diagnose(snap)))
+    text = _dumps(report)                       # must not raise
+    document = json.loads(text)
+    value = document[field] if builder == "info" else document["snapshot"][field]
+    assert value is None
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+def test_oversized_counter_keeps_human_doctor_total(field):
+    snap = _snapshot(**{field: OVERSIZED})
+    lines = diagnostics.format_doctor(diagnostics.diagnose(snap), "/s")
+    assert lines[-1].startswith("FAILED:")
+    assert all(len(line.splitlines()) <= 1 for line in lines)
+
+
+def test_oversized_counter_renders_safely_in_the_human_table():
+    """`format_count` is what the human `info` table uses; it must not attempt
+    the decimal conversion that raises."""
+    rendered = diagnostics.format_count(OVERSIZED)
+    assert len(rendered) < 80
+    assert rendered.strip() != ""
+
+
+def test_ordinary_counter_formatting_is_unchanged():
+    """The guard must not disturb the established column layout."""
+    assert diagnostics.format_count(11) == "11"
+    assert diagnostics.format_count(1234567) == "1,234,567"
+    assert diagnostics.format_count(1234, 8) == f"{1234:>8,}"
+    assert diagnostics.format_count(LARGE_BUT_SAFE) == f"{LARGE_BUT_SAFE:,}"
+
+
+def test_the_representability_bound_is_a_json_text_bound_not_a_float_bound():
+    """Regression guard on the choice of bound. `10**400` exceeds
+    `sys.float_info.max` yet is perfectly representable as JSON text, so tying
+    the counter bound to the float ceiling would wrongly reject it."""
+    assert LARGE_BUT_SAFE > sys.float_info.max
+    assert diagnostics.json_scalar(LARGE_BUT_SAFE) == LARGE_BUT_SAFE
+    assert diagnostics.json_scalar(OVERSIZED) is None
+
+
+def test_diagnostics_does_not_mutate_the_global_digit_limit():
+    """The correction must not widen CPython's limit process-wide."""
+    before = sys.get_int_max_str_digits()
+    _dumps(diagnostics.info_report(_snapshot(generation=OVERSIZED), "/s"))
+    assert sys.get_int_max_str_digits() == before
+    assert "set_int_max_str_digits" not in inspect.getsource(diagnostics)
 
 
 def test_boolean_fitness_is_not_silently_treated_as_one_point_zero():

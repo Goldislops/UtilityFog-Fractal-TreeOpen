@@ -1240,6 +1240,74 @@ def test_zero_size_lattice_does_not_crash_either_command(tmp_path, command, shap
                                  else "snapshot"] is not None
 
 
+# --- oversized counters through the genuine NPZ route ----------------------
+#
+# Reachability note. An ordinary portable-genome JSON file is NOT the route:
+# CPython applies the same integer-string ceiling when PARSING, so `json.load`
+# rejects an over-limit decimal literal before the loader ever sees it. The
+# NPZ route does reach it -- `load_npz` uses `allow_pickle=True` and then
+# `int(...)`, so a pickled Python int of any magnitude survives as a real int.
+# A snapshot built directly in a library call is the other valid witness.
+
+
+def _write_oversized_snapshot(path, field="generation"):
+    """A real .npz whose counter is a huge pickled Python int."""
+    lattice = np.zeros((2, 3, 4), dtype=np.uint8)
+    lattice[0, 0, 0] = 1
+    payload = {
+        "lattice": lattice,
+        "memory_grid": np.zeros((8, 2, 3, 4), dtype=np.float32),
+        "generation": 7,
+        "ca_step": 11,
+        "best_fitness": 0.25,
+    }
+    payload[field] = np.array(10 ** 100000, dtype=object)
+    np.savez(path, **payload)
+    return str(path)
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+@pytest.mark.parametrize("argv_tail", [[], ["--json"]])
+def test_oversized_counter_does_not_traceback_in_info(tmp_path, field, argv_tail):
+    """Human `info` formats the counters directly with `:,`, which raises on a
+    value past the digit ceiling; `info --json` serialized it verbatim and
+    raised inside the encoder. Neither may traceback."""
+    path = _write_oversized_snapshot(tmp_path / f"big_{field}.npz", field)
+    proc = _run_module("info", path, *argv_tail)
+    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0
+    if argv_tail:
+        assert json.loads(proc.stdout)[field] is None
+
+
+@pytest.mark.parametrize("field", ["generation", "ca_step"])
+@pytest.mark.parametrize("argv_tail", [[], ["--json"]])
+def test_oversized_counter_is_reported_by_doctor(tmp_path, field, argv_tail):
+    """`doctor` must report it as a failed check, not die describing it."""
+    path = _write_oversized_snapshot(tmp_path / f"big_{field}.npz", field)
+    proc = _run_module("doctor", path, *argv_tail)
+    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
+    assert proc.returncode == 1
+    if argv_tail:
+        document = json.loads(proc.stdout)
+        assert document["ok"] is False
+        failed = [c["name"] for c in document["checks"] if not c["ok"]]
+        assert f"{field}_non_negative_int" in failed
+        assert document["snapshot"][field] is None
+    else:
+        assert f"{field}_non_negative_int" in proc.stdout
+        assert "[FAIL]" in proc.stdout
+
+
+def test_ordinary_counters_still_render_normally(tmp_path):
+    """The guard must not disturb the established `info` layout."""
+    path = _write_snapshot(tmp_path / "normal.npz", generation=1234567, ca_step=11)
+    proc = _run_module("info", path)
+    assert proc.returncode == 0, proc.stderr
+    assert "Generation: 1,234,567" in proc.stdout
+    assert "CA Step:    11" in proc.stdout
+
+
 # --- untrusted pathnames may not forge output rows -------------------------
 
 
