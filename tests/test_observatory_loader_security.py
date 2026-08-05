@@ -219,10 +219,15 @@ def test_loader_never_enables_pickle_anywhere(tmp_path):
 
 
 def test_no_pickle_enabling_escape_hatch_exists():
-    """No flag, environment variable or compatibility mode may re-enable it."""
+    """No flag, environment variable or compatibility mode may re-enable it.
+
+    Tokens are precise rather than substrings: a bare ``environ`` also matches
+    the ordinary English word "environment", which the docstring legitimately
+    uses when explaining that there is no environment override.
+    """
     source = Path(inspect.getsourcefile(loader)).read_text(encoding="utf-8")
     for banned in ("allow_pickle=True", "ALLOW_PICKLE", "allow-pickle",
-                   "getenv", "environ"):
+                   "os.getenv", "os.environ", "environ["):
         assert banned not in source, f"loader references {banned}"
 
 
