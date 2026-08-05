@@ -1261,12 +1261,18 @@ def test_a_source_path_cannot_forge_doctor_report_lines(cli, capsys):
     cli.set_loader(lambda _p: bad)
 
     assert cli.run(["doctor", cli.snapshot_path]) == 1
-    out = capsys.readouterr().out
-    assert out.count("[PASS]") == 12
-    assert out.count("[FAIL]") == 1
-    assert "OK: all 13 checks passed." not in out
-    assert len([ln for ln in out.splitlines()
-                if ln.startswith(("OK:", "FAILED:"))]) == 1
+    lines = capsys.readouterr().out.splitlines()
+
+    # The forged text is not erased -- it is still visible, inert, on the
+    # Snapshot line. What it may not do is become its own row: structure is
+    # what a reader and a grep go by, so structure is what is asserted.
+    body = [ln for ln in lines if ln.startswith("  [")]
+    assert len(body) == 13
+    assert sum(1 for ln in body if ln.startswith("  [PASS]")) == 12
+    assert sum(1 for ln in body if ln.startswith("  [FAIL]")) == 1
+    assert [ln for ln in lines if ln.startswith(("OK:", "FAILED:"))] == [
+        "FAILED: 1 of 13 checks did not pass."
+    ]
 
 
 def test_a_source_path_cannot_forge_info_rows(cli, capsys):
@@ -1274,8 +1280,9 @@ def test_a_source_path_cannot_forge_info_rows(cli, capsys):
     object.__setattr__(bad, "source_path", "/tmp/a\n  Void        :       99 (99.9%)")
     cli.set_loader(lambda _p: bad)
     assert cli.run(["info", cli.snapshot_path]) == 0
-    out = capsys.readouterr().out
-    assert out.count("Void") == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert len([ln for ln in lines if ln.startswith("  Void")]) == 1
+    assert len([ln for ln in lines if ln.startswith("Source:")]) == 1
 
 
 def test_json_mode_round_trips_a_hostile_path_verbatim(cli, capsys):
