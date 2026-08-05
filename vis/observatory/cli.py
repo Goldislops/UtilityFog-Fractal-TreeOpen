@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+from vis.observatory import cli_errors
+
 # ---------------------------------------------------------------------------
 # Error contract
 #
@@ -53,8 +55,37 @@ NUM_MEMORY_CHANNELS = 8
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
 
+#: Commands that already speak JSON on success, and therefore must speak it on
+#: failure too: answering `--json` with prose leaves a machine consumer with
+#: nothing to parse.
+_JSON_COMMANDS = frozenset({"info", "doctor"})
+
+_ERROR_FORMATS = ("human", "json")
+
+#: Global options that consume a following token. Kept as data because two
+#: separate pieces of logic must agree about it: the pre-scan below, and
+#: `_first_command_token`, which would otherwise mistake an option's VALUE for
+#: the subcommand.
+_VALUE_TAKING_GLOBAL_OPTIONS = ("--error-format",)
+
+#: The error format for the current `main()` call, or None when the global
+#: option was not supplied. Module scope because argparse discovers usage
+#: failures inside `parse_args`, before any namespace exists to carry it.
+_ERROR_FORMAT = None
+
+
 class _UserError(Exception):
-    """An expected, actionable user-facing failure (exit status 1)."""
+    """An expected, actionable user-facing failure (exit status 1).
+
+    Carries the machine-readable ``code`` from the raise site. Assigning it
+    there rather than deriving it from the message text is deliberate: message
+    wording is human prose that varies with the OS, the locale and the
+    library version, and must never be load-bearing.
+    """
+
+    def __init__(self, message, code="input-error"):
+        super().__init__(message)
+        self.code = code
 
 
 def _one_line(text: object) -> str:
@@ -107,15 +138,116 @@ def _non_negative_float(raw: str) -> float:
     return value
 
 
+def _is_value_taking_option(token: str) -> bool:
+    """True when ``token`` names a global option that consumes the next token.
+
+    Prefix matching mirrors argparse's own abbreviation support (``allow_abbrev``
+    defaults to True), so the pre-scan and the parser agree on what ``--error-f``
+    means rather than diverging on an abbreviation.
+    """
+    if "=" in token or not token.startswith("--") or len(token) <= 2:
+        return False
+    return any(name.startswith(token) for name in _VALUE_TAKING_GLOBAL_OPTIONS)
+
+
 def _first_command_token(argv):
-    """Return the first non-option token, i.e. the intended subcommand."""
+    """Return the first non-option token, i.e. the intended subcommand.
+
+    Skipping bare ``-``-prefixed tokens is not enough once a global option
+    takes a value: in ``--error-format json slize``, the value ``json`` is not
+    an option and would be returned as the intended subcommand, so the typo
+    ``slize`` would never be examined and the did-you-mean suggestion would be
+    silently lost.
+    """
+    skip_value = False
     for token in argv:
+        if skip_value:
+            skip_value = False
+            continue
         if token == "--":
             return None
         if token.startswith("-"):
+            skip_value = _is_value_taking_option(token)
             continue
         return token
     return None
+
+
+def _scan_error_format(argv):
+    """Read ``--error-format`` from argv before argparse runs.
+
+    Necessary, not merely convenient: argparse reports a usage failure from
+    inside ``parse_args``, so no parsed namespace exists yet at the moment the
+    format is needed. Returns ``None`` when the option is absent, which is what
+    lets an explicit ``--error-format human`` override the automatic upgrade
+    for ``info --json`` / ``doctor --json``.
+
+    An unrecognised value falls back to human: the request itself is a usage
+    error that argparse is about to report, and a format that was never validly
+    selected must not be trusted to carry the refusal.
+    """
+    expect_value = False
+    for token in argv:
+        if expect_value:
+            return token if token in _ERROR_FORMATS else "human"
+        if token == "--":
+            break
+        if token.startswith("--") and "=" in token:
+            name, _, value = token.partition("=")
+            if any(opt.startswith(name) for opt in _VALUE_TAKING_GLOBAL_OPTIONS):
+                return value if value in _ERROR_FORMATS else "human"
+            continue
+        if _is_value_taking_option(token):
+            expect_value = True
+    return None
+
+
+def _classify_usage_error(message):
+    """Map one argparse message to a (code, argument) pair.
+
+    argparse's text is English prose, gettext-wrapped and version-dependent, so
+    the anchors here are narrow and the fallback is honest: an unrecognised
+    shape becomes ``usage-error`` rather than being guessed into a more
+    specific code that a consumer might then rely on.
+    """
+    text = message or ""
+    if "the following arguments are required" in text:
+        required = text.split(":", 1)[-1]
+        if "command" in required:
+            return "missing-command", None
+        return "missing-argument", required.strip() or None
+    if text.startswith("unrecognized arguments"):
+        return "unknown-option", text.split(":", 1)[-1].strip() or None
+    if "invalid choice" in text:
+        if text.startswith("argument command"):
+            return "unknown-command", None
+        return "invalid-argument-value", text.split(":", 1)[0][9:].strip() or None
+    if text.startswith("argument "):
+        return "invalid-argument-value", text.split(":", 1)[0][9:].strip() or None
+    return "usage-error", None
+
+
+class _ObservatoryParser(argparse.ArgumentParser):
+    """An ArgumentParser that can report a usage failure as a JSON envelope.
+
+    Only ``error()`` is overridden. ``exit()`` and ``print_help()`` are left
+    alone on purpose: ``--help`` must stay human text on stdout at status 0
+    whatever the error format says.
+
+    ``add_subparsers`` defaults ``parser_class`` to ``type(self)``, so every
+    subparser inherits this behaviour -- which is what covers missing
+    positionals and every ``ArgumentTypeError`` from the custom converters,
+    since those are raised by the subparser rather than by this one.
+    """
+
+    def error(self, message):
+        if _ERROR_FORMAT != "json":
+            super().error(message)      # unchanged human behaviour
+        code, argument = _classify_usage_error(message)
+        sys.stderr.write(cli_errors.format_error(
+            code, message, argument=argument,
+        ))
+        sys.exit(2)
 
 
 def _suggest_command(parser, argv, commands):
@@ -131,12 +263,24 @@ def _suggest_command(parser, argv, commands):
     token = _first_command_token(argv)
     if token is None or token in commands:
         return
+    # Bound the token before difflib sees it: `get_close_matches` builds an
+    # index over the whole word before any cutoff applies, so a pathological
+    # argv value would be paid for in full. No real subcommand typo is this
+    # long, and `main(argv=[...])` is a supported entry point.
+    if len(token) > 64:
+        return
     matches = difflib.get_close_matches(token, commands, n=1, cutoff=0.6)
     if not matches:
         return
-    parser.error(
-        f"unknown command {_one_line(token)!r}. Did you mean {matches[0]!r}?"
-    )
+    suggestion = f"Did you mean {matches[0]!r}?"
+    message = f"unknown command {_one_line(token)!r}. {suggestion}"
+    if _ERROR_FORMAT == "json":
+        sys.stderr.write(cli_errors.format_error(
+            "unknown-command", message,
+            suggestion=suggestion, argument=token,
+        ))
+        sys.exit(2)
+    parser.error(message)
 
 
 def _emit_json(report) -> None:
@@ -161,14 +305,18 @@ def _validated_snapshot_path(raw: str) -> Path:
     # ahead of this would report "unsupported format" for what is really a
     # wrong kind of path.
     if path.is_dir():
-        raise _UserError(f"snapshot path is a directory, not a file: {raw}")
+        raise _UserError(
+            f"snapshot path is a directory, not a file: {raw}",
+            "snapshot-wrong-path-kind",
+        )
     if path.suffix not in SUPPORTED_SNAPSHOT_SUFFIXES:
         raise _UserError(
             f"unsupported snapshot format {path.suffix or '(none)'!r} for {raw}; "
-            f"expected one of {', '.join(SUPPORTED_SNAPSHOT_SUFFIXES)}"
+            f"expected one of {', '.join(SUPPORTED_SNAPSHOT_SUFFIXES)}",
+            "snapshot-unsupported-suffix",
         )
     if not path.exists():
-        raise _UserError(f"snapshot not found: {raw}")
+        raise _UserError(f"snapshot not found: {raw}", "snapshot-not-found")
     return path
 
 
@@ -176,9 +324,11 @@ def _validated_directory(raw: str) -> Path:
     """Check an animation argument is an existing, usable directory."""
     path = Path(raw)
     if not path.exists():
-        raise _UserError(f"directory not found: {raw}")
+        raise _UserError(
+            f"directory not found: {raw}", "animation-directory-invalid"
+        )
     if not path.is_dir():
-        raise _UserError(f"not a directory: {raw}")
+        raise _UserError(f"not a directory: {raw}", "animation-directory-invalid")
     return path
 
 
@@ -221,7 +371,9 @@ def _load_snapshot_checked(path):
     try:
         return load_snapshot(path)
     except _unreadable_input_errors() as exc:
-        raise _UserError(f"cannot read snapshot {path}: {exc}") from exc
+        raise _UserError(
+            f"cannot read snapshot {path}: {exc}", "snapshot-unreadable"
+        ) from exc
 
 
 def _validated_level(snapshot, axis: str, level):
@@ -239,15 +391,45 @@ def _validated_level(snapshot, axis: str, level):
     if not -extent <= level < extent:
         raise _UserError(
             f"level {level} is outside axis {axis!r} of size {extent} "
-            f"(valid range {-extent} to {extent - 1})"
+            f"(valid range {-extent} to {extent - 1})",
+            "level-out-of-range",
         )
     return level
 
 
+def _error_format_for(args) -> str:
+    """Resolve the error format for a failure that happened after parsing.
+
+    An explicit global option always wins. Absent one, a command that was
+    asked for JSON on success gets JSON on failure too -- answering `--json`
+    with prose is the gap this contract exists to close. The upgrade is scoped
+    to those commands; every other subcommand stays human.
+    """
+    if _ERROR_FORMAT is not None:
+        return _ERROR_FORMAT
+    if getattr(args, "command", None) in _JSON_COMMANDS and getattr(args, "json", False):
+        return "json"
+    return "human"
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Read before the parser is built: argparse reports usage failures from
+    # inside `parse_args`, so a namespace does not exist yet when the format
+    # is first needed.
+    global _ERROR_FORMAT
+    _ERROR_FORMAT = _scan_error_format(argv)
+
+    parser = _ObservatoryParser(
         prog="cosmic-observatory",
         description="Phase 8 Cosmic Observatory -- UtilityFog CA Visualization",
+    )
+    parser.add_argument(
+        "--error-format", choices=_ERROR_FORMATS, default="human",
+        help="How to report an expected failure. 'json' emits one error "
+             "envelope on stderr. Must appear before the subcommand.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -330,8 +512,6 @@ def main(argv=None):
     p_doctor.add_argument("--json", action="store_true",
                           help="Emit one JSON document on stdout instead of text")
 
-    if argv is None:
-        argv = sys.argv[1:]
     _suggest_command(parser, argv, sorted(sub.choices))
 
     args = parser.parse_args(argv)
@@ -339,7 +519,14 @@ def main(argv=None):
     try:
         return _dispatch(args)
     except _UserError as exc:
-        print(f"{parser.prog}: error: {_one_line(exc)}", file=sys.stderr)
+        if _error_format_for(args) == "json":
+            # One write, terminator included, so nothing can interleave
+            # between the document and its newline.
+            sys.stderr.write(cli_errors.format_error(
+                exc.code, str(exc), command=getattr(args, "command", None),
+            ))
+        else:
+            print(f"{parser.prog}: error: {_one_line(exc)}", file=sys.stderr)
         return 1
 
 
@@ -539,7 +726,10 @@ def _dispatch(args):
         try:
             snapshots = load_snapshot_series(args.data_dir, max_count=args.max_frames)
         except _unreadable_input_errors() as exc:
-            raise _UserError(f"cannot animate {args.data_dir}: {exc}") from exc
+            raise _UserError(
+                f"cannot animate {args.data_dir}: {exc}",
+                "animation-directory-invalid",
+            ) from exc
 
         # Phase 2 -- rendering and saving. Deliberately OUTSIDE the translation
         # boundary: a failure here is a defect, not bad user input, and must
