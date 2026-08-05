@@ -182,34 +182,51 @@ def _scan_error_format(argv):
     lets an explicit ``--error-format human`` override the automatic upgrade
     for ``info --json`` / ``doctor --json``.
 
-    An unrecognised value falls back to human: the request itself is a usage
-    error that argparse is about to report, and a format that was never validly
-    selected must not be trusted to carry the refusal.
+    The rules, in full:
 
-    A repeated option follows argparse's ordinary LAST-WINS semantics. This
-    scan is a second reader of the same argv, so it has to reach the same
-    answer argparse will; returning the first occurrence instead would mean
-    the format the CLI emits disagrees with the format it parsed, and which
-    one a caller observed would depend on whether the failure happened before
-    or after ``parse_args``.
+    1. No occurrence -> ``None``.
+    2. Every occurrence valid -> the LAST one, matching argparse's ordinary
+       repeated-option semantics. This scan is a second reader of the same
+       argv and has to reach the same answer argparse will; returning the
+       first occurrence instead would mean the format the CLI emits disagrees
+       with the format it parsed, and which a caller observed would depend on
+       whether the failure happened before or after ``parse_args``.
+    3. ANY occurrence carrying an invalid value, or lacking its value
+       entirely, makes the result ``human`` -- and that is STICKY. argparse
+       cannot parse such a command line at all, so the whole invocation is
+       refused; a later valid occurrence must not launder an earlier invalid
+       one into an accepted JSON selection, and an earlier valid occurrence
+       must not survive a later missing value. A format that was never
+       validly selected must not be trusted to carry the refusal.
+    4. Separated, equals and supported abbreviated forms all agree.
     """
     selected = None
+    failed = False
     expect_value = False
     for token in argv:
         if expect_value:
             expect_value = False
-            selected = token if token in _ERROR_FORMATS else "human"
+            if token in _ERROR_FORMATS:
+                selected = token
+            else:
+                failed = True
             continue
         if token == "--":
             break
         if token.startswith("--") and "=" in token:
             name, _, value = token.partition("=")
             if any(opt.startswith(name) for opt in _VALUE_TAKING_GLOBAL_OPTIONS):
-                selected = value if value in _ERROR_FORMATS else "human"
+                if value in _ERROR_FORMATS:
+                    selected = value
+                else:
+                    failed = True
             continue
         if _is_value_taking_option(token):
             expect_value = True
-    return selected
+    if expect_value:
+        # The option was the final token, so its value never arrived.
+        failed = True
+    return "human" if failed else selected
 
 
 def _classify_usage_error(message):
