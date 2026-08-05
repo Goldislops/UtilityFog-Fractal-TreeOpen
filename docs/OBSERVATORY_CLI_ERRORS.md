@@ -20,12 +20,38 @@ the subcommand consumes everything that follows it.
 |---|---|---|
 | Stream | stderr | stderr |
 | Shape | `cosmic-observatory: error: <message>` | one JSON object |
-| Lines | exactly one | exactly one |
+| Lines the CLI writes | exactly one | exactly one |
 | stdout | empty | empty |
 | Exit status | unchanged | unchanged |
 
-Human mode is byte-for-byte what it has always been. `--error-format human`
-and omitting the option produce identical output.
+`--error-format human` and omitting the option produce identical output, and
+human runtime-error prose, successful output and the exit statuses are all
+unchanged from before this option existed.
+
+The one thing that necessarily did change is the **help and usage displays**:
+they now list `--error-format {human,json}`, as any new option would.
+
+### The stderr contract, precisely
+
+The CLI guarantees what it writes. It does **not** own the stream.
+
+**Guaranteed:**
+
+- the expected-error path writes **exactly one** JSON envelope line, and
+  nothing else — no usage preamble, no traceback, no additional prose;
+- stdout is empty;
+- output is deterministic for identical inputs.
+
+**Not guaranteed:** that the envelope is the only thing on stderr, or that it
+is the final line. Python's `warnings` machinery, matplotlib, and the
+interpreter's own shutdown notices can write to stderr before or after the
+CLI does, and none of them are under its control.
+
+**So a consumer must locate the envelope rather than parse the whole stream:**
+scan stderr for a line that parses as a JSON object whose `schema` is
+`utilityfog.observatory.error/1`. If more than one is present — which can only
+happen when the stream carries output from something besides a single CLI
+invocation — use the **last** match.
 
 ## What is *not* affected
 
@@ -34,9 +60,9 @@ and omitting the option produce identical output.
 - **Successful output is unchanged.** `info --json` and `doctor --json` emit
   exactly the documents they always have, on stdout.
 - **Unexpected defects still propagate.** A programming error keeps its
-  traceback and is never dressed up as a user error. If the last line of
-  stderr does not parse as an envelope, an internal error occurred — do not
-  infer the envelope's presence from the exit status alone.
+  traceback and is never dressed up as a user error. If stderr carries no line
+  matching the error schema, an internal error occurred — do not infer the
+  envelope's presence from the exit status alone.
 
 ## Version-1 schema
 
@@ -73,8 +99,8 @@ Formatted for reading:
 | `exit_status` | integer | `2` or `1`. Restates the process status. |
 
 **Serialization.** Keys are sorted, separators are compact (`,` and `:`), the
-document is ASCII-escaped, and it is followed by one newline. Equivalent
-inputs produce byte-identical output.
+document is ASCII-escaped, and it occupies one physical line followed by one
+newline. Equivalent inputs produce byte-identical output.
 
 ASCII escaping is a correctness requirement, not a style choice. `U+2028`,
 `U+2029` and `U+0085` are legal unescaped in JSON strings but are line
@@ -95,9 +121,9 @@ applicable", never "unknown".
 |---|---|
 | `missing-command` | No subcommand was given. |
 | `unknown-command` | The subcommand is not recognised. |
-| `unknown-option` | An option is not recognised, or a value was given to a flag that takes none. |
-| `missing-argument` | A required argument was omitted. |
-| `invalid-argument-value` | An argument value failed validation (range, type, or choice). |
+| `unknown-option` | An option is not recognised, or a value was given to a flag that takes none (`--json=x`). |
+| `missing-argument` | A required argument was omitted, or an option was present without its value (`--save` with nothing after it). |
+| `invalid-argument-value` | A value *was* supplied and failed validation (range, type, or choice). |
 | `usage-error` | Fallback for any other usage failure. |
 
 ### `input` — the command line parsed but named something unusable (exit 1)
@@ -110,7 +136,14 @@ applicable", never "unknown".
 | `snapshot-unreadable` | The file exists but could not be decoded. |
 | `animation-directory-invalid` | The animation directory is missing, is not a directory, or holds no usable frames. |
 | `level-out-of-range` | A `--level` lies outside the selected axis. |
-| `input-error` | Fallback for any other expected runtime failure. |
+| `input-error` | Fallback for any other expected runtime failure — including a path the OS refused to examine at all. |
+
+The three specific `snapshot-*` path codes are reported only for a path
+**positively established** to be a directory, to be missing, or to have an
+unsupported suffix. When the operating system refuses to examine the path —
+a name past `NAME_MAX`, or one the filesystem rejects — nothing has been
+established about what kind of thing it is, so the honest `input-error`
+fallback is used rather than a code that would assert more than is known.
 
 `usage-error` and `input-error` are honest fallbacks. argparse's own messages
 are English prose that varies by Python version and may be localised, so
@@ -171,13 +204,28 @@ was 1".
 
 ### Shell
 
+Select the envelope line; do not parse the whole file.
+
 ```bash
-if ! out=$(python -m vis.observatory info "$SNAP" --json 2>err.json); then
-  code=$(jq -r .code < err.json)
-  case "$code" in
+SCHEMA=utilityfog.observatory.error/1
+
+if ! out=$(python -m vis.observatory info "$SNAP" --json 2>err.txt); then
+  # Keep only lines that are JSON objects carrying the error schema, and
+  # take the last. `-c` keeps each match on one line; `//empty` drops
+  # anything that is not an object.
+  envelope=$(jq -Rc --arg s "$SCHEMA" \
+    'fromjson? // empty | select(type == "object" and .schema == $s)' \
+    err.txt | tail -n 1)
+
+  if [ -z "$envelope" ]; then
+    echo "no error envelope found — internal error" >&2
+    exit 1
+  fi
+
+  case "$(printf '%s' "$envelope" | jq -r .code)" in
     snapshot-not-found)   echo "no such snapshot" ;;
     snapshot-unreadable)  echo "corrupt snapshot" ;;
-    *)                    echo "failed: $(jq -r .message < err.json)" ;;
+    *) printf '%s' "$envelope" | jq -r '"failed: " + .message' ;;
   esac
 fi
 ```
@@ -187,6 +235,31 @@ fi
 ```python
 import json
 import subprocess
+
+ERROR_SCHEMA = "utilityfog.observatory.error/1"
+
+
+def find_envelope(stderr):
+    """Return the CLI's error envelope, or None if it did not emit one.
+
+    stderr is shared with the warnings machinery, matplotlib and the
+    interpreter's own shutdown notices, so the stream as a whole is not a
+    JSON document and its last line is not necessarily the envelope. Scan
+    for a JSON object carrying the error schema; take the last if several.
+    """
+    found = None
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get("schema") == ERROR_SCHEMA:
+            found = document
+    return found
+
 
 proc = subprocess.run(
     ["python", "-m", "vis.observatory", "--error-format", "json",
@@ -199,12 +272,16 @@ if proc.returncode == 0:
 elif proc.returncode == 1 and proc.stdout:
     report = json.loads(proc.stdout)          # ran; some checks failed
 else:
-    # The envelope is the LAST line of stderr: the warnings machinery and
-    # matplotlib share this stream and are not under the CLI's control.
-    line = [ln for ln in proc.stderr.splitlines() if ln.strip()][-1]
-    error = json.loads(line)
+    error = find_envelope(proc.stderr)
+    if error is None:
+        # No envelope means an internal error, not an expected failure.
+        raise SystemExit(f"observatory failed unexpectedly:\n{proc.stderr}")
     raise SystemExit(f"{error['code']}: {error['message']}")
 ```
+
+Note the last branch: **do not infer the envelope's presence from the exit
+status alone.** An unexpected defect also exits non-zero, with a traceback and
+no envelope. Absence of a matching line is how you tell them apart.
 
 ## Bounds and safety
 

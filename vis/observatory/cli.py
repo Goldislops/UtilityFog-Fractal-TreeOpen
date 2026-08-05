@@ -185,21 +185,31 @@ def _scan_error_format(argv):
     An unrecognised value falls back to human: the request itself is a usage
     error that argparse is about to report, and a format that was never validly
     selected must not be trusted to carry the refusal.
+
+    A repeated option follows argparse's ordinary LAST-WINS semantics. This
+    scan is a second reader of the same argv, so it has to reach the same
+    answer argparse will; returning the first occurrence instead would mean
+    the format the CLI emits disagrees with the format it parsed, and which
+    one a caller observed would depend on whether the failure happened before
+    or after ``parse_args``.
     """
+    selected = None
     expect_value = False
     for token in argv:
         if expect_value:
-            return token if token in _ERROR_FORMATS else "human"
+            expect_value = False
+            selected = token if token in _ERROR_FORMATS else "human"
+            continue
         if token == "--":
             break
         if token.startswith("--") and "=" in token:
             name, _, value = token.partition("=")
             if any(opt.startswith(name) for opt in _VALUE_TAKING_GLOBAL_OPTIONS):
-                return value if value in _ERROR_FORMATS else "human"
+                selected = value if value in _ERROR_FORMATS else "human"
             continue
         if _is_value_taking_option(token):
             expect_value = True
-    return None
+    return selected
 
 
 def _classify_usage_error(message):
@@ -218,12 +228,25 @@ def _classify_usage_error(message):
         return "missing-argument", required.strip() or None
     if text.startswith("unrecognized arguments"):
         return "unknown-option", text.split(":", 1)[-1].strip() or None
-    if "invalid choice" in text:
-        if text.startswith("argument command"):
-            return "unknown-command", None
-        return "invalid-argument-value", text.split(":", 1)[0][9:].strip() or None
     if text.startswith("argument "):
-        return "invalid-argument-value", text.split(":", 1)[0][9:].strip() or None
+        name, _, detail = text.partition(":")
+        argument = name[len("argument "):].strip() or None
+        # An invalid CHOICE of subcommand is an unknown command, not a bad
+        # value: `command` is the dest argparse gives the subparsers action.
+        if "invalid choice" in detail:
+            if argument == "command":
+                return "unknown-command", None
+            return "invalid-argument-value", argument
+        # The option was present but its value was not. Nothing was supplied
+        # to be invalid, so this is a missing argument.
+        if "expected" in detail and "argument" in detail:
+            return "missing-argument", argument
+        # A value was attached to a flag that takes none, e.g. `--json=x`.
+        if "ignored explicit argument" in detail:
+            return "unknown-option", argument
+        return "invalid-argument-value", argument
+    if "invalid choice" in text:
+        return "invalid-argument-value", None
     return "usage-error", None
 
 
@@ -298,7 +321,7 @@ def _emit_json(report) -> None:
     print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(",", ":")))
 
 
-def _examined(predicate, raw: str, code: str) -> bool:
+def _examined(predicate, raw: str) -> bool:
     """Run a filesystem predicate, translating a path the OS cannot examine.
 
     `Path.exists()` and `Path.is_dir()` return False for an absent path, but
@@ -309,13 +332,23 @@ def _examined(predicate, raw: str, code: str) -> bool:
 
     That is an expected input problem, not a defect: the user named something
     unusable. Without this it escaped as a traceback on the status-1 lane,
-    which is exactly the class of failure this CLI's error contract exists to
-    make parseable.
+    which is exactly the class of failure this contract exists to make
+    parseable.
+
+    The code is always the honest ``input-error`` fallback. When the OS
+    refuses to look at a path, NOTHING has been established about what kind of
+    thing it is -- so reporting `snapshot-wrong-path-kind` would assert it is
+    a directory, and `snapshot-not-found` would assert it is absent, neither
+    of which was determined. The specific codes stay reserved for paths
+    positively established to be a directory, missing, or of an unsupported
+    suffix.
     """
     try:
         return predicate()
     except OSError as exc:
-        raise _UserError(f"cannot examine path {raw}: {exc}", code) from exc
+        raise _UserError(
+            f"cannot examine path {raw}: {exc}", "input-error"
+        ) from exc
 
 
 def _validated_snapshot_path(raw: str) -> Path:
@@ -324,7 +357,7 @@ def _validated_snapshot_path(raw: str) -> Path:
     # Directory first: a bare directory has no suffix, so checking the suffix
     # ahead of this would report "unsupported format" for what is really a
     # wrong kind of path.
-    if _examined(path.is_dir, raw, "snapshot-wrong-path-kind"):
+    if _examined(path.is_dir, raw):
         raise _UserError(
             f"snapshot path is a directory, not a file: {raw}",
             "snapshot-wrong-path-kind",
@@ -335,7 +368,7 @@ def _validated_snapshot_path(raw: str) -> Path:
             f"expected one of {', '.join(SUPPORTED_SNAPSHOT_SUFFIXES)}",
             "snapshot-unsupported-suffix",
         )
-    if not _examined(path.exists, raw, "snapshot-not-found"):
+    if not _examined(path.exists, raw):
         raise _UserError(f"snapshot not found: {raw}", "snapshot-not-found")
     return path
 
@@ -343,11 +376,11 @@ def _validated_snapshot_path(raw: str) -> Path:
 def _validated_directory(raw: str) -> Path:
     """Check an animation argument is an existing, usable directory."""
     path = Path(raw)
-    if not _examined(path.exists, raw, "animation-directory-invalid"):
+    if not _examined(path.exists, raw):
         raise _UserError(
             f"directory not found: {raw}", "animation-directory-invalid"
         )
-    if not _examined(path.is_dir, raw, "animation-directory-invalid"):
+    if not _examined(path.is_dir, raw):
         raise _UserError(f"not a directory: {raw}", "animation-directory-invalid")
     return path
 

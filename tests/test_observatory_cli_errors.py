@@ -613,7 +613,7 @@ def test_report_and_envelope_are_distinguishable_by_schema(capsys, tmp_path, sna
     report = json.loads(capsys.readouterr().out)
 
     assert cli_mod.main(["doctor", snap, "--json"]) == 1
-    envelope = json.loads(_envelope_line(capsys.readouterr().err))
+    envelope = _envelope_line(capsys.readouterr().err)
 
     assert report["ok"] is False and envelope["ok"] is False
     assert report["schema"] != envelope["schema"]
@@ -647,7 +647,7 @@ def test_very_long_path_is_bounded(capsys, tmp_path):
     assert _run_json(["--error-format", "json", "info", long_path]) == 1
     captured = capsys.readouterr()
     assert len(captured.err) < 4096, "envelope must stay bounded"
-    json.loads(_envelope_line(captured.err))
+    _envelope_line(captured.err)
 
 
 # ===========================================================================
@@ -705,7 +705,7 @@ def test_envelope_reaches_real_stderr_with_the_right_status(args, status):
     proc = _run_module(*args)
     assert proc.returncode == status
     assert proc.stdout == ""
-    document = json.loads(_envelope_line(proc.stderr))
+    document = _envelope_line(proc.stderr)
     assert document["exit_status"] == status
     assert "Traceback (most recent call last)" not in proc.stderr
 
