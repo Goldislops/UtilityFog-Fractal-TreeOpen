@@ -188,14 +188,21 @@ def test_dtype_conversions_are_preserved():
     assert snapshot.memory_grid.dtype == np.float32
 
 
-def test_np_load_receives_str_path_and_allow_pickle():
+def test_np_load_receives_str_path_and_allow_pickle_false():
+    """`allow_pickle=False` is passed EXPLICITLY.
+
+    NumPy's default is already False, but relying on a default would make the
+    security property invisible at the call site and silently reversible by an
+    upstream change. The exact-dict comparison is what stops a fallback retry
+    or an extra flag being added without a test noticing.
+    """
     archive = _FakeArchive(_contents())
     _, load_mock = _load(archive, path=Path("/fake/dir/v070_gen7.npz"))
     assert load_mock.call_count == 1
     args, kwargs = load_mock.call_args
     assert args == (str(Path("/fake/dir/v070_gen7.npz")),)
     assert type(args[0]) is str
-    assert kwargs == {"allow_pickle": True}
+    assert kwargs == {"allow_pickle": False}
 
 
 def test_metadata_defaults_are_preserved_when_keys_are_absent():
