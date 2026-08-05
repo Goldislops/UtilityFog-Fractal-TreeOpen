@@ -47,32 +47,52 @@ REQUIRED_KEYS = {
 # ---------------------------------------------------------------------------
 
 
-def _envelope_line(stderr):
-    """Return the envelope, which is the LAST line of stderr.
+def _envelopes_in(stderr):
+    """Return every error envelope found on stderr, in order.
 
-    Deliberately not "stderr contains only the envelope". stderr is shared:
-    the warnings machinery, matplotlib and an interpreter shutdown notice can
-    all write there, none of them under this CLI's control. The enforceable
-    contract -- and the one consumers are told to rely on -- is that the
-    envelope is the final line and is itself exactly one physical line.
+    This is the enforceable contract, and it is deliberately weaker than
+    "stderr contains only the envelope" AND weaker than "the envelope is the
+    final line". stderr is shared: the warnings machinery, matplotlib and an
+    interpreter shutdown notice can all write there, before or after the CLI
+    does, and none of them are under this CLI's control.
+
+    What the CLI guarantees is that IT writes exactly one envelope line and no
+    other prose. What a consumer does is scan for a JSON line whose ``schema``
+    is the error schema, and -- if more than one is present, which can only
+    come from something other than a single CLI invocation -- take the last.
     """
-    lines = [line for line in stderr.splitlines() if line.strip()]
-    assert lines, "no stderr output at all"
-    return lines[-1]
+    found = []
+    for raw in stderr.splitlines():
+        line = raw.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get("schema") == cli_errors.ERROR_SCHEMA:
+            found.append(document)
+    return found
+
+
+def _envelope_line(stderr):
+    """The single envelope a consumer should select from ``stderr``."""
+    found = _envelopes_in(stderr)
+    assert found, f"no error envelope on stderr: {stderr[:300]!r}"
+    return found[-1]
 
 
 def _only_envelope(capsys, expect_status=None):
-    """Assert stdout is empty and stderr's last line is one JSON envelope."""
+    """Assert stdout is empty and the CLI emitted exactly one envelope."""
     captured = capsys.readouterr()
     assert captured.out == "", f"stdout leaked: {captured.out[:200]!r}"
     text = captured.err
     # `endswith` rather than a newline count: `print` emits the platform
     # terminator, so this is CRLF on Windows and LF on the CI runner.
     assert text.endswith("\n")
-    line = _envelope_line(text)
-    assert len(line.splitlines()) == 1, "envelope must be one physical line"
-    document = json.loads(line)
-    assert isinstance(document, dict)
+    found = _envelopes_in(text)
+    assert len(found) == 1, f"expected exactly one envelope, got {len(found)}"
+    document = found[0]
     if expect_status is not None:
         assert document["exit_status"] == expect_status
     return document
@@ -702,3 +722,220 @@ def test_help_through_the_public_route_stays_human():
     assert proc.returncode == 0
     assert proc.stderr == ""
     assert "--error-format" in proc.stdout
+
+
+# ===========================================================================
+# Audit corrections
+# ===========================================================================
+
+
+# --- repeated global option: the scan must agree with argparse -------------
+#
+# argparse's ordinary behaviour is last-wins for a repeated option. The
+# pre-scan is a second reader of the same argv, so it must reach the same
+# answer -- otherwise the format the CLI *emits* disagrees with the format it
+# *parsed*, and which one you observe depends on whether the failure happened
+# before or after `parse_args`.
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (["--error-format", "json", "--error-format", "human"], "human"),
+        (["--error-format", "human", "--error-format", "json"], "json"),
+        (["--error-format=json", "--error-format=human"], "human"),
+        (["--error-format=human", "--error-format=json"], "json"),
+        (["--error-format", "json", "--error-format=human"], "human"),
+        (["--error-format=human", "--error-format", "json"], "json"),
+    ],
+)
+def test_repeated_error_format_follows_last_wins(capsys, tmp_path, flags, expected):
+    """Runtime lane: the emitted format must match the final selection."""
+    target = str(tmp_path / "absent.npz")
+    assert cli_mod.main([*flags, "info", target]) == 1
+    err = capsys.readouterr().err
+    if expected == "json":
+        assert _envelopes_in(err), "expected an envelope, got human prose"
+    else:
+        assert not _envelopes_in(err), "expected human prose, got an envelope"
+        assert err.startswith("cosmic-observatory: error: ")
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        (["--error-format", "json", "--error-format", "human"], "human"),
+        (["--error-format", "human", "--error-format", "json"], "json"),
+    ],
+)
+def test_repeated_error_format_agrees_on_the_usage_lane(capsys, flags, expected):
+    """Usage lane: decided entirely by the pre-scan, so it is the lane that
+    exposes a scanner that disagrees with argparse."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main([*flags, "zzzzzzzzzz"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert bool(_envelopes_in(err)) is (expected == "json")
+
+
+def test_the_scan_matches_what_argparse_parsed(capsys, tmp_path):
+    """Stated as an equality rather than a shape: whatever argparse records in
+    the namespace is what the emitter must have used."""
+    target = str(tmp_path / "absent.npz")
+    for flags in (["--error-format", "json", "--error-format", "human"],
+                  ["--error-format", "human", "--error-format", "json"]):
+        parsed = flags[-1] if "=" not in flags[-1] else flags[-1].split("=")[1]
+        cli_mod.main([*flags, "info", target])
+        err = capsys.readouterr().err
+        assert bool(_envelopes_in(err)) is (parsed == "json"), flags
+
+
+def test_an_invalid_repeat_does_not_select_a_format(capsys, tmp_path):
+    """A bad value is a usage error argparse is about to report; it must not
+    be accepted as a valid selection by the scanner either."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--error-format", "json", "--error-format", "yaml",
+                      "info", str(tmp_path / "absent.npz")])
+    assert exc.value.code == 2
+
+
+# --- usage-code classification --------------------------------------------
+
+
+@pytest.mark.parametrize("tail", [["body", "S", "--save"], ["slice", "S", "--axis"]])
+def test_option_missing_its_value_is_missing_argument(capsys, tmp_path, tail):
+    """`--save` with nothing after it is a missing ARGUMENT, not an invalid
+    value: no value was supplied to be invalid."""
+    argv = ["--error-format", "json",
+            *[str(tmp_path / "s.npz") if t == "S" else t for t in tail]]
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(argv)
+    assert exc.value.code == 2
+    assert _only_envelope(capsys, expect_status=2)["code"] == "missing-argument"
+
+
+@pytest.mark.parametrize("command", ["info", "doctor"])
+def test_value_given_to_a_valueless_flag_is_unknown_option(capsys, tmp_path, command):
+    """`--json=value` supplies a value to a flag that takes none. The
+    documented vocabulary calls that `unknown-option`."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--error-format", "json", command,
+                      str(tmp_path / "s.npz"), "--json=value"])
+    assert exc.value.code == 2
+    assert _only_envelope(capsys, expect_status=2)["code"] == "unknown-option"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        ["slice", "S", "--axis", "q"],          # invalid choice
+        ["channel", "S", "--mode", "nope"],     # invalid choice
+        ["slice", "S", "--channel", "99"],      # invalid typed value
+        ["slice", "S", "--level", "abc"],       # builtin int converter
+    ],
+)
+def test_invalid_choices_and_values_stay_invalid_argument_value(capsys, tmp_path, tail):
+    argv = ["--error-format", "json",
+            *[str(tmp_path / "s.npz") if t == "S" else t for t in tail]]
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(argv)
+    assert exc.value.code == 2
+    assert _only_envelope(capsys)["code"] == "invalid-argument-value"
+
+
+def test_unrecognised_usage_shapes_fall_back_honestly():
+    """The fallback must exist and must be declared, so an unfamiliar argparse
+    message is reported honestly rather than guessed into a specific code."""
+    assert cli_errors.CODES["usage-error"] == "usage"
+    code, _ = cli_mod._classify_usage_error("something argparse has never said")
+    assert code == "usage-error"
+
+
+# --- unexaminable paths are not "wrong kind" ------------------------------
+
+
+def test_unexaminable_path_is_not_labelled_a_directory(capsys, tmp_path):
+    """The OS refused to examine the path, so nothing was established about
+    what kind of thing it is. Claiming `snapshot-wrong-path-kind` asserts it
+    IS a directory, which was never determined."""
+    long_path = f"{tmp_path}{os.sep}{'q' * 60000}.npz"
+    assert _run_json(["--error-format", "json", "info", long_path]) == 1
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "input-error"
+    assert document["category"] == "input"
+
+
+def test_unexaminable_animation_directory_uses_the_fallback(capsys, tmp_path):
+    long_path = f"{tmp_path}{os.sep}{'q' * 60000}"
+    assert _run_json(["--error-format", "json", "animate", long_path]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def test_positively_established_path_kinds_keep_their_specific_codes(capsys, tmp_path):
+    """The fallback must not swallow the cases that ARE determined."""
+    cases = [
+        (str(tmp_path), "snapshot-wrong-path-kind"),
+        (str(tmp_path / "absent.npz"), "snapshot-not-found"),
+    ]
+    unsupported = tmp_path / "s.txt"
+    unsupported.write_text("x", encoding="utf-8")
+    cases.append((str(unsupported), "snapshot-unsupported-suffix"))
+
+    for target, expected in cases:
+        assert _run_json(["--error-format", "json", "info", target]) == 1
+        assert _only_envelope(capsys)["code"] == expected, target
+
+
+# --- stderr framing: a schema-bearing line, not "the last line" ------------
+
+
+def test_consumer_finds_the_envelope_behind_unrelated_stderr_prose(capsys, tmp_path):
+    """Unrelated diagnostics may share stderr. The consumer rule is "find the
+    JSON line whose schema is the error schema", not "read the whole stream"
+    and not "take the final line"."""
+    print("WARNING: some unrelated library noise", file=sys.stderr)
+    print("  continued on a second line", file=sys.stderr)
+
+    assert cli_mod.main(["--error-format", "json", "info",
+                         str(tmp_path / "absent.npz")]) == 1
+    err = capsys.readouterr().err
+
+    assert "unrelated library noise" in err, "the test's own noise must survive"
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(err)                       # the whole stream is not JSON
+
+    found = _envelopes_in(err)
+    assert len(found) == 1, "the CLI must contribute exactly one envelope"
+    assert found[0]["code"] == "snapshot-not-found"
+
+
+def test_the_cli_contributes_exactly_one_envelope_line(capsys, tmp_path):
+    assert cli_mod.main(["--error-format", "json", "info",
+                         str(tmp_path / "absent.npz")]) == 1
+    err = capsys.readouterr().err
+    json_lines = [ln for ln in err.splitlines() if ln.strip().startswith("{")]
+    assert len(json_lines) == 1
+
+
+def test_the_cli_writes_no_usage_preamble_or_prose_in_json_mode(capsys):
+    """The guarantee that survives the weakened framing contract: whatever
+    else shares stderr, the CLI itself adds no usage block and no prose."""
+    with pytest.raises(SystemExit):
+        cli_mod.main(["--error-format", "json", "zzzzzzzzzz"])
+    err = capsys.readouterr().err
+    assert "usage:" not in err
+    assert "cosmic-observatory: error:" not in err
+    assert "Traceback (most recent call last)" not in err
+    assert err.strip().startswith("{") and err.strip().endswith("}")
+
+
+def test_last_matching_envelope_wins_when_several_are_present():
+    """Selection rule, stated directly on the helper: several envelopes can
+    only come from something other than one CLI invocation, and the consumer
+    takes the last."""
+    first = cli_errors.format_error("snapshot-not-found", "first")
+    second = cli_errors.format_error("unknown-command", "second")
+    stream = f"noise\n{first}not json\n{second}trailing noise\n"
+    found = _envelopes_in(stream)
+    assert len(found) == 2
+    assert _envelope_line(stream)["code"] == "unknown-command"
