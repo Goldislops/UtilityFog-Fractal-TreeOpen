@@ -298,13 +298,33 @@ def _emit_json(report) -> None:
     print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(",", ":")))
 
 
+def _examined(predicate, raw: str, code: str) -> bool:
+    """Run a filesystem predicate, translating a path the OS cannot examine.
+
+    `Path.exists()` and `Path.is_dir()` return False for an absent path, but
+    they RAISE for one the filesystem rejects outright -- a name past
+    NAME_MAX, or one containing a byte the filesystem forbids. `_ignore_error`
+    covers ENOENT/ENOTDIR/EBADF/ELOOP and nothing else, so ENAMETOOLONG and
+    EACCES propagate.
+
+    That is an expected input problem, not a defect: the user named something
+    unusable. Without this it escaped as a traceback on the status-1 lane,
+    which is exactly the class of failure this CLI's error contract exists to
+    make parseable.
+    """
+    try:
+        return predicate()
+    except OSError as exc:
+        raise _UserError(f"cannot examine path {raw}: {exc}", code) from exc
+
+
 def _validated_snapshot_path(raw: str) -> Path:
     """Check a snapshot argument is a supported, readable file before loading."""
     path = Path(raw)
     # Directory first: a bare directory has no suffix, so checking the suffix
     # ahead of this would report "unsupported format" for what is really a
     # wrong kind of path.
-    if path.is_dir():
+    if _examined(path.is_dir, raw, "snapshot-wrong-path-kind"):
         raise _UserError(
             f"snapshot path is a directory, not a file: {raw}",
             "snapshot-wrong-path-kind",
@@ -315,7 +335,7 @@ def _validated_snapshot_path(raw: str) -> Path:
             f"expected one of {', '.join(SUPPORTED_SNAPSHOT_SUFFIXES)}",
             "snapshot-unsupported-suffix",
         )
-    if not path.exists():
+    if not _examined(path.exists, raw, "snapshot-not-found"):
         raise _UserError(f"snapshot not found: {raw}", "snapshot-not-found")
     return path
 
@@ -323,11 +343,11 @@ def _validated_snapshot_path(raw: str) -> Path:
 def _validated_directory(raw: str) -> Path:
     """Check an animation argument is an existing, usable directory."""
     path = Path(raw)
-    if not path.exists():
+    if not _examined(path.exists, raw, "animation-directory-invalid"):
         raise _UserError(
             f"directory not found: {raw}", "animation-directory-invalid"
         )
-    if not path.is_dir():
+    if not _examined(path.is_dir, raw, "animation-directory-invalid"):
         raise _UserError(f"not a directory: {raw}", "animation-directory-invalid")
     return path
 

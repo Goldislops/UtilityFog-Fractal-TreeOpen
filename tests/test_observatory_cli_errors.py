@@ -130,9 +130,13 @@ def test_cli_errors_imports_only_the_standard_library():
 
 
 def test_cli_errors_references_no_renderer_or_numeric_stack():
+    """Bare words like "animation" and "dashboard" are legitimate vocabulary
+    here -- `animation-directory-invalid` is an error code -- so this scans for
+    module references rather than substrings. The AST walk above is the
+    authoritative import check; this supplements it."""
     source = Path(cli_errors.__file__).read_text(encoding="utf-8")
-    for banned in ("numpy", "matplotlib", "plotly", "scatter3d", "slicer",
-                   "dashboard", "animation", "diagnostics"):
+    for banned in ("numpy", "matplotlib", "plotly", "scatter3d",
+                   "vis.observatory.", "import vis"):
         assert banned not in source, f"cli_errors references {banned}"
 
 

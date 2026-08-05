@@ -98,6 +98,13 @@ MAX_FIELD_LENGTH = 256
 
 _TRUNCATION_MARKER = "..."
 
+#: Redacted rather than merely bounded. An exception's text can carry a
+#: formatted traceback (a nested error, a subprocess's captured output), and
+#: the contract promises no traceback ever reaches a consumer. Replacing the
+#: marker leaves visible evidence that something was removed.
+_TRACEBACK_MARKER = "Traceback (most recent call last)"
+_TRACEBACK_REDACTION = "[traceback removed]"
+
 
 def category_for(code: str) -> str:
     """Return the category a code belongs to."""
@@ -139,6 +146,7 @@ def sanitize(value: Any) -> Optional[str]:
     if value is None:
         return None
     text = " ".join(str(value).splitlines()).strip()
+    text = text.replace(_TRACEBACK_MARKER, _TRACEBACK_REDACTION)
     text = text.encode("ascii", "backslashreplace").decode("ascii")
     if len(text) > MAX_FIELD_LENGTH:
         text = text[:MAX_FIELD_LENGTH] + _TRUNCATION_MARKER
