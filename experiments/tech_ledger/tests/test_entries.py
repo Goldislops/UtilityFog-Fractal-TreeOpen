@@ -116,7 +116,21 @@ def test_tlv4_005_landau_lifshitz_pseudotensor():
     entry = _load("TLV4-005")
     assert entry["entry_id"] == "TLV4-005"
     assert entry["primary_classification"] == "B"
-    assert entry["classification_qualifiers"] == ["F"]
+    assert entry["classification_qualifiers"] == ["F", "G"]
+    # Ruling pins (owner, 2026-08-05, corrected four-way scope): the
+    # caveat and the four-way scope are dossier-sourced; the pins carry
+    # polarity (non-exclusion, conditions), never bare vocabulary; the
+    # extraction-propulsion refusal is the record's own policy.
+    rationale = entry["classification_rationale"]
+    assert "the pseudotensor is coordinate-dependent" in rationale
+    assert "does not by itself create an invariant" in rationale
+    assert "does not exclude explicitly specified quasi-local constructions" in rationale
+    assert ("total angular momentum only under stronger fall-off and "
+            "parity conditions") in rationale
+    assert "this record's own repository policy, not a source claim" in rationale
+    assert "corrected 2026-08-05 under strict primary-evidence rules" in (
+        entry["provenance"]["source_reference"]
+    )
     assert entry["implementation_disposition"] == "evidence-gated"
     assert entry["status"] == "active"
     assert entry["implementation_seam"] == (
