@@ -160,6 +160,55 @@ def test_cli_errors_references_no_renderer_or_numeric_stack():
         assert banned not in source, f"cli_errors references {banned}"
 
 
+def test_optional_dependency_guards_precede_the_observatory_imports():
+    """Collection must SKIP, not error, when the optional numeric/rendering
+    stack is absent.
+
+    `from vis.observatory ...` executes `vis/observatory/__init__.py`, which
+    imports `loader.py` and then NumPy, so a bare top-level Observatory import
+    turns a skippable optional-dependency case into a hard collection error.
+    The established convention in `tests/test_observatory_cli.py` is to call
+    `pytest.importorskip` for numpy and matplotlib FIRST.
+
+    Asserted structurally against this module's own source, in statement
+    order, because the property is about import ordering at collection time --
+    which cannot be observed from inside a module that has already imported
+    successfully.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    guarded = []
+    first_observatory_import = None
+    for index, node in enumerate(tree.body):
+        if (isinstance(node, ast.ImportFrom) and node.module
+                and node.module.split(".")[0] == "vis"):
+            if first_observatory_import is None:
+                first_observatory_import = index
+        # `np = pytest.importorskip("numpy")` or a bare call statement.
+        call = None
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+        elif (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            call = node.value
+        if call is None or not isinstance(call.func, ast.Attribute):
+            continue
+        if call.func.attr != "importorskip":
+            continue
+        if call.args and isinstance(call.args[0], ast.Constant):
+            guarded.append((index, call.args[0].value))
+
+    assert first_observatory_import is not None, "no vis.* import found"
+    names = {name for _, name in guarded}
+    assert "numpy" in names, "missing pytest.importorskip('numpy')"
+    assert "matplotlib" in names, "missing pytest.importorskip('matplotlib')"
+    for index, name in guarded:
+        if name in ("numpy", "matplotlib"):
+            assert index < first_observatory_import, (
+                f"importorskip({name!r}) must precede the first vis.* import"
+            )
+
+
 def test_cli_errors_loads_without_the_observatory_package():
     """In a fresh interpreter, by file path, with no package import: the
     module must come up without pulling NumPy or matplotlib."""
@@ -899,6 +948,87 @@ def test_a_failed_error_format_never_reaches_the_runtime_lane(capsys, flags, tmp
         cli_mod.main([*flags, "info", str(tmp_path / "absent.npz")])
     assert exc.value.code == 2
     assert not _envelopes_in(capsys.readouterr().err)
+
+
+# --- the scan covers the GLOBAL PREFIX only -------------------------------
+#
+# `--error-format` is a global option: it is only meaningful before the
+# subcommand, because the subparsers action consumes everything from the
+# command name onward. The pre-scan must therefore stop at the first
+# unconsumed non-option token -- the intended subcommand -- rather than
+# walking the whole argv and treating the subcommand's own arguments as
+# further global occurrences.
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        # A misplaced trailing option must not overwrite a valid prefix
+        # selection. argparse rejects the trailing option as a usage error,
+        # but the caller DID validly ask for JSON, so the refusal is JSON.
+        pytest.param(["--error-format", "json", "info", "s.npz",
+                      "--error-format", "human"], "json", id="json-prefix-human-trailing"),
+        pytest.param(["--error-format", "human", "info", "s.npz",
+                      "--error-format", "json"], "human", id="human-prefix-json-trailing"),
+        pytest.param(["--error-format=json", "info", "s.npz",
+                      "--error-format=human"], "json", id="equals-prefix-equals-trailing"),
+        pytest.param(["--error-f", "json", "info", "s.npz",
+                      "--error-format", "human"], "json", id="abbrev-prefix-trailing"),
+        # No valid prefix: a trailing misplaced option must not retroactively
+        # select anything.
+        pytest.param(["info", "s.npz", "--error-format", "json"],
+                     None, id="no-prefix-trailing-json"),
+        pytest.param(["info", "s.npz", "--error-format=json"],
+                     None, id="no-prefix-trailing-equals"),
+        pytest.param(["doctor", "s.npz", "--json", "--error-format", "json"],
+                     None, id="no-prefix-after-flags"),
+        # A trailing INVALID occurrence must not make the prefix sticky-human
+        # either: the scan never reaches it.
+        pytest.param(["--error-format", "json", "info", "s.npz",
+                      "--error-format", "yaml"], "json", id="valid-prefix-invalid-trailing"),
+        pytest.param(["--error-format", "json", "info", "s.npz",
+                      "--error-format"], "json", id="valid-prefix-dangling-trailing"),
+        # The subcommand's own options are never global occurrences.
+        pytest.param(["--error-format", "json", "slice", "s.npz",
+                      "--axis", "x", "--level", "3"], "json", id="subcommand-options-ignored"),
+        # Sticky failure still applies when it happens IN the prefix.
+        pytest.param(["--error-format", "yaml", "info", "s.npz",
+                      "--error-format", "json"], "human", id="invalid-prefix-trailing-valid"),
+    ],
+)
+def test_scanner_reads_only_the_global_prefix(argv, expected):
+    assert cli_mod._scan_error_format(argv) == expected
+
+
+def test_misplaced_trailing_option_still_yields_the_requested_json_envelope(capsys):
+    """The end-to-end shape of thread 1: argparse refuses the misplaced
+    trailing option, and because JSON was validly selected before the
+    subcommand, the refusal is a JSON envelope rather than prose."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--error-format", "json", "info", "s.npz",
+                      "--error-format", "human"])
+    assert exc.value.code == 2
+    document = _only_envelope(capsys, expect_status=2)
+    assert document["category"] == "usage"
+
+
+def test_misplaced_trailing_option_keeps_human_when_human_was_selected(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["--error-format", "human", "info", "s.npz",
+                      "--error-format", "json"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert not _envelopes_in(captured.err)
+    assert "cosmic-observatory: error:" in captured.err
+
+
+def test_a_trailing_option_alone_selects_nothing(capsys):
+    """No valid global prefix, so the refusal stays human."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main(["info", "s.npz", "--error-format", "json"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert not _envelopes_in(captured.err)
 
 
 def test_all_valid_repeats_still_follow_last_wins(capsys, tmp_path):
