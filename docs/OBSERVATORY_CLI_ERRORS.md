@@ -16,11 +16,21 @@ python -m vis.observatory [--error-format {human,json}] <command> ...
 subcommand. Placing it after the subcommand is itself a usage error, because
 the subcommand consumes everything that follows it.
 
-If the option is repeated, the last occurrence wins — argparse's ordinary
-behaviour. But if **any** occurrence carries an unrecognised value or is
-missing its value, the invocation cannot be parsed at all, and the refusal is
-reported in **human** form: a format that was never validly selected is not
-trusted to carry the refusal.
+Only occurrences **before the subcommand** count — everything from the command
+name onward belongs to that subcommand. A misplaced `--error-format` after the
+subcommand is a usage error, and it neither overrides nor supplies a global
+selection. So this still emits a JSON envelope, because JSON *was* validly
+selected before the subcommand:
+
+```
+--error-format json info snap.npz --error-format human   # JSON envelope, status 2
+```
+
+Within that prefix, if the option is repeated the last occurrence wins —
+argparse's ordinary behaviour. But if **any** prefix occurrence carries an
+unrecognised value or is missing its value, the invocation cannot be parsed at
+all, and the refusal is reported in **human** form: a format that was never
+validly selected is not trusted to carry the refusal.
 
 | | `human` (default) | `json` |
 |---|---|---|

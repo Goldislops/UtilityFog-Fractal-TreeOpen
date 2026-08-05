@@ -26,6 +26,13 @@ from pathlib import Path
 
 import pytest
 
+# The Observatory package initializer imports `loader.py` and through it NumPy,
+# and sibling `vis` modules import matplotlib. Guarding BEFORE the package
+# import is what makes a missing optional stack a clean skip rather than a
+# hard collection error -- the same convention as tests/test_observatory_cli.py.
+pytest.importorskip("numpy")
+pytest.importorskip("matplotlib")
+
 from vis.observatory import cli as cli_mod
 from vis.observatory import cli_errors
 

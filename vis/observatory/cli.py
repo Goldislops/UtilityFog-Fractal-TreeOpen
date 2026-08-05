@@ -199,6 +199,19 @@ def _scan_error_format(argv):
        must not survive a later missing value. A format that was never
        validly selected must not be trusted to carry the refusal.
     4. Separated, equals and supported abbreviated forms all agree.
+
+    Only the GLOBAL PREFIX is scanned. ``--error-format`` is a global option
+    and is only meaningful before the subcommand, because the subparsers
+    action consumes everything from the command name onward. So the scan stops
+    at the first unconsumed non-option token -- the intended subcommand --
+    rather than walking the whole argv.
+
+    Without that stop, ``--error-format json info snap.npz --error-format
+    human`` overwrote the selection from the subcommand's own arguments.
+    argparse refuses the misplaced trailing option as a usage error, but the
+    caller HAD validly asked for JSON, so the refusal must be a JSON envelope.
+    Conversely a trailing occurrence must never retroactively select a format
+    when no valid one appeared in the prefix.
     """
     selected = None
     failed = False
@@ -212,6 +225,9 @@ def _scan_error_format(argv):
                 failed = True
             continue
         if token == "--":
+            break
+        if not token.startswith("-"):
+            # The subcommand. Everything after it belongs to the subparser.
             break
         if token.startswith("--") and "=" in token:
             name, _, value = token.partition("=")
