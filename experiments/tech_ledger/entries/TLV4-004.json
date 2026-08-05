@@ -1,25 +1,26 @@
 {
  "classification_qualifiers": [
-  "E"
+  "E",
+  "G"
  ],
- "classification_rationale": "Peer-reviewed quantum-foundations framework under active research (C); any claim that it enables a device or physical effect is a speculative hypothesis (E face).",
+ "classification_rationale": "Peer-reviewed quantum-foundations framework (C): founding papers Page-Wootters, Phys. Rev. D 27, 2885 (1983) and Wootters, Int. J. Theor. Phys. 23, 701 (1984), with further peer-reviewed publications through January 2025 (Quantum 9, 1610 and 1616; checked 2026-08-04); any claim that it enables a device or physical effect is a speculative hypothesis (E face); each externally checkable status claim here is an external fact requiring primary-source verification (G face).",
  "entry_id": "TLV4-004",
  "implementation_disposition": "evidence-gated",
- "implementation_seam": "Two-qubit clock/system conditional-state toy matching ordinary evolution in the validated regime",
+ "implementation_seam": "Two-qubit clock/system conditional-state toy reproducing the finite two-photon conditional-state experiment of Moreva et al., Phys. Rev. A 89, 052122 (2014), including its finite-clock visibility reduction; separately, the exact ordinary-evolution equivalence theorem (Page-Wootters 1983 Sec. III; Giovannetti-Lloyd-Maccone, Phys. Rev. D 92, 045033 (2015)) applies only to a non-interacting clock, ideal in the continuous-clock limit; no device capability or physical validation is implied",
  "legitimate_uses": [
   "A hypothesis-labelled research-ledger entry",
-  "A small conditional-state toy model reproducing a published result"
+  "A small conditional-state toy model reproducing the published two-qubit result of Moreva et al., Phys. Rev. A 89, 052122 (2014)"
  ],
  "minimal_evidence_before_implementation": [
-  "Reproduction of a published toy-model result before any extension"
+  "Reproduction of the published two-qubit conditional-state result (Moreva et al., Phys. Rev. A 89, 052122 (2014)) before any extension"
  ],
  "neutral_name": "Page-Wootters relational-time models",
  "primary_classification": "C",
  "provenance": {
-  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
-  "recorded_date": "2026-08-01",
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-04)",
+  "recorded_date": "2026-08-04",
   "source_kind": "user-supplied-audit",
-  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source -- corrected 2026-08-04: the record body derives from the original user-supplied audit and remains unverified; four claim-atom classes (peer-review status, dated publication activity, the named two-qubit result, and the equivalence-theorem conditions) were checked against primary sources at recorded access levels (the 1983 founding paper in full text; the 2014 experiment and 2015 theory papers as arXiv author manuscripts; remaining sources at abstract or metadata level; the dated-activity check returned partial support at that access level) in the TLV4-004 primary-source evidence dossier (11478 bytes, sha256 4197f32f047312f4a1e82c8c647b9bf300652b34f91cf22cec191868683d7697); G qualifier added and seam recast under that dossier; verification_status unchanged",
   "verification_status": "unverified"
  },
  "related_intake_ledger_entries": [],

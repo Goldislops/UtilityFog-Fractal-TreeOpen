@@ -93,12 +93,18 @@ def test_tlv4_004_page_wootters_relational_time():
     entry = _load("TLV4-004")
     assert entry["entry_id"] == "TLV4-004"
     assert entry["primary_classification"] == "C"
-    assert entry["classification_qualifiers"] == ["E"]
+    assert entry["classification_qualifiers"] == ["E", "G"]
     assert entry["implementation_disposition"] == "evidence-gated"
     assert entry["status"] == "active"
     assert entry["implementation_seam"] == (
-        "Two-qubit clock/system conditional-state toy matching ordinary "
-        "evolution in the validated regime"
+        "Two-qubit clock/system conditional-state toy reproducing the "
+        "finite two-photon conditional-state experiment of Moreva et al., "
+        "Phys. Rev. A 89, 052122 (2014), including its finite-clock "
+        "visibility reduction; separately, the exact ordinary-evolution "
+        "equivalence theorem (Page-Wootters 1983 Sec. III; "
+        "Giovannetti-Lloyd-Maccone, Phys. Rev. D 92, 045033 (2015)) applies "
+        "only to a non-interacting clock, ideal in the continuous-clock "
+        "limit; no device capability or physical validation is implied"
     )
     assert entry["provenance"]["verification_status"] == "unverified"
     assert entry["repository_placements"] == ["research-ledger", "experiment"]
@@ -143,6 +149,7 @@ def test_tlv4_006_effective_field_theory_scale_separation():
 def test_tlv4_008_zero_point_claims():
     entry = _load("TLV4-008")
     assert entry["primary_classification"] == "F"
+    assert entry["classification_qualifiers"] == ["G"]
     assert entry["implementation_disposition"] == "prohibited"
     assert entry["implementation_seam"] is None
     assert entry["repository_placements"] == ["research-ledger"]
@@ -154,9 +161,17 @@ def test_tlv4_008_zero_point_claims():
     assert "does not by itself demonstrate a cyclic net-work source" in rationale
     assert "full-cycle energy accounting" in rationale
     assert "not a declaration" in rationale
+    # Ruling pins (owner, 2026-08-05): the absence finding is accepted at
+    # inspected-source scope; full-cycle accounting is repository policy,
+    # not a literature finding; the reservoir step is this record's own
+    # marked inference, never Jaffe's statement.
+    assert "within the sources directly inspected for this correction" in rationale
+    assert "this record's own bounded inference, not Jaffe's statement" in rationale
+    assert "a repository requirement rather than a literature finding" in rationale
     warnings = " ".join(entry["warnings"])
     assert "separately audited reclassification" in warnings
     assert "not a physical theorem" in warnings
+    assert "within the sources directly inspected for this correction" in warnings
     # Categorical wording stays out.
     assert "contradicts thermodynamics" not in rationale
     assert "none known" not in " ".join(
