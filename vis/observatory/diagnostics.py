@@ -59,6 +59,36 @@ _MAX_DETAIL_TOKEN = 60
 
 _FLOAT_MAX = sys.float_info.max
 
+#: ``log10(2)``, used to bound an integer's decimal length from its bit length.
+_LOG10_2 = math.log10(2)
+
+
+def _is_json_safe_int(value: int) -> bool:
+    """True when CPython can render ``value`` as decimal text.
+
+    CPython caps integer-to-string conversion (``sys.get_int_max_str_digits()``,
+    4300 by default). Past that ceiling ``str(n)``, ``f"{n}"`` and
+    ``json.dumps(n)`` all raise ``ValueError`` -- so an oversized counter
+    emitted verbatim would kill the serializer while the report was busy
+    asserting the counter was fine.
+
+    The ceiling is measured WITHOUT performing the conversion that raises:
+    ``int.bit_length()`` is exact, cheap and total, and ``digits <=
+    floor(bit_length * log10(2)) + 1`` bounds the decimal length from above.
+    The predicate therefore only admits values that are certainly renderable;
+    it may reject a borderline value that would in fact have fitted, which is
+    the safe direction. A limit of ``0`` means the cap is disabled.
+
+    This is a JSON *text* bound and is deliberately NOT ``_FLOAT_MAX``: a
+    401-digit integer such as ``10 ** 400`` far exceeds the float ceiling yet
+    is perfectly representable as a JSON number, and must keep round-tripping
+    exactly. The two bounds answer different questions.
+    """
+    limit = sys.get_int_max_str_digits()
+    if limit <= 0:
+        return True
+    return int(value.bit_length() * _LOG10_2) + 1 <= limit
+
 # --- dtype gating ----------------------------------------------------------
 #
 # `dtype.kind` characters: b bool, i signed int, u unsigned int, f float,
@@ -210,12 +240,17 @@ def json_scalar(value: Any) -> Any:
     the checks are designed to flag.
     """
     if _is_exact_int(value):
-        # Emitted verbatim, at any magnitude. A Python int of any size is a
-        # legal JSON number, and it is the true value; forcing it through
-        # float() would raise OverflowError above ~1.8e308 and would lose
-        # precision well before that. Reporting the real counter beats
-        # reporting a rounded one.
-        return value
+        # Emitted verbatim whenever the JSON encoder can actually write it.
+        # An exact int is the true value, and forcing it through float() would
+        # raise OverflowError above ~1.8e308 and lose precision well before
+        # that -- so a large counter such as 10**400 is reported exactly.
+        #
+        # The one exception is an integer past CPython's decimal-rendering
+        # ceiling: `json.dumps` would raise ValueError on it, so it is
+        # reported as null, matching how every other unavailable value in
+        # this module is represented. The corresponding check reports the
+        # failure, so nothing is silently lost.
+        return value if _is_json_safe_int(value) else None
     return json_number(value)
 
 
@@ -243,9 +278,17 @@ def format_count(value: Optional[int], width: int = 0) -> str:
     preserved exactly: ``width`` reproduces the previous ``{:>8,}`` for the
     per-state rows, and the default reproduces the unpadded ``{:,}`` used on
     the ``Non-void:`` line.
+
+    An integer past CPython's decimal-rendering ceiling is reported as
+    ``<too large>`` rather than formatted: ``{:,}`` on such a value raises
+    ``ValueError``, and rendering it in full would print a line the width of
+    the number. Counters reach this function through the human ``info`` table,
+    so the guard belongs here rather than at each call site.
     """
     if value is None:
         return "n/a".rjust(width)
+    if type(value) is int and not _is_json_safe_int(value):
+        return "<too large>".rjust(width)
     return f"{value:>{width},}" if width else f"{value:,}"
 
 
@@ -433,14 +476,19 @@ def diagnose(snapshot) -> List[Check]:
 
     for field in ("generation", "ca_step"):
         value = getattr(snapshot, field, None)
-        # `and` short-circuits, so `>= 0` only ever runs on a genuine int.
-        ok = _is_exact_int(value) and value >= 0
-        if _is_exact_int(value):
-            # `_clip` because `f"{value}"` raises ValueError past CPython's
-            # integer-to-string digit limit.
-            detail = f"{field} is {_clip(value)}" if ok else f"{field} is negative"
-        else:
+        if not _is_exact_int(value):
+            ok = False
             detail = f"{field} is {type(value).__name__}, expected a non-negative int"
+        elif value < 0:
+            ok, detail = False, f"{field} is negative"
+        elif not _is_json_safe_int(value):
+            # Described by bit length, never by converting it: `f"{value}"` is
+            # exactly the operation that raises for a value this large.
+            ok = False
+            detail = (f"{field} has {value.bit_length()} bits, too large to "
+                      "render as decimal text")
+        else:
+            ok, detail = True, f"{field} is {value}"
         checks.append(Check(f"{field}_non_negative_int", ok, detail))
 
     # `float(fitness)` is NOT called here. `_is_real_number` admits any Python

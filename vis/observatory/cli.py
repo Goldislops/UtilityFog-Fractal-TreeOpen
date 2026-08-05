@@ -376,8 +376,12 @@ def _dispatch(args):
         # a filename is untrusted data and must not forge extra output rows.
         print(f"Source:     {_one_line(snap.source_path)}")
         print(f"Shape:      {snap.shape}")
-        print(f"Generation: {snap.generation:,}")
-        print(f"CA Step:    {snap.ca_step:,}")
+        # Through the shared formatter: `{:,}` raises ValueError on an integer
+        # past CPython's decimal-rendering ceiling, which the NPZ route can
+        # carry (it loads with allow_pickle=True and then calls int()).
+        # Ordinary counters render exactly as before.
+        print(f"Generation: {diagnostics.format_count(snap.generation)}")
+        print(f"CA Step:    {diagnostics.format_count(snap.ca_step)}")
         print(f"Fitness:    {snap.best_fitness:.4f}")
         print(f"Non-void:   {diagnostics.format_count(stats['non_void_count'])}"
               f" / {diagnostics.format_count(total)}")
