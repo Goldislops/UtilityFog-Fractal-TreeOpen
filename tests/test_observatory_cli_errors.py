@@ -820,11 +820,12 @@ def _pickle_backed_npz(tmp_path):
     return str(path)
 
 
-def test_pickle_backed_npz_is_a_bounded_human_error(cli, capsys, tmp_path):
-    cli.use_real_loader()
+def test_pickle_backed_npz_is_a_bounded_human_error(capsys, tmp_path):
+    """Driven through `main()` directly: this module never patches the loader,
+    so the real decode path runs."""
     target = _pickle_backed_npz(tmp_path)
 
-    assert cli.run(["info", target]) == 1
+    assert cli_mod.main(["info", target]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -842,12 +843,11 @@ def test_pickle_backed_npz_is_a_bounded_human_error(cli, capsys, tmp_path):
     ],
     ids=["global-flag", "auto-upgrade"],
 )
-def test_pickle_backed_npz_emits_the_error_envelope(cli, capsys, tmp_path,
+def test_pickle_backed_npz_emits_the_error_envelope(capsys, tmp_path,
                                                     argv_prefix, tail):
-    cli.use_real_loader()
     target = _pickle_backed_npz(tmp_path)
 
-    assert cli.run([*argv_prefix, "info", target, *tail]) == 1
+    assert cli_mod.main([*argv_prefix, "info", target, *tail]) == 1
 
     document = _only_envelope(capsys, expect_status=1)
     assert document["code"] == "snapshot-unreadable"

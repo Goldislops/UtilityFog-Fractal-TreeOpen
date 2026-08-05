@@ -126,15 +126,44 @@ def load_npz(path: str | Path) -> ObservatorySnapshot:
     closed deterministically before any of that later work begins. Extraction
     failures are not caught, translated or suppressed: a missing key or a failing
     metadata conversion propagates exactly as before, and the `with` block still
-    closes the archive on the way out. `str(path)`, `allow_pickle=True`, the
-    `0` / `0` / `0.0` metadata defaults and the `int()` / `float()` conversions
-    are preserved verbatim.
+    closes the archive on the way out. `str(path)`, the `0` / `0` / `0.0`
+    metadata defaults and the `int()` / `float()` conversions are preserved
+    verbatim.
 
-    The claim is archive resource lifetime relative to extraction — not an
-    indefinitely accumulating descriptor leak, and not snapshot validation.
+    ``allow_pickle=False`` -- no pickle, ever
+    ----------------------------------------
+    An NPZ member of object dtype is stored as a pickle, so loading one with
+    pickle enabled is arbitrary code execution by construction. This route is
+    reachable from a bare filename on the command line, so the archive is
+    opened with ``allow_pickle=False`` and NumPy refuses such a member with a
+    ``ValueError`` instead of unpickling it. That refusal is already in the
+    CLI's translated-input set, so it surfaces as an ordinary
+    ``snapshot-unreadable`` failure rather than a traceback.
+
+    Passed EXPLICITLY although NumPy's default is already ``False``: relying on
+    the default would make the property invisible at the call site and
+    silently reversible by an upstream change. There is deliberately no
+    fallback retry, no flag and no environment override -- a compatibility
+    escape hatch would reinstate exactly the execution path being removed.
+
+    No legitimate producer in this repository is affected. Snapshots carry
+    numeric arrays plus plain scalars, and the same decision was already taken
+    for `scripts/dandelion.py` (PR #432) and for the nextness, calibration,
+    engine-resume and replicate loaders.
+
+    The claim is an OBJECT-ARRAY REFUSAL, not whole-archive validation: nothing
+    here resists decompression amplification, absurd declared shapes, hostile
+    member names or defects in NumPy's own header parsing. A pickle-backed
+    legacy archive is refused by design and must be re-exported with numeric
+    arrays.
+
+    The other claim is archive resource lifetime relative to extraction — not
+    an indefinitely accumulating descriptor leak, and not snapshot validation.
+    Both hold on refusal too: the member is decoded inside the ``with`` block,
+    so the handle is released whether extraction succeeds or is refused.
     """
     path = Path(path)
-    with np.load(str(path), allow_pickle=True) as snap:
+    with np.load(str(path), allow_pickle=False) as snap:
         lattice = snap["lattice"]
         memory_grid = snap["memory_grid"]
         generation = int(snap.get("generation", 0))

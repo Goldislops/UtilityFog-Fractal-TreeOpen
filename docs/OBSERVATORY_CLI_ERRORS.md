@@ -309,10 +309,34 @@ no envelope. Absence of a matching line is how you tell them apart.
   contains an unpaired escape that strict parsers reject.
 - No traceback, and no unrestricted exception representation, is emitted.
 
-### Known limitation
+### Pickle-backed NPZ archives are refused
 
-`message` for `snapshot-unreadable` embeds the underlying decoder's text,
-which can include absolute paths and OS-localised strings. It is bounded and
-sanitised, but it is *not* a curated string. Treat `message` as untrusted
-human text — which rule 5 above already requires — and key automation off
-`code`.
+An `.npz` member of object dtype is stored as a pickle, so loading one with
+pickle enabled is arbitrary code execution by construction — and this route is
+reachable from a bare filename on the command line. The Observatory therefore
+opens every NPZ with `allow_pickle=False`.
+
+A snapshot carrying an object-dtype member is refused as an ordinary
+`snapshot-unreadable` input failure: exit status 1, one bounded human line or
+the version-1 envelope on stderr, empty stdout, no traceback.
+
+**This is deliberate, not a bug.** A pickle-backed legacy archive must be
+re-exported using numeric arrays. There is no flag, environment variable or
+compatibility mode to re-enable pickle, and no fallback retry — a compatibility
+escape hatch would reinstate exactly the execution path being removed. Ordinary
+snapshots are unaffected: they carry numeric arrays plus plain scalars, and
+legacy 3- and 5-channel numeric grids still migrate to eight channels as before.
+
+### Known limitations
+
+- **The pickle refusal is an object-array refusal, not whole-archive
+  validation.** No claim is made that an arbitrary `.npz` is safe or fully
+  validated. Decompression amplification, absurd declared shapes, hostile
+  member names and defects in NumPy's own header parsing are all out of scope.
+  What is guaranteed is narrower and precise: no member is ever handed to the
+  unpickler.
+- `message` for `snapshot-unreadable` embeds the underlying decoder's text,
+  which can include absolute paths and OS-localised strings. It is bounded and
+  sanitised, but it is *not* a curated string. Treat `message` as untrusted
+  human text — which rule 5 above already requires — and key automation off
+  `code`.
