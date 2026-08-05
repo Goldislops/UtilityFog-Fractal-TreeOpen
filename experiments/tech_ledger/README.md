@@ -67,7 +67,7 @@ validation never mutates, infers or upgrades anything.
 >
 > An assertion is *externally checkable* when its truth-maker lies outside this repository and a primary source could confirm or refute it. G is triggered by any of:
 > **(a)** a named publication, venue, or publication/peer-review status;
-> **(b)** a research-status claim bounded to dates, venues, **or activity** (an emphatic existence assertion about a field's research — "real active research in their own field", "Real research literature" — satisfies the activity limb and exceeds any label's semantics);
+> **(b)** a research-status claim bounded to dates, venues, **or activity** (an emphatic existence assertion about a field's research — "real active research in their own field", "Real research literature" — satisfies the activity limb and exceeds any label's semantics; a non-emphatic activity restatement that stays within a label's defined semantics — "Active [field] research" on a C-record — does not satisfy this limb and is judged under exclusion 1);
 > **(c)** a measured figure imported from an external source;
 > **(d)** a named external empirical result — a specific experiment, demonstration, measurement, or standard;
 > **(e)** a capability claim about an external technology or physical effect — affirmative or negative — that the record's reasoning relies on as a checkable fact;
@@ -75,7 +75,7 @@ validation never mutates, infers or upgrades anything.
 > **(g)** the **specific substantive content of an external theorem, analytic solution, or mathematical result** — stating what the mathematics says ("the pseudotensor is coordinate-dependent, so only integrated or asymptotic quantities are meaningful") is externally checkable and is **never exempt merely because its truth-maker is proof**. A generic statement that an approximation method has a bounded validity regime states the character of approximation methods as a class and is method identity, not (g)-content.
 >
 > **G is never triggered by:**
-> 1. the classification labels themselves, or prose restating a label's defined semantics with **no added empirical assertion** — including a negative restatement (an unbounded "no settled technique" on a C-record restates research-stage meaning); an emphatic existence claim exceeds the label and is judged under trigger (b);
+> 1. the classification labels themselves, or prose restating a label's defined semantics with **no added empirical assertion** — including a negative restatement (an unbounded "no settled technique" on a C-record restates research-stage meaning) and its affirmative mirror (a bare "Active [field] research" on a C-record restates C's own active-research-stage semantics); an emphatic existence claim — one insisting on reality in words the label does not supply ("real", "Real") — exceeds the label and is judged under trigger (b);
 > 2. schema fields, enums and record-state metadata;
 > 3. repository-internal facts, whose truth-maker is this repository's own tree (by recorded convention this includes statements *about the record's own source document*, e.g. "the user-supplied audit supplies no…", whose truth-maker is the recorded intake, not the world);
 > 4. pure hypotheticals and conditionals;
