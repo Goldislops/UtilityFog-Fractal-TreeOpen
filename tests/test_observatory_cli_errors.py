@@ -799,6 +799,122 @@ def test_an_invalid_repeat_does_not_select_a_format(capsys, tmp_path):
     assert exc.value.code == 2
 
 
+# --- a failed occurrence is STICKY ----------------------------------------
+#
+# Last-wins is only meaningful when every occurrence is valid. argparse cannot
+# parse ANY of the invocations below, so the whole command line is refused --
+# and the scanner must reach the same conclusion. A later valid occurrence
+# must not launder an earlier invalid one into an accepted JSON selection, and
+# an earlier valid occurrence must not survive a later missing value.
+#
+# The rules, stated once:
+#   1. no occurrence            -> None
+#   2. all occurrences valid    -> the last one (argparse's ordinary result)
+#   3. ANY occurrence invalid or missing its value -> "human"
+#   4. separated, equals and supported abbreviated forms agree
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        # 1. absent
+        pytest.param([], None, id="absent"),
+        pytest.param(["info", "x.npz"], None, id="absent-with-command"),
+        # 2. all valid -> last wins
+        pytest.param(["--error-format", "json"], "json", id="single-json"),
+        pytest.param(["--error-format", "human"], "human", id="single-human"),
+        pytest.param(["--error-format", "json", "--error-format", "human"],
+                     "human", id="valid-valid-separated"),
+        pytest.param(["--error-format=human", "--error-format=json"],
+                     "json", id="valid-valid-equals"),
+        pytest.param(["--error-f", "json"], "json", id="abbreviated-valid"),
+        # 3. any failure is sticky
+        pytest.param(["--error-format", "yaml"], "human", id="single-invalid"),
+        pytest.param(["--error-format", "yaml", "--error-format", "json"],
+                     "human", id="invalid-then-valid-separated"),
+        pytest.param(["--error-format=yaml", "--error-format=json"],
+                     "human", id="invalid-then-valid-equals"),
+        pytest.param(["--error-format", "json", "--error-format", "yaml"],
+                     "human", id="valid-then-invalid-separated"),
+        pytest.param(["--error-format=json", "--error-format=yaml"],
+                     "human", id="valid-then-invalid-equals"),
+        pytest.param(["--error-format", "json", "--error-format"],
+                     "human", id="valid-then-missing-value"),
+        pytest.param(["--error-format=json", "--error-format"],
+                     "human", id="equals-then-missing-value"),
+        pytest.param(["--error-format"], "human", id="missing-value-alone"),
+        pytest.param(["--error-f", "yaml", "--error-format", "json"],
+                     "human", id="abbreviated-invalid-then-valid"),
+        pytest.param(["--error-f"], "human", id="abbreviated-missing-value"),
+        # 4. mixed forms
+        pytest.param(["--error-format=yaml", "--error-format", "json"],
+                     "human", id="equals-invalid-then-separated-valid"),
+        pytest.param(["--error-format", "json", "--error-format=yaml"],
+                     "human", id="separated-valid-then-equals-invalid"),
+    ],
+)
+def test_scanner_rules(argv, expected):
+    """The seam directly: every rule pinned on one table."""
+    assert cli_mod._scan_error_format(argv) == expected
+
+
+FAILED_SCAN_INVOCATIONS = [
+    pytest.param(["--error-format", "yaml", "--error-format", "json"],
+                 id="invalid-then-valid"),
+    pytest.param(["--error-format=yaml", "--error-format=json"],
+                 id="invalid-then-valid-equals"),
+    pytest.param(["--error-format", "json", "--error-format", "yaml"],
+                 id="valid-then-invalid"),
+    pytest.param(["--error-format=json", "--error-format=yaml"],
+                 id="valid-then-invalid-equals"),
+    pytest.param(["--error-format", "json", "--error-format"],
+                 id="valid-then-missing-value"),
+    pytest.param(["--error-format=json", "--error-format"],
+                 id="equals-then-missing-value"),
+    pytest.param(["--error-f", "yaml", "--error-format", "json"],
+                 id="abbreviated-invalid-then-valid"),
+]
+
+
+@pytest.mark.parametrize("flags", FAILED_SCAN_INVOCATIONS)
+def test_a_failed_error_format_is_refused_in_human_form(capsys, flags):
+    """End to end: argparse cannot parse any of these, so the refusal is a
+    status-2 usage error in HUMAN form -- a format that was never validly
+    selected must not be trusted to carry the refusal."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main([*flags, "info", "x.npz"])
+    assert exc.value.code == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert not _envelopes_in(captured.err), "refusal must not be a JSON envelope"
+    assert "cosmic-observatory: error:" in captured.err
+
+
+@pytest.mark.parametrize("flags", FAILED_SCAN_INVOCATIONS)
+def test_a_failed_error_format_never_reaches_the_runtime_lane(capsys, flags, tmp_path):
+    """The command never runs, so a runtime error cannot be reported either --
+    argparse refuses first, with status 2 rather than 1."""
+    with pytest.raises(SystemExit) as exc:
+        cli_mod.main([*flags, "info", str(tmp_path / "absent.npz")])
+    assert exc.value.code == 2
+    assert not _envelopes_in(capsys.readouterr().err)
+
+
+def test_all_valid_repeats_still_follow_last_wins(capsys, tmp_path):
+    """The correction must not damage the case that does parse."""
+    target = str(tmp_path / "absent.npz")
+    assert cli_mod.main(["--error-format", "human", "--error-format", "json",
+                         "info", target]) == 1
+    assert _envelopes_in(capsys.readouterr().err)
+
+    assert cli_mod.main(["--error-format", "json", "--error-format", "human",
+                         "info", target]) == 1
+    err = capsys.readouterr().err
+    assert not _envelopes_in(err)
+    assert err.startswith("cosmic-observatory: error: ")
+
+
 # --- usage-code classification --------------------------------------------
 
 
