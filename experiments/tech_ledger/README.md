@@ -36,7 +36,7 @@ labels are **qualifiers** (`classification_qualifiers`).
 | **D** | architecture analogy or inspiration only |
 | **E** | speculative physical hypothesis requiring empirical validation |
 | **F** | unsupported, misleading or technically mismatched claim |
-| **G** | external factual claim requiring primary-source verification before repository inclusion |
+| **G** | externally checkable factual assertion carried in a record's prose — see "The G rule" below for the trigger classes (a)-(g), the exclusions and their precedence, the dossier obligation (applying equally to PRs that include and PRs that correct such assertions), the condition-bound prospective mode, and the every-G-accountable deadline |
 
 ## Record schema (`tech-ledger-v1`, closed)
 
@@ -60,6 +60,34 @@ carry no seam; `eligible` and `evidence-gated` require one;
 `v5-deferred` status requires a `deferred` disposition and a null seam; a
 **G** classification never causes `verification_status` to be rewritten —
 validation never mutates, infers or upgrades anything.
+
+## The G rule
+
+> **G marks an externally checkable factual assertion carried in a record's prose.**
+>
+> An assertion is *externally checkable* when its truth-maker lies outside this repository and a primary source could confirm or refute it. G is triggered by any of:
+> **(a)** a named publication, venue, or publication/peer-review status;
+> **(b)** a research-status claim bounded to dates, venues, **or activity** (an emphatic existence assertion about a field's research — "real active research in their own field", "Real research literature" — satisfies the activity limb and exceeds any label's semantics; a non-emphatic activity restatement that stays within a label's defined semantics — "Active [field] research" on a C-record — does not satisfy this limb and is judged under exclusion 1);
+> **(c)** a measured figure imported from an external source;
+> **(d)** a named external empirical result — a specific experiment, demonstration, measurement, or standard;
+> **(e)** a capability claim about an external technology or physical effect — affirmative or negative — that the record's reasoning relies on as a checkable fact;
+> **(f)** the licence, availability, release, or maintenance status of a named external artifact;
+> **(g)** the **specific substantive content of an external theorem, analytic solution, or mathematical result** — stating what the mathematics says ("the pseudotensor is coordinate-dependent, so only integrated or asymptotic quantities are meaningful") is externally checkable and is **never exempt merely because its truth-maker is proof**. A generic statement that an approximation method has a bounded validity regime states the character of approximation methods as a class and is method identity, not (g)-content.
+>
+> **G is never triggered by:**
+> 1. the classification labels themselves, or prose restating a label's defined semantics with **no added empirical assertion** — including a negative restatement (an unbounded "no settled technique" on a C-record restates research-stage meaning) and its affirmative mirror (a bare "Active [field] research" on a C-record restates C's own active-research-stage semantics); an emphatic existence claim — one insisting on reality in words the label does not supply ("real", "Real") — exceeds the label and is judged under trigger (b);
+> 2. schema fields, enums and record-state metadata;
+> 3. repository-internal facts, whose truth-maker is this repository's own tree (by recorded convention this includes statements *about the record's own source document*, e.g. "the user-supplied audit supplies no…", whose truth-maker is the recorded intake, not the world);
+> 4. pure hypotheticals and conditionals;
+> 5. genuinely synthetic, repository-local procedures and test fixtures;
+> 6. a **bare method name or operator choice** ("WKB approximation", "standard mathematical analysis tooling"), a **categorical existence-reference** to a method's standard results, and **descriptions of a field's own standard methodological practice** — where *naming* means specific identification by author, venue, year, title, or figure, and a categorical reference asserts only that a method's standard mathematics exists.
+>
+> **Requirements are not a shelter, with stated precedence:** a normative requirement or prohibition is exempt only when it neither asserts nor presupposes an external fact **beyond exclusion 6's method identity**. Precedence rule: a categorical existence-reference remains exempt wherever it appears, including inside a requirement ("Match to a textbook asymptotic result" presupposes only that the method's standard mathematics exists); a requirement that **names** a specific publication, result, or capability, or states (g)-content, is never sheltered (a gate naming "Moreva et al., PRA 89, 052122 (2014)" carries G for exactly that reason).
+>
+> **Obligation:** a record carrying G for its own assertions must have those assertions routed through a bounded primary-source evidence dossier — with recorded access levels and a pinned receipt — before the content PR that **includes or corrects** them merges. A record already merged whose prose is found to trigger G is corrected under this same obligation; history is never grounds for exemption.
+> **Prospective G:** valid only on a record with a `deferred` disposition (null seam) and a `v5-deferred`, `future-watch` or `parked` status; it binds each future ingested claim, not the record's own prose, and requires no dossier until such a claim lands.
+> **Every G must be one or the other, on a deadline:** a G that corresponds neither to a current trigger with dossier treatment nor to valid prospective mode is a defect and must be regularized **at the record's next content PR — for an unmerged record, the PR that includes it**. Regularization means binding the G to a real trigger with dossier treatment, converting the record to valid prospective mode, or revising the G *together with any prose clause that references it* with a recorded reason — a bare qualifier deletion that strands referencing prose is not a valid regularization.
+> **G never changes `verification_status`** — verification is a separate recorded act, and inclusion is not endorsement.
 
 ## Validator
 
