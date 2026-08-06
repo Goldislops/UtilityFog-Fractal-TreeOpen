@@ -1240,18 +1240,38 @@ def test_zero_size_lattice_does_not_crash_either_command(tmp_path, command, shap
                                  else "snapshot"] is not None
 
 
-# --- oversized counters through the genuine NPZ route ----------------------
+# --- oversized counters: the NPZ route is now closed -----------------------
 #
-# Reachability note. An ordinary portable-genome JSON file is NOT the route:
-# CPython applies the same integer-string ceiling when PARSING, so `json.load`
-# rejects an over-limit decimal literal before the loader ever sees it. The
-# NPZ route does reach it -- `load_npz` uses `allow_pickle=True` and then
-# `int(...)`, so a pickled Python int of any magnitude survives as a real int.
-# A snapshot built directly in a library call is the other valid witness.
+# An oversized counter -- past CPython's integer-to-string ceiling -- had
+# exactly one NPZ route: an object-dtype member, i.e. a pickle. No numeric
+# NumPy dtype can represent 10**100000, so there is no pickle-free way to
+# construct one.
+#
+# The loader now opens archives with `allow_pickle=False`, which closes that
+# route deliberately. These tests therefore no longer assert that such a
+# snapshot LOADS and is diagnosed; they assert that it is REFUSED, before
+# diagnostics run, as an ordinary `snapshot-unreadable` input failure.
+#
+# Restoring the old assertions would mean restoring the unsafe pickle path,
+# so it is not an option. The oversized-counter DIAGNOSTICS contract is
+# unaffected and remains covered directly, in memory, by
+# tests/test_observatory_diagnostics.py -- which constructs the snapshot
+# through the library rather than through a file and needs no pickle. That
+# file is untouched by this change.
+#
+# An ordinary portable-genome JSON file was never the route either: CPython
+# applies the same ceiling when PARSING, so `json.load` rejects an over-limit
+# decimal literal before the loader sees it.
+
+ERROR_SCHEMA = "utilityfog.observatory.error/1"
 
 
-def _write_oversized_snapshot(path, field="generation"):
-    """A real .npz whose counter is a huge pickled Python int."""
+def _write_pickle_backed_counter(path, field="generation"):
+    """An .npz whose counter is an object-dtype (pickled) huge integer.
+
+    Written, not loaded: `np.savez` pickles on the way in, which is inert.
+    The loader must refuse it on the way out.
+    """
     lattice = np.zeros((2, 3, 4), dtype=np.uint8)
     lattice[0, 0, 0] = 1
     payload = {
@@ -1266,37 +1286,49 @@ def _write_oversized_snapshot(path, field="generation"):
     return str(path)
 
 
-@pytest.mark.parametrize("field", ["generation", "ca_step"])
-@pytest.mark.parametrize("argv_tail", [[], ["--json"]])
-def test_oversized_counter_does_not_traceback_in_info(tmp_path, field, argv_tail):
-    """Human `info` formats the counters directly with `:,`, which raises on a
-    value past the digit ceiling; `info --json` serialized it verbatim and
-    raised inside the encoder. Neither may traceback."""
-    path = _write_oversized_snapshot(tmp_path / f"big_{field}.npz", field)
-    proc = _run_module("info", path, *argv_tail)
-    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
-    assert proc.returncode == 0
-    if argv_tail:
-        assert json.loads(proc.stdout)[field] is None
+def _error_envelope(stderr):
+    """The envelope is the JSON line carrying the error schema."""
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            document = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(document, dict) and document.get("schema") == ERROR_SCHEMA:
+            return document
+    return None
 
 
 @pytest.mark.parametrize("field", ["generation", "ca_step"])
+@pytest.mark.parametrize("command", ["info", "doctor"])
 @pytest.mark.parametrize("argv_tail", [[], ["--json"]])
-def test_oversized_counter_is_reported_by_doctor(tmp_path, field, argv_tail):
-    """`doctor` must report it as a failed check, not die describing it."""
-    path = _write_oversized_snapshot(tmp_path / f"big_{field}.npz", field)
-    proc = _run_module("doctor", path, *argv_tail)
-    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
+def test_pickle_backed_counter_is_refused_before_diagnostics(
+    tmp_path, field, command, argv_tail
+):
+    """Refused at load, so no diagnostics run and no report is produced.
+
+    Both commands, both fields, both output modes: status 1, empty stdout,
+    no traceback, and in JSON mode a version-1 `snapshot-unreadable` envelope
+    on stderr.
+    """
+    path = _write_pickle_backed_counter(tmp_path / f"big_{field}.npz", field)
+    proc = _run_module(command, path, *argv_tail)
+
     assert proc.returncode == 1
+    assert proc.stdout == "", f"a report was produced: {proc.stdout[:200]!r}"
+    assert "Traceback (most recent call last)" not in proc.stderr, proc.stderr
+
     if argv_tail:
-        document = json.loads(proc.stdout)
-        assert document["ok"] is False
-        failed = [c["name"] for c in document["checks"] if not c["ok"]]
-        assert f"{field}_non_negative_int" in failed
-        assert document["snapshot"][field] is None
+        document = _error_envelope(proc.stderr)
+        assert document is not None, f"no envelope on stderr: {proc.stderr[:300]!r}"
+        assert document["code"] == "snapshot-unreadable"
+        assert document["category"] == "input"
+        assert document["exit_status"] == 1
     else:
-        assert f"{field}_non_negative_int" in proc.stdout
-        assert "[FAIL]" in proc.stdout
+        assert proc.stderr.startswith("cosmic-observatory: error: ")
+        assert len(proc.stderr.strip().splitlines()) == 1
 
 
 def test_ordinary_counters_still_render_normally(tmp_path):
