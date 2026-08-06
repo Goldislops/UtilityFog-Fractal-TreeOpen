@@ -15,7 +15,8 @@ before any post-extraction work begins.
 No real simulation, engine, GPU kernel, snapshot or heatmap is involved: the
 engine's lazy import is served by a scoped `sys.modules` stand-in (restored
 afterwards), `AcousticMap` is replaced by a recorder, and `np.load` returns a
-closure-recording fake. Nothing is written anywhere.
+closure-recording fake. The pickle-refusal tests appended at the end DO
+write real NPZ archives, but only inside pytest's own `tmp_path`.
 
 Scope is archive resource lifetime relative to extraction — not snapshot
 validation, archive security, the acoustic mathematics or whole-diagnostic
@@ -514,6 +515,20 @@ def _write_snapshot_am(path, compressed=False, **members):
     return str(path)
 
 
+def _engine_stub_installed():
+    """Serve `run_acoustic_diagnostic`'s function-local engine import.
+
+    That import happens at `acoustic_map.py:355`, BEFORE the `np.load` at
+    :358, so a hostile-archive test would otherwise pull in the real engine
+    and contradict this module's "no real engine" claim.
+    """
+    stub = types.ModuleType(_ENGINE_MODULE)
+    stub.step_ca_lattice = lambda *a, **k: None
+    stub.load_rule_spec = lambda *a, **k: {}
+    stub.init_memory_grid = lambda *a, **k: None
+    return mock.patch.dict(sys.modules, {_ENGINE_MODULE: stub})
+
+
 def test_am_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     """Control. Without it, every "marker is absent" assertion below could
     pass against a payload that never worked. This is the only place in this
@@ -534,7 +549,7 @@ def test_object_payload_is_refused_by_the_diagnostic(tmp_path, field):
     archive = _write_snapshot_am(
         tmp_path / f"{field}.npz", **{field: _payload_array_am(tmp_path)}
     )
-    with pytest.raises(ValueError) as excinfo:
+    with _engine_stub_installed(), pytest.raises(ValueError) as excinfo:
         acoustic_map.run_acoustic_diagnostic(archive, num_steps=0)
     assert "allow_pickle=False" in str(excinfo.value)
     assert not _marker_am(tmp_path).exists(), "the pickle payload executed"
@@ -552,7 +567,8 @@ def test_no_diagnostic_seam_runs_after_a_refusal(tmp_path):
         def __init__(self, *a, **k):
             built.append(1)
 
-    with mock.patch.object(acoustic_map, "AcousticMap", _RecordingMap):
+    with _engine_stub_installed(), \
+         mock.patch.object(acoustic_map, "AcousticMap", _RecordingMap):
         with pytest.raises(ValueError):
             acoustic_map.run_acoustic_diagnostic(archive, num_steps=0)
 
@@ -572,7 +588,7 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(acoustic_map.np, "load", _recording_load)
-    with pytest.raises(ValueError):
+    with _engine_stub_installed(), pytest.raises(ValueError):
         acoustic_map.run_acoustic_diagnostic(archive, num_steps=0)
     assert calls == [False], f"expected one pickle-free open, got {calls}"
 
@@ -592,7 +608,7 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
         return handle
 
     monkeypatch.setattr(acoustic_map.np, "load", _tracking_load)
-    with pytest.raises(ValueError):
+    with _engine_stub_installed(), pytest.raises(ValueError):
         acoustic_map.run_acoustic_diagnostic(archive, num_steps=0)
 
     assert len(opened) == 1

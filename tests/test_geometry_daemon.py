@@ -14,7 +14,9 @@ Nothing here touches a real snapshot, engine, printer, STL generation or
 long-running daemon: `np.load` is replaced at the module boundary with a fake
 archive that records context entry/exit and closure, the three exporters are
 recorders, and the clock is deterministic. No `.npz`, CSV, JSON, STL or PNG is
-written anywhere, and the module's import-time `GEO_DIR.mkdir(...)` is isolated
+written outside pytest's own `tmp_path` (the pickle-refusal tests appended
+at the end write real NPZ archives there), and the module's import-time
+`GEO_DIR.mkdir(...)` is isolated
 so the repository's real `data/geometry` directory is never created or modified.
 
 Scope is `.npz` archive resource lifetime only — not snapshot validation, archive

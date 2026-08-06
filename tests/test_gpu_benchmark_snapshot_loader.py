@@ -17,7 +17,9 @@ No real benchmark, engine, GPU kernel, snapshot or persistent output is used:
 `scripts.continuous_evolution_ca` is replaced by a scoped stand-in (the
 production module imports it at load time), `benchmark_component` is a
 deterministic recorder rather than a timing loop, arrays are 2x2x2, and
-`np.load` returns a closure-recording fake. Nothing is written anywhere.
+`np.load` returns a closure-recording fake. The pickle-refusal tests
+appended at the end DO write real NPZ archives, but only inside pytest's
+own `tmp_path`.
 
 Scope is archive resource lifetime relative to extraction — not snapshot
 validation, benchmark mathematics, timing methodology, or the separate question

@@ -12,7 +12,8 @@ as it already did for syntactically invalid JSON.
 
 Everything here runs in-process against the real coroutine driven by a
 controlled asynchronous fake socket: no real WebSocket, no browser, no network,
-no snapshot files and no NumPy data.
+no snapshot files outside pytest's own `tmp_path` (the pickle-refusal
+tests appended at the end write real NPZ archives there).
 
 Scope is top-level JSON shape in `handle_client` only — not whole-server,
 whole-WebSocket, authentication, authorization or payload-schema totality.
@@ -335,8 +336,22 @@ def test_initial_snapshot_failure_does_not_block_message_handling(monkeypatch):
     assert websocket.delivered == ["null", PING]
     assert len(_pongs(websocket)) == 1
 
-import numpy as np
 from pathlib import Path
+
+# This module deliberately runs without NumPy (see `_optional_dependency_stubs`
+# above): the malformed-frame contract must execute in ordinary maintained CI
+# rather than being skipped away behind an optional dependency. The pickle
+# tests below DO need real NumPy, so it is imported defensively and only those
+# tests are skipped when it is absent -- importing it unconditionally would
+# fail collection of this whole file, taking the 330 lines above with it.
+try:
+    import numpy as np
+    _HAVE_NUMPY = True
+except ImportError:  # pragma: no cover - exercised only in a bare environment
+    np = None
+    _HAVE_NUMPY = False
+
+requires_numpy = pytest.mark.skipif(not _HAVE_NUMPY, reason="numpy not installed")
 
 
 # ===========================================================================
@@ -396,6 +411,7 @@ def _write_snapshot_ls(path, compressed=False, **members):
     return str(path)
 
 
+@requires_numpy
 def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     """Control. Without it, every "marker is absent" assertion below could
     pass against a payload that never worked. This is the only place in this
@@ -411,6 +427,7 @@ def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     assert _marker_ls(tmp_path).exists(), "the payload fixture is inert; fix it"
 
 
+@requires_numpy
 @pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
 def test_object_payload_is_refused_by_extract_render_data(tmp_path, field):
     archive = _write_snapshot_ls(
@@ -429,6 +446,7 @@ def _structured_payload_ls(directory):
     return structured
 
 
+@requires_numpy
 def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
     """A structured dtype takes a different path through NumPy's descriptor
     handling than a plain object array, so it needs its own control."""
@@ -440,6 +458,7 @@ def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
     assert _marker_ls(tmp_path).exists(), "the structured payload is inert"
 
 
+@requires_numpy
 def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
     """`kind == 'O'` alone would miss this; NumPy's refusal covers
     `dtype.hasobject`."""
@@ -452,6 +471,7 @@ def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
     assert not _marker_ls(tmp_path).exists()
 
 
+@requires_numpy
 def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
     """`extract_render_data` had no context manager: the handle was held open
     across up to MAX_CELLS iterations of per-cell work. `np.argwhere` is the
@@ -481,6 +501,7 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
     assert observed == [True], "the archive was still open during cell iteration"
 
 
+@requires_numpy
 def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
     archive = _write_snapshot_ls(
         tmp_path / "retry.npz", lattice=_payload_array_ls(tmp_path)
@@ -498,6 +519,7 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
     assert calls == [False]
 
 
+@requires_numpy
 def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
     archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))
     data = lucid_server.extract_render_data(archive)
