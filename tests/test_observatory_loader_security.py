@@ -153,18 +153,63 @@ def test_object_payload_in_recognized_metadata_is_refused(tmp_path, field):
     assert not _marker(tmp_path).exists(), "the pickle payload executed"
 
 
+def _structured_payload(directory):
+    """A structured dtype hiding the payload in an object field."""
+    structured = np.empty((1,), dtype=[("payload", "O"), ("n", "i4")])
+    structured["payload"][0] = _PayloadOnUnpickle(directory)
+    structured["n"][0] = 1
+    return structured
+
+
+def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
+    """Control for the structured variant specifically.
+
+    The plain object-array payload has its own control above, but a structured
+    dtype takes a different path through NumPy's descriptor handling. Without
+    this, the structured refusal test's "marker is absent" assertion could pass
+    against a payload that was never live in that shape.
+    """
+    archive = _write(tmp_path / "struct_control.npz",
+                     generation=_structured_payload(tmp_path))
+    assert not _marker(tmp_path).exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["generation"]
+
+    assert _marker(tmp_path).exists(), "the structured payload is inert; fix it"
+
+
 @pytest.mark.parametrize("field", ["generation", "ca_step", "best_fitness"])
 def test_object_bearing_structured_metadata_is_refused(tmp_path, field):
     """A structured dtype can hide an object field, so `kind == 'O'` alone is
     not the test -- NumPy's own refusal covers `dtype.hasobject`."""
-    structured = np.empty((1,), dtype=[("payload", "O"), ("n", "i4")])
-    structured["payload"][0] = _PayloadOnUnpickle(tmp_path)
-    structured["n"][0] = 1
-    archive = _write(tmp_path / f"struct_{field}.npz", **{field: structured})
+    archive = _write(tmp_path / f"struct_{field}.npz",
+                     **{field: _structured_payload(tmp_path)})
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as excinfo:
         loader.load_npz(archive)
 
+    # Assert the SPECIFIC refusal: a bare `ValueError` would also be satisfied
+    # by an unrelated failure elsewhere in the load path.
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker(tmp_path).exists(), "the pickle payload executed"
+
+
+def test_a_compressed_archive_is_refused_the_same_way(tmp_path):
+    """Real producers use `np.savez_compressed`, so the hostile fixture should
+    exercise that shape too rather than only the uncompressed one."""
+    path = tmp_path / "compressed.npz"
+    np.savez_compressed(
+        path,
+        lattice=_payload_array(tmp_path),
+        memory_grid=_grid(),
+        generation=7, ca_step=11, best_fitness=0.25,
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        loader.load_npz(str(path))
+
+    assert "allow_pickle=False" in str(excinfo.value)
     assert not _marker(tmp_path).exists(), "the pickle payload executed"
 
 
