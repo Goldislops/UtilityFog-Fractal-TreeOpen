@@ -1,0 +1,40 @@
+{
+ "classification_qualifiers": [
+  "C"
+ ],
+ "classification_rationale": "Established engineering practice on calibrated, synchronised multi-sensor research platforms (A); the uncalibrated, uncooperative-sensor case is research-stage (C face); any specific external claim about real recordings requires primary-source verification before any repository use. Synthetic-data work only in this repository.",
+ "entry_id": "TLV4-022",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "Two-synthetic-camera triangulation with known geometry, tolerance-asserted",
+ "legitimate_uses": [
+  "A ledger record now; synthetic-geometry toys under the existing experiment gates"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Synthetic-scene validation with known geometry before anything further"
+ ],
+ "neutral_name": "Multi-camera and multi-sensor 3D fusion with bird's-eye-view tracking",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-06)",
+  "recorded_date": "2026-08-06",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source; the deployment reading rejected 2026-08-06: the A-face clause recast to atom 022-2's supported scope including the synchronised limb (label face deliberately revised to the evidenced form, recorded here), and G revised out together with its referencing 'is G' clause under the ratified G rule (recorded reason: the recast practice clause shelters under exclusion 6 - field-standard methodological practice naming no author, venue, year, title or figure - and the research-stage clause under exclusion 1, so the record's own prose carries no current trigger; prospective-mode conditions fail (evidence-gated, live seam, active); the verification obligation is preserved as a normative requirement)",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Applying calibrated-rig assumptions to found footage",
+  "Treating fusion output as evidence without uncertainty",
+  "Any real-footage work (a separately authorised later concern)"
+ ],
+ "warnings": [
+  "No real footage, media or external dataset is touched under this entry.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

@@ -1,0 +1,38 @@
+{
+ "classification_qualifiers": [
+  "G"
+ ],
+ "classification_rationale": "Demonstrated engineering (local inference stacks): local LLM inference runtimes with documented low-bit quantisation exist (llama.cpp), post-training quantisation to 3-4 bits at LLM scale shows small measured degradation on its published benchmarks (GPTQ), and measured bit-level trade-offs find 4-bit near-optimal for zero-shot accuracy at fixed total model bits on the studied model families (k-bit inference scaling laws); model-capability or quantisation claims beyond these named results are external facts requiring verification (G face).",
+ "entry_id": "TLV4-013",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Backend-matrix smoke test with a recorded task-level accuracy check",
+ "legitimate_uses": [
+  "Local, air-gapped analysis tooling under the repository's existing gates"
+ ],
+ "minimal_evidence_before_implementation": [
+  "A task-level accuracy check before relying on quantised outputs in any evidence lane"
+ ],
+ "neutral_name": "Local inference and low-bit quantisation for on-premise models",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-06)",
+  "recorded_date": "2026-08-06",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source; G bound 2026-08-06 to the three named quantisation results under the ratified G rule (full-text evidence completed 2026-08-06 and re-derived by the accountable primary); treatment receipts pinned in-record: the bound B4 G primary-source dossier (65900 bytes, sha256 7f5680fadd8b569ad67ab2934232cd2d477ae6db684db566d153afd03f2e1992) and the executing evidence addendum (40691 bytes, sha256 59bcd8314c78b1e8477e0b145299ab869f10f5fd5271c6ba6af2facea6eb4a96)",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code",
+  "future-watch"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Quality-critical classification on heavily quantised models without a calibration record"
+ ],
+ "warnings": [
+  "Model outputs are never evidence; the Glass-Wall discipline is inherited.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

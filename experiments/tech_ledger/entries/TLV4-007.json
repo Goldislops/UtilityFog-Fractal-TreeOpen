@@ -1,0 +1,44 @@
+{
+ "classification_qualifiers": [
+  "D",
+  "G"
+ ],
+ "classification_rationale": "Active materials-science research (C); serves this project mainly as architecture inspiration (D face); each specific external mechanism claim requires primary-source verification (G face).",
+ "entry_id": "TLV4-007",
+ "implementation_disposition": "deferred",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "Cited, hypothesis-labelled research-ledger entries",
+  "Inspiration for growth rules only through the existing sandbox promotion gate"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Primary-source citations per specific mechanism before any repository use"
+ ],
+ "neutral_name": "Self-assembling materials, bio-scaffolding and ambient-resource harvesting",
+ "primary_classification": "C",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [
+  14,
+  15
+ ],
+ "repository_placements": [
+  "research-ledger",
+  "future-watch"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "future-watch",
+ "unsuitable_uses": [
+  "Claiming near-term buildability of fog hardware",
+  "Scheduling implementation on lab-stage external results"
+ ],
+ "warnings": [
+  "Metaphors compile only after disclosing a discrete mechanism and a falsifiable prediction (intake-ledger discipline).",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}
