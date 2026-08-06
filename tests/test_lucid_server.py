@@ -334,3 +334,174 @@ def test_initial_snapshot_failure_does_not_block_message_handling(monkeypatch):
     asyncio.run(lucid_server.handle_client(websocket))
     assert websocket.delivered == ["null", PING]
     assert len(_pongs(websocket)) == 1
+
+import numpy as np
+from pathlib import Path
+
+
+# ===========================================================================
+# Pickle refusal -- lucid_server must never unpickle an NPZ member
+#
+# An object-dtype member is stored as a pickle, so loading one with pickle
+# enabled is arbitrary code execution by construction. The payload below is
+# harmless: its reduction writes ONE marker file inside pytest's own tmp_path
+# and returns. `__reduce__` runs at PICKLE time and only records the callable,
+# so writing the archive is inert; the call would happen at UNPICKLE time.
+#
+# Scope: an object-member refusal, NOT whole-archive validation.
+# ===========================================================================
+
+_LS_MARKER = "LUCID_PAYLOAD_EXECUTED"
+
+
+def _create_marker_ls(directory: str) -> str:
+    """Stand in for a malicious payload; deliberately inert.
+
+    Module scope is required -- pickle stores a module-qualified reference, so
+    a function defined inside a test body could not be resolved at load time.
+    """
+    marker = Path(directory) / _LS_MARKER
+    marker.write_text("payload executed", encoding="utf-8")
+    return str(marker)
+
+
+class _PayloadLs:
+    """Its reduction calls the marker writer when unpickled."""
+
+    def __init__(self, directory):
+        self._directory = str(directory)
+
+    def __reduce__(self):
+        return (_create_marker_ls, (self._directory,))
+
+
+def _payload_array_ls(directory):
+    return np.array([_PayloadLs(directory)], dtype=object)
+
+
+def _marker_ls(tmp_path):
+    return tmp_path / _LS_MARKER
+
+
+def _write_snapshot_ls(path, compressed=False, **members):
+    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    payload = {
+        "lattice": np.ones((4, 4, 4), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 4, 4, 4), dtype=np.float32),
+        "generation": 7,
+    }
+    payload.update(members)
+    writer = np.savez_compressed if compressed else np.savez
+    writer(path, **payload)
+    return str(path)
+
+
+def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
+    """Control. Without it, every "marker is absent" assertion below could
+    pass against a payload that never worked. This is the only place in this
+    module that enables pickle."""
+    archive = _write_snapshot_ls(
+        tmp_path / "control.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    assert not _marker_ls(tmp_path).exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+
+    assert _marker_ls(tmp_path).exists(), "the payload fixture is inert; fix it"
+
+
+@pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
+def test_object_payload_is_refused_by_extract_render_data(tmp_path, field):
+    archive = _write_snapshot_ls(
+        tmp_path / f"{field}.npz", **{field: _payload_array_ls(tmp_path)}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_ls(tmp_path).exists(), "the pickle payload executed"
+
+
+def _structured_payload_ls(directory):
+    structured = np.empty((1,), dtype=[("payload", "O"), ("n", "i4")])
+    structured["payload"][0] = _PayloadLs(directory)
+    structured["n"][0] = 1
+    return structured
+
+
+def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
+    """A structured dtype takes a different path through NumPy's descriptor
+    handling than a plain object array, so it needs its own control."""
+    archive = _write_snapshot_ls(
+        tmp_path / "sc.npz", generation=_structured_payload_ls(tmp_path)
+    )
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["generation"]
+    assert _marker_ls(tmp_path).exists(), "the structured payload is inert"
+
+
+def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
+    """`kind == 'O'` alone would miss this; NumPy's refusal covers
+    `dtype.hasobject`."""
+    archive = _write_snapshot_ls(
+        tmp_path / "struct.npz", generation=_structured_payload_ls(tmp_path)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_ls(tmp_path).exists()
+
+
+def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
+    """`extract_render_data` had no context manager: the handle was held open
+    across up to MAX_CELLS iterations of per-cell work. `np.argwhere` is the
+    first downstream call, so it is the ordering witness."""
+    archive = _write_snapshot_ls(tmp_path / "clean.npz")
+    real_load = np.load
+    opened = []
+
+    def _tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    observed = []
+    real_argwhere = np.argwhere
+
+    def _watching_argwhere(*args, **kwargs):
+        handle = opened[0]
+        observed.append(handle.fid is None or getattr(handle.fid, "closed", True))
+        return real_argwhere(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _tracking_load)
+    monkeypatch.setattr(lucid_server.np, "argwhere", _watching_argwhere)
+
+    lucid_server.extract_render_data(archive)
+
+    assert observed == [True], "the archive was still open during cell iteration"
+
+
+def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+    archive = _write_snapshot_ls(
+        tmp_path / "retry.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+    with pytest.raises(ValueError):
+        lucid_server.extract_render_data(archive)
+    assert calls == [False]
+
+
+def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
+    archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))
+    data = lucid_server.extract_render_data(archive)
+    assert set(data) == {"cells", "metrics"}
+    assert data["metrics"]["generation"] == 5
+    assert type(data["metrics"]["generation"]) is int
+    assert data["cells"], "a fully non-void lattice must yield cells"
