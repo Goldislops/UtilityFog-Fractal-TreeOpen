@@ -47,11 +47,40 @@ def find_latest_snapshot(data_dir):
 
 
 def extract_render_data(snap_path):
-    """Extract cell positions, states, and ages from a snapshot."""
-    snap = np.load(snap_path, allow_pickle=True)
-    state = snap['lattice']
-    mg = snap['memory_grid']
-    gen = int(snap['generation'])
+    """Extract cell positions, states, and ages from a snapshot.
+
+    ``allow_pickle=False`` -- no pickle, ever
+    ----------------------------------------
+    An NPZ member of object dtype is stored as a pickle, so loading one with
+    pickle enabled is arbitrary code execution by construction. This function
+    is reached from a watched directory every poll AND on every client
+    connect, so an archive dropped into ``data/`` would be unpickled without
+    anyone asking. NumPy now refuses such a member with a ``ValueError``
+    instead.
+
+    Passed EXPLICITLY although NumPy's default is already ``False``: relying
+    on the default would make the property invisible at the call site and
+    silently reversible by an upstream change. There is deliberately no
+    fallback retry and no override.
+
+    Archive lifetime
+    ----------------
+    The three values are materialised inside the ``with`` block and the
+    archive is closed before any downstream work begins -- including the
+    ``state.shape[0]`` inspection, the non-void search and the per-cell loop,
+    which previously ran for up to ``MAX_CELLS`` iterations with the handle
+    still open. Closure is explicit, not left to garbage collection, and it
+    holds on refusal too because the members are read inside the block.
+
+    The claim is an OBJECT-MEMBER REFUSAL and archive resource lifetime -- not
+    whole-archive validation. Nothing here resists decompression
+    amplification, absurd declared shapes, hostile member names or defects in
+    NumPy's own header parsing.
+    """
+    with np.load(snap_path, allow_pickle=False) as snap:
+        state = snap['lattice']
+        mg = snap['memory_grid']
+        gen = int(snap['generation'])
 
     n = state.shape[0]
 

@@ -334,8 +334,19 @@ def run_acoustic_diagnostic(snapshot_path: str, num_steps: int = 200):
     Extraction is not guarded: a missing key or a failing ``int()`` conversion
     propagates exactly as before, and the ``with`` block still closes the archive
     on the way out. The ``snapshot_path`` argument is passed to ``np.load``
-    unchanged (no path conversion is introduced) and ``allow_pickle=True`` is
-    preserved verbatim.
+    unchanged (no path conversion is introduced).
+
+    ``allow_pickle=False`` -- an object-dtype member is stored as a pickle, so
+    loading one with pickle enabled is arbitrary code execution. The snapshot
+    path here comes straight from ``sys.argv``, so NumPy now refuses such a
+    member with a ``ValueError`` rather than unpickling it. Passed explicitly
+    although it is already NumPy's default, because relying on a default makes
+    the property invisible at the call site and silently reversible upstream.
+    There is deliberately no fallback retry and no override.
+
+    That refusal is an OBJECT-MEMBER REFUSAL, not whole-archive validation:
+    nothing here resists decompression amplification, absurd declared shapes,
+    hostile member names or defects in NumPy's own header parsing.
 
     The claim is archive resource lifetime relative to extraction — not an
     indefinitely accumulating descriptor leak, not snapshot validation, and
@@ -344,7 +355,7 @@ def run_acoustic_diagnostic(snapshot_path: str, num_steps: int = 200):
     from scripts.continuous_evolution_ca import step_ca_lattice, load_rule_spec, init_memory_grid
 
     print(f"Loading snapshot: {snapshot_path}")
-    with np.load(snapshot_path, allow_pickle=True) as snap:
+    with np.load(snapshot_path, allow_pickle=False) as snap:
         lattice = snap["lattice"]
         memory_grid = snap["memory_grid"]
         gen = int(snap["generation"])

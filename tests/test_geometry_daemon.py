@@ -27,6 +27,7 @@ import ast
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import pytest
 
 # `scripts/geometry_daemon.py` runs `GEO_DIR.mkdir(parents=True, exist_ok=True)`

@@ -92,15 +92,29 @@ def _load_snapshot(path):
 
     Extraction is not guarded: a missing key or a failing ``int()`` / ``float()``
     conversion propagates exactly as before, and the ``with`` block still closes
-    the archive on the way out. ``str(path)``, ``allow_pickle=True``, the
-    required-key semantics, the extraction order, both conversions and the tuple
-    order are preserved verbatim.
+    the archive on the way out. ``str(path)``, the required-key semantics, the
+    extraction order, both conversions and the tuple order are preserved
+    verbatim.
+
+    ``allow_pickle=False`` -- an object-dtype member is stored as a pickle, so
+    loading one with pickle enabled is arbitrary code execution. This helper
+    backs four unauthenticated GET routes on a service that binds
+    ``0.0.0.0``, so anyone able to place a file in ``data/`` could have had it
+    unpickled by the next request. NumPy now refuses such a member with a
+    ``ValueError`` instead. Passed explicitly although it is already NumPy's
+    default, because relying on a default makes the property invisible at the
+    call site and silently reversible upstream. There is deliberately no
+    fallback retry and no override.
+
+    That refusal is an OBJECT-MEMBER REFUSAL, not whole-archive validation:
+    nothing here resists decompression amplification, absurd declared shapes,
+    hostile member names or defects in NumPy's own header parsing.
 
     The claim is archive resource lifetime relative to extraction — not an
     indefinitely accumulating descriptor leak, not snapshot validation, endpoint
     totality, API authentication or atomic file access.
     """
-    with np.load(str(path), allow_pickle=True) as snap:
+    with np.load(str(path), allow_pickle=False) as snap:
         lattice = snap["lattice"]
         memory_grid = snap["memory_grid"]
         generation = int(snap["generation"])
