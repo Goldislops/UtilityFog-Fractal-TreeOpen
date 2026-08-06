@@ -589,7 +589,7 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         geometry_daemon._load_snapshot(archive)
     assert len(opened) == 1
-    assert opened[0].fid is None or getattr(opened[0].fid, "closed", True)
+    assert opened[0].fid is None or opened[0].fid.closed
 
 
 def test_a_numeric_snapshot_still_loads_unchanged(tmp_path):

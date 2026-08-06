@@ -597,4 +597,4 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
 
     assert len(opened) == 1
     handle = opened[0]
-    assert handle.fid is None or getattr(handle.fid, "closed", True)
+    assert handle.fid is None or handle.fid.closed

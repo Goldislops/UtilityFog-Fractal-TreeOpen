@@ -49,8 +49,8 @@ def find_latest_snapshot(data_dir):
 def extract_render_data(snap_path):
     """Extract cell positions, states, and ages from a snapshot.
 
-    ``allow_pickle=False`` -- no pickle, ever
-    ----------------------------------------
+    ``allow_pickle=False`` -- no pickled member is ever loaded
+    ---------------------------------------------------------
     An NPZ member of object dtype is stored as a pickle, so loading one with
     pickle enabled is arbitrary code execution by construction. This function
     is reached from a watched directory every poll AND on every client

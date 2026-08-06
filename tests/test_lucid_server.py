@@ -470,7 +470,7 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
 
     def _watching_argwhere(*args, **kwargs):
         handle = opened[0]
-        observed.append(handle.fid is None or getattr(handle.fid, "closed", True))
+        observed.append(handle.fid is None or handle.fid.closed)
         return real_argwhere(*args, **kwargs)
 
     monkeypatch.setattr(lucid_server.np, "load", _tracking_load)
