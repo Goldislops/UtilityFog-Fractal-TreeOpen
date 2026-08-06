@@ -781,6 +781,99 @@ def test_help_through_the_public_route_stays_human():
 
 
 # ===========================================================================
+# A pickle-backed NPZ is an ordinary `snapshot-unreadable` input failure
+#
+# The loader refuses object-dtype members rather than unpickling them. At the
+# CLI boundary that must land on the established status-1 lane -- not as a
+# traceback, and not with the payload's representation leaking into the
+# message.
+# ===========================================================================
+
+
+_PICKLE_MARKER = "CLI_PICKLE_PAYLOAD_EXECUTED"
+
+
+def _touch_cli_marker(directory: str) -> str:
+    """Inert stand-in for a payload; writes one file inside pytest's tmp_path."""
+    marker = Path(directory) / _PICKLE_MARKER
+    marker.write_text("executed", encoding="utf-8")
+    return str(marker)
+
+
+class _CliPayloadOnUnpickle:
+    def __init__(self, directory):
+        self._directory = str(directory)
+
+    def __reduce__(self):
+        return (_touch_cli_marker, (self._directory,))
+
+
+def _pickle_backed_npz(tmp_path):
+    np = pytest.importorskip("numpy")
+    path = tmp_path / "pickled.npz"
+    np.savez(
+        path,
+        lattice=np.array([_CliPayloadOnUnpickle(tmp_path)], dtype=object),
+        memory_grid=np.zeros((8, 2, 3, 4), dtype=np.float32),
+        generation=7, ca_step=11, best_fitness=0.25,
+    )
+    return str(path)
+
+
+def test_pickle_backed_npz_is_a_bounded_human_error(capsys, tmp_path):
+    """Driven through `main()` directly: this module never patches the loader,
+    so the real decode path runs."""
+    target = _pickle_backed_npz(tmp_path)
+
+    assert cli_mod.main(["info", target]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.strip().splitlines()) == 1
+    assert "Traceback (most recent call last)" not in captured.err
+    assert captured.err.startswith("cosmic-observatory: error: ")
+    assert not (tmp_path / _PICKLE_MARKER).exists(), "the payload executed"
+
+
+@pytest.mark.parametrize(
+    "argv_prefix, tail",
+    [
+        (["--error-format", "json"], []),
+        ([], ["--json"]),
+    ],
+    ids=["global-flag", "auto-upgrade"],
+)
+def test_pickle_backed_npz_emits_the_error_envelope(capsys, tmp_path,
+                                                    argv_prefix, tail):
+    target = _pickle_backed_npz(tmp_path)
+
+    assert cli_mod.main([*argv_prefix, "info", target, *tail]) == 1
+
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "snapshot-unreadable"
+    assert document["category"] == "input"
+    assert not (tmp_path / _PICKLE_MARKER).exists(), "the payload executed"
+
+    # The refusal names the mechanism, not the payload's repr.
+    serialized = json.dumps(document)
+    assert "Traceback" not in serialized
+    assert "_CliPayloadOnUnpickle" not in serialized
+
+
+def test_pickle_refusal_through_the_public_module_route(tmp_path):
+    """End to end, through a real process rather than the fixture."""
+    pytest.importorskip("numpy")
+    target = _pickle_backed_npz(tmp_path)
+    proc = _run_module("--error-format", "json", "doctor", target)
+
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert "Traceback (most recent call last)" not in proc.stderr
+    assert _envelope_line(proc.stderr)["code"] == "snapshot-unreadable"
+    assert not (tmp_path / _PICKLE_MARKER).exists(), "the payload executed"
+
+
+# ===========================================================================
 # Audit corrections
 # ===========================================================================
 

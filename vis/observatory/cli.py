@@ -424,9 +424,19 @@ def _unreadable_input_errors():
     Deliberately assembled rather than replaced by a bare ``except Exception``:
     the tuple is what separates a bad *file* from a bad *program*. NumPy signals
     a damaged archive in several unrelated ways -- an empty file raises
-    ``EOFError``, non-archive bytes fall through to the pickle path and raise
-    ``UnpicklingError``, a corrupt member raises ``BadZipFile`` or ``zlib.error``
-    -- and none of those derive from ``OSError`` or ``ValueError``.
+    ``EOFError``, a corrupt member raises ``BadZipFile`` or ``zlib.error`` --
+    and neither of those derives from ``OSError`` or ``ValueError``.
+
+    The Observatory loader now opens archives with ``allow_pickle=False``, so
+    non-archive bytes and pickle-backed members are refused BEFORE any
+    unpickling, normally as ``ValueError``. That refusal is already covered by
+    ``ValueError`` below.
+
+    ``pickle.UnpicklingError`` is retained conservatively: this tuple is shared
+    by every input-translation site, and keeping it costs nothing. Its presence
+    describes what would be *translated* if it ever arrived -- it does not
+    enable, authorise or imply pickle anywhere. Nothing in this package
+    unpickles.
     """
     import pickle
     import zlib
@@ -650,8 +660,12 @@ def _dispatch(args):
         print(f"Source:     {_one_line(snap.source_path)}")
         print(f"Shape:      {snap.shape}")
         # Through the shared formatter: `{:,}` raises ValueError on an integer
-        # past CPython's decimal-rendering ceiling, which the NPZ route can
-        # carry (it loads with allow_pickle=True and then calls int()).
+        # past CPython's decimal-rendering ceiling. That value can still arrive
+        # by DIRECT LIBRARY CONSTRUCTION -- a snapshot assembled in memory is a
+        # supported seam -- so the formatter's robustness remains necessary.
+        # It can no longer arrive through the NPZ route: an integer that large
+        # has only an object-array representation, and the loader refuses those
+        # with `allow_pickle=False` before anything reaches formatting.
         # Ordinary counters render exactly as before.
         print(f"Generation: {diagnostics.format_count(snap.generation)}")
         print(f"CA Step:    {diagnostics.format_count(snap.ca_step)}")
