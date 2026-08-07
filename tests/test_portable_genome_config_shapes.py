@@ -28,12 +28,14 @@ Reachability is checked on two separate surfaces:
 from __future__ import annotations
 
 import ast
+import base64
 import inspect
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import scripts.portable_genome as pg
@@ -1207,9 +1209,177 @@ def test_export_genome_untouched_by_this_package():
     assert {"_load_transition_table", "_load_stochastic_config"} <= called
 
 
-def test_export_cli_snapshot_path_unchanged():
-    # Deliberately out of scope for this package: the export CLI still loads a
-    # snapshot exactly as before.
+# ===========================================================================
+# Export-CLI snapshot loading: no pickled member is ever loaded
+#
+# An NPZ member of object dtype IS a pickle, so loading one with pickle
+# enabled is arbitrary code execution by construction. The export CLI reads a
+# snapshot supplied on the command line, so the payload below is harmless: its
+# reduction writes ONE marker file inside pytest's own tmp_path and returns.
+# `__reduce__` runs at PICKLE time and only records the callable, so writing
+# the archive is inert; the call would happen at UNPICKLE time, which is the
+# event under test.
+#
+# Two surfaces, matching this module's existing DIRECT/PUBLIC split:
+#   * IN-PROCESS -- the module's real `__main__` body, lifted from the live
+#     source, so load counting, archive lifetime and call ordering can be
+#     observed on the real objects.
+#   * PUBLIC -- `python -m scripts.portable_genome export`, which proves the
+#     shipped entry point refuses too.
+#
+# Scope: an OBJECT-MEMBER REFUSAL, not whole-archive validation. Nothing here
+# claims resistance to decompression amplification, absurd declared shapes,
+# hostile member names or defects in NumPy's own header parsing.
+# ===========================================================================
+
+_PG_MARKER = "PORTABLE_GENOME_PAYLOAD_EXECUTED"
+
+#: Every member the export CLI actually dereferences, in the CLI's own order.
+#: `generation`, `ca_step` and `best_fitness` are reached through `.get`, which
+#: routes through `NpzFile.__getitem__` whenever the key is present -- a `.get`
+#: default does NOT make a member safe, and each is covered here for that
+#: reason.
+_CLI_MEMBERS = ("lattice", "memory_grid", "generation", "ca_step", "best_fitness")
+
+
+def _create_marker_pg(directory: str) -> int:
+    """Stand in for a malicious payload; deliberately inert.
+
+    Module scope is required: pickle stores a module-qualified reference, so
+    this has to be importable by name at unpickle time.
+
+    Returns ``0`` so a pickle-enabled load carries on through the CLI's
+    ``int()``/``float()`` casts instead of dying on incidental type noise. That
+    keeps the failing-first evidence pointed at the real defect -- the payload
+    ran -- rather than at a cast that happened to blow up first.
+    """
+    Path(directory, _PG_MARKER).write_text("executed", encoding="utf-8")
+    return 0
+
+
+class _PayloadPG:
+    """An object whose reduction calls :func:`_create_marker_pg`."""
+
+    def __init__(self, directory: str) -> None:
+        self._directory = directory
+
+    def __reduce__(self):
+        return (_create_marker_pg, (self._directory,))
+
+
+def _payload_member_pg(directory) -> "np.ndarray":
+    """A 0-d object-dtype member -- i.e. a pickle inside the archive."""
+    return np.array(_PayloadPG(str(directory)), dtype=object)
+
+
+def _numeric_members_pg(generation=7, ca_step=42, best_fitness=0.125) -> dict:
+    """A legitimate snapshot: ndarrays and plain numeric scalars, no objects."""
+    return {
+        "lattice": np.arange(8, dtype=np.uint8).reshape(2, 2, 2),
+        "memory_grid": np.zeros((pg.MEMORY_CHANNELS, 2, 2, 2), dtype=np.float32),
+        "generation": np.int64(generation),
+        "ca_step": np.int64(ca_step),
+        "best_fitness": np.float64(best_fitness),
+    }
+
+
+def _write_snapshot_pg(tmp_path, members) -> Path:
+    archive = tmp_path / "snapshot.npz"
+    np.savez(archive, **members)
+    return archive
+
+
+def _minimal_rule_file(tmp_path) -> Path:
+    """An empty rule spec.
+
+    Every configuration loader reached by ``export_genome`` defaults cleanly on
+    an absent ``params`` section, so this keeps the evidence pointed at
+    snapshot loading rather than at rule parsing.
+    """
+    rule_file = tmp_path / "rule.toml"
+    rule_file.write_text("", encoding="utf-8")
+    return rule_file
+
+
+def _cli_main_block() -> ast.Module:
+    """The module's real ``if __name__ == "__main__":`` body, lifted live.
+
+    Lifted from the installed source rather than reimplemented, so these tests
+    cannot drift away from what ``python -m scripts.portable_genome`` actually
+    runs. The single-block assertion is what keeps the lift honest.
+    """
+    tree = _module_tree()
+    blocks = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__"
+    ]
+    assert len(blocks) == 1, "portable_genome no longer has exactly one __main__ block"
+    return ast.Module(body=blocks[0].body, type_ignores=[])
+
+
+def _run_export_cli(monkeypatch, rule_file, snapshot, output, *extra) -> None:
+    """Execute the real ``__main__`` body in-process.
+
+    It runs against a COPY of the module's own globals, so ``export_genome``
+    and ``np`` are the real objects and any monkeypatch applied BEFORE this
+    call is visible to the CLI. Nothing long-running is started: the export
+    branch parses one TOML file, reads one archive and writes one JSON file.
+    """
+    argv = [
+        "portable_genome.py", "export",
+        "--rule-file", str(rule_file),
+        "--snapshot", str(snapshot),
+        "--output", str(output),
+        *extra,
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    namespace = dict(pg.__dict__)
+    namespace["__name__"] = "__main__"
+    exec(compile(_cli_main_block(), "<portable_genome __main__>", "exec"), namespace)
+
+
+def _export_cli_subprocess(rule_file, snapshot, output, *extra):
+    """Run the PUBLIC export CLI exactly as an operator would."""
+    return subprocess.run(
+        [
+            sys.executable, "-m", "scripts.portable_genome", "export",
+            "--rule-file", str(rule_file),
+            "--snapshot", str(snapshot),
+            "--output", str(output),
+            *extra,
+        ],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+
+
+def _archive_is_open(handle) -> bool:
+    """True while the NPZ archive still owns operating-system resources.
+
+    Reads the real ``NpzFile``: ``close()`` drops both ``zip`` and ``fid`` to
+    ``None``. Deliberately NOT written with a ``getattr(..., default)`` --
+    a default is precisely what makes a closure assertion pass on an object
+    that was never observed at all.
+    """
+    return handle.zip is not None
+
+
+# --- static contract -------------------------------------------------------
+
+
+def test_export_cli_snapshot_load_is_pickle_free():
+    """Supersedes ``test_export_cli_snapshot_path_unchanged``.
+
+    That test pinned the export CLI to ``allow_pickle=True`` and described the
+    loader as deliberately out of scope. It is in scope now: the pin asserted
+    the insecure behaviour, so it has been replaced by an assertion of the
+    intended secure contract rather than merely deleted.
+    """
     tree = _module_tree()
     loads = [
         node
@@ -1224,4 +1394,238 @@ def test_export_cli_snapshot_path_unchanged():
     keywords = {kw.arg: kw.value for kw in loads[0].keywords}
     assert set(keywords) == {"allow_pickle"}
     assert isinstance(keywords["allow_pickle"], ast.Constant)
-    assert keywords["allow_pickle"].value is True
+    assert keywords["allow_pickle"].value is False
+
+
+def test_export_cli_owns_the_archive_through_a_context_manager():
+    """The load is a ``with`` subject, and ``export_genome`` is outside it.
+
+    The dynamic proof lives in
+    ``test_the_archive_is_closed_before_export_genome_begins``; this is the
+    structural half, and it is what makes the ordering visible to a reader of
+    the source rather than only to a test run.
+    """
+    tree = _module_tree()
+    owning = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and item.context_expr.func.attr == "load"
+            for item in node.items
+        )
+    ]
+    assert len(owning) == 1, "the export CLI's np.load is not owned by a `with`"
+    inside = {
+        node.func.id
+        for node in ast.walk(owning[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "export_genome" not in inside, (
+        "export_genome is called while the archive is still open"
+    )
+
+
+# --- the payload really does execute when pickle is enabled ----------------
+
+
+def test_pg_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
+    """Positive control.
+
+    Without this, every "marker absent" assertion below would be vacuous: a
+    payload that never fires proves nothing about a loader that refuses it.
+    """
+    archive = _write_snapshot_pg(tmp_path, {"lattice": _payload_member_pg(tmp_path)})
+    marker = tmp_path / _PG_MARKER
+    assert not marker.exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+
+    assert marker.exists(), "the payload did not fire; the refusal tests are vacuous"
+
+
+# --- refusal ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("member", _CLI_MEMBERS)
+def test_every_member_the_cli_touches_is_refused(monkeypatch, tmp_path, member):
+    """Each of the five members the CLI dereferences, carrying the payload.
+
+    The last three are reached through ``.get`` with a default. That default
+    only applies to an ABSENT key -- a present key still decodes -- so they are
+    covered exactly like the two direct subscripts.
+    """
+    members = _numeric_members_pg()
+    members[member] = _payload_member_pg(tmp_path)
+    archive = _write_snapshot_pg(tmp_path, members)
+    output = tmp_path / "genome.json"
+    marker = tmp_path / _PG_MARKER
+
+    with pytest.raises(ValueError) as excinfo:
+        _run_export_cli(monkeypatch, _minimal_rule_file(tmp_path), archive, output)
+
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not marker.exists(), "the payload executed"
+    assert not output.exists(), "a genome was written from a refused snapshot"
+
+
+def test_the_public_export_cli_refuses_a_pickled_member(tmp_path):
+    """The shipped entry point, run as an operator would run it.
+
+    Marker absence is deliberately NOT asserted here: the payload's reduction
+    names a callable in THIS test module, which a fresh interpreter would fail
+    to import, so an absent marker in a subprocess would prove nothing either
+    way. What this surface proves is that the real console entry point refuses
+    and writes no genome. The in-process tests above own the marker evidence.
+    """
+    archive = _write_snapshot_pg(
+        tmp_path, {**_numeric_members_pg(), "lattice": _payload_member_pg(tmp_path)}
+    )
+    output = tmp_path / "genome.json"
+
+    result = _export_cli_subprocess(_minimal_rule_file(tmp_path), archive, output)
+
+    assert result.returncode != 0
+    assert "allow_pickle=False" in result.stderr
+    assert not output.exists()
+
+
+def test_the_cli_loads_once_and_never_retries_with_pickle_enabled(monkeypatch, tmp_path):
+    """A refusal must be final.
+
+    A fallback retry would restore the vulnerability while leaving every other
+    assertion in this file green, so the argument every load was made with is
+    recorded and the whole sequence is asserted -- not just the first call.
+    """
+    archive = _write_snapshot_pg(
+        tmp_path, {**_numeric_members_pg(), "lattice": _payload_member_pg(tmp_path)}
+    )
+    calls = []
+    real_load = np.load
+
+    def recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle", "<absent>"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(np, "load", recording_load)
+    with pytest.raises(ValueError):
+        _run_export_cli(
+            monkeypatch, _minimal_rule_file(tmp_path), archive, tmp_path / "genome.json"
+        )
+
+    assert calls == [False], f"expected exactly one pickle-free load, got {calls}"
+
+
+# --- archive lifetime ------------------------------------------------------
+
+
+def test_the_archive_is_closed_before_export_genome_begins(monkeypatch, tmp_path):
+    """Deterministic closure, observed on the real ``NpzFile``.
+
+    Non-vacuity is enforced from both ends. The archive is recorded as GENUINELY
+    OPEN at load time, and ``export_genome`` is recorded as GENUINELY REACHED --
+    both are asserted before the closure claim, so "closed" can never be
+    satisfied by an observation that never happened.
+    """
+    archive = _write_snapshot_pg(tmp_path, _numeric_members_pg())
+    seen = {}
+    real_load = np.load
+    real_export = pg.export_genome
+
+    def watching_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        seen["handle"] = handle
+        seen["open_at_load"] = _archive_is_open(handle)
+        return handle
+
+    def watching_export(*args, **kwargs):
+        seen["open_at_export"] = _archive_is_open(seen["handle"])
+        seen["fid_at_export"] = seen["handle"].fid
+        return real_export(*args, **kwargs)
+
+    monkeypatch.setattr(np, "load", watching_load)
+    monkeypatch.setattr(pg, "export_genome", watching_export)
+    _run_export_cli(
+        monkeypatch, _minimal_rule_file(tmp_path), archive, tmp_path / "genome.json"
+    )
+
+    assert seen.get("open_at_load") is True, "the archive was never observed open"
+    assert "open_at_export" in seen, "export_genome was never reached"
+    assert seen["open_at_export"] is False, "export_genome ran with the archive open"
+    assert seen["fid_at_export"] is None, "the file descriptor was still held"
+
+
+# --- compatibility ---------------------------------------------------------
+
+
+def test_a_numeric_snapshot_still_exports_its_counters(monkeypatch, tmp_path):
+    """Generation, CA step and best fitness survive the refusal change."""
+    archive = _write_snapshot_pg(tmp_path, _numeric_members_pg())
+    output = tmp_path / "genome.json"
+
+    _run_export_cli(monkeypatch, _minimal_rule_file(tmp_path), archive, output)
+
+    metadata = json.loads(output.read_text(encoding="utf-8"))["metadata"]
+    assert metadata["source_generation"] == 7
+    assert metadata["source_ca_step"] == 42
+    assert metadata["best_fitness"] == 0.125
+
+
+def test_absent_optional_members_still_fall_back_to_their_defaults(monkeypatch, tmp_path):
+    """The `.get` defaults are untouched: an ABSENT key still yields 0/0/0.0."""
+    archive = _write_snapshot_pg(
+        tmp_path,
+        {
+            "lattice": np.arange(8, dtype=np.uint8).reshape(2, 2, 2),
+            "memory_grid": np.zeros((pg.MEMORY_CHANNELS, 2, 2, 2), dtype=np.float32),
+        },
+    )
+    output = tmp_path / "genome.json"
+
+    _run_export_cli(monkeypatch, _minimal_rule_file(tmp_path), archive, output)
+
+    metadata = json.loads(output.read_text(encoding="utf-8"))["metadata"]
+    assert metadata["source_generation"] == 0
+    assert metadata["source_ca_step"] == 0
+    assert metadata["best_fitness"] == 0.0
+
+
+def test_the_epigenetic_payload_still_exports_intact(monkeypatch, tmp_path):
+    """The arrays outlive the archive.
+
+    ``export_genome`` base64-encodes ``lattice`` and ``memory_grid`` AFTER the
+    archive is closed, so decoding them to their exact byte lengths and values
+    is what proves closure did not truncate or invalidate the data.
+    """
+    archive = _write_snapshot_pg(tmp_path, _numeric_members_pg())
+    output = tmp_path / "genome.json"
+
+    _run_export_cli(
+        monkeypatch,
+        _minimal_rule_file(tmp_path),
+        archive,
+        output,
+        "--include-epigenetic",
+    )
+
+    epi = json.loads(output.read_text(encoding="utf-8"))["epigenetic_snapshot"]
+    assert epi["included"] is True
+    assert epi["lattice_shape"] == [2, 2, 2]
+    assert epi["snapshot_generation"] == 7
+    assert epi["snapshot_ca_step"] == 42
+    assert base64.b64decode(epi["lattice_b64"]) == bytes(range(8))
+    assert len(base64.b64decode(epi["memory_grid_b64"])) == pg.MEMORY_CHANNELS * 8 * 4
+
+
+def test_without_the_flag_the_epigenetic_section_stays_excluded(monkeypatch, tmp_path):
+    """Established export semantics: the flag, not the snapshot, decides."""
+    archive = _write_snapshot_pg(tmp_path, _numeric_members_pg())
+    output = tmp_path / "genome.json"
+
+    _run_export_cli(monkeypatch, _minimal_rule_file(tmp_path), archive, output)
+
+    genome = json.loads(output.read_text(encoding="utf-8"))
+    assert genome["epigenetic_snapshot"] == {"included": False}

@@ -32,21 +32,18 @@ TARGETS = (
     "scripts/gpu_benchmark.py",
     "scripts/lucid_server.py",
     "scripts/medusa_api.py",
+    "scripts/portable_genome.py",
 )
 
-#: `scripts/portable_genome.py` is deliberately ABSENT from TARGETS.
+#: There is deliberately NO exemption list. An earlier revision of this module
+#: carried `KNOWN_PENDING`, holding `scripts/portable_genome.py` back because
+#: its loader was pinned to `allow_pickle=True` by an AST assertion in a file
+#: outside that package's authorized boundary. That assertion now asserts the
+#: secure contract instead, the loader is converted, and the exemption has been
+#: removed rather than left behind as a dormant hole -- an exemption mechanism
+#: that no longer exempts anything is an invitation to reuse it.
 #:
-#: Its `np.load` is pinned to `allow_pickle=True` by an AST assertion in
-#: `tests/test_portable_genome_config_shapes.py::test_export_cli_snapshot_path_unchanged`
-#: (`assert keywords["allow_pickle"].value is True`), which lies outside this
-#: package's authorized file boundary. Converting that loader requires
-#: updating that assertion, so it is left for a separate authorized pass
-#: rather than silently widening scope here.
-#:
-#: Keyed to an exact COUNT, not just a path. Exempting the whole file would
-#: let a SECOND pickle-enabled `np.load` be added there and hide behind the
-#: exemption; requiring the count to stay at exactly one closes that.
-KNOWN_PENDING = {"scripts/portable_genome.py": 1}
+#: The sweep below therefore requires ZERO unguarded NumPy loads.
 
 #: Directories the repo-wide sweep must cover. Asserted to exist, because
 #: `Path.rglob` on a missing directory yields nothing silently -- renaming one
@@ -163,25 +160,36 @@ def _unguarded_load_counts():
 def test_no_unguarded_np_load_survives_under_scripts_or_vis():
     """Rename-proof sweep. `TARGETS` can go stale; this cannot.
 
-    It also catches a seventh loader appearing later. The known exception is
-    matched on an exact COUNT, so a second pickle-enabled load added to the
-    exempt file is still caught.
+    It also catches a seventh loader appearing later. There is no exemption
+    list to consult and no count to keep in step: the requirement is simply
+    zero.
     """
     counts = _unguarded_load_counts()
-    unexpected = {
-        rel: n for rel, n in counts.items() if KNOWN_PENDING.get(rel) != n
-    }
-    assert unexpected == {}, (
+    assert counts == {}, (
         "NumPy load without literal allow_pickle=False (path -> count): "
-        f"{unexpected}"
+        f"{counts}"
     )
 
 
-def test_the_known_pending_exception_is_still_real():
-    """If `portable_genome` is ever converted, this fails and the exception
-    must be deleted -- so the list cannot rot into a permanent blind spot."""
-    counts = _unguarded_load_counts()
-    assert {rel: counts.get(rel, 0) for rel in KNOWN_PENDING} == KNOWN_PENDING, (
-        "a KNOWN_PENDING module changed -- if it is now pickle-free, remove it "
-        "from KNOWN_PENDING and add it to TARGETS"
+def test_the_sweep_can_actually_see_a_pickle_enabled_load(tmp_path):
+    """Non-vacuity guard for the sweep above.
+
+    `test_no_unguarded_np_load_survives_under_scripts_or_vis` now asserts an
+    empty dict, and an empty dict is exactly what a broken matcher returns.
+    Feeding `_np_load_calls` a module that really does enable pickle proves the
+    detector still detects, so a green sweep means "nothing found" rather than
+    "nothing looked for".
+    """
+    hostile = ast.parse(
+        "import numpy as np\n"
+        "import numpy as _alias\n"
+        "from numpy import load\n"
+        "np.load('a.npz', allow_pickle=True)\n"
+        "_alias.load('b.npz')\n"
+        "load('c.npz', allow_pickle=True)\n"
+        "import json\n"
+        "json.load(open('d.json'))\n"
     )
+    calls = _np_load_calls(hostile)
+    # Three NumPy loads caught across all three spellings; `json.load` ignored.
+    assert len(calls) == 3
