@@ -19,7 +19,7 @@ closure-recording fake. The pickle-refusal tests appended at the end DO
 write real NPZ archives, but only inside pytest's own `tmp_path`.
 
 Scope is archive resource lifetime relative to extraction — not snapshot
-validation, archive security, the acoustic mathematics or whole-diagnostic
+validation, whole-archive validation, the acoustic mathematics or whole-diagnostic
 correctness.
 """
 
@@ -613,4 +613,8 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
 
     assert len(opened) == 1
     handle = opened[0]
-    assert handle.fid is None or handle.fid.closed
+    # `zip` is the primary witness: `close()` drops it unconditionally,
+    # whereas `fid` is a CLASS attribute defaulting to None and is only set
+    # on the instance when np.load owned the file. Asserting `fid is None`
+    # alone would therefore pass on a handle that was never closed at all.
+    assert handle.zip is None and (handle.fid is None or handle.fid.closed)

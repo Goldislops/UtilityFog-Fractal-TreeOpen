@@ -10,13 +10,16 @@ ignored. Construction now accepts only an exact built-in `dict` and silently
 ignores every other decoded shape, continuing to read later messages exactly
 as it already did for syntactically invalid JSON.
 
-Everything here runs in-process against the real coroutine driven by a
-controlled asynchronous fake socket: no real WebSocket, no browser, no network,
-no snapshot files outside pytest's own `tmp_path` (the pickle-refusal
-tests appended at the end write real NPZ archives there).
+The malformed-frame tests run in-process against the real coroutine driven by
+a controlled asynchronous fake socket; the pickle-refusal tests appended at
+the end call `extract_render_data` directly, with no coroutine and no fake
+socket. Neither uses a real WebSocket, browser or network, and neither writes
+a snapshot file outside pytest's own `tmp_path`.
 
-Scope is top-level JSON shape in `handle_client` only — not whole-server,
-whole-WebSocket, authentication, authorization or payload-schema totality.
+Scope is top-level JSON shape in `handle_client`, plus `extract_render_data`'s
+object-member refusal and archive lifetime — not whole-server, whole-WebSocket,
+whole-archive validation, authentication, authorization or payload-schema
+totality.
 """
 
 from __future__ import annotations
@@ -490,7 +493,9 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
 
     def _watching_argwhere(*args, **kwargs):
         handle = opened[0]
-        observed.append(handle.fid is None or handle.fid.closed)
+        # `close()` drops `zip` unconditionally; `fid` is a class attribute
+        # defaulting to None, so it cannot carry this claim on its own.
+        observed.append(handle.zip is None)
         return real_argwhere(*args, **kwargs)
 
     monkeypatch.setattr(lucid_server.np, "load", _tracking_load)

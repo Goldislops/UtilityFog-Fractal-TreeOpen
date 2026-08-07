@@ -2,7 +2,8 @@
 
 An NPZ member of object dtype is stored as a pickle, so loading one with
 pickle enabled is arbitrary code execution by construction. This module is the
-repository-wide gate: every covered loader must pass the literal
+gate over ``scripts/`` and ``vis/`` -- see ``SWEPT_DIRS``, which is the honest
+extent of it, not "the repository". Every covered loader must pass the literal
 ``allow_pickle=False``, explicitly.
 
 Explicit rather than relying on NumPy's default -- which is already ``False`` --
@@ -45,10 +46,53 @@ TARGETS = (
 #:
 #: The sweep below therefore requires ZERO unguarded NumPy loads.
 
-#: Directories the repo-wide sweep must cover. Asserted to exist, because
-#: `Path.rglob` on a missing directory yields nothing silently -- renaming one
-#: would otherwise narrow the sweep without any test noticing.
+#: Directories the sweep covers. Asserted to exist, because `Path.rglob` on a
+#: missing directory yields nothing silently -- renaming one would otherwise
+#: narrow the sweep without any test noticing.
+#:
+#: Deliberately NOT the repository root. Widening it that far would sweep
+#: `tests/`, where the pickle-enabling calls are legitimate positive controls,
+#: and carving `tests/` back out would reintroduce exactly the exemption
+#: mechanism removed above. Directories outside this tuple are unswept, and
+#: saying so is the honest description of the gate.
 SWEPT_DIRS = ("scripts", "vis")
+
+
+def _numpy_load_names(tree):
+    """Resolve, from ``tree``'s own imports, every name that means NumPy ``load``.
+
+    Returns ``(module_names, direct_names)``.
+
+    ``asname`` is honoured in BOTH import forms. An earlier revision set a flag
+    from ``from numpy import load as npload`` but still matched only the literal
+    name ``load``, so the aliased call slipped through the sweep entirely.
+
+    A local rebinding is the same call under another name, so ``_l = np.load``
+    is resolved too.
+    """
+    module_names = {"np", "numpy"}
+    direct_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "numpy":
+                    module_names.add(alias.asname or "numpy")
+        elif isinstance(node, ast.ImportFrom) and node.module == "numpy":
+            for alias in node.names:
+                if alias.name == "load":
+                    direct_names.add(alias.asname or "load")
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if (isinstance(value, ast.Attribute) and value.attr == "load"
+                and isinstance(value.value, ast.Name)
+                and value.value.id in module_names):
+            direct_names.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+    return module_names, direct_names
 
 
 def _np_load_calls(tree):
@@ -60,22 +104,17 @@ def _np_load_calls(tree):
     policy fail spuriously. Working from the AST also means the docstrings
     that mention ``np.load(...)`` in prose are correctly ignored.
 
-    Both spellings are matched -- ``np.load`` / ``numpy.load`` via an
-    attribute, and a bare ``load`` bound by ``from numpy import load``. The
-    repo-wide sweep has no per-file "is `np` numpy?" backstop, so a new module
-    written in either of the other two styles would otherwise slip past it.
+    Four spellings are matched: ``np.load`` / ``numpy.load`` / any aliased
+    module, a direct name bound by ``from numpy import load [as ...]``, a name
+    rebound from ``np.load``, and ``getattr(np, "load")(...)``. The sweep has
+    no per-file "is `np` numpy?" backstop, so a module written in any of the
+    other styles would otherwise slip past it.
+
+    This matcher is necessarily name-based and therefore never complete on its
+    own. ``_pickle_enabling_calls`` is the argument-based backstop that does
+    not depend on guessing the callee's name.
     """
-    aliases = {"np", "numpy"}
-    bare_load_imported = any(
-        isinstance(node, ast.ImportFrom) and node.module == "numpy"
-        and any(a.name == "load" for a in node.names)
-        for node in ast.walk(tree)
-    )
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "numpy":
-                    aliases.add(alias.asname or "numpy")
+    module_names, direct_names = _numpy_load_names(tree)
 
     found = []
     for node in ast.walk(tree):
@@ -83,11 +122,43 @@ def _np_load_calls(tree):
             continue
         func = node.func
         if (isinstance(func, ast.Attribute) and func.attr == "load"
-                and isinstance(func.value, ast.Name) and func.value.id in aliases):
+                and isinstance(func.value, ast.Name)
+                and func.value.id in module_names):
             found.append(node)
-        elif (bare_load_imported and isinstance(func, ast.Name)
-                and func.id == "load"):
+        elif isinstance(func, ast.Name) and func.id in direct_names:
             found.append(node)
+        elif (isinstance(func, ast.Call) and isinstance(func.func, ast.Name)
+                and func.func.id == "getattr" and len(func.args) == 2
+                and isinstance(func.args[0], ast.Name)
+                and func.args[0].id in module_names
+                and isinstance(func.args[1], ast.Constant)
+                and func.args[1].value == "load"):
+            found.append(node)
+    return found
+
+
+def _pickle_enabling_calls(tree):
+    """Every call that ASKS for pickle, whatever the callee is called.
+
+    ``np.load`` is not the only door. ``np.lib.npyio.NpzFile(fh,
+    allow_pickle=True)`` and ``np.lib.format.read_array(fh,
+    allow_pickle=True)`` reach the same unpickling code and are structurally
+    invisible to any matcher keyed on the callee's NAME. Keying on the ARGUMENT
+    instead catches every spelling, including ones that do not exist yet.
+
+    Being AST rather than substring, it is also not fooled by
+    ``allow_pickle = True`` with spaces, which the token scan below misses.
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "allow_pickle":
+                continue
+            if not (isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False):
+                found.append(node)
     return found
 
 
@@ -133,28 +204,79 @@ def test_no_pickle_enabling_escape_hatch_exists(rel):
     `MEDUSA_EVENT_BUS_DISABLED` legitimately, and `gpu_accelerator` manipulates
     the environment for unrelated reasons. Only pickle-specific constructions
     are forbidden.
+
+    This is a raw substring scan and is therefore whitespace-sensitive --
+    `allow_pickle = True` with spaces would pass it. That gap is closed
+    structurally by `test_no_call_under_scripts_or_vis_asks_for_pickle`, which
+    reads the AST and does not care how the argument is spaced. The scan is
+    kept anyway because it also catches the token in prose, where a claim that
+    pickle is enabled would be a lie about what the code now does.
     """
     source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
     for banned in ("allow_pickle=True", "ALLOW_PICKLE", "allow-pickle"):
         assert banned not in source, f"{rel} references {banned}"
 
 
-def _unguarded_load_counts():
-    """Map each swept file to how many NumPy loads lack literal False."""
-    counts = {}
-    for name in SWEPT_DIRS:
-        directory = _REPO_ROOT / name
+def _sweep(root=None, dirs=None):
+    """Walk ``dirs`` under ``root``; return ``(unguarded, enabling)`` per file.
+
+    ``unguarded`` counts NumPy loads that do not pass literal ``False``;
+    ``enabling`` counts calls of any name that ask for pickle.
+
+    Parameterised on purpose. Hard-coding the repository root left the walk
+    itself -- the glob, the classification, the relative-path key -- with no
+    test of its own, so an inverted comparison or a wrong suffix would return
+    an empty mapping and every assertion built on it would still pass.
+    ``test_the_sweep_itself_can_see_a_planted_loader`` points this at a tree it
+    controls for exactly that reason.
+    """
+    root = _REPO_ROOT if root is None else root
+    dirs = SWEPT_DIRS if dirs is None else dirs
+    unguarded, enabling = {}, {}
+    for name in dirs:
+        directory = root / name
         assert directory.is_dir(), (
             f"{name}/ is missing -- the sweep would silently cover nothing"
         )
         for path in sorted(directory.rglob("*.py")):
-            rel = path.relative_to(_REPO_ROOT).as_posix()
-            for call in _np_load_calls(ast.parse(path.read_text(encoding="utf-8"))):
+            rel = path.relative_to(root).as_posix()
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for call in _np_load_calls(tree):
                 keywords = {kw.arg: kw.value for kw in call.keywords}
                 value = keywords.get("allow_pickle")
                 if not (isinstance(value, ast.Constant) and value.value is False):
-                    counts[rel] = counts.get(rel, 0) + 1
-    return counts
+                    unguarded[rel] = unguarded.get(rel, 0) + 1
+            asking = len(_pickle_enabling_calls(tree))
+            if asking:
+                enabling[rel] = asking
+    return unguarded, enabling
+
+
+#: A module exercising every spelling the two matchers are meant to catch, plus
+#: one they must ignore. Shared by both non-vacuity guards so the guards and
+#: the matchers cannot drift apart.
+_PLANTED_MODULE = (
+    "import numpy as np\n"
+    "import numpy as _alias\n"
+    "from numpy import load as _aliased_load\n"
+    "np.load('a.npz', allow_pickle=True)\n"          # plain, enabled
+    "_alias.load('b.npz')\n"                          # aliased module, no kwarg
+    "_aliased_load('c.npz', allow_pickle=True)\n"     # aliased direct import
+    "getattr(np, 'load')('d.npz', allow_pickle=True)\n"   # getattr indirection
+    "_rebound = np.load\n"
+    "_rebound('e.npz', allow_pickle=True)\n"          # local rebinding
+    "np.lib.npyio.NpzFile(fh, allow_pickle = True)\n"  # not `load` at all
+    "import json\n"
+    "json.load(open('f.json'))\n"                     # must be ignored
+)
+
+#: Five of the six NumPy loads reach `_np_load_calls`; the `NpzFile`
+#: constructor is not a `load` call and is caught only by the argument-based
+#: matcher. `json.load` is caught by neither.
+_PLANTED_UNGUARDED = 5
+#: Every call that names `allow_pickle` with a non-False value, including the
+#: whitespaced `NpzFile` constructor a substring scan would miss.
+_PLANTED_ENABLING = 5
 
 
 def test_no_unguarded_np_load_survives_under_scripts_or_vis():
@@ -164,32 +286,62 @@ def test_no_unguarded_np_load_survives_under_scripts_or_vis():
     list to consult and no count to keep in step: the requirement is simply
     zero.
     """
-    counts = _unguarded_load_counts()
-    assert counts == {}, (
+    unguarded, _ = _sweep()
+    assert unguarded == {}, (
         "NumPy load without literal allow_pickle=False (path -> count): "
-        f"{counts}"
+        f"{unguarded}"
     )
 
 
-def test_the_sweep_can_actually_see_a_pickle_enabled_load(tmp_path):
-    """Non-vacuity guard for the sweep above.
+def test_no_call_under_scripts_or_vis_asks_for_pickle():
+    """The doors that are not called ``load``.
 
-    `test_no_unguarded_np_load_survives_under_scripts_or_vis` now asserts an
-    empty dict, and an empty dict is exactly what a broken matcher returns.
-    Feeding `_np_load_calls` a module that really does enable pickle proves the
-    detector still detects, so a green sweep means "nothing found" rather than
-    "nothing looked for".
+    ``np.load`` is one entry point to NumPy's unpickling code, not the only
+    one: ``NpzFile(fh, allow_pickle=True)`` and ``read_array(...,
+    allow_pickle=True)`` reach it directly and are invisible to a matcher keyed
+    on the callee's name. This asks the other question -- did anything, under
+    any name, request pickle at all.
     """
-    hostile = ast.parse(
-        "import numpy as np\n"
-        "import numpy as _alias\n"
-        "from numpy import load\n"
-        "np.load('a.npz', allow_pickle=True)\n"
-        "_alias.load('b.npz')\n"
-        "load('c.npz', allow_pickle=True)\n"
-        "import json\n"
-        "json.load(open('d.json'))\n"
+    _, enabling = _sweep()
+    assert enabling == {}, (
+        "call requesting allow_pickle other than literal False (path -> count): "
+        f"{enabling}"
     )
-    calls = _np_load_calls(hostile)
-    # Three NumPy loads caught across all three spellings; `json.load` ignored.
-    assert len(calls) == 3
+
+
+def test_the_matchers_can_actually_see_a_pickle_enabled_load():
+    """Non-vacuity guard for the two matchers.
+
+    Both sweeps assert an empty mapping, and an empty mapping is exactly what a
+    broken matcher returns. Feeding them a module that really does enable
+    pickle proves the detectors still detect, so a green sweep means "nothing
+    found" rather than "nothing looked for".
+    """
+    tree = ast.parse(_PLANTED_MODULE)
+    assert len(_np_load_calls(tree)) == _PLANTED_UNGUARDED
+    assert len(_pickle_enabling_calls(tree)) == _PLANTED_ENABLING
+
+
+def test_the_sweep_itself_can_see_a_planted_loader(tmp_path):
+    """Non-vacuity guard for the sweep, not merely the matchers it calls.
+
+    The guard above would still pass if `_sweep` globbed the wrong suffix,
+    inverted its `allow_pickle` comparison, or walked a directory that yields
+    nothing -- because it never calls `_sweep`. Pointing the real function at a
+    tree this test controls exercises the walk, the classification and the
+    relative-path key end to end.
+    """
+    planted = tmp_path / "scripts"
+    planted.mkdir()
+    (planted / "hostile.py").write_text(_PLANTED_MODULE, encoding="utf-8")
+    (planted / "safe.py").write_text(
+        "import numpy as np\n"
+        "with np.load('a.npz', allow_pickle=False) as snap:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    unguarded, enabling = _sweep(root=tmp_path, dirs=("scripts",))
+
+    assert unguarded == {"scripts/hostile.py": _PLANTED_UNGUARDED}
+    assert enabling == {"scripts/hostile.py": _PLANTED_ENABLING}

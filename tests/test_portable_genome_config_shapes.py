@@ -1475,11 +1475,13 @@ def test_every_member_the_cli_touches_is_refused(monkeypatch, tmp_path, member):
 def test_the_public_export_cli_refuses_a_pickled_member(tmp_path):
     """The shipped entry point, run as an operator would run it.
 
-    Marker absence is deliberately NOT asserted here: the payload's reduction
-    names a callable in THIS test module, which a fresh interpreter would fail
-    to import, so an absent marker in a subprocess would prove nothing either
-    way. What this surface proves is that the real console entry point refuses
-    and writes no genome. The in-process tests above own the marker evidence.
+    Marker absence is deliberately NOT asserted here, and would be the wrong
+    evidence on this surface whatever the import layout happens to be: the
+    payload's reduction names a callable in THIS test module, so an absent
+    marker in a subprocess is explained just as well by the child failing to
+    import it as by the loader refusing it. What this surface proves is that
+    the real console entry point refuses and writes no genome. The in-process
+    tests above own the marker evidence unconditionally.
     """
     archive = _write_snapshot_pg(
         tmp_path, {**_numeric_members_pg(), "lattice": _payload_member_pg(tmp_path)}
@@ -1618,6 +1620,33 @@ def test_the_epigenetic_payload_still_exports_intact(monkeypatch, tmp_path):
     assert epi["snapshot_ca_step"] == 42
     assert base64.b64decode(epi["lattice_b64"]) == bytes(range(8))
     assert len(base64.b64decode(epi["memory_grid_b64"])) == pg.MEMORY_CHANNELS * 8 * 4
+
+
+def test_a_non_npz_snapshot_now_fails_at_the_context_manager(monkeypatch, tmp_path):
+    """A DISCLOSED CONSEQUENCE of giving the archive deterministic closure.
+
+    ``np.load`` on a file that is not a zip returns a plain ndarray, which has
+    no context-manager protocol. Before the ``with``, a ``.npy`` passed to
+    ``--snapshot`` got as far as ``snap["lattice"]`` and failed there with an
+    indexing error; it now fails one statement earlier with a different
+    exception type.
+
+    Closing the archive before ``export_genome`` and preserving the exception
+    behaviour cannot both hold for a non-zip input. Closure was the explicit
+    requirement, so the consequence is pinned here as a stated contract rather
+    than left as a silent change. What is unchanged: the exception still
+    propagates uncaught, the exit is still non-zero, and no genome is written.
+    """
+    not_an_archive = tmp_path / "snapshot.npy"
+    np.save(not_an_archive, np.arange(8, dtype=np.uint8))
+    output = tmp_path / "genome.json"
+
+    with pytest.raises((TypeError, AttributeError)):
+        _run_export_cli(
+            monkeypatch, _minimal_rule_file(tmp_path), not_an_archive, output
+        )
+
+    assert not output.exists()
 
 
 def test_without_the_flag_the_epigenetic_section_stays_excluded(monkeypatch, tmp_path):

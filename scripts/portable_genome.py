@@ -742,7 +742,8 @@ if __name__ == "__main__":
             #
             # The context manager closes the archive before `export_genome`
             # begins -- deterministically, not left to garbage collection.
-            # Every member is materialised inside the block, so the base64
+            # Every member this CLI reads is materialised inside the block
+            # (an unread member is never touched at all), so the base64
             # encoding downstream reads real in-memory arrays.
             with np.load(args.snapshot, allow_pickle=False) as snap:
                 lattice, memory_grid = snap["lattice"], snap["memory_grid"]

@@ -19,7 +19,7 @@ replaced by a closure-recording fake, and the one endpoint witness uses Flask's
 in-process test client.
 
 Scope is archive resource lifetime relative to extraction — not snapshot
-validation, archive security, endpoint totality, API authentication, atomic file
+validation, whole-archive validation, endpoint totality, API authentication, atomic file
 access or whole-server correctness.
 """
 
@@ -505,8 +505,11 @@ def test_ma_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     "field", ["lattice", "memory_grid", "generation", "best_fitness"]
 )
 def test_object_payload_is_refused_by_the_helper(tmp_path, field):
-    """`best_fitness` is unique to this module -- it is the only loader of the
-    six that reads a fourth member."""
+    """Four members, `best_fitness` among them.
+
+    This was the widest loader of the six until the export CLI joined them:
+    `scripts/portable_genome.py` reads five, three of those through `.get`.
+    """
     archive = _write_snapshot_ma(
         tmp_path / f"{field}.npz", **{field: _payload_array_ma(tmp_path)}
     )
@@ -549,7 +552,12 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         medusa_api._load_snapshot(archive)
     assert len(opened) == 1
-    assert opened[0].fid is None or opened[0].fid.closed
+    # `zip` is the primary witness: `close()` drops it unconditionally,
+    # whereas `fid` is a CLASS attribute defaulting to None, so asserting
+    # on it alone would pass on a handle that was never closed at all.
+    assert opened[0].zip is None and (
+        opened[0].fid is None or opened[0].fid.closed
+    )
 
 
 def test_a_numeric_snapshot_still_loads_all_four_values(tmp_path):

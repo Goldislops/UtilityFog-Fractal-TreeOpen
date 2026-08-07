@@ -19,8 +19,9 @@ at the end write real NPZ archives there), and the module's import-time
 `GEO_DIR.mkdir(...)` is isolated
 so the repository's real `data/geometry` directory is never created or modified.
 
-Scope is `.npz` archive resource lifetime only — not snapshot validation, archive
-security, deterministic export, atomic output or whole-daemon correctness.
+Scope is `.npz` archive resource lifetime and object-member refusal — not
+snapshot validation, whole-archive validation, deterministic export, atomic
+output or whole-daemon correctness.
 """
 
 from __future__ import annotations
@@ -591,7 +592,12 @@ def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         geometry_daemon._load_snapshot(archive)
     assert len(opened) == 1
-    assert opened[0].fid is None or opened[0].fid.closed
+    # `zip` is the primary witness: `close()` drops it unconditionally,
+    # whereas `fid` is a CLASS attribute defaulting to None, so asserting
+    # on it alone would pass on a handle that was never closed at all.
+    assert opened[0].zip is None and (
+        opened[0].fid is None or opened[0].fid.closed
+    )
 
 
 def test_a_numeric_snapshot_still_loads_unchanged(tmp_path):
