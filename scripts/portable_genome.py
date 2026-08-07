@@ -730,10 +730,24 @@ if __name__ == "__main__":
         gen = ca_step_count = 0
         best_fit = 0.0
         if args.snapshot:
-            snap = np.load(args.snapshot, allow_pickle=True)
-            lattice, memory_grid = snap["lattice"], snap["memory_grid"]
-            gen, ca_step_count = int(snap.get("generation", 0)), int(snap.get("ca_step", 0))
-            best_fit = float(snap.get("best_fitness", 0.0))
+            # An NPZ member of object dtype IS a pickle, so loading one with
+            # pickle enabled is arbitrary code execution by construction, and
+            # this path takes its archive straight from the command line.
+            # NumPy now refuses such a member with a ValueError instead of
+            # reconstructing it. `allow_pickle=False` is passed EXPLICITLY
+            # although it is already NumPy's default: a default makes the
+            # property invisible at the call site and silently reversible by an
+            # upstream change. There is no fallback retry and no override.
+            # This is an object-member refusal, not archive validation.
+            #
+            # The context manager closes the archive before `export_genome`
+            # begins -- deterministically, not left to garbage collection.
+            # Every member is materialised inside the block, so the base64
+            # encoding downstream reads real in-memory arrays.
+            with np.load(args.snapshot, allow_pickle=False) as snap:
+                lattice, memory_grid = snap["lattice"], snap["memory_grid"]
+                gen, ca_step_count = int(snap.get("generation", 0)), int(snap.get("ca_step", 0))
+                best_fit = float(snap.get("best_fitness", 0.0))
         path = export_genome(args.output, rule_spec=rule_spec, generation=gen,
                              ca_step=ca_step_count, best_fitness=best_fit,
                              lattice=lattice, memory_grid=memory_grid,
