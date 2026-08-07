@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -740,12 +741,23 @@ if __name__ == "__main__":
             # upstream change. There is no fallback retry and no override.
             # This is an object-member refusal, not archive validation.
             #
-            # The context manager closes the archive before `export_genome`
-            # begins -- deterministically, not left to garbage collection.
-            # Every member this CLI reads is materialised inside the block
-            # (an unread member is never touched at all), so the base64
-            # encoding downstream reads real in-memory arrays.
-            with np.load(args.snapshot, allow_pickle=False) as snap:
+            # Ownership is CONDITIONAL because `np.load` returns two different
+            # kinds of thing. A zip archive yields an `NpzFile`, which owns an
+            # operating-system handle and must be closed deterministically
+            # before `export_genome` begins rather than left to garbage
+            # collection. A `.npy` yields a plain ndarray (or a memmap), which
+            # owns no handle and has no context-manager protocol; wrapping it
+            # in `nullcontext` lets it reach the same `snap["lattice"]`
+            # subscript that has always been where a non-archive input fails,
+            # so the archive gains closure without the array losing its
+            # established exception.
+            #
+            # Every member this CLI reads is materialised inside the block (an
+            # unread member is never touched at all), so the base64 encoding
+            # downstream reads real in-memory arrays.
+            loaded = np.load(args.snapshot, allow_pickle=False)
+            owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
+            with owner as snap:
                 lattice, memory_grid = snap["lattice"], snap["memory_grid"]
                 gen, ca_step_count = int(snap.get("generation", 0)), int(snap.get("ca_step", 0))
                 best_fit = float(snap.get("best_fitness", 0.0))

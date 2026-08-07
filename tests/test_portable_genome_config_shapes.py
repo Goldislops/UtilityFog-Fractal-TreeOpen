@@ -1321,6 +1321,60 @@ def _cli_main_block() -> ast.Module:
     return ast.Module(body=blocks[0].body, type_ignores=[])
 
 
+def _member_accesses(node, name):
+    """Every constant-string member access on ``name`` inside ``node``.
+
+    Returns ``(lineno, col_offset, member)`` triples so callers can restore
+    source order -- ``ast.walk`` does not preserve it, and two of the CLI's
+    accesses share a line.
+
+    Both access forms are covered: ``snap["x"]`` and ``snap.get("x", default)``.
+    """
+    found = []
+    for child in ast.walk(node):
+        member = None
+        if (isinstance(child, ast.Subscript)
+                and isinstance(child.value, ast.Name) and child.value.id == name
+                and isinstance(child.slice, ast.Constant)
+                and isinstance(child.slice.value, str)):
+            member = child.slice.value
+        elif (isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "get"
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == name
+                and child.args and isinstance(child.args[0], ast.Constant)
+                and isinstance(child.args[0].value, str)):
+            member = child.args[0].value
+        if member is not None:
+            found.append((child.lineno, child.col_offset, member))
+    return found
+
+
+def _cli_snapshot_with():
+    """The ``with`` in the export CLI that owns the loaded snapshot.
+
+    Selected by BEHAVIOUR, not position. The ``__main__`` body also contains
+    ``with open(args.rule_file, "rb") as f:``, so "the only ``with``" was never
+    a safe way to find this one -- it silently selects the TOML handle. The
+    snapshot block is identified as the one whose bound name is dereferenced
+    with constant-string members, and exactly one must match.
+    """
+    block = _cli_main_block()
+    candidates = []
+    for node in ast.walk(block):
+        if not isinstance(node, ast.With):
+            continue
+        target = node.items[0].optional_vars
+        if isinstance(target, ast.Name) and _member_accesses(node, target.id):
+            candidates.append(node)
+    assert len(candidates) == 1, (
+        "expected exactly one `with` dereferencing constant-string snapshot "
+        f"members in the export CLI, found {len(candidates)}"
+    )
+    return candidates[0]
+
+
 def _run_export_cli(monkeypatch, rule_file, snapshot, output, *extra) -> None:
     """Execute the real ``__main__`` body in-process.
 
@@ -1414,15 +1468,14 @@ def test_export_cli_routes_the_snapshot_through_conditional_ownership():
     rather than only to a test run.
     """
     block = _cli_main_block()
-    owning = [node for node in ast.walk(block) if isinstance(node, ast.With)]
-    assert len(owning) == 1, "the export CLI no longer has exactly one `with`"
+    owning = _cli_snapshot_with()
     assert any(
         isinstance(node, ast.Attribute) and node.attr == "nullcontext"
         for node in ast.walk(block)
     ), "the snapshot is not routed through contextlib.nullcontext"
     inside = {
         node.func.id
-        for node in ast.walk(owning[0])
+        for node in ast.walk(owning)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "export_genome" not in inside, (
@@ -1644,6 +1697,36 @@ def _legacy_npy_error_class():
         "a constant-string subscript on a plain ndarray no longer raises; "
         "the legacy contract this test pins no longer exists"
     )
+
+
+#: The exact legacy class, named rather than only derived, because a reviewer
+#: should be able to read the contract without running anything. It is
+#: cross-checked against a live probe below, so the name cannot rot silently.
+_LEGACY_NPY_ERROR = IndexError
+
+
+def test_the_named_legacy_npy_class_is_what_numpy_actually_raises():
+    """Keeps the named class and the derived one from drifting apart.
+
+    If NumPy ever changes what a constant-string subscript on a plain ndarray
+    raises, this fails and names the real class rather than letting the
+    documented contract quietly become fiction.
+    """
+    derived = _legacy_npy_error_class()
+    assert derived is _LEGACY_NPY_ERROR, (
+        f"the legacy class is actually {derived.__name__}, not "
+        f"{_LEGACY_NPY_ERROR.__name__}; update _LEGACY_NPY_ERROR"
+    )
+
+
+def test_the_legacy_class_is_distinguishable_from_the_regression():
+    """Non-vacuity: the two outcomes this test suite separates must differ.
+
+    The regression raised ``TypeError`` from the context-manager protocol. If
+    the legacy class were also ``TypeError``, every assertion below would pass
+    in both the broken and the correct state and prove nothing.
+    """
+    assert _legacy_npy_error_class() is not TypeError
 
 
 def test_a_numeric_npy_still_fails_exactly_as_it_did_before(monkeypatch, tmp_path):

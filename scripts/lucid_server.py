@@ -14,6 +14,7 @@ The server:
 """
 
 import asyncio
+import contextlib
 import json
 import glob
 import time
@@ -72,12 +73,23 @@ def extract_render_data(snap_path):
     still open. Closure is explicit, not left to garbage collection, and it
     holds on refusal too because the members are read inside the block.
 
+    Ownership is CONDITIONAL because ``np.load`` returns two different kinds of
+    thing. A zip archive yields an ``NpzFile``, which owns an operating-system
+    handle and needs that deterministic close. A ``.npy`` yields a plain
+    ndarray (or a memmap), which owns no handle and has no context-manager
+    protocol; wrapping it in ``nullcontext`` lets it reach the same
+    ``snap['lattice']`` subscript that has always been where a non-archive
+    input fails. The archive gains closure without the array losing its
+    established exception.
+
     The claim is an OBJECT-MEMBER REFUSAL and archive resource lifetime -- not
     whole-archive validation. Nothing here resists decompression
     amplification, absurd declared shapes, hostile member names or defects in
     NumPy's own header parsing.
     """
-    with np.load(snap_path, allow_pickle=False) as snap:
+    loaded = np.load(snap_path, allow_pickle=False)
+    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
+    with owner as snap:
         state = snap['lattice']
         mg = snap['memory_grid']
         gen = int(snap['generation'])

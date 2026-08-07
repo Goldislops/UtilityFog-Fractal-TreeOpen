@@ -544,6 +544,25 @@ def _legacy_npy_error_class_ls():
     )
 
 
+#: The exact legacy class, named rather than only derived, so the contract is
+#: readable without running anything. Cross-checked against a live probe below.
+_LEGACY_NPY_ERROR_LS = IndexError
+
+
+@requires_numpy
+def test_the_named_legacy_npy_class_is_what_numpy_actually_raises():
+    """Keeps the named class and the derived one from drifting apart."""
+    derived = _legacy_npy_error_class_ls()
+    assert derived is _LEGACY_NPY_ERROR_LS, (
+        f"the legacy class is actually {derived.__name__}, not "
+        f"{_LEGACY_NPY_ERROR_LS.__name__}; update _LEGACY_NPY_ERROR_LS"
+    )
+    # Non-vacuity: the regression raised TypeError from the context-manager
+    # protocol. If the legacy class were TypeError too, this suite could not
+    # tell the broken state from the correct one.
+    assert derived is not TypeError
+
+
 @requires_numpy
 def test_a_numeric_npy_still_fails_exactly_as_it_did_before(tmp_path, monkeypatch):
     """`extract_render_data` gained its first `with` on this branch.
