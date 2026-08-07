@@ -21,7 +21,7 @@ def _load(entry_id):
 
 def test_all_committed_entries_validate_and_ids_match_filenames():
     summary = validate_directory(_ENTRIES_DIR)
-    assert summary["entry_count"] == 20
+    assert summary["entry_count"] == 25
     for record in summary["entries"]:
         assert record["filename"] == f"{record['entry_id']}.json"
     assert [r["entry_id"] for r in summary["entries"]] == [
@@ -31,14 +31,19 @@ def test_all_committed_entries_validate_and_ids_match_filenames():
         "TLV4-004",
         "TLV4-005",
         "TLV4-006",
+        "TLV4-007",
         "TLV4-008",
         "TLV4-009",
         "TLV4-010",
         "TLV4-011",
         "TLV4-012",
+        "TLV4-013",
         "TLV4-016",
         "TLV4-017",
+        "TLV4-018",
         "TLV4-019",
+        "TLV4-020",
+        "TLV4-022",
         "TLV4-023",
         "TLV4-024",
         "TLV4-025",
@@ -389,3 +394,48 @@ def test_tlv4_029_v5_deferred_ingestion():
     assert entry["implementation_seam"] is None
     assert entry["repository_placements"] == ["future-watch"]
     assert entry["provenance"]["verification_status"] == "unverified"
+
+
+def test_tlv4_007_route_pins():
+    e = _load("TLV4-007")
+    assert e["implementation_disposition"] == "deferred"
+    assert e["implementation_seam"] is None
+    assert e["status"] == "future-watch"
+
+
+def test_tlv4_013_route_pins():
+    e = _load("TLV4-013")
+    assert e["classification_qualifiers"] == ["G"]
+    assert "documented low-bit quantisation exist (llama.cpp)" in e["classification_rationale"]
+    assert "total model bits" in e["classification_rationale"]
+    assert "ICLR" not in e["classification_rationale"]
+    assert "ICML" not in e["classification_rationale"]
+    assert e["provenance"]["recorded_date"] == "2026-08-06"
+    assert "7f5680fadd8b569ad67ab2934232cd2d477ae6db684db566d153afd03f2e1992" in e["provenance"]["source_reference"]
+    assert "59bcd8314c78b1e8477e0b145299ab869f10f5fd5271c6ba6af2facea6eb4a96" in e["provenance"]["source_reference"]
+    assert "pinned in-record" in e["provenance"]["source_reference"]
+
+
+def test_tlv4_018_route_pins():
+    e = _load("TLV4-018")
+    assert e["classification_qualifiers"] == []
+    assert "multiple existing provenance idioms" in e["classification_rationale"]
+    assert "remains G" not in e["classification_rationale"]
+    assert "trigger-bearing sentence" in e["provenance"]["source_reference"]
+    assert "018-4" in e["provenance"]["source_reference"]
+    assert "normative warning" in e["provenance"]["source_reference"]
+    assert "whether or not it is equivalent in substance" in e["provenance"]["source_reference"]
+
+
+def test_tlv4_020_route_pins():
+    e = _load("TLV4-020")
+    assert e["classification_rationale"].startswith("Research-stage (C);")
+    assert e["implementation_seam"] is None
+    assert e["status"] == "future-watch"
+
+
+def test_tlv4_022_route_pins():
+    e = _load("TLV4-022")
+    assert e["classification_qualifiers"] == ["C"]
+    assert e["classification_rationale"].startswith("Established engineering practice on calibrated, synchronised")
+    assert "exclusion 6" in e["provenance"]["source_reference"]
