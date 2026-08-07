@@ -524,6 +524,50 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
     assert calls == [False]
 
 
+def _legacy_npy_error_class_ls():
+    """The exception class an ordinary numeric `.npy` produced BEFORE this branch.
+
+    Derived, never hard-coded. At the base commit `extract_render_data` did
+    `snap = np.load(...)` and then immediately `snap['lattice']`. For a non-zip
+    input `np.load` returns a plain ndarray rather than an `NpzFile`, so the
+    legacy failure is whatever a constant-string subscript on an ndarray raises
+    in the installed NumPy.
+    """
+    probe = np.zeros(2)
+    try:
+        probe["lattice"]
+    except Exception as exc:  # noqa: BLE001 - the class IS the thing under test
+        return type(exc)
+    raise AssertionError(
+        "a constant-string subscript on a plain ndarray no longer raises; "
+        "the legacy contract this test pins no longer exists"
+    )
+
+
+@requires_numpy
+def test_a_numeric_npy_still_fails_exactly_as_it_did_before(tmp_path, monkeypatch):
+    """`extract_render_data` gained its first `with` on this branch.
+
+    An `NpzFile` needs deterministic ownership; an ndarray does not. Conditional
+    ownership keeps the archive closing while leaving a `.npy` to fail at the
+    same `snap['lattice']` subscript it always did -- and nothing downstream may
+    run, which `np.argwhere` witnesses because it is the first call after the
+    extraction.
+    """
+    not_an_archive = tmp_path / "snapshot.npy"
+    np.save(not_an_archive, np.zeros((2, 2, 2), dtype=np.uint8))
+
+    reached = []
+    monkeypatch.setattr(
+        lucid_server.np, "argwhere", lambda *a, **k: reached.append("argwhere")
+    )
+
+    with pytest.raises(_legacy_npy_error_class_ls()):
+        lucid_server.extract_render_data(str(not_an_archive))
+
+    assert reached == [], "downstream processing ran on a non-archive input"
+
+
 @requires_numpy
 def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
     archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))

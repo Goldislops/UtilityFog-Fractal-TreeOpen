@@ -1397,27 +1397,29 @@ def test_export_cli_snapshot_load_is_pickle_free():
     assert keywords["allow_pickle"].value is False
 
 
-def test_export_cli_owns_the_archive_through_a_context_manager():
-    """The load is a ``with`` subject, and ``export_genome`` is outside it.
+def test_export_cli_routes_the_snapshot_through_conditional_ownership():
+    """The loaded object is owned by a ``with``; ``export_genome`` is outside it.
 
-    The dynamic proof lives in
-    ``test_the_archive_is_closed_before_export_genome_begins``; this is the
-    structural half, and it is what makes the ordering visible to a reader of
-    the source rather than only to a test run.
+    The context expression is deliberately NOT ``np.load(...)`` itself.
+    ``np.load`` returns an ``NpzFile`` for a zip archive but a plain ndarray
+    (or a memmap) for a ``.npy``, and an ndarray has no context-manager
+    protocol. Only the non-archive case is wrapped in ``nullcontext``: the NPZ
+    keeps deterministic closure, and a ``.npy`` still fails exactly where it
+    always did, at the first constant-string subscript.
+
+    The dynamic halves live in
+    ``test_the_archive_is_closed_before_export_genome_begins`` and
+    ``test_a_numeric_npy_still_fails_exactly_as_it_did_before``; this is the
+    structural half, which makes the ordering visible to a reader of the source
+    rather than only to a test run.
     """
-    tree = _module_tree()
-    owning = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.With)
-        and any(
-            isinstance(item.context_expr, ast.Call)
-            and isinstance(item.context_expr.func, ast.Attribute)
-            and item.context_expr.func.attr == "load"
-            for item in node.items
-        )
-    ]
-    assert len(owning) == 1, "the export CLI's np.load is not owned by a `with`"
+    block = _cli_main_block()
+    owning = [node for node in ast.walk(block) if isinstance(node, ast.With)]
+    assert len(owning) == 1, "the export CLI no longer has exactly one `with`"
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "nullcontext"
+        for node in ast.walk(block)
+    ), "the snapshot is not routed through contextlib.nullcontext"
     inside = {
         node.func.id
         for node in ast.walk(owning[0])
@@ -1622,26 +1624,42 @@ def test_the_epigenetic_payload_still_exports_intact(monkeypatch, tmp_path):
     assert len(base64.b64decode(epi["memory_grid_b64"])) == pg.MEMORY_CHANNELS * 8 * 4
 
 
-def test_a_non_npz_snapshot_now_fails_at_the_context_manager(monkeypatch, tmp_path):
-    """A DISCLOSED CONSEQUENCE of giving the archive deterministic closure.
+def _legacy_npy_error_class():
+    """The exception class an ordinary numeric ``.npy`` produced BEFORE this branch.
 
-    ``np.load`` on a file that is not a zip returns a plain ndarray, which has
-    no context-manager protocol. Before the ``with``, a ``.npy`` passed to
-    ``--snapshot`` got as far as ``snap["lattice"]`` and failed there with an
-    indexing error; it now fails one statement earlier with a different
-    exception type.
+    Derived, never hard-coded. At the base commit the export CLI did
+    ``snap = np.load(...)`` and then immediately ``snap["lattice"]``. For a
+    non-zip input ``np.load`` returns a plain ndarray rather than an
+    ``NpzFile``, so the legacy failure is whatever a constant-string subscript
+    on an ndarray raises in the installed NumPy. Reproducing that exact
+    operation here pins the contract to real behaviour instead of to a
+    remembered class name, and cannot drift if NumPy changes it.
+    """
+    probe = np.zeros(2)
+    try:
+        probe["lattice"]
+    except Exception as exc:  # noqa: BLE001 - the class IS the thing under test
+        return type(exc)
+    raise AssertionError(
+        "a constant-string subscript on a plain ndarray no longer raises; "
+        "the legacy contract this test pins no longer exists"
+    )
 
-    Closing the archive before ``export_genome`` and preserving the exception
-    behaviour cannot both hold for a non-zip input. Closure was the explicit
-    requirement, so the consequence is pinned here as a stated contract rather
-    than left as a silent change. What is unchanged: the exception still
-    propagates uncaught, the exit is still non-zero, and no genome is written.
+
+def test_a_numeric_npy_still_fails_exactly_as_it_did_before(monkeypatch, tmp_path):
+    """Deterministic NPZ closure must not cost the legacy ``.npy`` failure.
+
+    An ``NpzFile`` owns an operating-system handle and needs deterministic
+    ownership; an ndarray owns nothing and needs none. Conditional ownership
+    gives the archive its ``with`` while leaving a ``.npy`` to reach the same
+    subscript that failed at the base commit -- same exception class, no
+    output, no downstream work.
     """
     not_an_archive = tmp_path / "snapshot.npy"
     np.save(not_an_archive, np.arange(8, dtype=np.uint8))
     output = tmp_path / "genome.json"
 
-    with pytest.raises((TypeError, AttributeError)):
+    with pytest.raises(_legacy_npy_error_class()):
         _run_export_cli(
             monkeypatch, _minimal_rule_file(tmp_path), not_an_archive, output
         )
