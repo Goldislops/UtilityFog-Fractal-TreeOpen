@@ -63,12 +63,23 @@ def _load_snapshot(path):
     or a failing `int()` conversion propagates exactly as before, and the `with`
     block still closes the archive on the way out.
 
-    `allow_pickle=True` and the `str(path)` conversion are preserved verbatim;
-    changing that policy is out of scope. The claim here is archive resource
-    lifetime only — not snapshot validation, archive security, deterministic
-    export or atomic output.
+    The `str(path)` conversion is preserved verbatim.
+
+    `allow_pickle=False` — an object-dtype member is stored as a pickle, so
+    loading one with pickle enabled is arbitrary code execution. This daemon
+    loads unattended from a watched directory, so a file dropped into `data/`
+    would be unpickled with nobody present; NumPy now refuses such a member
+    with a `ValueError` instead. Passed explicitly although it is already
+    NumPy's default, because relying on a default makes the property invisible
+    at the call site and silently reversible upstream. There is deliberately
+    no fallback retry and no override.
+
+    The claim here is an OBJECT-MEMBER REFUSAL plus archive resource lifetime
+    — not snapshot validation, whole-archive security, deterministic export or
+    atomic output. Nothing here resists decompression amplification, absurd
+    declared shapes, hostile member names or NumPy header defects.
     """
-    with np.load(str(path), allow_pickle=True) as snap:
+    with np.load(str(path), allow_pickle=False) as snap:
         state = snap["lattice"]
         memory_grid = snap["memory_grid"]
         generation = int(snap["generation"])

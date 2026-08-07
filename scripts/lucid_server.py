@@ -14,6 +14,7 @@ The server:
 """
 
 import asyncio
+import contextlib
 import json
 import glob
 import time
@@ -47,11 +48,58 @@ def find_latest_snapshot(data_dir):
 
 
 def extract_render_data(snap_path):
-    """Extract cell positions, states, and ages from a snapshot."""
-    snap = np.load(snap_path, allow_pickle=True)
-    state = snap['lattice']
-    mg = snap['memory_grid']
-    gen = int(snap['generation'])
+    """Extract cell positions, states, and ages from a snapshot.
+
+    ``allow_pickle=False`` -- no pickled member is ever loaded
+    ---------------------------------------------------------
+    An NPZ member of object dtype is stored as a pickle, so loading one with
+    pickle enabled is arbitrary code execution by construction. This function
+    is reached on every client connect, and from the watched directory
+    whenever the newest snapshot's path or mtime CHANGES -- not on every poll,
+    which only re-checks. Either way an archive dropped into ``data/`` would be
+    unpickled without anyone asking. NumPy now refuses such a member with a ``ValueError``
+    instead.
+
+    Passed EXPLICITLY although NumPy's default is already ``False``: relying
+    on the default would make the property invisible at the call site and
+    silently reversible by an upstream change. There is deliberately no
+    fallback retry and no override.
+
+    Archive lifetime
+    ----------------
+    The three values are materialised inside the ``with`` block and the
+    archive is closed before any downstream work begins -- including the
+    ``state.shape[0]`` inspection, the non-void search and the per-cell loop,
+    which previously ran for up to ``MAX_CELLS`` iterations with the handle
+    still open. Closure is explicit, not left to garbage collection, and it
+    holds on refusal too because the members are read inside the block.
+
+    Ownership is CONDITIONAL because ``np.load`` returns two different kinds of
+    thing. A zip archive yields an ``NpzFile``, which owns an operating-system
+    handle and needs that deterministic close. A ``.npy`` yields a plain
+    ndarray, which owns no handle and has no context-manager protocol; wrapping
+    it in ``nullcontext`` lets it reach the same ``snap['lattice']`` subscript
+    that has always been where a NUMERIC non-archive input fails. The archive
+    gains closure without the array losing its established exception.
+
+    Two limits on that, stated rather than implied. An OBJECT-dtype ``.npy``
+    now fails earlier, at ``np.load`` itself, because pickle is refused before
+    anything is returned -- that is the intended change, not a preserved one.
+    And ``np.load`` returns a ``memmap`` only when passed ``mmap_mode``, which
+    this call site never does; a memmap WOULD own a mapping and would not be
+    closed by this branch, so the argument list here is load-bearing.
+
+    The claim is an OBJECT-MEMBER REFUSAL and archive resource lifetime -- not
+    whole-archive validation. Nothing here resists decompression
+    amplification, absurd declared shapes, hostile member names or defects in
+    NumPy's own header parsing.
+    """
+    loaded = np.load(snap_path, allow_pickle=False)
+    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
+    with owner as snap:
+        state = snap['lattice']
+        mg = snap['memory_grid']
+        gen = int(snap['generation'])
 
     n = state.shape[0]
 

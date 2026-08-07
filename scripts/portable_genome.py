@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -730,10 +731,44 @@ if __name__ == "__main__":
         gen = ca_step_count = 0
         best_fit = 0.0
         if args.snapshot:
-            snap = np.load(args.snapshot, allow_pickle=True)
-            lattice, memory_grid = snap["lattice"], snap["memory_grid"]
-            gen, ca_step_count = int(snap.get("generation", 0)), int(snap.get("ca_step", 0))
-            best_fit = float(snap.get("best_fitness", 0.0))
+            # An NPZ member of object dtype IS a pickle, so loading one with
+            # pickle enabled is arbitrary code execution by construction, and
+            # this path takes its archive straight from the command line.
+            # NumPy now refuses such a member with a ValueError instead of
+            # reconstructing it. `allow_pickle=False` is passed EXPLICITLY
+            # although it is already NumPy's default: a default makes the
+            # property invisible at the call site and silently reversible by an
+            # upstream change. There is no fallback retry and no override.
+            # This is an object-member refusal, not archive validation.
+            #
+            # Ownership is CONDITIONAL because `np.load` returns two different
+            # kinds of thing. A zip archive yields an `NpzFile`, which owns an
+            # operating-system handle and must be closed deterministically
+            # before `export_genome` begins rather than left to garbage
+            # collection. A `.npy` yields a plain ndarray, which owns no handle
+            # and has no context-manager protocol; wrapping it in
+            # `nullcontext` lets it reach the same `snap["lattice"]` subscript
+            # that has always been where a NUMERIC non-archive input fails, so
+            # the archive gains closure without the array losing its
+            # established exception.
+            #
+            # Two limits, stated rather than implied. An OBJECT-dtype `.npy`
+            # now fails earlier, at `np.load` itself, because pickle is refused
+            # before anything is returned -- that is the intended change, not a
+            # preserved one. And `np.load` returns a `memmap` only when passed
+            # `mmap_mode`, which this call site never does; a memmap WOULD own a
+            # mapping and would NOT be closed by the ndarray branch, so the
+            # argument list here is load-bearing.
+            #
+            # Every member this CLI reads is materialised inside the block (an
+            # unread member is never touched at all), so the base64 encoding
+            # downstream reads real in-memory arrays.
+            loaded = np.load(args.snapshot, allow_pickle=False)
+            owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
+            with owner as snap:
+                lattice, memory_grid = snap["lattice"], snap["memory_grid"]
+                gen, ca_step_count = int(snap.get("generation", 0)), int(snap.get("ca_step", 0))
+                best_fit = float(snap.get("best_fitness", 0.0))
         path = export_genome(args.output, rule_spec=rule_spec, generation=gen,
                              ca_step=ca_step_count, best_fitness=best_fit,
                              lattice=lattice, memory_grid=memory_grid,
