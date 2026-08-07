@@ -1090,20 +1090,21 @@ __all__ += [  # type: ignore[misc]
 #
 # Boundaries enforced here:
 #
-#   • Snapshot loading uses ``allow_pickle=False``. An NPZ member of object
-#     dtype is stored as a pickle, so loading one with pickle enabled is
-#     arbitrary code execution by construction; NumPy refuses such a member
-#     with a ``ValueError`` instead. The reads in this chunk already pass
-#     ``False`` (see ``_is_valid_snapshot_npz`` and ``process_snapshot``).
+#   • Snapshot loading passes ``allow_pickle=False``. An NPZ member of
+#     object dtype is stored as a pickle, so loading one with pickle enabled
+#     is arbitrary code execution by construction; NumPy refuses such a
+#     member with a ``ValueError`` instead. Both reads in this chunk already
+#     pass ``False`` -- ``_is_valid_snapshot_npz`` and ``load_snapshot``,
+#     which is the one ``process_snapshot`` calls and is also exported in
+#     ``__all__``, so it is reachable on its own.
 #
-#     This comment previously said the opposite -- that loading used
-#     ``allow_pickle=True`` because Medusa's own ``np.savez`` artefacts
-#     include pickled metadata, that Phase 16's medusa_api used the same
-#     flag, and that engine files are trusted. All three were wrong: this
-#     file's own loads pass ``False``, medusa_api now does too, and no
-#     producer in this repository emits an object-dtype member -- the
-#     engine writes ndarrays and plain scalars, and ``meta_json`` is a
-#     ``<U`` string, not an object.
+#     This comment previously asserted the opposite: that loading enabled
+#     pickle because Medusa's own ``np.savez`` artefacts include pickled
+#     metadata, that Phase 16's medusa_api used the same setting, and that
+#     engine files are trusted. All three were wrong. This file's own loads
+#     pass ``False``; medusa_api now does too; and no producer in this
+#     repository emits an object-dtype member -- the engine writes ndarrays
+#     and plain scalars, and ``meta_json`` is a ``<U`` string, not an object.
 #
 #     What is claimed is OBJECT-MEMBER REFUSAL, not whole-archive
 #     validation: nothing here resists decompression amplification, absurd
@@ -1149,11 +1150,22 @@ def _is_valid_snapshot_npz(path: pathlib.Path) -> bool:
 
     What this predicate does NOT do is reject an object-bearing archive.
     ``NpzFile.files`` reads the zip's central directory only; it decodes no
-    member, so ``allow_pickle=False`` has nothing to refuse at listing time
+    member, so ``allow_pickle=False`` has nothing to refuse at listing time,
     and an archive carrying a pickled member whose three required keys are
-    present is reported valid here. Refusal happens later, at the
-    pickle-free member access in ``process_snapshot``, which is where the
-    ``ValueError`` is raised.
+    present is reported valid here.
+
+    Where the refusal then lands depends on WHICH member is pickled, and
+    ``load_snapshot`` treats the two cases differently:
+
+      • a pickled REQUIRED key (``lattice``, ``memory_grid``,
+        ``generation``) raises ``ValueError`` out of ``load_snapshot``;
+      • a pickled OPTIONAL key is caught there and skipped silently, so the
+        load succeeds with that key absent from ``meta`` and NOTHING
+        propagates.
+
+    Either way the pickle is never executed, which is the property that
+    matters. But "the archive is refused" would be too strong: for an
+    optional member it is accepted minus one key.
 
     That is an object-member refusal, not whole-archive validation: this
     predicate is a cheap key-presence check and claims nothing more.
@@ -1167,9 +1179,11 @@ def _is_valid_snapshot_npz(path: pathlib.Path) -> bool:
         with np.load(str(path), allow_pickle=False) as snap:
             return _REQUIRED_SNAPSHOT_KEYS.issubset(set(snap.files))
     except Exception:
-        # Catch broadly: malformed zip, missing file, permissions,
-        # pickled-payload-refused, future numpy quirks. Any failure
-        # is "this is not a valid Medusa snapshot."
+        # Catch broadly: malformed zip, missing file, permissions, future
+        # numpy quirks. Any failure is "this is not a valid Medusa snapshot."
+        # Deliberately NOT listed: a refused pickled payload. Listing keys
+        # decodes no member, so nothing is refused at this point -- see the
+        # docstring above.
         return False
 
 

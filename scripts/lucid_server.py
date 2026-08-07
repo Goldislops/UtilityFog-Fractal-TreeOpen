@@ -54,9 +54,10 @@ def extract_render_data(snap_path):
     ---------------------------------------------------------
     An NPZ member of object dtype is stored as a pickle, so loading one with
     pickle enabled is arbitrary code execution by construction. This function
-    is reached from a watched directory every poll AND on every client
-    connect, so an archive dropped into ``data/`` would be unpickled without
-    anyone asking. NumPy now refuses such a member with a ``ValueError``
+    is reached on every client connect, and from the watched directory
+    whenever the newest snapshot's path or mtime CHANGES -- not on every poll,
+    which only re-checks. Either way an archive dropped into ``data/`` would be
+    unpickled without anyone asking. NumPy now refuses such a member with a ``ValueError``
     instead.
 
     Passed EXPLICITLY although NumPy's default is already ``False``: relying
@@ -76,11 +77,17 @@ def extract_render_data(snap_path):
     Ownership is CONDITIONAL because ``np.load`` returns two different kinds of
     thing. A zip archive yields an ``NpzFile``, which owns an operating-system
     handle and needs that deterministic close. A ``.npy`` yields a plain
-    ndarray (or a memmap), which owns no handle and has no context-manager
-    protocol; wrapping it in ``nullcontext`` lets it reach the same
-    ``snap['lattice']`` subscript that has always been where a non-archive
-    input fails. The archive gains closure without the array losing its
-    established exception.
+    ndarray, which owns no handle and has no context-manager protocol; wrapping
+    it in ``nullcontext`` lets it reach the same ``snap['lattice']`` subscript
+    that has always been where a NUMERIC non-archive input fails. The archive
+    gains closure without the array losing its established exception.
+
+    Two limits on that, stated rather than implied. An OBJECT-dtype ``.npy``
+    now fails earlier, at ``np.load`` itself, because pickle is refused before
+    anything is returned -- that is the intended change, not a preserved one.
+    And ``np.load`` returns a ``memmap`` only when passed ``mmap_mode``, which
+    this call site never does; a memmap WOULD own a mapping and would not be
+    closed by this branch, so the argument list here is load-bearing.
 
     The claim is an OBJECT-MEMBER REFUSAL and archive resource lifetime -- not
     whole-archive validation. Nothing here resists decompression

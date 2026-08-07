@@ -512,8 +512,8 @@ def _write_snapshot_gd(path, compressed=False, **members):
 
 def test_gd_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     """Control. Without it, every "marker is absent" assertion below could
-    pass against a payload that never worked. This is the only place in this
-    module that enables pickle."""
+    pass against a payload that never worked. Pickle is enabled here and in the
+    compressed-archive control below, and nowhere else in this module."""
     archive = _write_snapshot_gd(
         tmp_path / "control.npz", lattice=_payload_array_gd(tmp_path)
     )

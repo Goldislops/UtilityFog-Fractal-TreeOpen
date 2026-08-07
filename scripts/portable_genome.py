@@ -745,12 +745,20 @@ if __name__ == "__main__":
             # kinds of thing. A zip archive yields an `NpzFile`, which owns an
             # operating-system handle and must be closed deterministically
             # before `export_genome` begins rather than left to garbage
-            # collection. A `.npy` yields a plain ndarray (or a memmap), which
-            # owns no handle and has no context-manager protocol; wrapping it
-            # in `nullcontext` lets it reach the same `snap["lattice"]`
-            # subscript that has always been where a non-archive input fails,
-            # so the archive gains closure without the array losing its
+            # collection. A `.npy` yields a plain ndarray, which owns no handle
+            # and has no context-manager protocol; wrapping it in
+            # `nullcontext` lets it reach the same `snap["lattice"]` subscript
+            # that has always been where a NUMERIC non-archive input fails, so
+            # the archive gains closure without the array losing its
             # established exception.
+            #
+            # Two limits, stated rather than implied. An OBJECT-dtype `.npy`
+            # now fails earlier, at `np.load` itself, because pickle is refused
+            # before anything is returned -- that is the intended change, not a
+            # preserved one. And `np.load` returns a `memmap` only when passed
+            # `mmap_mode`, which this call site never does; a memmap WOULD own a
+            # mapping and would NOT be closed by the ndarray branch, so the
+            # argument list here is load-bearing.
             #
             # Every member this CLI reads is materialised inside the block (an
             # unread member is never touched at all), so the base64 encoding

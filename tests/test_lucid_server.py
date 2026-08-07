@@ -417,8 +417,8 @@ def _write_snapshot_ls(path, compressed=False, **members):
 @requires_numpy
 def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
     """Control. Without it, every "marker is absent" assertion below could
-    pass against a payload that never worked. This is the only place in this
-    module that enables pickle."""
+    pass against a payload that never worked. Pickle is enabled here and in the
+    structured-dtype control below, and nowhere else in this module."""
     archive = _write_snapshot_ls(
         tmp_path / "control.npz", lattice=_payload_array_ls(tmp_path)
     )
@@ -504,6 +504,35 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
     lucid_server.extract_render_data(archive)
 
     assert observed == [True], "the archive was still open during cell iteration"
+
+
+@requires_numpy
+def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+    """Closure on the exceptional path, witnessed on the real `NpzFile`.
+
+    The docstring claims closure "holds on refusal too because the members are
+    read inside the block". This file's ownership is conditional now, so that
+    claim is newest here and is witnessed rather than asserted.
+    """
+    archive = _write_snapshot_ls(
+        tmp_path / "refused.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    opened = []
+    real_load = np.load
+
+    def tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(lucid_server.np, "load", tracking_load)
+    with pytest.raises(ValueError):
+        lucid_server.extract_render_data(str(archive))
+
+    assert len(opened) == 1, "the archive was never opened"
+    # `close()` drops `zip` unconditionally; `fid` is a class attribute
+    # defaulting to None and cannot carry this claim alone.
+    assert opened[0].zip is None, "the archive survived the refusal"
 
 
 @requires_numpy

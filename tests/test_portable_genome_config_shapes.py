@@ -1325,8 +1325,8 @@ def _member_accesses(node, name):
     """Every constant-string member access on ``name`` inside ``node``.
 
     Returns ``(lineno, col_offset, member)`` triples so callers can restore
-    source order -- ``ast.walk`` does not preserve it, and two of the CLI's
-    accesses share a line.
+    source order -- ``ast.walk`` does not preserve it, and the CLI packs two
+    accesses onto each of two lines, so ``lineno`` alone is not enough.
 
     Both access forms are covered: ``snap["x"]`` and ``snap.get("x", default)``.
     """
@@ -1405,12 +1405,37 @@ def _cli_snapshot_members():
     return tuple(ordered)
 
 
+def _derive_cli_members():
+    """Derive at import WITHOUT letting a failure take out the file.
+
+    ``_cli_snapshot_members`` asserts loudly, and it has to -- a derivation
+    that quietly returned ``()`` would parametrise zero refusal cases in
+    silence. But it is called at module scope, where a raised assertion is a
+    COLLECTION ERROR for all ~70 tests here, most of which are the
+    configuration-shape totality package and have nothing to do with snapshot
+    loading. This module's sibling `tests/test_lucid_server.py` refuses an
+    unconditional numpy import for exactly that reason.
+
+    So the failure is captured rather than raised, reported by its own test,
+    and coverage falls back to the reviewed contract -- never to nothing.
+    """
+    try:
+        return _cli_snapshot_members(), None
+    except AssertionError as exc:
+        return (), exc
+
+
+_DERIVED_CLI_MEMBERS, _CLI_DERIVATION_ERROR = _derive_cli_members()
+
 #: Every member the export CLI actually dereferences, in the CLI's own order,
 #: DERIVED from the live source rather than transcribed. `generation`,
 #: `ca_step` and `best_fitness` are reached through `.get`, which routes
 #: through `NpzFile.__getitem__` whenever the key is present -- a `.get`
 #: default does NOT make a member safe, and each is covered for that reason.
-_CLI_MEMBERS = _cli_snapshot_members()
+#:
+#: Falls back to the reviewed contract if the derivation could not run, so the
+#: refusal parametrisation never silently empties.
+_CLI_MEMBERS = _DERIVED_CLI_MEMBERS or _EXPECTED_CLI_MEMBERS
 
 
 def _run_export_cli(monkeypatch, rule_file, snapshot, output, *extra) -> None:
@@ -1498,10 +1523,24 @@ def test_the_derived_cli_members_match_the_reviewed_contract():
     is exactly the kind of change that should stop a reviewer rather than slip
     through under a green suite.
     """
-    assert _CLI_MEMBERS == _EXPECTED_CLI_MEMBERS, (
-        f"the export CLI now dereferences {_CLI_MEMBERS}, not "
-        f"{_EXPECTED_CLI_MEMBERS}. The refusal tests already cover the new set; "
-        "confirm the change is intended and update _EXPECTED_CLI_MEMBERS."
+    assert _DERIVED_CLI_MEMBERS == _EXPECTED_CLI_MEMBERS, (
+        f"the export CLI now dereferences {_DERIVED_CLI_MEMBERS}, not "
+        f"{_EXPECTED_CLI_MEMBERS}. Before editing the constant, check the "
+        "DERIVATION against the CLI: if a member is read through an alias or a "
+        "computed key it will be under-reported here, and copying a short "
+        "tuple into the constant would bake that gap in permanently."
+    )
+
+
+def test_the_cli_member_derivation_actually_ran():
+    """The fallback must never pass for a broken derivation.
+
+    `_CLI_MEMBERS` falls back to the reviewed contract so the refusal tests
+    keep running, which means a failed derivation would otherwise be invisible.
+    This is where it surfaces.
+    """
+    assert _CLI_DERIVATION_ERROR is None, (
+        f"the export CLI member derivation failed: {_CLI_DERIVATION_ERROR}"
     )
 
 
@@ -1529,10 +1568,10 @@ def test_export_cli_routes_the_snapshot_through_conditional_ownership():
 
     The context expression is deliberately NOT ``np.load(...)`` itself.
     ``np.load`` returns an ``NpzFile`` for a zip archive but a plain ndarray
-    (or a memmap) for a ``.npy``, and an ndarray has no context-manager
-    protocol. Only the non-archive case is wrapped in ``nullcontext``: the NPZ
-    keeps deterministic closure, and a ``.npy`` still fails exactly where it
-    always did, at the first constant-string subscript.
+    for a ``.npy``, and an ndarray has no context-manager protocol. Only the
+    non-archive case is wrapped in ``nullcontext``: the NPZ keeps deterministic
+    closure, and a numeric ``.npy`` still fails exactly where it always did, at
+    the first constant-string subscript.
 
     The dynamic halves live in
     ``test_the_archive_is_closed_before_export_genome_begins`` and
@@ -1542,6 +1581,20 @@ def test_export_cli_routes_the_snapshot_through_conditional_ownership():
     """
     block = _cli_main_block()
     owning = _cli_snapshot_with()
+
+    # Assert the docstring's actual claim: the `with` subject is a NAME, not
+    # the load call. Checking only that the token `nullcontext` appears
+    # somewhere in the block would still pass if the code were rewritten as
+    # `with np.load(...) as snap:` beside a dead nullcontext reference.
+    context_expr = owning.items[0].context_expr
+    assert not (
+        isinstance(context_expr, ast.Call)
+        and isinstance(context_expr.func, ast.Attribute)
+        and context_expr.func.attr == "load"
+    ), "the `with` subject is np.load(...) itself; a .npy would fail on entry"
+    assert isinstance(context_expr, ast.Name), (
+        "the `with` subject is no longer the conditionally-owned name"
+    )
     assert any(
         isinstance(node, ast.Attribute) and node.attr == "nullcontext"
         for node in ast.walk(block)
@@ -1691,6 +1744,35 @@ def test_the_archive_is_closed_before_export_genome_begins(monkeypatch, tmp_path
 # --- compatibility ---------------------------------------------------------
 
 
+def test_the_real_archive_is_closed_after_a_refusal(monkeypatch, tmp_path):
+    """Closure must hold on the exceptional path, not only the happy one.
+
+    The prose claims the archive closes "on a refusal raised mid extraction"
+    because the members are read inside the block. This is the file where that
+    claim is newest -- ownership here is conditional -- so it is witnessed
+    rather than asserted, on the real `NpzFile`.
+    """
+    archive = _write_snapshot_pg(
+        tmp_path, {**_numeric_members_pg(), "lattice": _payload_member_pg(tmp_path)}
+    )
+    opened = []
+    real_load = np.load
+
+    def tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(np, "load", tracking_load)
+    with pytest.raises(ValueError):
+        _run_export_cli(
+            monkeypatch, _minimal_rule_file(tmp_path), archive, tmp_path / "g.json"
+        )
+
+    assert len(opened) == 1, "the archive was never opened"
+    assert _archive_is_open(opened[0]) is False, "the archive survived the refusal"
+
+
 def test_a_numeric_snapshot_still_exports_its_counters(monkeypatch, tmp_path):
     """Generation, CA step and best fitness survive the refusal change."""
     archive = _write_snapshot_pg(tmp_path, _numeric_members_pg())
@@ -1815,11 +1897,20 @@ def test_a_numeric_npy_still_fails_exactly_as_it_did_before(monkeypatch, tmp_pat
     np.save(not_an_archive, np.arange(8, dtype=np.uint8))
     output = tmp_path / "genome.json"
 
+    # `IndexError` is a common class, so the absence of an output file does not
+    # by itself prove the failure happened at the subscript. A sentinel on
+    # `export_genome` -- the first thing after the extraction -- pins it.
+    reached = []
+    monkeypatch.setattr(
+        pg, "export_genome", lambda *a, **k: reached.append("export_genome")
+    )
+
     with pytest.raises(_legacy_npy_error_class()):
         _run_export_cli(
             monkeypatch, _minimal_rule_file(tmp_path), not_an_archive, output
         )
 
+    assert reached == [], "export_genome ran on a non-archive input"
     assert not output.exists()
 
 
