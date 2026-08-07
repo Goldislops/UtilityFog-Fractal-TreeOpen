@@ -1090,11 +1090,26 @@ __all__ += [  # type: ignore[misc]
 #
 # Boundaries enforced here:
 #
-#   • Snapshot loading uses ``allow_pickle=True`` because Medusa's own
-#     ``np.savez`` artefacts include pickled metadata (Phase 16's
-#     medusa_api uses the same flag). We trust the engine's own files.
-#     Loading non-Medusa .npz files is not in scope; the function only
-#     accepts paths that match the configured snapshot glob.
+#   • Snapshot loading uses ``allow_pickle=False``. An NPZ member of object
+#     dtype is stored as a pickle, so loading one with pickle enabled is
+#     arbitrary code execution by construction; NumPy refuses such a member
+#     with a ``ValueError`` instead. The reads in this chunk already pass
+#     ``False`` (see ``_is_valid_snapshot_npz`` and ``process_snapshot``).
+#
+#     This comment previously said the opposite -- that loading used
+#     ``allow_pickle=True`` because Medusa's own ``np.savez`` artefacts
+#     include pickled metadata, that Phase 16's medusa_api used the same
+#     flag, and that engine files are trusted. All three were wrong: this
+#     file's own loads pass ``False``, medusa_api now does too, and no
+#     producer in this repository emits an object-dtype member -- the
+#     engine writes ndarrays and plain scalars, and ``meta_json`` is a
+#     ``<U`` string, not an object.
+#
+#     What is claimed is OBJECT-MEMBER REFUSAL, not whole-archive
+#     validation: nothing here resists decompression amplification, absurd
+#     declared shapes, hostile member names or defects in NumPy's own header
+#     parsing. Loading non-Medusa .npz files remains out of scope; the
+#     function only accepts paths that match the configured snapshot glob.
 #
 #   • Writes are restricted to ``config.log_directory`` and its parent
 #     must already exist (we create the leaf log dir, never the scaffold).
@@ -1129,9 +1144,19 @@ def _is_valid_snapshot_npz(path: pathlib.Path) -> bool:
     data — ``NpzFile.files`` reads only the zip's central directory, so
     this stays in the milliseconds range even for tens of MB.
 
-    Any failure mode — missing keys, malformed zip, I/O error, pickled
-    payload that ``allow_pickle=False`` refuses to materialize at
-    file-listing time — yields ``False``. The function never raises.
+    Any failure mode — missing keys, malformed zip, I/O error — yields
+    ``False``. The function never raises.
+
+    What this predicate does NOT do is reject an object-bearing archive.
+    ``NpzFile.files`` reads the zip's central directory only; it decodes no
+    member, so ``allow_pickle=False`` has nothing to refuse at listing time
+    and an archive carrying a pickled member whose three required keys are
+    present is reported valid here. Refusal happens later, at the
+    pickle-free member access in ``process_snapshot``, which is where the
+    ``ValueError`` is raised.
+
+    That is an object-member refusal, not whole-archive validation: this
+    predicate is a cheap key-presence check and claims nothing more.
 
     Per issue #139 finding (a): replaces the previous file-size
     threshold, which was structurally wrong (real snapshots range from

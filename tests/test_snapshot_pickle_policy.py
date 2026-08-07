@@ -138,27 +138,51 @@ def _np_load_calls(tree):
 
 
 def _pickle_enabling_calls(tree):
-    """Every call that ASKS for pickle, whatever the callee is called.
+    """Calls that ask for pickle through a STATICALLY READABLE argument.
 
-    ``np.load`` is not the only door. ``np.lib.npyio.NpzFile(fh,
-    allow_pickle=True)`` and ``np.lib.format.read_array(fh,
-    allow_pickle=True)`` reach the same unpickling code and are structurally
-    invisible to any matcher keyed on the callee's NAME. Keying on the ARGUMENT
-    instead catches every spelling, including ones that do not exist yet.
+    Keyed on the argument rather than the callee, so it does not depend on
+    guessing a name. ``np.load`` is not the only door: ``np.lib.npyio.NpzFile(
+    fh, allow_pickle=True)`` and ``np.lib.format.read_array(fh,
+    allow_pickle=True)`` reach the same unpickling code and are invisible to
+    any matcher keyed on the callee's name.
 
-    Being AST rather than substring, it is also not fooled by
-    ``allow_pickle = True`` with spaces, which the token scan below misses.
+    EXACTLY what is enforced, and nothing wider:
+
+    * an explicit ``allow_pickle=`` keyword whose value is not the literal
+      ``False``, on a call to anything;
+    * ``**{"allow_pickle": ...}`` where the mapping is a LITERAL dict with a
+      constant key.
+
+    NOT enforced, and not claimed: any route where the argument is not
+    statically readable -- ``**kwargs`` forwarded from elsewhere, a dict built
+    at runtime, a name whose value is computed, ``functools.partial``, or a
+    call reached through an object attribute. This is a static gate over
+    literal source, not a proof that pickle can never be requested.
+
+    Being AST rather than substring, it is not fooled by ``allow_pickle = True``
+    with spaces, which the token scan below misses.
     """
     found = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         for keyword in node.keywords:
-            if keyword.arg != "allow_pickle":
-                continue
-            if not (isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value is False):
-                found.append(node)
+            if keyword.arg == "allow_pickle":
+                if not (isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is False):
+                    found.append(node)
+                    break
+            elif keyword.arg is None and isinstance(keyword.value, ast.Dict):
+                # `**{...}`. Only a literal mapping can be read; anything else
+                # is out of scope and deliberately not guessed at.
+                enabling = any(
+                    isinstance(key, ast.Constant) and key.value == "allow_pickle"
+                    and not (isinstance(value, ast.Constant) and value.value is False)
+                    for key, value in zip(keyword.value.keys, keyword.value.values)
+                )
+                if enabling:
+                    found.append(node)
+                    break
     return found
 
 
@@ -266,17 +290,21 @@ _PLANTED_MODULE = (
     "_rebound = np.load\n"
     "_rebound('e.npz', allow_pickle=True)\n"          # local rebinding
     "np.lib.npyio.NpzFile(fh, allow_pickle = True)\n"  # not `load` at all
+    "np.lib.format.read_array(fh, allow_pickle=True)\n"  # nor is this
+    "np.load('g.npz', **{'allow_pickle': True})\n"    # literal dict expansion
     "import json\n"
     "json.load(open('f.json'))\n"                     # must be ignored
 )
 
-#: Five of the six NumPy loads reach `_np_load_calls`; the `NpzFile`
-#: constructor is not a `load` call and is caught only by the argument-based
+#: Reaching `_np_load_calls`: the five `load`-named spellings plus the literal
+#: dict expansion, which is a `load` call whose keyword is not readable as
+#: `False` and so counts as unguarded. The `NpzFile` and `read_array`
+#: constructors are not `load` calls and are caught only by the argument-based
 #: matcher. `json.load` is caught by neither.
-_PLANTED_UNGUARDED = 5
-#: Every call that names `allow_pickle` with a non-False value, including the
-#: whitespaced `NpzFile` constructor a substring scan would miss.
-_PLANTED_ENABLING = 5
+_PLANTED_UNGUARDED = 6
+#: Every call whose `allow_pickle` is statically readable and not `False`,
+#: including the whitespaced `NpzFile`, `read_array`, and the `**{...}` form.
+_PLANTED_ENABLING = 7
 
 
 def test_no_unguarded_np_load_survives_under_scripts_or_vis():
@@ -300,7 +328,12 @@ def test_no_call_under_scripts_or_vis_asks_for_pickle():
     one: ``NpzFile(fh, allow_pickle=True)`` and ``read_array(...,
     allow_pickle=True)`` reach it directly and are invisible to a matcher keyed
     on the callee's name. This asks the other question -- did anything, under
-    any name, request pickle at all.
+    any name, request pickle through a statically readable argument.
+
+    Static gate, stated exactly: it reads explicit ``allow_pickle=`` keywords
+    and literal ``**{...}`` mappings. It does not resolve forwarded
+    ``**kwargs``, runtime-built mappings or computed values, and does not claim
+    to.
     """
     _, enabling = _sweep()
     assert enabling == {}, (

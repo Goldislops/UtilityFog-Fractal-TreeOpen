@@ -1234,12 +1234,12 @@ def test_export_genome_untouched_by_this_package():
 
 _PG_MARKER = "PORTABLE_GENOME_PAYLOAD_EXECUTED"
 
-#: Every member the export CLI actually dereferences, in the CLI's own order.
-#: `generation`, `ca_step` and `best_fitness` are reached through `.get`, which
-#: routes through `NpzFile.__getitem__` whenever the key is present -- a `.get`
-#: default does NOT make a member safe, and each is covered here for that
-#: reason.
-_CLI_MEMBERS = ("lattice", "memory_grid", "generation", "ca_step", "best_fitness")
+#: The member list the CLI is expected to dereference today. This is a REVIEW
+#: ALARM, not the source of coverage: `_CLI_MEMBERS` below is derived from the
+#: real CLI, so a new member is covered automatically, and
+#: `test_the_derived_cli_members_match_the_reviewed_contract` then fails to say
+#: the contract moved and wants looking at.
+_EXPECTED_CLI_MEMBERS = ("lattice", "memory_grid", "generation", "ca_step", "best_fitness")
 
 
 def _create_marker_pg(directory: str) -> int:
@@ -1375,6 +1375,44 @@ def _cli_snapshot_with():
     return candidates[0]
 
 
+def _cli_snapshot_members():
+    """Derive, from the real export CLI, every snapshot member it dereferences.
+
+    Narrowly scoped on purpose: it reads only the ``with`` block that owns the
+    snapshot, only names bound by that block, and only CONSTANT-string members.
+    A dynamically computed key would not be seen -- the CLI has none, and
+    inventing broad matching to cover a case that does not exist would trade a
+    true narrow claim for a false wide one.
+
+    Source order is preserved so the parametrised refusal test reads in the
+    same order the CLI dereferences, which is also the order in which a refusal
+    wins when several members are hostile at once.
+
+    The assertions inside deliberately fail LOUDLY at import. A derivation that
+    quietly returned ``()`` on a restructured CLI would parametrise zero cases
+    and every refusal test would vanish while the suite stayed green.
+    """
+    with_node = _cli_snapshot_with()
+    name = with_node.items[0].optional_vars.id
+
+    ordered, seen = [], set()
+    for _lineno, _col, member in sorted(_member_accesses(with_node, name)):
+        if member not in seen:
+            seen.add(member)
+            ordered.append(member)
+
+    assert ordered, "no constant-string snapshot members found in the export CLI"
+    return tuple(ordered)
+
+
+#: Every member the export CLI actually dereferences, in the CLI's own order,
+#: DERIVED from the live source rather than transcribed. `generation`,
+#: `ca_step` and `best_fitness` are reached through `.get`, which routes
+#: through `NpzFile.__getitem__` whenever the key is present -- a `.get`
+#: default does NOT make a member safe, and each is covered for that reason.
+_CLI_MEMBERS = _cli_snapshot_members()
+
+
 def _run_export_cli(monkeypatch, rule_file, snapshot, output, *extra) -> None:
     """Execute the real ``__main__`` body in-process.
 
@@ -1449,6 +1487,41 @@ def test_export_cli_snapshot_load_is_pickle_free():
     assert set(keywords) == {"allow_pickle"}
     assert isinstance(keywords["allow_pickle"], ast.Constant)
     assert keywords["allow_pickle"].value is False
+
+
+def test_the_derived_cli_members_match_the_reviewed_contract():
+    """Automatic coverage expansion, plus an explicit alarm when it expands.
+
+    Coverage comes from the derivation, so a sixth member added to the CLI is
+    refused-tested the moment it appears -- no one has to remember to update a
+    list. This test then fails, on purpose, because a changed snapshot contract
+    is exactly the kind of change that should stop a reviewer rather than slip
+    through under a green suite.
+    """
+    assert _CLI_MEMBERS == _EXPECTED_CLI_MEMBERS, (
+        f"the export CLI now dereferences {_CLI_MEMBERS}, not "
+        f"{_EXPECTED_CLI_MEMBERS}. The refusal tests already cover the new set; "
+        "confirm the change is intended and update _EXPECTED_CLI_MEMBERS."
+    )
+
+
+def test_the_member_derivation_can_actually_see_a_member():
+    """Non-vacuity for the derivation itself.
+
+    `_member_accesses` returning nothing would empty the parametrisation, and
+    an empty parametrisation is silent. Feeding it a block written in both
+    access forms proves it still reads them, and that it ignores a member
+    accessed on some OTHER name.
+    """
+    planted = ast.parse(
+        "with owner as snap:\n"
+        "    a = snap['lattice']\n"
+        "    b = snap.get('generation', 0)\n"
+        "    c = other['ignored']\n"
+        "    d = snap[key]\n"
+    )
+    found = [member for _l, _c, member in sorted(_member_accesses(planted, "snap"))]
+    assert found == ["lattice", "generation"]
 
 
 def test_export_cli_routes_the_snapshot_through_conditional_ownership():
