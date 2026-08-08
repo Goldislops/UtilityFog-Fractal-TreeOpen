@@ -111,24 +111,16 @@ def _np_load_calls(node, names=None) -> list:
 
 
 def _enclosing_scopes(tree) -> list:
-    """Every function body in ``tree``, plus the module itself.
-
-    Ownership is judged per SCOPE, never across the whole module. Searching the
-    module tree let a `with` in one function certify a load in another, which
-    is not ownership at all.
-    """
-    scopes = [tree]
-    scopes += [
+    """Every function body in ``tree``, plus the module itself."""
+    return [tree] + [
         node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
-    return scopes
 
 
 def _scope_of(tree, call):
     """The innermost function containing ``call``, or the module tree."""
-    best = tree
-    best_size = None
+    best, best_size = tree, None
     for scope in _enclosing_scopes(tree):
         if scope is tree:
             continue
@@ -139,126 +131,179 @@ def _scope_of(tree, call):
     return best
 
 
-def _wrapped_call_targets(node) -> list:
-    """Calls nested inside ``node`` that could be wrapping an archive.
+def _own_scope_nodes(scope) -> list:
+    """Nodes belonging to ``scope`` itself, not to a nested function or lambda.
 
-    Accepts the standard adapters -- ``contextlib.closing(...)``,
-    ``contextlib.nullcontext(...)`` and ``ExitStack.enter_context(...)`` --
-    so a correct idiom is not reported as a defect.
+    A ``with`` inside a nested ``def`` that is never called does not own
+    anything in the outer function, so descending into one would certify a leak.
     """
-    return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+    out = []
+
+    def walk(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            out.append(child)
+            walk(child)
+
+    walk(scope)
+    return out
+
+
+def _target_key(node):
+    """A stable textual key for an assignment target or context expression.
+
+    ``d`` -> ``"d"``; ``self.data`` -> ``"self.data"``; ``cache["s"]`` ->
+    ``"cache['s']"``. Returning a QUALIFIED key rather than the base name is
+    what stops ``self.data = np.load(...)`` from tainting ``self``, after which
+    any ``with self.<anything>`` in the method would have certified the load.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _target_key(node.value)
+        return f"{base}.{node.attr}" if base else None
+    if isinstance(node, ast.Subscript):
+        base = _target_key(node.value)
+        if base is None or not isinstance(node.slice, ast.Constant):
+            return None
+        return f"{base}[{node.slice.value!r}]"
+    return None
+
+
+#: Context-manager adapters that genuinely pass ownership through to what they
+#: wrap. Filtered by NAME on purpose: an earlier revision accepted ANY call
+#: containing the load, so `with some_logger(np.load(p)) as fh:` counted as
+#: ownership when it owns nothing.
+_OWNERSHIP_ADAPTERS = {"closing", "nullcontext", "aclosing"}
+
+
+def _refers_to(expr, keys, call) -> bool:
+    """Does ``expr`` denote the archive -- the call, a tracked target, or an
+    accepted adapter/conditional over one?
+
+    Deliberately EXACT. An earlier revision accepted any expression that merely
+    MENTIONED a tracked name, so ``with open(out % gen, "w")`` -- where ``gen``
+    derived from the archive -- was read as owning it.
+    """
+    if expr is call:
+        return True
+    key = _target_key(expr)
+    if key is not None and key in keys:
+        return True
+    if isinstance(expr, ast.IfExp):
+        return (_refers_to(expr.body, keys, call)
+                or _refers_to(expr.orelse, keys, call))
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        name = (func.attr if isinstance(func, ast.Attribute)
+                else func.id if isinstance(func, ast.Name) else None)
+        if name in _OWNERSHIP_ADAPTERS:
+            return any(_refers_to(arg, keys, call) for arg in expr.args)
+    return False
+
+
+def _bound_targets(nodes, call) -> set:
+    """Targets the archive is bound to, including one leg of a tuple assign."""
+    keys = set()
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if value is call:
+            for target in targets:
+                key = _target_key(target)
+                if key:
+                    keys.add(key)
+        elif isinstance(value, ast.Tuple):
+            for target in targets:
+                if isinstance(target, ast.Tuple):
+                    for sub, element in zip(target.elts, value.elts):
+                        if element is call:
+                            key = _target_key(sub)
+                            if key:
+                                keys.add(key)
+    return keys
 
 
 def _reaches_a_with(scope, call) -> bool:
-    """Is ``call``'s result handed to a ``with`` (or an explicit close) in ``scope``?
+    """Is ``call``'s result handed to a ``with`` (or explicitly closed) in ``scope``?
 
-    Accepted, because all of these genuinely bound the archive's lifetime:
+    Accepted, because each genuinely bounds the archive's lifetime:
 
-      * ``with np.load(...) as snap:``                       -- direct
-      * ``with contextlib.closing(np.load(...)) as snap:``   -- wrapped
-      * ``stack.enter_context(np.load(...))``                -- ExitStack
+      * ``with np.load(...) as snap:``                          -- direct
+      * ``with contextlib.closing(np.load(...)) as snap:``      -- adapter
+      * ``stack.enter_context(np.load(...))``                   -- ExitStack
       * ``loaded = np.load(...)`` / ``owner = nullcontext(loaded) if ... else loaded``
-        / ``with owner as snap:``                            -- CONDITIONAL
-      * ``d = np.load(...)`` / ``try: ... finally: d.close()`` -- explicit close
+        / ``with owner as snap:``                               -- CONDITIONAL
+      * ``d = np.load(...)`` / ``try: ... finally: d.close()``   -- explicit close
+        (including ``self.data.close()`` and ``cache['s'].close()``)
 
-    The conditional form is used deliberately by `scripts/lucid_server.py` and
-    `scripts/portable_genome.py`, where `np.load` may return an ndarray that
-    has no context-manager protocol. A matcher recognising only the direct
-    shape would report those correct files as defects.
+    The conditional form is what `scripts/lucid_server.py` and
+    `scripts/portable_genome.py` do, where `np.load` may return an ndarray with
+    no context-manager protocol.
 
-    REBINDING is honoured: if a tracked name is later assigned a value that
-    does not derive from it, the name stops standing for the archive and a
-    later ``with`` on it proves nothing.
+    REBINDING is honoured, adapters are matched by NAME, targets are tracked as
+    QUALIFIED keys, and nested function bodies are excluded -- each of those
+    closed a way of certifying an unowned archive.
 
-    Stated limit, because a static gate cannot do reachability: a ``with``
-    inside a conditional branch is accepted without proving that branch always
-    runs. This gate answers "is the archive given an owner in this scope", not
+    Stated limits, because a static gate cannot do reachability or aliasing:
+    a ``with`` inside a conditional branch is accepted without proving that
+    branch runs; ownership handed to another function is not modelled; and a
+    target whose key cannot be spelled statically (a computed subscript) is not
+    tracked. This answers "is the archive given an owner in this scope", not
     "does that owner run on every path".
     """
-    withs = [node for node in ast.walk(scope) if isinstance(node, ast.With)]
-    async_withs = [node for node in ast.walk(scope) if isinstance(node, ast.AsyncWith)]
-    withs = withs + async_withs
+    nodes = _own_scope_nodes(scope)
+    withs = [n for n in nodes if isinstance(n, (ast.With, ast.AsyncWith))]
 
-    # Direct, or wrapped in an adapter that is itself the context expression.
-    for node in withs:
-        for item in node.items:
-            if item.context_expr is call:
-                return True
-            if any(inner is call for inner in _wrapped_call_targets(item.context_expr)):
-                return True
-
-    # Handed straight to an ExitStack.
-    for node in ast.walk(scope):
+    for node in nodes:
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "enter_context"
                 and any(arg is call for arg in node.args)):
             return True
 
-    # Bound to a name (plain, walrus, or unpacked) and later owned.
-    names: set = set()
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Assign) and node.value is call:
-            for target in node.targets:
-                names.update(
-                    n.id for n in ast.walk(target) if isinstance(n, ast.Name)
-                )
-        elif isinstance(node, ast.NamedExpr) and node.value is call:
-            names.add(node.target.id)
-        elif isinstance(node, ast.AnnAssign) and node.value is call:
-            if isinstance(node.target, ast.Name):
-                names.add(node.target.id)
-    if not names:
-        # Bound to an attribute or subscript (e.g. `self.data = np.load(...)`).
-        # Not name-trackable; treat as owned only if something in this scope
-        # closes it explicitly, otherwise report it and let a human look.
-        for node in ast.walk(scope):
-            if (isinstance(node, ast.Assign) and node.value is call
-                    and any(isinstance(t, (ast.Attribute, ast.Subscript))
-                            for t in node.targets)):
-                return _has_explicit_close(scope, None)
-        return False
+    keys = _bound_targets(nodes, call)
 
     changed = True
     while changed:
         changed = False
-        for node in ast.walk(scope):
-            if not isinstance(node, ast.Assign):
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
                 continue
-            used = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
-            targets = {n.id for t in node.targets
-                       for n in ast.walk(t) if isinstance(n, ast.Name)}
-            if used & names:
-                for name in targets - names:
-                    names.add(name)
-                    changed = True
-            elif targets & names and node.value is not call:
-                # Rebinding: the name no longer stands for the archive.
-                for name in targets & names:
-                    names.discard(name)
-                    changed = True
+            if value is call:
+                continue
+            if _refers_to(value, keys, call):
+                for target in targets:
+                    key = _target_key(target)
+                    if key and key not in keys:
+                        keys.add(key)
+                        changed = True
+            else:
+                for target in targets:
+                    key = _target_key(target)
+                    if key in keys:
+                        keys.discard(key)
+                        changed = True
 
     for node in withs:
         for item in node.items:
-            expr = item.context_expr
-            if isinstance(expr, ast.Name) and expr.id in names:
-                return True
-            if any(isinstance(n, ast.Name) and n.id in names
-                   for n in ast.walk(expr)):
+            if _refers_to(item.context_expr, keys, call):
                 return True
 
-    return _has_explicit_close(scope, names)
-
-
-def _has_explicit_close(scope, names) -> bool:
-    """``x.close()`` on a tracked name inside ``scope``."""
-    for node in ast.walk(scope):
+    for node in nodes:
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "close"):
-            value = node.func.value
-            if names is None:
-                return True
-            if isinstance(value, ast.Name) and value.id in names:
-                return True
+                and node.func.attr == "close"
+                and _target_key(node.func.value) in keys):
+            return True
     return False
 
 
@@ -428,6 +473,67 @@ _PLANTED_FROM_IMPORT = (
     "    return d['lattice']\n"
 )
 
+#: Shapes an EARLIER revision of this matcher certified as owned. Each is a
+#: real way to leak an archive while looking managed, and each is now flagged.
+_PLANTED_UNRELATED_WRAPPER = (
+    "import numpy as np\n"
+    "def f(p, logger):\n"
+    "    with logger(np.load(str(p), allow_pickle=False)) as fh:\n"
+    "        pass\n"
+)
+_PLANTED_MENTIONS_DERIVED = (
+    "import numpy as np\n"
+    "def f(p, outdir):\n"
+    "    d = np.load(str(p), allow_pickle=False)\n"
+    "    gen = int(d['generation'])\n"
+    "    out = outdir / ('r_%d.txt' % gen)\n"
+    "    with open(out, 'w') as fh:\n"
+    "        pass\n"
+)
+_PLANTED_SELF_TAINT = (
+    "import numpy as np\n"
+    "class C:\n"
+    "    def f(self, p):\n"
+    "        self.data = np.load(str(p), allow_pickle=False)\n"
+    "        with self.lock:\n"
+    "            pass\n"
+)
+_PLANTED_DERIVED_CLOSE = (
+    "import numpy as np\n"
+    "def f(p, mk):\n"
+    "    d = np.load(str(p), allow_pickle=False)\n"
+    "    stream = mk(d['lattice'])\n"
+    "    stream.close()\n"
+)
+_PLANTED_NESTED_DEF = (
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    d = np.load(str(p), allow_pickle=False)\n"
+    "    def never():\n"
+    "        with d as x:\n"
+    "            pass\n"
+    "    return d['lattice']\n"
+)
+
+#: Correct shapes an earlier revision reported as defects.
+_PLANTED_ATTRIBUTE_CLOSE = (
+    "import numpy as np\n"
+    "class C:\n"
+    "    def f(self, p):\n"
+    "        self.data = np.load(str(p), allow_pickle=False)\n"
+    "        try:\n"
+    "            return self.data['lattice']\n"
+    "        finally:\n"
+    "            self.data.close()\n"
+)
+_PLANTED_TUPLE_ASSIGN = (
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    d, meta = np.load(str(p), allow_pickle=False), None\n"
+    "    with d as x:\n"
+    "        return x['lattice']\n"
+)
+
 
 def _single_load(source):
     tree = ast.parse(source)
@@ -438,8 +544,13 @@ def _single_load(source):
 
 @pytest.mark.parametrize(
     "source",
-    [_PLANTED_UNOWNED, _PLANTED_CROSS_FUNCTION, _PLANTED_REBOUND],
-    ids=["no-owner", "with-in-another-function", "rebound-before-the-with"],
+    [_PLANTED_UNOWNED, _PLANTED_CROSS_FUNCTION, _PLANTED_REBOUND,
+     _PLANTED_UNRELATED_WRAPPER, _PLANTED_MENTIONS_DERIVED, _PLANTED_SELF_TAINT,
+     _PLANTED_DERIVED_CLOSE, _PLANTED_NESTED_DEF],
+    ids=["no-owner", "with-in-another-function", "rebound-before-the-with",
+         "unrelated-wrapper-call", "ctx-expr-merely-mentions-a-derived-name",
+         "self-tainted-by-attribute-target", "close-on-a-derived-name",
+         "with-only-in-an-uncalled-nested-def"],
 )
 def test_the_ownership_matcher_detects_unowned_loads(source):
     """Without these, an empty findings mapping could mean a broken matcher.
@@ -457,9 +568,11 @@ def test_the_ownership_matcher_detects_unowned_loads(source):
 @pytest.mark.parametrize(
     "source",
     [_PLANTED_DIRECT, _PLANTED_CONDITIONAL, _PLANTED_CLOSING,
-     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY, _PLANTED_WALRUS],
+     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY, _PLANTED_WALRUS,
+     _PLANTED_ATTRIBUTE_CLOSE, _PLANTED_TUPLE_ASSIGN],
     ids=["direct-with", "conditional-nullcontext", "contextlib-closing",
-         "exitstack-enter-context", "try-finally-close", "walrus"],
+         "exitstack-enter-context", "try-finally-close", "walrus",
+         "attribute-target-closed", "tuple-assignment"],
 )
 def test_the_ownership_matcher_accepts_correct_shapes(source):
     """A gate that rejects working code is worse than no gate.
@@ -543,21 +656,56 @@ def _permissive_closure_defaults(tree) -> list:
     return found
 
 
-def _closure_proof_files() -> list:
-    """Maintained tests that assert something about archive closure."""
-    directory = _REPO_ROOT / TEST_DIR
+def _asserts_closure(tree) -> bool:
+    """Does this module actually touch an archive's closure machinery?
+
+    A substring test for "closed" was far too coarse: it matched `fail_closed`,
+    `disclosed`, `unclosed_array` and `test_category_vocabulary_is_closed`,
+    pulling in ~30 files that assert nothing about closure. That did not harm
+    the scan, but it made the non-vacuity floor below meaningless -- the guard
+    would still have passed with every real closure proof in the repository
+    deleted, which is precisely what it exists to catch.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in {"zip", "fid"}:
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) == 3
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "closed"):
+            return True
+    return False
+
+
+def _closure_proof_files(root=None) -> list:
+    """Maintained tests that genuinely assert something about archive closure."""
+    root = _REPO_ROOT if root is None else root
+    directory = root / TEST_DIR
     assert directory.is_dir(), (
         f"{TEST_DIR}/ is missing -- the closure-proof scan would cover nothing"
     )
     files = [
         path for path in sorted(directory.rglob("test_*.py"))
-        if "closed" in path.read_text(encoding="utf-8")
+        if _asserts_closure(ast.parse(path.read_text(encoding="utf-8")))
     ]
     assert files, (
         f"no closure-asserting tests discovered under {TEST_DIR}/ -- the scan "
         "is looking in the wrong place"
     )
     return files
+
+
+def _permissive_offenders(root=None) -> dict:
+    """Path -> line numbers of permissive closure defaults."""
+    root = _REPO_ROOT if root is None else root
+    offenders = {}
+    for path in _closure_proof_files(root):
+        hits = _permissive_closure_defaults(
+            ast.parse(path.read_text(encoding="utf-8"))
+        )
+        if hits:
+            offenders[path.relative_to(root).as_posix()] = [n.lineno for n in hits]
+    return offenders
 
 
 def test_closure_proof_files_are_actually_discovered():
@@ -567,21 +715,18 @@ def test_closure_proof_files_are_actually_discovered():
     returned nothing, that would be indistinguishable from a clean tree.
     """
     files = _closure_proof_files()
+    # Six snapshot-consumer suites carry a real `zip`/`fid` witness, plus this
+    # package's own. Discovery is now AST-based, so this floor counts genuine
+    # closure proofs rather than any file that happens to contain "closed".
     assert len(files) >= 5, (
         f"only {len(files)} closure-asserting test files found; the repository "
-        "has many more, so discovery is probably broken"
+        "has more, so discovery is probably broken"
     )
 
 
 def test_no_snapshot_closure_proof_uses_a_permissive_default():
     """A closure assertion must fail when the handle was never closed."""
-    offenders = {}
-    for path in _closure_proof_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        hits = _permissive_closure_defaults(tree)
-        if hits:
-            rel = path.relative_to(_REPO_ROOT).as_posix()
-            offenders[rel] = [node.lineno for node in hits]
+    offenders = _permissive_offenders()
     assert offenders == {}, (
         "closure proof written with a permissive getattr default "
         f"(path -> lines): {offenders}. Assert on the archive's own state "
@@ -609,3 +754,21 @@ def test_the_permissive_default_matcher_detects_a_planted_bad_example():
 def test_the_permissive_default_matcher_accepts_a_strict_control():
     """A genuine proof must not be flagged, or the gate would be unusable."""
     assert _permissive_closure_defaults(ast.parse(_PLANTED_STRICT)) == []
+
+
+def test_the_permissive_default_scan_itself_can_see_a_planted_file(tmp_path):
+    """Non-vacuity for the whole assembly, not just the matcher.
+
+    `test_no_snapshot_closure_proof_uses_a_permissive_default` asserts an empty
+    mapping, and an empty mapping is also what a broken walk, a wrong glob or a
+    failed discovery filter returns. Pointing the real functions at a tree this
+    test controls exercises discovery, parsing and offender assembly end to
+    end -- including that the strict control is NOT reported.
+    """
+    planted = tmp_path / TEST_DIR
+    planted.mkdir()
+    (planted / "test_bad.py").write_text(_PLANTED_PERMISSIVE, encoding="utf-8")
+    (planted / "test_good.py").write_text(_PLANTED_STRICT, encoding="utf-8")
+
+    assert len(_closure_proof_files(tmp_path)) == 2, "discovery missed a file"
+    assert _permissive_offenders(tmp_path) == {f"{TEST_DIR}/test_bad.py": [2]}

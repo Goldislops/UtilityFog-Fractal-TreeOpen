@@ -102,8 +102,10 @@ def load_snapshot(path: pathlib.Path):
     class. The one qualification, stated rather than glossed: if closing the
     archive itself raises (an ``OSError`` from a flaky mount, say), Python's
     ``with`` semantics mean the close error reaches the caller and the original
-    survives as its ``__context__``. That window did not exist before, because
-    nothing ran at that point; it is the ordinary cost of owning a resource.
+    survives as its ``__context__``. Previously a close could still fail, but
+    only inside ``NpzFile.__del__``, where CPython prints and swallows it -- so
+    what changed is that such an error can now PROPAGATE, not that closing
+    newly became possible. It is the ordinary cost of owning a resource.
     """
     loaded = np.load(str(path), allow_pickle=False)
     owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded

@@ -2,16 +2,16 @@
 
 PR #458 made every repository snapshot consumer pickle-free and gave five of
 them deterministic archive ownership. It disclosed one loader left behind:
-this one. It already passes a literal ``allow_pickle=False`` -- so the pickle
-sweep is satisfied -- but it never closes the archive:
+this one. It already passed a literal ``allow_pickle=False`` -- so the pickle
+sweep was satisfied -- but it did NOT close the archive. It previously read::
 
     data = np.load(str(path), allow_pickle=False)
     state = data["lattice"]
     ...
     return state, memory, gen
 
-Release therefore depends on `NpzFile.__del__` running when the last reference
-to `data` drops. Two reasons that is not good enough:
+Release therefore depended on `NpzFile.__del__` running when the last reference
+to `data` dropped. Two reasons that was not good enough:
 
   * On the EXCEPTIONAL path a propagating exception keeps this frame alive
     through its traceback, so `data` stays referenced and the archive stays
@@ -24,9 +24,10 @@ Scope, stated honestly: this loader is an operator-invoked offline CLI reading
 one archive at a time, so it is the LEAST reachable of the consumers -- the
 claim here is deterministic release, not a fix for a live service leak.
 
-Nothing here starts the profiler. `load_snapshot` calls only `np.load` and
-`int()`; the results document is written solely by `main()`, which is
-`__name__`-guarded and unreachable from this module's tests.
+Nothing here starts the profiler. `load_snapshot` calls no other function
+defined in that module -- only `np.load`, `int`, `str`, `isinstance` and
+`contextlib.nullcontext` -- and the results document is written solely by
+`main()`, which is `__name__`-guarded and unreachable from these tests.
 """
 
 from __future__ import annotations
@@ -82,12 +83,14 @@ def _optional_dependency_stubs() -> dict:
 with mock.patch.dict(sys.modules, _optional_dependency_stubs()):
     from scripts import workstream_b_profile_predicates as wb
 
-# `patch.dict` restores by clear()+update(), which evicts anything imported
-# INSIDE the block -- even when the stub mapping was empty. Put the module back,
-# so a later `import scripts.workstream_b_profile_predicates` elsewhere in the
-# session does not re-execute it and hit the SystemExit the stub exists to
-# avoid. `setdefault` never overwrites a real prior entry.
-sys.modules.setdefault("scripts.workstream_b_profile_predicates", wb)
+# `patch.dict` restores by clear()+update(), so the module imported inside the
+# block is evicted from `sys.modules` on exit. That is left alone DELIBERATELY.
+# Re-publishing it under the canonical name looked tidier, but on CI -- where
+# scipy is genuinely absent -- the module's `ndimage` is this file's stub, and
+# a later importer reaching `compute_cluster_profile` would silently get a fake
+# labelling instead of the SystemExit that means "scipy is missing". An
+# inert eviction is better than a live silent fake. Nothing else imports this
+# module today; `wb` below is the only reference these tests need.
 
 
 try:
@@ -258,6 +261,12 @@ class _Tracker:
             "the archive was never observed open; a closure claim here would "
             "be vacuous"
         )
+        assert self.handles and self.handles[0] is not None, (
+            "the archive never owned a file object at load"
+        )
+        assert not self.handles[0].closed, (
+            "the file object was already closed at load"
+        )
 
     def assert_archive_is_closed(self):
         """Both halves, because `zip is None` alone is not enough.
@@ -350,6 +359,7 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
     sentinel = RuntimeError("member access exploded")
     real_load = np.load
     opened = []
+    captured_fid = []
     wrapper_reads = []
 
     class _Exploding:
@@ -382,6 +392,7 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
     def exploding_load(*args, **kwargs):
         inner = real_load(*args, **kwargs)
         opened.append(inner)
+        captured_fid.append(inner.fid)
         wrapper = _Exploding(inner)
         exploders.append(wrapper)
         return wrapper
@@ -392,6 +403,7 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
         wb.load_snapshot(archive)
 
     wrapper_reads.extend(w.reads for w in exploders)
+    original_fid = captured_fid[0] if captured_fid else None
 
     assert excinfo.value is sentinel, "the exception was replaced, not propagated"
     assert opened, "np.load was never reached"
@@ -400,7 +412,11 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
     # after a failure on the very first access.
     assert wrapper_reads == [2], f"expected two member reads, got {wrapper_reads}"
     assert opened[0].zip is None, "the archive survived a member-access failure"
-    assert opened[0].fid is None or opened[0].fid.closed, (
+    # The ORIGINAL file object, captured while open. `opened[0].fid` would be
+    # useless here: `close()` sets it to None, so `fid is None or fid.closed`
+    # is unconditionally true afterwards and the descriptor leg would be dead.
+    assert original_fid is not None, "the archive never owned a file object"
+    assert original_fid.closed, (
         "the underlying file object survived a member-access failure"
     )
 
