@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import pathlib
 import sys
@@ -65,10 +66,43 @@ def find_newest_snapshots(n: int) -> list[pathlib.Path]:
 
 
 def load_snapshot(path: pathlib.Path):
-    data = np.load(str(path), allow_pickle=False)
-    state = data["lattice"]
-    memory = data["memory_grid"]
-    gen = int(data["generation"])
+    """Read ``lattice``, ``memory_grid`` and ``generation`` from a snapshot.
+
+    Archive lifetime
+    ----------------
+    The archive is released at a defined point instead of whenever finalisation
+    happens to run. That matters most on the EXCEPTIONAL path: a propagating
+    exception keeps this frame alive through its traceback, so the loaded
+    object stays referenced and the archive stays open for as long as any
+    handler retains it. On the success path the previous code did release the
+    handle promptly under CPython refcounting -- the honest claim here is
+    deterministic release, not the repair of a long-lived leak.
+
+    Ownership is CONDITIONAL because ``np.load`` returns two different kinds of
+    thing. A zip archive yields an ``NpzFile``, which owns an operating-system
+    handle and needs the close. A ``.npy`` yields a plain ndarray, which has no
+    context-manager protocol; wrapping it in ``nullcontext`` lets it reach the
+    same ``data["lattice"]`` subscript that has always been where a numeric
+    non-archive input fails, so that exception keeps its established class and
+    failure point rather than becoming a ``TypeError`` raised one statement
+    earlier.
+
+    An ndarray is not inherently resource-free: ``np.memmap`` is an ndarray
+    subclass and does own a mapping. It is unreachable here only because
+    ``mmap_mode`` is never supplied to the call below, so the argument list is
+    load-bearing.
+
+    Deliberately unchanged: the ``str(path)`` coercion, the literal
+    ``allow_pickle=False``, the member access order, ``int()`` on
+    ``generation``, the returned objects, and every exception's identity. There
+    is no fallback and no retry.
+    """
+    loaded = np.load(str(path), allow_pickle=False)
+    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
+    with owner as data:
+        state = data["lattice"]
+        memory = data["memory_grid"]
+        gen = int(data["generation"])
     return state, memory, gen
 
 
