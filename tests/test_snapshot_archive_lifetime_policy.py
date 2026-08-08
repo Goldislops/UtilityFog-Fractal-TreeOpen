@@ -134,8 +134,8 @@ def _scope_of(tree, call):
 def _own_scope_nodes(scope) -> list:
     """Nodes belonging to ``scope`` itself, not to a nested function or lambda.
 
-    A ``with`` inside a nested ``def`` that is never called does not own
-    anything in the outer function, so descending into one would certify a leak.
+    A ``with`` inside a nested ``def`` that is never called owns nothing in the
+    outer function, so descending into one would certify a leak.
     """
     out = []
 
@@ -151,13 +151,25 @@ def _own_scope_nodes(scope) -> list:
     return out
 
 
+def _pos(node):
+    """Source position, used to reason about statement ORDER.
+
+    Order is the whole point. An earlier revision computed a whole-scope
+    fixed point over name membership, which cannot tell an alias created
+    BEFORE acquisition from one created after, cannot keep a valid alias alive
+    once the original name is rebound, and cannot tell a `close()` that runs
+    before the load from one that runs after.
+    """
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+
 def _target_key(node):
     """A stable textual key for an assignment target or context expression.
 
     ``d`` -> ``"d"``; ``self.data`` -> ``"self.data"``; ``cache["s"]`` ->
-    ``"cache['s']"``. Returning a QUALIFIED key rather than the base name is
-    what stops ``self.data = np.load(...)`` from tainting ``self``, after which
-    any ``with self.<anything>`` in the method would have certified the load.
+    ``"cache['s']"``. A QUALIFIED key is what stops ``self.data = np.load(...)``
+    from tainting ``self``, after which any ``with self.<anything>`` in the
+    method would have certified the load.
     """
     if isinstance(node, ast.Name):
         return node.id
@@ -172,20 +184,96 @@ def _target_key(node):
     return None
 
 
-#: Context-manager adapters that genuinely pass ownership through to what they
-#: wrap. Filtered by NAME on purpose: an earlier revision accepted ANY call
-#: containing the load, so `with some_logger(np.load(p)) as fh:` counted as
-#: ownership when it owns nothing.
-_OWNERSHIP_ADAPTERS = {"closing", "nullcontext", "aclosing"}
+#: contextlib adapters that genuinely pass ownership through to what they wrap.
+_ADAPTER_NAMES = {"closing", "nullcontext", "aclosing"}
 
 
-def _refers_to(expr, keys, call) -> bool:
-    """Does ``expr`` denote the archive -- the call, a tracked target, or an
-    accepted adapter/conditional over one?
+def _contextlib_provenance(tree):
+    """What this module may legitimately call an ownership adapter.
 
-    Deliberately EXACT. An earlier revision accepted any expression that merely
-    MENTIONED a tracked name, so ``with open(out % gen, "w")`` -- where ``gen``
-    derived from the archive -- was read as owning it.
+    Returns ``(module_aliases, bare_names, stack_factories)``.
+
+    Provenance is checked because a NAME proves nothing:
+    ``logger.nullcontext(loaded)`` and ``logger.enter_context(...)`` are
+    arbitrary methods that happen to share a spelling with the real thing, and
+    an earlier revision accepted both.
+    """
+    module_aliases, bare_names, stack_factories = set(), set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "contextlib":
+                    module_aliases.add(alias.asname or "contextlib")
+        elif isinstance(node, ast.ImportFrom) and node.module == "contextlib":
+            for alias in node.names:
+                if alias.name in _ADAPTER_NAMES:
+                    bare_names.add(alias.asname or alias.name)
+                elif alias.name in {"ExitStack", "AsyncExitStack"}:
+                    stack_factories.add(alias.asname or alias.name)
+    return module_aliases, bare_names, stack_factories
+
+
+def _is_adapter_call(expr, prov) -> bool:
+    """``contextlib.nullcontext(...)`` / a `from contextlib import` adapter."""
+    if not isinstance(expr, ast.Call):
+        return False
+    module_aliases, bare_names, _ = prov
+    func = expr.func
+    if (isinstance(func, ast.Attribute) and func.attr in _ADAPTER_NAMES
+            and isinstance(func.value, ast.Name)
+            and func.value.id in module_aliases):
+        return True
+    return isinstance(func, ast.Name) and func.id in bare_names
+
+
+def _exit_stack_keys(nodes, prov) -> set:
+    """Targets bound from ``contextlib.ExitStack()`` or an imported ExitStack."""
+    module_aliases, _, stack_factories = prov
+    keys = set()
+    for node in nodes:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        func = node.value.func
+        ok = (
+            (isinstance(func, ast.Attribute)
+             and func.attr in {"ExitStack", "AsyncExitStack"}
+             and isinstance(func.value, ast.Name)
+             and func.value.id in module_aliases)
+            or (isinstance(func, ast.Name) and func.id in stack_factories)
+        )
+        if ok:
+            for target in node.targets:
+                key = _target_key(target)
+                if key:
+                    keys.add(key)
+    for node in nodes:
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                value = item.context_expr
+                if not isinstance(value, ast.Call):
+                    continue
+                func = value.func
+                ok = (
+                    (isinstance(func, ast.Attribute)
+                     and func.attr in {"ExitStack", "AsyncExitStack"}
+                     and isinstance(func.value, ast.Name)
+                     and func.value.id in module_aliases)
+                    or (isinstance(func, ast.Name) and func.id in stack_factories)
+                )
+                if ok and item.optional_vars is not None:
+                    key = _target_key(item.optional_vars)
+                    if key:
+                        keys.add(key)
+    return keys
+
+
+def _denotes(expr, keys, call, prov) -> bool:
+    """Does ``expr`` certainly denote the archive at this point?
+
+    EVERY alternative of a conditional must denote it. An earlier revision
+    combined the two arms with ``or``, so a one-sided
+    ``nullcontext(loaded) if condition else unrelated`` -- which hands an
+    unrelated object to the ``with`` on the false branch -- was accepted.
     """
     if expr is call:
         return True
@@ -193,118 +281,173 @@ def _refers_to(expr, keys, call) -> bool:
     if key is not None and key in keys:
         return True
     if isinstance(expr, ast.IfExp):
-        return (_refers_to(expr.body, keys, call)
-                or _refers_to(expr.orelse, keys, call))
-    if isinstance(expr, ast.Call):
-        func = expr.func
-        name = (func.attr if isinstance(func, ast.Attribute)
-                else func.id if isinstance(func, ast.Name) else None)
-        if name in _OWNERSHIP_ADAPTERS:
-            return any(_refers_to(arg, keys, call) for arg in expr.args)
+        return (_denotes(expr.body, keys, call, prov)
+                and _denotes(expr.orelse, keys, call, prov))
+    if _is_adapter_call(expr, prov):
+        return any(_denotes(arg, keys, call, prov) for arg in expr.args)
     return False
 
 
-def _bound_targets(nodes, call) -> set:
-    """Targets the archive is bound to, including one leg of a tuple assign."""
-    keys = set()
-    for node in nodes:
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-            targets, value = [node.target], node.value
-        else:
-            continue
-        if value is call:
-            for target in targets:
-                key = _target_key(target)
-                if key:
-                    keys.add(key)
-        elif isinstance(value, ast.Tuple):
-            for target in targets:
-                if isinstance(target, ast.Tuple):
-                    for sub, element in zip(target.elts, value.elts):
-                        if element is call:
-                            key = _target_key(sub)
-                            if key:
-                                keys.add(key)
-    return keys
+def _binding_targets(node, call, keys, prov):
+    """``(targets, denotes)`` for an assignment-like ``node``, else ``None``."""
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+        targets, value = [node.target], node.value
+    else:
+        return None
+    if value is call:
+        return targets, True
+    if isinstance(value, ast.Tuple):
+        matched = []
+        for target in targets:
+            if isinstance(target, ast.Tuple):
+                for sub, element in zip(target.elts, value.elts):
+                    if element is call:
+                        matched.append(sub)
+        if matched:
+            return matched, True
+    return targets, _denotes(value, keys, call, prov)
 
 
-def _reaches_a_with(scope, call) -> bool:
-    """Is ``call``'s result handed to a ``with`` (or explicitly closed) in ``scope``?
+def _span(node):
+    """(first, last) source positions covered by ``node``."""
+    positions = [_pos(n) for n in ast.walk(node) if hasattr(n, "lineno")]
+    return (min(positions), max(positions)) if positions else (_pos(node), _pos(node))
 
-    Accepted, because each genuinely bounds the archive's lifetime:
 
-      * ``with np.load(...) as snap:``                          -- direct
-      * ``with contextlib.closing(np.load(...)) as snap:``      -- adapter
-      * ``stack.enter_context(np.load(...))``                   -- ExitStack
-      * ``loaded = np.load(...)`` / ``owner = nullcontext(loaded) if ... else loaded``
-        / ``with owner as snap:``                               -- CONDITIONAL
-      * ``d = np.load(...)`` / ``try: ... finally: d.close()``   -- explicit close
-        (including ``self.data.close()`` and ``cache['s'].close()``)
+def _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at) -> bool:
+    """Is a tracked target closed in a ``finally`` that guards its risky uses?
 
-    The conditional form is what `scripts/lucid_server.py` and
-    `scripts/portable_genome.py` do, where `np.load` may return an ndarray with
-    no context-manager protocol.
-
-    REBINDING is honoured, adapters are matched by NAME, targets are tracked as
-    QUALIFIED keys, and nested function bodies are excluded -- each of those
-    closed a way of certifying an unowned archive.
-
-    Stated limits, because a static gate cannot do reachability or aliasing:
-    a ``with`` inside a conditional branch is accepted without proving that
-    branch runs; ownership handed to another function is not modelled; and a
-    target whose key cannot be spelled statically (a computed subscript) is not
-    tracked. This answers "is the archive given an owner in this scope", not
-    "does that owner run on every path".
+    A bare ``d.close()`` after a member access does NOT own the archive: if the
+    access raises, the close is never reached. An earlier revision accepted any
+    matching ``close()`` anywhere in the function while claiming
+    exceptional-path ownership.
     """
-    nodes = _own_scope_nodes(scope)
-    withs = [n for n in nodes if isinstance(n, (ast.With, ast.AsyncWith))]
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Try) or not node.finalbody:
+            continue
+        keys = keys_at(_pos(node))
+        if not keys:
+            continue
+        closes = [
+            inner for body in node.finalbody for inner in ast.walk(body)
+            if isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "close"
+            and _target_key(inner.func.value) in keys
+        ]
+        if not closes:
+            continue
+        first, last = _span(node)
+        risky = [
+            _pos(inner) for inner in _own_scope_nodes(scope)
+            if isinstance(inner, (ast.Subscript, ast.Attribute))
+            and _target_key(inner.value) in keys
+            and _pos(inner) > acquired_at
+        ]
+        # Every use of the archive after acquisition must sit inside the Try
+        # that the finally protects; otherwise a raise there escapes the close.
+        if all(first <= use <= last for use in risky):
+            return True
+    return False
 
-    for node in nodes:
+
+def _acquisition_position(scope, call):
+    """Position of the smallest statement in ``scope`` that performs the load."""
+    best = _pos(call)
+    best_size = None
+    for node in _own_scope_nodes(scope):
+        if not isinstance(node, ast.stmt):
+            continue
+        if any(inner is call for inner in ast.walk(node)):
+            size = sum(1 for _ in ast.walk(node))
+            if best_size is None or size < best_size:
+                best, best_size = _pos(node), size
+    return best
+
+
+def _reaches_a_with(scope, call, tree=None) -> bool:
+    """Is ``call``'s result owned, judged in STATEMENT ORDER?
+
+    Accepted: ``with np.load(...)``; a contextlib adapter around it or around a
+    tracked alias; ``ExitStack.enter_context`` on a demonstrably tracked stack;
+    an alias later handed to a ``with``; and ``close()`` inside a ``finally``
+    that protects the archive's risky uses.
+
+    Guaranteed by construction:
+      * facts created BEFORE the load cannot be tainted by it;
+      * an alias captures the value at its own assignment point;
+      * rebinding the original name does not erase a valid earlier alias;
+      * rebinding an alias invalidates it from that point onward;
+      * an owner counts only AFTER acquisition;
+      * every alternative of a conditional owner must denote the archive;
+      * adapters need contextlib provenance, not a familiar-looking name.
+
+    Deliberately conservative. Remaining static limits, stated precisely:
+    a ``with`` inside a conditional branch is accepted without proving that
+    branch runs; loops are read in source order, not iterated; ownership handed
+    to another function is not modelled; a target whose key cannot be spelled
+    statically (a computed subscript) is untracked; and `del`, `try/except`
+    reassignment and star-unpacking are not modelled. Each of those yields a
+    conservative FALSE POSITIVE (reported as unowned) rather than certifying a
+    leak, except the conditional-branch case, which is disclosed above.
+    """
+    # Provenance comes from the MODULE's imports, so the tree is required:
+    # `contextlib` is imported at module scope, never inside the function.
+    prov = _contextlib_provenance(tree if tree is not None else scope)
+
+    nodes = _own_scope_nodes(scope)
+    stack_keys = _exit_stack_keys(nodes, prov)
+    # Anchor acquisition to the STATEMENT that performs the load, not to the
+    # call expression's own column: `loaded = np.load(...)` starts to the left
+    # of the call, so comparing against the call would skip the very binding
+    # that introduces the archive.
+    acquired_at = _acquisition_position(scope, call)
+
+    ordered = sorted(nodes, key=_pos)
+    keys: set = set()
+    history = []  # (position, frozenset(keys)) after each step
+
+    for node in ordered:
+        if _pos(node) < acquired_at:
+            continue
+        binding = _binding_targets(node, call, keys, prov)
+        if binding is None:
+            continue
+        targets, denotes = binding
+        for target in targets:
+            key = _target_key(target)
+            if key is None:
+                continue
+            if denotes:
+                keys.add(key)
+            else:
+                keys.discard(key)
+        history.append((_pos(node), frozenset(keys)))
+
+    def keys_at(position):
+        current = frozenset()
+        for pos, snapshot in history:
+            if pos <= position:
+                current = snapshot
+        return current
+
+    for node in ordered:
+        if _pos(node) < acquired_at:
+            continue
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if _denotes(item.context_expr, keys_at(_pos(node)), call, prov):
+                    return True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "enter_context"
-                and any(arg is call for arg in node.args)):
-            return True
-
-    keys = _bound_targets(nodes, call)
-
-    changed = True
-    while changed:
-        changed = False
-        for node in nodes:
-            if isinstance(node, ast.Assign):
-                targets, value = node.targets, node.value
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                targets, value = [node.target], node.value
-            else:
-                continue
-            if value is call:
-                continue
-            if _refers_to(value, keys, call):
-                for target in targets:
-                    key = _target_key(target)
-                    if key and key not in keys:
-                        keys.add(key)
-                        changed = True
-            else:
-                for target in targets:
-                    key = _target_key(target)
-                    if key in keys:
-                        keys.discard(key)
-                        changed = True
-
-    for node in withs:
-        for item in node.items:
-            if _refers_to(item.context_expr, keys, call):
+                and _target_key(node.func.value) in stack_keys):
+            if any(_denotes(arg, keys_at(_pos(node)), call, prov)
+                   for arg in node.args):
                 return True
 
-    for node in nodes:
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "close"
-                and _target_key(node.func.value) in keys):
-            return True
-    return False
+    return _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at)
 
 
 def _owned_load_calls(tree) -> set:
@@ -312,7 +455,7 @@ def _owned_load_calls(tree) -> set:
     names = _numpy_load_names(tree)
     owned = set()
     for call in _np_load_calls(tree, names):
-        if _reaches_a_with(_scope_of(tree, call), call):
+        if _reaches_a_with(_scope_of(tree, call), call, tree):
             owned.add(id(call))
     return owned
 
@@ -360,7 +503,7 @@ def test_the_workstream_b_loader_owns_its_archive():
     assert len(calls) == 1, (
         f"expected exactly one np.load in load_snapshot, found {len(calls)}"
     )
-    assert _reaches_a_with(loader, calls[0]), (
+    assert _reaches_a_with(loader, calls[0], tree), (
         "load_snapshot's archive is not handed to a `with`; release depends on "
         "finalisation, which does not hold on the exceptional path"
     )
@@ -534,6 +677,86 @@ _PLANTED_TUPLE_ASSIGN = (
     "        return x['lattice']\n"
 )
 
+# --- temporal-order controls ------------------------------------------------
+#
+# Every one of these was mis-classified by a whole-scope, order-blind matcher.
+# They are planted here so the ordering guarantees cannot regress silently.
+
+#: An alias created BEFORE the load captured a different object entirely.
+_PLANTED_STALE_ALIAS = (
+    "import numpy as np\n"
+    "def f(p, previous):\n"
+    "    owner = previous\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    with owner as data:\n"
+    "        pass\n"
+    "    return loaded['lattice']\n"
+)
+
+#: The alias captured the archive BEFORE the original name was rebound, so it
+#: still owns it. A fixed point that erased history got this wrong the other
+#: way -- reporting correct code as a defect.
+_PLANTED_ALIAS_SURVIVES_REBIND = (
+    "import numpy as np\n"
+    "def f(p, replacement):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    owner = loaded\n"
+    "    loaded = replacement\n"
+    "    with owner as data:\n"
+    "        return data['lattice']\n"
+)
+
+#: Only ONE arm of the conditional owns the archive; the other hands the `with`
+#: an unrelated object.
+_PLANTED_ONE_SIDED_CONDITIONAL = (
+    "import contextlib\n"
+    "import numpy as np\n"
+    "def f(p, condition, unrelated):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    owner = (\n"
+    "        contextlib.nullcontext(loaded)\n"
+    "        if condition\n"
+    "        else unrelated\n"
+    "    )\n"
+    "    with owner as data:\n"
+    "        return data['lattice']\n"
+)
+
+#: If the member access raises, the close is never reached -- so this does not
+#: own the archive on the exceptional path the gate claims to cover.
+_PLANTED_BARE_CLOSE = (
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    value = loaded['lattice']\n"
+    "    loaded.close()\n"
+    "    return value\n"
+)
+
+#: A close that runs BEFORE acquisition cannot certify the archive acquired
+#: afterwards.
+_PLANTED_CLOSE_BEFORE_LOAD = (
+    "import numpy as np\n"
+    "def f(p, loaded):\n"
+    "    loaded.close()\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    return loaded['lattice']\n"
+)
+
+#: An arbitrary method that merely SHARES a name with a contextlib adapter.
+_PLANTED_SPOOFED_ADAPTER = (
+    "import numpy as np\n"
+    "def f(p, logger):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    with logger.nullcontext(loaded) as data:\n"
+    "        return data['lattice']\n"
+)
+_PLANTED_SPOOFED_ENTER_CONTEXT = (
+    "import numpy as np\n"
+    "def f(p, logger):\n"
+    "    logger.enter_context(np.load(str(p), allow_pickle=False))\n"
+)
+
 
 def _single_load(source):
     tree = ast.parse(source)
@@ -546,11 +769,17 @@ def _single_load(source):
     "source",
     [_PLANTED_UNOWNED, _PLANTED_CROSS_FUNCTION, _PLANTED_REBOUND,
      _PLANTED_UNRELATED_WRAPPER, _PLANTED_MENTIONS_DERIVED, _PLANTED_SELF_TAINT,
-     _PLANTED_DERIVED_CLOSE, _PLANTED_NESTED_DEF],
+     _PLANTED_DERIVED_CLOSE, _PLANTED_NESTED_DEF, _PLANTED_STALE_ALIAS,
+     _PLANTED_ONE_SIDED_CONDITIONAL, _PLANTED_BARE_CLOSE,
+     _PLANTED_CLOSE_BEFORE_LOAD, _PLANTED_SPOOFED_ADAPTER,
+     _PLANTED_SPOOFED_ENTER_CONTEXT],
     ids=["no-owner", "with-in-another-function", "rebound-before-the-with",
          "unrelated-wrapper-call", "ctx-expr-merely-mentions-a-derived-name",
          "self-tainted-by-attribute-target", "close-on-a-derived-name",
-         "with-only-in-an-uncalled-nested-def"],
+         "with-only-in-an-uncalled-nested-def", "alias-created-before-the-load",
+         "one-sided-conditional-owner", "bare-close-after-a-raising-access",
+         "close-before-acquisition", "spoofed-adapter-name",
+         "spoofed-enter-context"],
 )
 def test_the_ownership_matcher_detects_unowned_loads(source):
     """Without these, an empty findings mapping could mean a broken matcher.
@@ -562,17 +791,19 @@ def test_the_ownership_matcher_detects_unowned_loads(source):
     owned.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
 
 
 @pytest.mark.parametrize(
     "source",
     [_PLANTED_DIRECT, _PLANTED_CONDITIONAL, _PLANTED_CLOSING,
      _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY, _PLANTED_WALRUS,
-     _PLANTED_ATTRIBUTE_CLOSE, _PLANTED_TUPLE_ASSIGN],
+     _PLANTED_ATTRIBUTE_CLOSE, _PLANTED_TUPLE_ASSIGN,
+     _PLANTED_ALIAS_SURVIVES_REBIND],
     ids=["direct-with", "conditional-nullcontext", "contextlib-closing",
          "exitstack-enter-context", "try-finally-close", "walrus",
-         "attribute-target-closed", "tuple-assignment"],
+         "attribute-target-closed", "tuple-assignment",
+         "alias-survives-a-later-rebind"],
 )
 def test_the_ownership_matcher_accepts_correct_shapes(source):
     """A gate that rejects working code is worse than no gate.
@@ -583,7 +814,7 @@ def test_the_ownership_matcher_accepts_correct_shapes(source):
     since it is the usual answer to acquire-then-conditionally-own.
     """
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call)
+    assert _reaches_a_with(_scope_of(tree, call), call, tree)
 
 
 @pytest.mark.parametrize(
@@ -597,7 +828,7 @@ def test_aliased_numpy_load_spellings_are_still_seen(source):
     invisible to this gate rather than merely unclassified.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
 
 
 def test_the_ownership_sweep_itself_can_see_a_planted_defect(tmp_path):
@@ -657,23 +888,31 @@ def _permissive_closure_defaults(tree) -> list:
 
 
 def _asserts_closure(tree) -> bool:
-    """Does this module actually touch an archive's closure machinery?
+    """Does this module actually ASSERT something about an archive's closure?
 
-    A substring test for "closed" was far too coarse: it matched `fail_closed`,
-    `disclosed`, `unclosed_array` and `test_category_vocabulary_is_closed`,
-    pulling in ~30 files that assert nothing about closure. That did not harm
-    the scan, but it made the non-vacuity floor below meaningless -- the guard
-    would still have passed with every real closure proof in the repository
+    An earlier revision returned true for any `.zip`/`.fid` attribute access
+    anywhere in the file, so a bare read -- ``observed = handle.zip`` -- counted
+    as a closure proof. The handle state must now be reached from the tested
+    expression of a real ``assert``. Assertion HELPERS are covered for free,
+    because their bodies contain ``assert`` statements too.
+
+    A substring test for "closed" preceded that and was worse: it matched
+    `fail_closed`, `disclosed` and `unclosed_array`, pulling in ~30 files that
+    assert nothing. That made the non-vacuity floor below meaningless -- it
+    would have passed with every genuine closure proof in the repository
     deleted, which is precisely what it exists to catch.
     """
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr in {"zip", "fid"}:
-            return True
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr" and len(node.args) == 3
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "closed"):
-            return True
+        if not isinstance(node, ast.Assert):
+            continue
+        for inner in ast.walk(node.test):
+            if isinstance(inner, ast.Attribute) and inner.attr in {"zip", "fid"}:
+                return True
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "getattr" and len(inner.args) == 3
+                    and isinstance(inner.args[1], ast.Constant)
+                    and inner.args[1].value == "closed"):
+                return True
     return False
 
 
@@ -746,6 +985,20 @@ _PLANTED_STRICT = (
 )
 
 
+#: A bare handle read with NO assertion. An earlier revision counted this as a
+#: closure proof, because it looked only for a `.zip`/`.fid` attribute access
+#: anywhere in the file.
+_PLANTED_NON_ASSERT_READ = (
+    "def test_noise(handle):\n"
+    "    observed = handle.zip\n"
+)
+
+#: A genuine strict proof, which discovery must find.
+_PLANTED_ASSERTED_CLOSURE = (
+    "def test_real(handle):\n"
+    "    assert handle.zip is None and (handle.fid is None or handle.fid.closed)\n"
+)
+
 def test_the_permissive_default_matcher_detects_a_planted_bad_example():
     """The exact shape this gate exists to keep out."""
     assert len(_permissive_closure_defaults(ast.parse(_PLANTED_PERMISSIVE))) == 1
@@ -754,6 +1007,26 @@ def test_the_permissive_default_matcher_detects_a_planted_bad_example():
 def test_the_permissive_default_matcher_accepts_a_strict_control():
     """A genuine proof must not be flagged, or the gate would be unusable."""
     assert _permissive_closure_defaults(ast.parse(_PLANTED_STRICT)) == []
+
+
+def test_discovery_requires_a_real_assertion(tmp_path):
+    """A handle READ is not a closure proof.
+
+    `_asserts_closure` previously returned true for any `.zip`/`.fid` access
+    anywhere in a file, so a module that merely looked at a handle counted
+    towards the non-vacuity floor. Both controls are planted: the bare read
+    must be rejected, the strict assertion accepted.
+    """
+    assert not _asserts_closure(ast.parse(_PLANTED_NON_ASSERT_READ))
+    assert _asserts_closure(ast.parse(_PLANTED_ASSERTED_CLOSURE))
+
+    planted = tmp_path / TEST_DIR
+    planted.mkdir()
+    (planted / "test_noise.py").write_text(_PLANTED_NON_ASSERT_READ, encoding="utf-8")
+    (planted / "test_real.py").write_text(_PLANTED_ASSERTED_CLOSURE, encoding="utf-8")
+
+    found = [p.name for p in _closure_proof_files(tmp_path)]
+    assert found == ["test_real.py"], f"discovery is imprecise: {found}"
 
 
 def test_the_permissive_default_scan_itself_can_see_a_planted_file(tmp_path):
