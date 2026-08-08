@@ -267,6 +267,46 @@ def test_object_dtype_lattice_is_refused(
         assert leaked not in captured.out
 
 
+def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+    """Closure on the REFUSAL path, witnessed on a real handle.
+
+    This module's docstring claims deterministic lifetime "on the success path
+    and on every failure path". Two failure paths were witnessed -- a missing
+    member and a member access that raises -- but the object-dtype refusal,
+    which is this file's whole security subject, had no closure assertion at
+    all. Every sibling suite carries one; this closes the gap so the docstring
+    is true rather than aspirational.
+    """
+    harmless = np.array([{"note": "harmless"}, None, "text"], dtype=object)
+    snapshot = _write_npz(tmp_path / "obj_closed.npz", lattice=harmless)
+    archives: list = []
+    handles: list = []
+    open_at_load: list = []
+    called: list = []
+    real_load = np.load
+
+    def tracking_load(file, *args, **kwargs):
+        arc = real_load(file, *args, **kwargs)
+        archives.append(arc)
+        handles.append(arc.fid)
+        open_at_load.append(arc.zip is not None and arc.fid is not None
+                            and not arc.fid.closed)
+        return arc
+
+    monkeypatch.setattr(dandelion.np, "load", tracking_load)
+    monkeypatch.setattr(dandelion, "lattice_to_stl", lambda *a, **k: called.append(1))
+
+    with pytest.raises(ValueError) as excinfo:
+        dandelion.main(["stl", snapshot, "--output", str(tmp_path / "o.stl")])
+
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert called == [], "exporter must never see an object-dtype lattice"
+    assert archives, "np.load was never called"
+    assert open_at_load == [True], "the archive was never observed open"
+    assert archives[0].zip is None, "the archive survived the refusal"
+    assert handles[0].closed, "the underlying file object is still open"
+
+
 # ---------------------------------------------------------------------------
 # 5. Missing member: archive closes, KeyError propagates, no argparse exit 2
 # ---------------------------------------------------------------------------
@@ -287,15 +327,41 @@ def test_missing_lattice_member_closes_and_propagates(
 
 
 def test_missing_member_closes_the_archive(tmp_path, monkeypatch):
-    """A REAL NpzFile lacking the member: KeyError propagates, handle released."""
+    """A REAL NpzFile lacking the member: KeyError propagates, handle released.
+
+    The proof is deliberately made of observations rather than defaults. It
+    previously ended in::
+
+        assert archives[0].fid is None or getattr(archives[0].fid, "closed", True)
+
+    which had two permissive layers. ``NpzFile.fid`` is a CLASS attribute
+    defaulting to ``None``, assigned on the instance only when ``np.load``
+    owned the file; and the ``getattr`` default is ``True``. That form has
+    teeth for today's exact shape -- a path string is passed, so the archive
+    owns the file -- but a refactor that opened the file itself (a size
+    pre-check, stdin support, a ``BytesIO`` wrapper) would leave ``fid`` at the
+    class default and satisfy the assertion unconditionally, even with the
+    inner ``with`` deleted at the same time.
+
+    So the ORIGINAL file object is captured while it is demonstrably open, and
+    both halves are asserted afterwards: the archive relinquished it, and that
+    same object is closed. Neither can be satisfied by an absent attribute.
+    """
     calls: list = []
     archives: list = []
+    handles: list = []
+    open_at_load: list = []
     real_load = np.load  # captured before any patching
     snapshot = _write_npz(tmp_path / "nolattice.npz", other=np.zeros(3))
 
     def tracking_load(file, *args, **kwargs):
         arc = real_load(file, *args, **kwargs)
+        # Hold a reference so `NpzFile.__del__` cannot close the archive on our
+        # behalf -- a passing result must come from the production `with`.
         archives.append(arc)
+        handles.append(arc.fid)
+        open_at_load.append(arc.zip is not None and arc.fid is not None
+                            and not arc.fid.closed)
         return arc
 
     monkeypatch.setattr(dandelion.np, "load", tracking_load)
@@ -306,8 +372,14 @@ def test_missing_member_closes_the_archive(tmp_path, monkeypatch):
 
     assert calls == []
     assert archives, "np.load was never called"
-    # NpzFile.close() releases the underlying handle and sets fid to None.
-    assert archives[0].fid is None or getattr(archives[0].fid, "closed", True)
+    # The archive really was open, and really did own a file object, at capture.
+    # Without this the closure claim below could not distinguish "closed" from
+    # "never owned anything".
+    assert open_at_load == [True], "the archive was never observed open"
+    # It relinquished the archive ...
+    assert archives[0].zip is None, "the archive was not closed"
+    # ... and the original handle -- the one seen open above -- is closed.
+    assert handles[0].closed, "the underlying file object is still open"
 
 
 # ---------------------------------------------------------------------------
