@@ -236,6 +236,7 @@ class _Tracker:
         self.opened = []
         self.handles = []
         self.open_at_load = []
+        self.fid_open_at_load = []
         self.calls = []
 
     def install(self, monkeypatch):
@@ -247,7 +248,11 @@ class _Tracker:
             # Held for the test's lifetime, so `NpzFile.__del__` cannot close
             # the archive on our behalf -- a pass must come from production.
             self.opened.append(handle)
-            self.handles.append(getattr(handle, "fid", None))
+            fid = getattr(handle, "fid", None)
+            self.handles.append(fid)
+            # Sampled AT LOAD TIME. Asserting this later would be wrong: by
+            # then the loader has correctly closed it.
+            self.fid_open_at_load.append(fid is not None and not fid.closed)
             # `zip` is set unconditionally by `NpzFile.__init__` and dropped by
             # `close()`. A plain ndarray (from a `.npy`) has no `zip` at all.
             self.open_at_load.append(getattr(handle, "zip", None) is not None)
@@ -261,11 +266,9 @@ class _Tracker:
             "the archive was never observed open; a closure claim here would "
             "be vacuous"
         )
-        assert self.handles and self.handles[0] is not None, (
-            "the archive never owned a file object at load"
-        )
-        assert not self.handles[0].closed, (
-            "the file object was already closed at load"
+        assert self.fid_open_at_load == [True], (
+            "the archive never owned an OPEN file object at load; a closure "
+            "claim on it would be vacuous"
         )
 
     def assert_archive_is_closed(self):
