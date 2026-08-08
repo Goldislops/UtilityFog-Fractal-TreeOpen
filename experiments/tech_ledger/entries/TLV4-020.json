@@ -1,0 +1,37 @@
+{
+ "classification_qualifiers": [
+  "G"
+ ],
+ "classification_rationale": "Research-stage (C); every specific density, date or capability claim is an external fact requiring primary-source verification (G face).",
+ "entry_id": "TLV4-020",
+ "implementation_disposition": "deferred",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "A future-watch record with primary citations when added"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Primary-source citation per specific claim before any repository use"
+ ],
+ "neutral_name": "Single-electron and atomic-scale memory research",
+ "primary_classification": "C",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-06)",
+  "recorded_date": "2026-08-06",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source; emphatic activity clause recast non-emphatically 2026-08-06 under the ratified G rule (C support preserved: 'Research-stage' is C's own defining adjective, exclusion 1); the record's prospective-mode conditions (deferred disposition, null seam, future-watch status) hold, so the G binds future ingested claims",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "future-watch"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "future-watch",
+ "unsuitable_uses": [
+  "Capacity roadmaps built on laboratory demonstrations"
+ ],
+ "warnings": [
+  "Watch items never justify architecture decisions.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

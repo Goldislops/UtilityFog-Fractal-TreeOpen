@@ -1,0 +1,44 @@
+{
+ "classification_qualifiers": [
+  "B",
+  "F"
+ ],
+ "classification_rationale": "The mathematics itself (Leech lattice, zeta function, higher-dimensional topology) is established (B face); any claim that these structures describe real physical mechanisms is a speculative physical hypothesis requiring empirical validation (primary E); presenting numerical coincidence as physical evidence is a technically mismatched claim (F face).",
+ "entry_id": "TLV4-001",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "Quarantined pure-mathematics lattice/packing utility or property test only -- deterministic, zero physics claims in code or naming",
+ "legitimate_uses": [
+  "Quarantined pure-mathematics lattice or packing utilities with property-based tests, carrying no physics claim",
+  "Hypothesis-labelled research-ledger entries recording the speculative model with its evidential status"
+ ],
+ "minimal_evidence_before_implementation": [
+  "A written, falsifiable model statement with declared scales and validity limits",
+  "A conventional-baseline comparison plan agreed before any computation is treated as evidence"
+ ],
+ "neutral_name": "Higher-dimensional topology, Riemann-zeta references and Leech-lattice models",
+ "primary_classification": "E",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [
+  3
+ ],
+ "repository_placements": [
+  "research-ledger",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Encoding a vacuum-lattice or engine-law truth claim as a simulation invariant or configuration default",
+  "Representing any numerical coincidence as physical evidence"
+ ],
+ "warnings": [
+  "No numerical coincidence may be represented as physical evidence.",
+  "No engine-law or vacuum-lattice truth claim; schema validity is not scientific validity."
+ ]
+}

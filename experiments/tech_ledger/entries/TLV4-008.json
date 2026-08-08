@@ -1,0 +1,39 @@
+{
+ "classification_qualifiers": [
+  "G"
+ ],
+ "classification_rationale": "The user-supplied audit supplies no independently replicated demonstration of a usable net-energy-harvesting technology. Casimir-effect physics is real (predicted by Casimir, Proc. Kon. Ned. Akad. Wet. 51, 793 (1948); measured to about one percent at the smallest separation by Mohideen-Roy, Phys. Rev. Lett. 81, 4549 (1998)) but, within the sources directly inspected for this correction (enumerated in provenance), does not by itself demonstrate a cyclic net-work source (Jaffe, Phys. Rev. D 72, 021301 (2005) states that Casimir forces can be computed without reference to zero point energies; the further step - that the measured force does not by itself establish a zero-point-energy reservoir - is this record's own bounded inference, not Jaffe's statement); idealised vacuum-work proposals are admitted here only behind careful full-cycle energy accounting, a repository requirement rather than a literature finding. The F classification here is an evidence and engineering disposition for this repository, not a declaration that every idealised vacuum-work proposal is mathematically forbidden.",
+ "entry_id": "TLV4-008",
+ "implementation_disposition": "prohibited",
+ "implementation_seam": null,
+ "legitimate_uses": [
+  "A research-ledger record documenting why the harvesting claim is classified F, preserving the idea without endorsing it"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Primary-source review and independent replicated evidence of a usable net-energy-harvesting technology, justifying a later separately audited reclassification"
+ ],
+ "neutral_name": "Zero-point-energy harvesting claims",
+ "primary_classification": "F",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-05)",
+  "recorded_date": "2026-08-05",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source -- corrected 2026-08-05 under strict primary-evidence rules: the record body derives from the original user-supplied audit and remains unverified; index-reconstructed abstracts support no claim; the sources directly inspected for this correction are exactly three author manuscripts - Mohideen-Roy arXiv:physics/9805038 (full text), Jaffe arXiv:hep-th/0503158 (full text), and the corroborating 2010 Lamoreaux systematics note arXiv:1007.4276 (full text) - journal versions of record not inspected; the 1948 prediction is grounded as an attribution made by those texts; the 1997 Lamoreaux measurement paper (PRL 78, 5) and the 1984 Forward proposal (PRB 30, 1700) were not inspected - the only open copies located are third-party mirrors, declined pending the owner's classification review - so both carry bibliographic identity only and no claim about their content is made; the zero-point-energy-reservoir step is marked in the rationale as this record's bounded inference; the full-cycle energy accounting gate is a repository requirement, not a literature finding; receipts in the TLV4-008 primary-source evidence dossier v2 (9318 bytes, sha256 8505a414aba8381d15f8d6422a6a0be81bea53dda2fdfc4396ab56d636491322); G qualifier added; verification_status unchanged",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Any energy-budget model, simulation parameter, configuration default or roadmap item that assumes zero-point-energy input",
+  "Any language implying the repository endorses feasibility of net vacuum-energy extraction"
+ ],
+ "warnings": [
+  "Repository implementation remains prohibited unless primary-source review and independent replicated evidence justify a later separately audited reclassification.",
+  "Casimir-effect physics is real but, within the sources directly inspected for this correction, does not by itself demonstrate a cyclic net-work source; the F label records this repository's evidence disposition, not a physical theorem.",
+  "A prohibited F entry has no implementation seam by definition; validation of this record is not evidence about the claim."
+ ]
+}

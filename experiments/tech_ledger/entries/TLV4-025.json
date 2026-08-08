@@ -1,0 +1,37 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Established methodological standard of honest anomaly work: conventional explanations are itemised and tested before any observation may be escalated as anomalous. The method constrains PROCESS and record-keeping, never the outcome.",
+ "entry_id": "TLV4-025",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "A state or record validator that refuses anomaly escalation until itemised conventional checks are recorded",
+ "legitimate_uses": [
+  "A record or state validator that refuses anomaly escalation until itemised conventional checks are recorded",
+  "Methodology sections of evidence schemas requiring non-empty conventional-explanation fields"
+ ],
+ "minimal_evidence_before_implementation": [
+  "None beyond ordinary test evidence: the gate enforces recording and sequence, not any scientific result"
+ ],
+ "neutral_name": "Conventional-explanation testing before anomaly escalation",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "research-ledger"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Rhetorical \"all conventional explanations were ruled out\" claims without itemised, recorded tests",
+  "Encoding any predetermined conclusion -- conventional OR exotic -- into the gate itself"
+ ],
+ "warnings": [
+  "Enforce sequence and evidence recording, never a predetermined outcome."
+ ]
+}

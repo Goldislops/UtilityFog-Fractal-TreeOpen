@@ -19,7 +19,7 @@ replaced by a closure-recording fake, and the one endpoint witness uses Flask's
 in-process test client.
 
 Scope is archive resource lifetime relative to extraction — not snapshot
-validation, archive security, endpoint totality, API authentication, atomic file
+validation, whole-archive validation, endpoint totality, API authentication, atomic file
 access or whole-server correctness.
 """
 
@@ -191,7 +191,7 @@ def test_extraction_order_is_preserved():
     assert archive.lookups == ["lattice", "memory_grid", "generation", "best_fitness"]
 
 
-def test_np_load_receives_str_path_and_allow_pickle():
+def test_np_load_receives_str_path_and_allow_pickle_false():
     archive = _FakeArchive(_contents())
     path = _FakeSnapshotPath("v070_gen42.npz")
     _, load_mock = _load(archive, path=path)
@@ -199,7 +199,7 @@ def test_np_load_receives_str_path_and_allow_pickle():
     args, kwargs = load_mock.call_args
     assert args == (str(path),)
     assert type(args[0]) is str
-    assert kwargs == {"allow_pickle": True}
+    assert kwargs == {"allow_pickle": False}
 
 
 def test_returned_arrays_keep_their_dtypes():
@@ -426,3 +426,145 @@ def test_all_four_endpoints_still_use_the_shared_helper():
             if isinstance(node, ast.FunctionDef) and node.name == name
         )
         assert _np_load_calls(function) == []  # each goes through the helper only
+
+
+# ===========================================================================
+# Pickle refusal -- medusa_api must never unpickle an NPZ member
+#
+# An object-dtype member is stored as a pickle, so loading one with pickle
+# enabled is arbitrary code execution by construction. The payload below is
+# harmless: its reduction writes ONE marker file inside pytest's own tmp_path
+# and returns. `__reduce__` runs at PICKLE time and only records the callable,
+# so writing the archive is inert; the call would happen at UNPICKLE time.
+#
+# Scope: an object-member refusal, NOT whole-archive validation.
+# ===========================================================================
+
+_MA_MARKER = "MEDUSA_PAYLOAD_EXECUTED"
+
+
+def _create_marker_ma(directory: str) -> str:
+    """Stand in for a malicious payload; deliberately inert.
+
+    Module scope is required -- pickle stores a module-qualified reference, so
+    a function defined inside a test body could not be resolved at load time.
+    """
+    marker = Path(directory) / _MA_MARKER
+    marker.write_text("payload executed", encoding="utf-8")
+    return str(marker)
+
+
+class _PayloadMa:
+    """Its reduction calls the marker writer when unpickled."""
+
+    def __init__(self, directory):
+        self._directory = str(directory)
+
+    def __reduce__(self):
+        return (_create_marker_ma, (self._directory,))
+
+
+def _payload_array_ma(directory):
+    return np.array([_PayloadMa(directory)], dtype=object)
+
+
+def _marker_ma(tmp_path):
+    return tmp_path / _MA_MARKER
+
+
+def _write_snapshot_ma(path, compressed=False, **members):
+    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    payload = {
+        "lattice": np.zeros((2, 2, 2), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 2, 2, 2), dtype=np.float32),
+        "generation": 7,
+        "best_fitness": 0.5,
+    }
+    payload.update(members)
+    writer = np.savez_compressed if compressed else np.savez
+    writer(path, **payload)
+    return str(path)
+
+
+def test_ma_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
+    """Control. Without it, every "marker is absent" assertion below could
+    pass against a payload that never worked. This is the only place in this
+    module that enables pickle."""
+    archive = _write_snapshot_ma(
+        tmp_path / "control.npz", lattice=_payload_array_ma(tmp_path)
+    )
+    assert not _marker_ma(tmp_path).exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+
+    assert _marker_ma(tmp_path).exists(), "the payload fixture is inert; fix it"
+
+
+@pytest.mark.parametrize(
+    "field", ["lattice", "memory_grid", "generation", "best_fitness"]
+)
+def test_object_payload_is_refused_by_the_helper(tmp_path, field):
+    """Four members, `best_fitness` among them.
+
+    This was the widest loader of the six until the export CLI joined them:
+    `scripts/portable_genome.py` reads five, three of those through `.get`.
+    """
+    archive = _write_snapshot_ma(
+        tmp_path / f"{field}.npz", **{field: _payload_array_ma(tmp_path)}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        medusa_api._load_snapshot(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_ma(tmp_path).exists(), "the pickle payload executed"
+
+
+def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+    archive = _write_snapshot_ma(
+        tmp_path / "retry.npz", lattice=_payload_array_ma(tmp_path)
+    )
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(medusa_api.np, "load", _recording_load)
+    with pytest.raises(ValueError):
+        medusa_api._load_snapshot(archive)
+    assert calls == [False]
+
+
+def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+    archive = _write_snapshot_ma(
+        tmp_path / "closed.npz", lattice=_payload_array_ma(tmp_path)
+    )
+    real_load = np.load
+    opened = []
+
+    def _tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(medusa_api.np, "load", _tracking_load)
+    with pytest.raises(ValueError):
+        medusa_api._load_snapshot(archive)
+    assert len(opened) == 1
+    # `zip` is the primary witness: `close()` drops it unconditionally,
+    # whereas `fid` is a CLASS attribute defaulting to None, so asserting
+    # on it alone would pass on a handle that was never closed at all.
+    assert opened[0].zip is None and (
+        opened[0].fid is None or opened[0].fid.closed
+    )
+
+
+def test_a_numeric_snapshot_still_loads_all_four_values(tmp_path):
+    archive = _write_snapshot_ma(
+        tmp_path / "clean.npz", generation=np.int64(3), best_fitness=np.float32(0.25)
+    )
+    lattice, grid, generation, fitness = medusa_api._load_snapshot(archive)
+    assert lattice.dtype == np.uint8 and grid.dtype == np.float32
+    assert generation == 3 and type(generation) is int
+    assert fitness == pytest.approx(0.25) and type(fitness) is float

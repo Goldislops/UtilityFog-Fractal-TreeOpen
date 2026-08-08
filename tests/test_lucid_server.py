@@ -10,12 +10,16 @@ ignored. Construction now accepts only an exact built-in `dict` and silently
 ignores every other decoded shape, continuing to read later messages exactly
 as it already did for syntactically invalid JSON.
 
-Everything here runs in-process against the real coroutine driven by a
-controlled asynchronous fake socket: no real WebSocket, no browser, no network,
-no snapshot files and no NumPy data.
+The malformed-frame tests run in-process against the real coroutine driven by
+a controlled asynchronous fake socket; the pickle-refusal tests appended at
+the end call `extract_render_data` directly, with no coroutine and no fake
+socket. Neither uses a real WebSocket, browser or network, and neither writes
+a snapshot file outside pytest's own `tmp_path`.
 
-Scope is top-level JSON shape in `handle_client` only — not whole-server,
-whole-WebSocket, authentication, authorization or payload-schema totality.
+Scope is top-level JSON shape in `handle_client`, plus `extract_render_data`'s
+object-member refusal and archive lifetime — not whole-server, whole-WebSocket,
+whole-archive validation, authentication, authorization or payload-schema
+totality.
 """
 
 from __future__ import annotations
@@ -334,3 +338,289 @@ def test_initial_snapshot_failure_does_not_block_message_handling(monkeypatch):
     asyncio.run(lucid_server.handle_client(websocket))
     assert websocket.delivered == ["null", PING]
     assert len(_pongs(websocket)) == 1
+
+from pathlib import Path
+
+# This module deliberately runs without NumPy (see `_optional_dependency_stubs`
+# above): the malformed-frame contract must execute in ordinary maintained CI
+# rather than being skipped away behind an optional dependency. The pickle
+# tests below DO need real NumPy, so it is imported defensively and only those
+# tests are skipped when it is absent -- importing it unconditionally would
+# fail collection of this whole file, taking the 330 lines above with it.
+try:
+    import numpy as np
+    _HAVE_NUMPY = True
+except ImportError:  # pragma: no cover - exercised only in a bare environment
+    np = None
+    _HAVE_NUMPY = False
+
+requires_numpy = pytest.mark.skipif(not _HAVE_NUMPY, reason="numpy not installed")
+
+
+# ===========================================================================
+# Pickle refusal -- lucid_server must never unpickle an NPZ member
+#
+# An object-dtype member is stored as a pickle, so loading one with pickle
+# enabled is arbitrary code execution by construction. The payload below is
+# harmless: its reduction writes ONE marker file inside pytest's own tmp_path
+# and returns. `__reduce__` runs at PICKLE time and only records the callable,
+# so writing the archive is inert; the call would happen at UNPICKLE time.
+#
+# Scope: an object-member refusal, NOT whole-archive validation.
+# ===========================================================================
+
+_LS_MARKER = "LUCID_PAYLOAD_EXECUTED"
+
+
+def _create_marker_ls(directory: str) -> str:
+    """Stand in for a malicious payload; deliberately inert.
+
+    Module scope is required -- pickle stores a module-qualified reference, so
+    a function defined inside a test body could not be resolved at load time.
+    """
+    marker = Path(directory) / _LS_MARKER
+    marker.write_text("payload executed", encoding="utf-8")
+    return str(marker)
+
+
+class _PayloadLs:
+    """Its reduction calls the marker writer when unpickled."""
+
+    def __init__(self, directory):
+        self._directory = str(directory)
+
+    def __reduce__(self):
+        return (_create_marker_ls, (self._directory,))
+
+
+def _payload_array_ls(directory):
+    return np.array([_PayloadLs(directory)], dtype=object)
+
+
+def _marker_ls(tmp_path):
+    return tmp_path / _LS_MARKER
+
+
+def _write_snapshot_ls(path, compressed=False, **members):
+    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    payload = {
+        "lattice": np.ones((4, 4, 4), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 4, 4, 4), dtype=np.float32),
+        "generation": 7,
+    }
+    payload.update(members)
+    writer = np.savez_compressed if compressed else np.savez
+    writer(path, **payload)
+    return str(path)
+
+
+@requires_numpy
+def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
+    """Control. Without it, every "marker is absent" assertion below could
+    pass against a payload that never worked. Pickle is enabled here and in the
+    structured-dtype control below, and nowhere else in this module."""
+    archive = _write_snapshot_ls(
+        tmp_path / "control.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    assert not _marker_ls(tmp_path).exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+
+    assert _marker_ls(tmp_path).exists(), "the payload fixture is inert; fix it"
+
+
+@requires_numpy
+@pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
+def test_object_payload_is_refused_by_extract_render_data(tmp_path, field):
+    archive = _write_snapshot_ls(
+        tmp_path / f"{field}.npz", **{field: _payload_array_ls(tmp_path)}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_ls(tmp_path).exists(), "the pickle payload executed"
+
+
+def _structured_payload_ls(directory):
+    structured = np.empty((1,), dtype=[("payload", "O"), ("n", "i4")])
+    structured["payload"][0] = _PayloadLs(directory)
+    structured["n"][0] = 1
+    return structured
+
+
+@requires_numpy
+def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
+    """A structured dtype takes a different path through NumPy's descriptor
+    handling than a plain object array, so it needs its own control."""
+    archive = _write_snapshot_ls(
+        tmp_path / "sc.npz", generation=_structured_payload_ls(tmp_path)
+    )
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["generation"]
+    assert _marker_ls(tmp_path).exists(), "the structured payload is inert"
+
+
+@requires_numpy
+def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
+    """`kind == 'O'` alone would miss this; NumPy's refusal covers
+    `dtype.hasobject`."""
+    archive = _write_snapshot_ls(
+        tmp_path / "struct.npz", generation=_structured_payload_ls(tmp_path)
+    )
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_ls(tmp_path).exists()
+
+
+@requires_numpy
+def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
+    """`extract_render_data` had no context manager: the handle was held open
+    across up to MAX_CELLS iterations of per-cell work. `np.argwhere` is the
+    first downstream call, so it is the ordering witness."""
+    archive = _write_snapshot_ls(tmp_path / "clean.npz")
+    real_load = np.load
+    opened = []
+
+    def _tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    observed = []
+    real_argwhere = np.argwhere
+
+    def _watching_argwhere(*args, **kwargs):
+        handle = opened[0]
+        # `close()` drops `zip` unconditionally; `fid` is a class attribute
+        # defaulting to None, so it cannot carry this claim on its own.
+        observed.append(handle.zip is None)
+        return real_argwhere(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _tracking_load)
+    monkeypatch.setattr(lucid_server.np, "argwhere", _watching_argwhere)
+
+    lucid_server.extract_render_data(archive)
+
+    assert observed == [True], "the archive was still open during cell iteration"
+
+
+@requires_numpy
+def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+    """Closure on the exceptional path, witnessed on the real `NpzFile`.
+
+    The docstring claims closure "holds on refusal too because the members are
+    read inside the block". This file's ownership is conditional now, so that
+    claim is newest here and is witnessed rather than asserted.
+    """
+    archive = _write_snapshot_ls(
+        tmp_path / "refused.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    opened = []
+    real_load = np.load
+
+    def tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(lucid_server.np, "load", tracking_load)
+    with pytest.raises(ValueError):
+        lucid_server.extract_render_data(str(archive))
+
+    assert len(opened) == 1, "the archive was never opened"
+    # `close()` drops `zip` unconditionally; `fid` is a class attribute
+    # defaulting to None and cannot carry this claim alone.
+    assert opened[0].zip is None, "the archive survived the refusal"
+
+
+@requires_numpy
+def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+    archive = _write_snapshot_ls(
+        tmp_path / "retry.npz", lattice=_payload_array_ls(tmp_path)
+    )
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+    with pytest.raises(ValueError):
+        lucid_server.extract_render_data(archive)
+    assert calls == [False]
+
+
+def _legacy_npy_error_class_ls():
+    """The exception class an ordinary numeric `.npy` produced BEFORE this branch.
+
+    Derived, never hard-coded. At the base commit `extract_render_data` did
+    `snap = np.load(...)` and then immediately `snap['lattice']`. For a non-zip
+    input `np.load` returns a plain ndarray rather than an `NpzFile`, so the
+    legacy failure is whatever a constant-string subscript on an ndarray raises
+    in the installed NumPy.
+    """
+    probe = np.zeros(2)
+    try:
+        probe["lattice"]
+    except Exception as exc:  # noqa: BLE001 - the class IS the thing under test
+        return type(exc)
+    raise AssertionError(
+        "a constant-string subscript on a plain ndarray no longer raises; "
+        "the legacy contract this test pins no longer exists"
+    )
+
+
+#: The exact legacy class, named rather than only derived, so the contract is
+#: readable without running anything. Cross-checked against a live probe below.
+_LEGACY_NPY_ERROR_LS = IndexError
+
+
+@requires_numpy
+def test_the_named_legacy_npy_class_is_what_numpy_actually_raises():
+    """Keeps the named class and the derived one from drifting apart."""
+    derived = _legacy_npy_error_class_ls()
+    assert derived is _LEGACY_NPY_ERROR_LS, (
+        f"the legacy class is actually {derived.__name__}, not "
+        f"{_LEGACY_NPY_ERROR_LS.__name__}; update _LEGACY_NPY_ERROR_LS"
+    )
+    # Non-vacuity: the regression raised TypeError from the context-manager
+    # protocol. If the legacy class were TypeError too, this suite could not
+    # tell the broken state from the correct one.
+    assert derived is not TypeError
+
+
+@requires_numpy
+def test_a_numeric_npy_still_fails_exactly_as_it_did_before(tmp_path, monkeypatch):
+    """`extract_render_data` gained its first `with` on this branch.
+
+    An `NpzFile` needs deterministic ownership; an ndarray does not. Conditional
+    ownership keeps the archive closing while leaving a `.npy` to fail at the
+    same `snap['lattice']` subscript it always did -- and nothing downstream may
+    run, which `np.argwhere` witnesses because it is the first call after the
+    extraction.
+    """
+    not_an_archive = tmp_path / "snapshot.npy"
+    np.save(not_an_archive, np.zeros((2, 2, 2), dtype=np.uint8))
+
+    reached = []
+    monkeypatch.setattr(
+        lucid_server.np, "argwhere", lambda *a, **k: reached.append("argwhere")
+    )
+
+    with pytest.raises(_legacy_npy_error_class_ls()):
+        lucid_server.extract_render_data(str(not_an_archive))
+
+    assert reached == [], "downstream processing ran on a non-archive input"
+
+
+@requires_numpy
+def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
+    archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))
+    data = lucid_server.extract_render_data(archive)
+    assert set(data) == {"cells", "metrics"}
+    assert data["metrics"]["generation"] == 5
+    assert type(data["metrics"]["generation"]) is int
+    assert data["cells"], "a fully non-void lattice must yield cells"

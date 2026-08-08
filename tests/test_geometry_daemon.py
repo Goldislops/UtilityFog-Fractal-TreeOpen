@@ -14,11 +14,14 @@ Nothing here touches a real snapshot, engine, printer, STL generation or
 long-running daemon: `np.load` is replaced at the module boundary with a fake
 archive that records context entry/exit and closure, the three exporters are
 recorders, and the clock is deterministic. No `.npz`, CSV, JSON, STL or PNG is
-written anywhere, and the module's import-time `GEO_DIR.mkdir(...)` is isolated
+written outside pytest's own `tmp_path` (the pickle-refusal tests appended
+at the end write real NPZ archives there), and the module's import-time
+`GEO_DIR.mkdir(...)` is isolated
 so the repository's real `data/geometry` directory is never created or modified.
 
-Scope is `.npz` archive resource lifetime only — not snapshot validation, archive
-security, deterministic export, atomic output or whole-daemon correctness.
+Scope is `.npz` archive resource lifetime and object-member refusal — not
+snapshot validation, whole-archive validation, deterministic export, atomic
+output or whole-daemon correctness.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import ast
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import pytest
 
 # `scripts/geometry_daemon.py` runs `GEO_DIR.mkdir(parents=True, exist_ok=True)`
@@ -133,7 +137,7 @@ def test_helper_calls_np_load_with_the_same_path_conversion_and_allow_pickle():
     args, kwargs = loader.call_args
     assert args == (str(Path("/fake/dir/v070_gen42.npz")),)
     assert type(args[0]) is str
-    assert kwargs == {"allow_pickle": True}
+    assert kwargs == {"allow_pickle": False}
 
 
 def test_helper_enters_the_archive_context_exactly_once():
@@ -342,7 +346,7 @@ def test_daemon_cycle_loads_with_the_preserved_call_shape(tmp_path):
     assert loader.call_count == 1
     args, kwargs = loader.call_args
     assert args == (str(snapshot),)
-    assert kwargs == {"allow_pickle": True}
+    assert kwargs == {"allow_pickle": False}
 
 
 def test_daemon_cycle_keeps_the_snapshot_glob_pattern(tmp_path):
@@ -447,3 +451,158 @@ def test_once_path_uses_the_helper():
     main_block = main_blocks[0]
     assert len(_helper_calls(main_block)) == 1
     assert _np_load_calls(main_block) == []
+
+
+# ===========================================================================
+# Pickle refusal -- geometry_daemon must never unpickle an NPZ member
+#
+# An object-dtype member is stored as a pickle, so loading one with pickle
+# enabled is arbitrary code execution by construction. The payload below is
+# harmless: its reduction writes ONE marker file inside pytest's own tmp_path
+# and returns. `__reduce__` runs at PICKLE time and only records the callable,
+# so writing the archive is inert; the call would happen at UNPICKLE time.
+#
+# Scope: an object-member refusal, NOT whole-archive validation.
+# ===========================================================================
+
+_GD_MARKER = "GEOMETRY_PAYLOAD_EXECUTED"
+
+
+def _create_marker_gd(directory: str) -> str:
+    """Stand in for a malicious payload; deliberately inert.
+
+    Module scope is required -- pickle stores a module-qualified reference, so
+    a function defined inside a test body could not be resolved at load time.
+    """
+    marker = Path(directory) / _GD_MARKER
+    marker.write_text("payload executed", encoding="utf-8")
+    return str(marker)
+
+
+class _PayloadGd:
+    """Its reduction calls the marker writer when unpickled."""
+
+    def __init__(self, directory):
+        self._directory = str(directory)
+
+    def __reduce__(self):
+        return (_create_marker_gd, (self._directory,))
+
+
+def _payload_array_gd(directory):
+    return np.array([_PayloadGd(directory)], dtype=object)
+
+
+def _marker_gd(tmp_path):
+    return tmp_path / _GD_MARKER
+
+
+def _write_snapshot_gd(path, compressed=False, **members):
+    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    payload = {
+        "lattice": np.zeros((2, 2, 2), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 2, 2, 2), dtype=np.float32),
+        "generation": 7,
+    }
+    payload.update(members)
+    writer = np.savez_compressed if compressed else np.savez
+    writer(path, **payload)
+    return str(path)
+
+
+def test_gd_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
+    """Control. Without it, every "marker is absent" assertion below could
+    pass against a payload that never worked. Pickle is enabled here and in the
+    compressed-archive control below, and nowhere else in this module."""
+    archive = _write_snapshot_gd(
+        tmp_path / "control.npz", lattice=_payload_array_gd(tmp_path)
+    )
+    assert not _marker_gd(tmp_path).exists()
+
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+
+    assert _marker_gd(tmp_path).exists(), "the payload fixture is inert; fix it"
+
+
+@pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
+def test_object_payload_is_refused_by_the_helper(tmp_path, field):
+    archive = _write_snapshot_gd(
+        tmp_path / f"{field}.npz", **{field: _payload_array_gd(tmp_path)}
+    )
+    with pytest.raises(ValueError) as excinfo:
+        geometry_daemon._load_snapshot(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_gd(tmp_path).exists(), "the pickle payload executed"
+
+
+def test_a_compressed_hostile_archive_is_refused_the_same_way(tmp_path):
+    """Real producers use `np.savez_compressed`, so the hostile fixture
+    exercises that shape too rather than only the uncompressed one."""
+    archive = _write_snapshot_gd(
+        tmp_path / "compressed.npz", compressed=True,
+        lattice=_payload_array_gd(tmp_path),
+    )
+    with pytest.raises(ValueError) as excinfo:
+        geometry_daemon._load_snapshot(archive)
+    assert "allow_pickle=False" in str(excinfo.value)
+    assert not _marker_gd(tmp_path).exists()
+
+
+def test_the_compressed_payload_also_fires_when_pickle_is_enabled(tmp_path):
+    archive = _write_snapshot_gd(
+        tmp_path / "cc.npz", compressed=True,
+        lattice=_payload_array_gd(tmp_path),
+    )
+    with np.load(archive, allow_pickle=True) as snap:
+        snap["lattice"]
+    assert _marker_gd(tmp_path).exists(), "the compressed payload is inert"
+
+
+def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+    archive = _write_snapshot_gd(
+        tmp_path / "retry.npz", lattice=_payload_array_gd(tmp_path)
+    )
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(geometry_daemon.np, "load", _recording_load)
+    with pytest.raises(ValueError):
+        geometry_daemon._load_snapshot(archive)
+    assert calls == [False]
+
+
+def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+    archive = _write_snapshot_gd(
+        tmp_path / "closed.npz", lattice=_payload_array_gd(tmp_path)
+    )
+    real_load = np.load
+    opened = []
+
+    def _tracking_load(*args, **kwargs):
+        handle = real_load(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(geometry_daemon.np, "load", _tracking_load)
+    with pytest.raises(ValueError):
+        geometry_daemon._load_snapshot(archive)
+    assert len(opened) == 1
+    # `zip` is the primary witness: `close()` drops it unconditionally,
+    # whereas `fid` is a CLASS attribute defaulting to None, so asserting
+    # on it alone would pass on a handle that was never closed at all.
+    assert opened[0].zip is None and (
+        opened[0].fid is None or opened[0].fid.closed
+    )
+
+
+def test_a_numeric_snapshot_still_loads_unchanged(tmp_path):
+    archive = _write_snapshot_gd(tmp_path / "clean.npz", generation=np.int64(12))
+    state, grid, generation = geometry_daemon._load_snapshot(archive)
+    assert state.shape == (2, 2, 2)
+    assert grid.shape == (8, 2, 2, 2)
+    assert generation == 12 and type(generation) is int

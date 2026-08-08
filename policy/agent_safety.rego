@@ -56,11 +56,32 @@ is_encoded_payload(payload) {
 }
 
 # Base64 detection: 8+ total chars, alphanumeric + / + = optional padding.
-# Length floor of 8 rejects short alphanumeric strings like "test123" that
-# happen to match the base64 alphabet but aren't actually encoded content.
-# 8 is the smallest meaningful base64 output length (encodes 4-6 raw bytes
-# with padding), so this floor preserves detection of genuine short base64
-# while eliminating the false-positive class of plain words and identifiers.
+# Length floor of 8 rejects SHORT alphanumeric strings like "test123" (7
+# chars) that happen to match the base64 alphabet but aren't actually
+# encoded content. 8 is the smallest meaningful base64 output length
+# (encodes 4-6 raw bytes with padding), so this floor preserves detection of
+# genuine short base64.
+#
+# RECOGNITION BOUNDARY (issue #157, matrix-verified). The floor bounds the
+# false-positive surface by LENGTH ONLY. It does NOT eliminate plain words
+# and identifiers: any whole payload of 8+ characters drawn entirely from
+# [A-Za-z0-9+/] still matches. "password", "december", "baseline",
+# "deadbeefdeadbeef" (hex hash), "usr/local/bin" (path) and "abc123def456ghi"
+# are all classified as base64-like today. This over-inclusiveness is
+# retained deliberately, not overlooked:
+#
+#   - Detection means DENIAL, so the failure direction is fail-closed. A
+#     false positive costs availability; a false negative admits obfuscated
+#     content. Narrowing the matcher trades safety for availability.
+#   - The rule is gated behind data.agent_limits.enforce_encoded_payload,
+#     which is not set anywhere in this repository (config/agent_limits.yaml
+#     has no such key), so detection is off in every current configuration.
+#
+# Narrowing this surface (entropy, decode-and-verify, dictionary rejection)
+# is therefore a SEPARATE decision requiring its own threat model and
+# recorded rationale — it is not made here. The boundary above is pinned by
+# characterization tests in agent_safety_test.rego so any future narrowing
+# must update them deliberately.
 #
 # CONTRACT (issue #157): base64 detection is intentionally WHOLE-PAYLOAD —
 # the regex is anchored (^…$) on purpose. A base64-form token embedded

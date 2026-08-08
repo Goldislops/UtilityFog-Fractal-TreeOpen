@@ -1,0 +1,40 @@
+{
+ "classification_qualifiers": [
+  "F",
+  "G"
+ ],
+ "classification_rationale": "Established general-relativity method (B): the Landau-Lifshitz pseudotensor and the Einstein-Landau-Lifshitz quadrupole formalism, anchored in directly inspected literature (Szabados, Living Rev. Relativity 7 (2004) 4 and Blanchet, Living Rev. Relativity 17 (2014) 2, Eqs. (4) and (9)-(13), both publisher-hosted review articles; Xulu, arXiv:hep-th/0308070, an author-manuscript thesis; access levels recorded in provenance). Hard caveat, directly sourced to Szabados and Xulu (Blanchet works in fixed harmonic coordinates and does not carry it): the pseudotensor is coordinate-dependent - pointwise components are never a coordinate-independent physical energy density and can be made to vanish at a point by coordinate choice, and integration in arbitrary coordinates does not by itself create an invariant; total energy-momentum is well defined at spatial infinity for asymptotically flat systems evaluated in quasi-Cartesian-type coordinates or as asymptotic quantities, total angular momentum only under stronger fall-off and parity conditions (with no generally accepted definition at null infinity); and this record does not exclude explicitly specified quasi-local constructions, whose pseudotensor superpotentials may be read as Hamiltonian boundary terms with fixed gauge and boundary conditions. Reading local values as physical energy density, or citing them to support extraction or propulsion claims, is technically mismatched (F face); the extraction-propulsion refusal is this record's own repository policy, not a source claim.",
+ "entry_id": "TLV4-005",
+ "implementation_disposition": "evidence-gated",
+ "implementation_seam": "Numerical quadrupole-formula check against the analytic binary-inspiral leading order",
+ "legitimate_uses": [
+  "Experiments reproducing standard results with the caveat recorded"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Match to a textbook asymptotic result before any extension"
+ ],
+ "neutral_name": "Landau-Lifshitz gravitational pseudotensor calculations",
+ "primary_classification": "B",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-05)",
+  "recorded_date": "2026-08-05",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source -- corrected 2026-08-05 under strict primary-evidence rules: the record body derives from the original user-supplied audit and remains unverified; content claims rest only on directly inspected material - the publisher-hosted open-access review articles of Szabados (Living Rev. Relativity 7 (2004) 4) and Blanchet (Living Rev. Relativity 17 (2014) 2), both read in full, and the author-manuscript thesis of Xulu (arXiv:hep-th/0308070), read in full - source type and access level recorded as separate facts, and none of the three is a primary research paper; the quadrupole and binary-inspiral leading-order content is anchored in Blanchet Eqs. (4) and (9)-(13), with Peters, Phys. Rev. 136, B1224 (1964) and Peters-Mathews, Phys. Rev. 131, 435 (1963) carrying bibliographic identity only (not inspectable without bypass at audit time); the Landau-Lifshitz textbook carries bibliographic identity only, its attribution grounded via the inspected citations (Blanchet ref 285; Xulu ref 40; Szabados cites Goldberg 1958, not the textbook); the asymptotic-totals and angular-momentum conditions and the quasi-local rehabilitation are Szabados section 3.2.1-3.2.4, 3.3.1 and 11.3.4 direct statements; the extraction-propulsion refusal is this record's own repository policy; receipts in the TLV4-005 claim-atom and evidence dossier v3 (5425 bytes, sha256 d22eb6dac82de3bc7f7576e1ef29f0428b527bf341a66dda01b26c3d558d4bf3); G qualifier added; verification_status unchanged",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "research-ledger",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Reading local pseudotensor values as physical energy density",
+  "Supporting energy-extraction or propulsion claims"
+ ],
+ "warnings": [
+  "The coordinate-dependence caveat must travel with every use of this method.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

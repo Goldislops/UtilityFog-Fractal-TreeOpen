@@ -1,0 +1,37 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Established engineering practice, with multiple existing provenance idioms in this repository (A); every ingested external claim requires primary-source verification before repository reliance.",
+ "entry_id": "TLV4-018",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Validator enforcing source, date, hash and verification-status fields on external-claim records",
+ "legitimate_uses": [
+  "Provenance fields on ledger records and any future ingestion lane"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Provenance-preserving data ingestion",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates); correction recorded by Eighty Four (Kev seat, 2026-08-06)",
+  "recorded_date": "2026-08-06",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source; idiom-count wording corrected and G revised out 2026-08-06 together with its referencing clause under the ratified G rule (recorded reason: no dossier atom corresponds to a trigger-bearing sentence of this record - the nearest corresponding sentence to atom 018-4 is the record's own normative warning, which is exempt as a normative warning and carries no trigger whether or not it is equivalent in substance to that atom; prospective-mode conditions fail; the verification obligation is preserved as a normative requirement)",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "executable-code"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Treating present-but-unverified provenance as verified",
+  "Recording hashes without algorithm and scope"
+ ],
+ "warnings": [
+  "A provenance field records an assertion; verification is a separate recorded act.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

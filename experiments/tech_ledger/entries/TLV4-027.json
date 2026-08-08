@@ -1,0 +1,38 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated engineering; hash-link machinery already exists in this repository to build on.",
+ "entry_id": "TLV4-027",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Append-only custody-event list with hash-chain verification tests",
+ "legitimate_uses": [
+  "Evidence-schema fields: hashes, acquisition path, append-only custody events"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence"
+ ],
+ "neutral_name": "Sensor provenance, chain of custody and immutable source metadata",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "schema",
+  "executable-code"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Custody metadata asserted but unhashed",
+  "Retroactive edits without event records",
+  "Forensic-grade language before the mechanism actually exists"
+ ],
+ "warnings": [
+  "Say provenance-recorded until a real custody mechanism exists; never overclaim.",
+  "Schema validity is not scientific validity, endorsement or implementation authority."
+ ]
+}

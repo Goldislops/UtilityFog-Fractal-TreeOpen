@@ -1,0 +1,36 @@
+{
+ "classification_qualifiers": [],
+ "classification_rationale": "Demonstrated software-engineering discipline, already core practice in this repository (seeded runs, byte-identical canonical serialization, snapshot/resume equivalence). An engineering discipline, not a physics claim.",
+ "entry_id": "TLV4-016",
+ "implementation_disposition": "eligible",
+ "implementation_seam": "Same-input byte-identical replay or serialization test",
+ "legitimate_uses": [
+  "Standing requirement on new experiment and validation code, including this lab",
+  "Same-seed byte-identical output tests and canonical serialization conventions"
+ ],
+ "minimal_evidence_before_implementation": [
+  "Ordinary test evidence: repeated-run byte-identical outputs asserted in the relevant test suite"
+ ],
+ "neutral_name": "Deterministic execution, replay and reproducible experiment state",
+ "primary_classification": "A",
+ "provenance": {
+  "attributed_author": "Eighty Four (Kev-seat V4 technology audit, over Kev-supplied candidates)",
+  "recorded_date": "2026-08-01",
+  "source_kind": "user-supplied-audit",
+  "source_reference": "Kev-supplied V4 technology audit handback (Kev seat, 2026-08-01) -- unverified user-supplied audit, not a primary source",
+  "verification_status": "unverified"
+ },
+ "related_intake_ledger_entries": [],
+ "repository_placements": [
+  "executable-code",
+  "experiment"
+ ],
+ "schema": "tech-ledger-v1",
+ "status": "active",
+ "unsuitable_uses": [
+  "Exempting informal or exploratory code from determinism on convenience grounds"
+ ],
+ "warnings": [
+  "An engineering discipline, not a physics claim; its presence in a design says nothing about any physical hypothesis attached to that design."
+ ]
+}
