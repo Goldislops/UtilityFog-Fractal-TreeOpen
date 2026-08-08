@@ -288,6 +288,61 @@ def _denotes(expr, keys, call, prov) -> bool:
     return False
 
 
+def _bound_names(target) -> set:
+    """Every name a binding target writes, recursing tuples, lists and stars.
+
+    ``_target_key`` returns ``None`` for a tuple, so an earlier revision could
+    not INVALIDATE through ``loaded, meta = something_else, None`` -- the key
+    survived and a later ``with`` certified an archive that had been replaced.
+    """
+    keys = set()
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            keys |= _bound_names(element)
+        return keys
+    if isinstance(target, ast.Starred):
+        return _bound_names(target.value)
+    key = _target_key(target)
+    if key:
+        keys.add(key)
+    return keys
+
+
+def _rebinding_keys(node) -> set:
+    """Names ``node`` rebinds through a form that is not a plain assignment.
+
+    ``for x in ...``, ``with ... as x``, ``except ... as x``, ``import ... as
+    x``, ``x += ...``, ``del x`` and ``match``-captures all rebind at runtime.
+    An earlier revision recognised only assignments, so every one of these left
+    the tracked key in place and a later ``with`` on that name certified the
+    original archive -- defeating the module's own rebinding control through a
+    different spelling.
+    """
+    keys = set()
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        keys |= _bound_names(node.target)
+    elif isinstance(node, (ast.With, ast.AsyncWith)):
+        for item in node.items:
+            if item.optional_vars is not None:
+                keys |= _bound_names(item.optional_vars)
+    elif isinstance(node, ast.ExceptHandler):
+        if node.name:
+            keys.add(node.name)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            keys.add(alias.asname or alias.name.split(".")[0])
+    elif isinstance(node, ast.AugAssign):
+        keys |= _bound_names(node.target)
+    elif isinstance(node, ast.Delete):
+        for target in node.targets:
+            keys |= _bound_names(target)
+    elif isinstance(node, getattr(ast, "MatchAs", ())) and getattr(node, "name", None):
+        keys.add(node.name)
+    elif isinstance(node, getattr(ast, "MatchStar", ())) and getattr(node, "name", None):
+        keys.add(node.name)
+    return keys
+
+
 def _binding_targets(node, call, keys, prov):
     """``(targets, denotes)`` for an assignment-like ``node``, else ``None``."""
     if isinstance(node, ast.Assign):
@@ -320,35 +375,52 @@ def _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at) -> bool:
     """Is a tracked target closed in a ``finally`` that guards its risky uses?
 
     A bare ``d.close()`` after a member access does NOT own the archive: if the
-    access raises, the close is never reached. An earlier revision accepted any
-    matching ``close()`` anywhere in the function while claiming
-    exceptional-path ownership.
+    access raises, the close is never reached.
+
+    Three things this deliberately requires, each of which was a false negative
+    when it was missing:
+
+      * the ``Try`` and the ``close()`` must belong to THIS scope -- a close
+        inside a nested ``def`` or ``lambda`` registered for later is not run
+        here;
+      * the ``close()`` must be an unconditional statement of ``finalbody``,
+        not buried in an ``if``;
+      * EVERY use of the archive after acquisition must sit inside that
+        ``Try`` -- including uses that are not subscripts, such as passing the
+        archive to a function or iterating it, which an earlier revision could
+        not see, making its ``all(...)`` vacuously true.
     """
-    for node in ast.walk(scope):
+    scope_nodes = _own_scope_nodes(scope)
+    in_scope = {id(node) for node in scope_nodes}
+
+    for node in scope_nodes:
         if not isinstance(node, ast.Try) or not node.finalbody:
             continue
         keys = keys_at(_pos(node))
         if not keys:
             continue
         closes = [
-            inner for body in node.finalbody for inner in ast.walk(body)
-            if isinstance(inner, ast.Call)
-            and isinstance(inner.func, ast.Attribute)
-            and inner.func.attr == "close"
-            and _target_key(inner.func.value) in keys
+            statement.value for statement in node.finalbody
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr == "close"
+            and id(statement.value) in in_scope
+            and _target_key(statement.value.func.value) in keys
         ]
         if not closes:
             continue
         first, last = _span(node)
-        risky = [
-            _pos(inner) for inner in _own_scope_nodes(scope)
-            if isinstance(inner, (ast.Subscript, ast.Attribute))
-            and _target_key(inner.value) in keys
-            and _pos(inner) > acquired_at
-        ]
-        # Every use of the archive after acquisition must sit inside the Try
-        # that the finally protects; otherwise a raise there escapes the close.
-        if all(first <= use <= last for use in risky):
+        risky = []
+        for inner in scope_nodes:
+            if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
+                if inner.id in keys and _pos(inner) > acquired_at:
+                    risky.append(_pos(inner))
+            elif isinstance(inner, (ast.Subscript, ast.Attribute)):
+                if _target_key(inner.value) in keys and _pos(inner) > acquired_at:
+                    risky.append(_pos(inner))
+        risky = [use for use in risky if not (first <= use <= last)]
+        if not risky:
             return True
     return False
 
@@ -384,14 +456,27 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
       * every alternative of a conditional owner must denote the archive;
       * adapters need contextlib provenance, not a familiar-looking name.
 
-    Deliberately conservative. Remaining static limits, stated precisely:
-    a ``with`` inside a conditional branch is accepted without proving that
-    branch runs; loops are read in source order, not iterated; ownership handed
-    to another function is not modelled; a target whose key cannot be spelled
-    statically (a computed subscript) is untracked; and `del`, `try/except`
-    reassignment and star-unpacking are not modelled. Each of those yields a
-    conservative FALSE POSITIVE (reported as unowned) rather than certifying a
-    leak, except the conditional-branch case, which is disclosed above.
+    Deliberately conservative. Remaining static limits, stated precisely and
+    without a blanket safety claim, because an earlier revision made one that
+    did not hold:
+
+      * a ``with`` inside a conditional branch is accepted without proving that
+        branch runs. This is the one limit that can CERTIFY rather than merely
+        over-report, and it is why the gate is a review aid, not a proof.
+      * a load and an owner in mutually exclusive branches (load in ``if``,
+        owner in ``else``) is accepted. Such code would already fail at
+        runtime, but the gate does not reason about it.
+      * ownership handed to another function, or stored and closed elsewhere,
+        is not modelled -- reported unowned.
+      * a target whose key cannot be spelled statically (a computed subscript)
+        is untracked -- reported unowned.
+      * loops are not iterated. An owner inside the same loop as the load is
+        accepted; one outside it is rejected, since it would close only the
+        final iteration's archive.
+
+    Rebinding through ``for``, ``with ... as``, ``except ... as``, ``import
+    ... as``, augmented assignment, ``del``, ``match`` captures and tuple or
+    list targets IS modelled, and each invalidates the key from that point.
     """
     # Provenance comes from the MODULE's imports, so the tree is required:
     # `contextlib` is imported at module scope, never inside the function.
@@ -412,18 +497,21 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
     for node in ordered:
         if _pos(node) < acquired_at:
             continue
+        rebound = _rebinding_keys(node)
+        if rebound:
+            keys -= rebound
+            history.append((_pos(node), frozenset(keys)))
+            continue
         binding = _binding_targets(node, call, keys, prov)
         if binding is None:
             continue
         targets, denotes = binding
         for target in targets:
-            key = _target_key(target)
-            if key is None:
-                continue
+            written = _bound_names(target)
             if denotes:
-                keys.add(key)
+                keys |= written
             else:
-                keys.discard(key)
+                keys -= written
         history.append((_pos(node), frozenset(keys)))
 
     def keys_at(position):
@@ -433,8 +521,21 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
                 current = snapshot
         return current
 
+    # If the load happens inside a loop, an owner OUTSIDE that loop closes only
+    # the final iteration's archive and leaks the rest, so it does not count.
+    loop_span = None
+    for node in _own_scope_nodes(scope):
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            if any(inner is call for inner in ast.walk(node)):
+                span = _span(node)
+                if loop_span is None or span[0] > loop_span[0]:
+                    loop_span = span
+
+    def in_force(position):
+        return loop_span is None or loop_span[0] <= position <= loop_span[1]
+
     for node in ordered:
-        if _pos(node) < acquired_at:
+        if _pos(node) < acquired_at or not in_force(_pos(node)):
             continue
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
@@ -442,7 +543,8 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
                     return True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "enter_context"
-                and _target_key(node.func.value) in stack_keys):
+                and _target_key(node.func.value) in stack_keys
+                and in_force(_pos(node))):
             if any(_denotes(arg, keys_at(_pos(node)), call, prov)
                    for arg in node.args):
                 return True
@@ -830,6 +932,145 @@ def test_aliased_numpy_load_spellings_are_still_seen(source):
     tree, call = _single_load(source)
     assert not _reaches_a_with(_scope_of(tree, call), call, tree)
 
+
+# --- rebinding-form and finally-shape controls ------------------------------
+#
+# Each of these was certified as OWNED by a matcher that recognised only plain
+# assignments as bindings, walked into nested scopes when looking for a
+# `close()`, or judged "risky use" by subscripts alone. They are kept as data
+# rather than named constants because the point is the SHAPE, not the name.
+
+_PLANTED_LEAKS = {
+    "for-target-rebind":
+        "import numpy as np\n"
+        "def f(p, q):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    first = loaded['lattice']\n"
+        "    for loaded in q:\n        pass\n"
+        "    with loaded as d:\n        pass\n"
+        "    return first\n",
+    "with-as-rebind":
+        "import numpy as np\n"
+        "def f(p, other):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    with other as loaded:\n        pass\n"
+        "    with loaded as d:\n        pass\n",
+    "except-as-rebind":
+        "import numpy as np\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        pass\n"
+        "    except Exception as loaded:\n        pass\n"
+        "    with loaded as d:\n        pass\n",
+    "augmented-assign-rebind":
+        "import numpy as np\n"
+        "def f(p, other):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    loaded += other\n"
+        "    with loaded as d:\n        pass\n",
+    "del-then-with":
+        "import numpy as np\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    del loaded\n"
+        "    with loaded as d:\n        pass\n",
+    "tuple-target-rebind":
+        "import contextlib\n"
+        "import numpy as np\n"
+        "def f(p, q):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    first = loaded['lattice']\n"
+        "    loaded, meta = contextlib.nullcontext(q), None\n"
+        "    with loaded as d:\n        pass\n"
+        "    return first\n",
+    "swap-rebind":
+        "import numpy as np\n"
+        "def f(p, e):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    d, e = e, d\n"
+        "    with d as x:\n        pass\n",
+    "close-inside-a-nested-def-in-finally":
+        "import numpy as np\n"
+        "def f(p, register):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n"
+        "        def later():\n            d.close()\n"
+        "        register(later)\n",
+    "close-via-lambda-in-finally":
+        "import numpy as np\n"
+        "def f(p, register):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        register(lambda: d.close())\n",
+    "non-subscript-risky-use-outside-the-try":
+        "import numpy as np\n"
+        "def f(p, consume):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    result = consume(d)\n"
+        "    try:\n        pass\n    finally:\n        d.close()\n"
+        "    return result\n",
+    "iteration-risky-use-outside-the-try":
+        "import numpy as np\n"
+        "def f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    keys = list(d)\n"
+        "    try:\n        pass\n    finally:\n        d.close()\n"
+        "    return keys\n",
+    "loop-carried-acquisition-owned-outside-the-loop":
+        "import numpy as np\n"
+        "def f(paths, report):\n"
+        "    for p in paths:\n"
+        "        d = np.load(str(p), allow_pickle=False)\n"
+        "        report(d['lattice'])\n"
+        "    with d as x:\n        pass\n",
+    "conditional-close-in-finally":
+        "import numpy as np\n"
+        "def f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n"
+        "        if cond:\n            d.close()\n",
+}
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_LEAKS.values()),
+                         ids=list(_PLANTED_LEAKS))
+def test_rebinding_and_finally_shapes_are_not_certified(source):
+    """Thirteen ways to leak an archive while looking managed.
+
+    Every one was reported OWNED before this control existed. They are the
+    reason the matcher replays bindings in statement order, models the
+    non-assignment rebinding forms, refuses to walk into nested scopes when
+    looking for a `close()`, and counts a plain name load as a risky use.
+    """
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["import numpy as np\n"
+     "def f(paths, report):\n"
+     "    for p in paths:\n"
+     "        with np.load(str(p), allow_pickle=False) as d:\n"
+     "            report(d['lattice'])\n",
+     "import numpy as np\n"
+     "def f(p, consume):\n"
+     "    d = np.load(str(p), allow_pickle=False)\n"
+     "    try:\n        return consume(d)\n"
+     "    finally:\n        d.close()\n"],
+    ids=["owner-inside-the-same-loop", "non-subscript-use-inside-the-try"],
+)
+def test_the_stricter_rules_still_accept_correct_code(source):
+    """The tightening must not reject working idioms.
+
+    An owner in the same loop as the load is fine -- each iteration's archive is
+    closed. And a non-subscript use is fine when it sits inside the Try the
+    finally protects; it is only a problem outside it.
+    """
+    tree, call = _single_load(source)
+    assert _reaches_a_with(_scope_of(tree, call), call, tree)
 
 def test_the_ownership_sweep_itself_can_see_a_planted_defect(tmp_path):
     """Non-vacuity for the sweep, not merely the matcher it calls.
