@@ -1298,9 +1298,19 @@ def _asserts_closure(tree) -> bool:
 
     An earlier revision returned true for any `.zip`/`.fid` attribute access
     anywhere in the file, so a bare read -- ``observed = handle.zip`` -- counted
-    as a closure proof. The handle state must now be reached from the tested
-    expression of a real ``assert``. Assertion HELPERS are covered for free,
-    because their bodies contain ``assert`` statements too.
+    as a closure proof. The handle state must now be reached from a tested
+    expression: the test of an ``assert``, or the value of a ``return``.
+
+    Both forms are needed. An assert-only rule covered assert-style helpers but
+    silently skipped the commoner pytest idiom, a ``return``-style predicate
+    (``def is_closed(h): return getattr(h, "closed", True)``) -- such a file was
+    never scanned for permissive defaults at all.
+
+    RECOGNISED SHAPES, stated so the gate is not mistaken for more: an
+    attribute named ``zip``, ``fid`` or ``closed``, and ``getattr(x, "closed",
+    ...)``. A proof expressed some other way -- ``unittest``'s
+    ``assertIsNone``, a handle state read through a computed attribute name --
+    is not seen, and its file is simply not scanned.
 
     A substring test for "closed" preceded that and was worse: it matched
     `fail_closed`, `disclosed` and `unclosed_array`, pulling in ~30 files that
