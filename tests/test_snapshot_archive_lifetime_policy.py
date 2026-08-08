@@ -67,16 +67,28 @@ def _numpy_load_names(tree):
             for alias in node.names:
                 if alias.name == "load":
                     direct_names.add(alias.asname or "load")
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        value = node.value
-        if (isinstance(value, ast.Attribute) and value.attr == "load"
-                and isinstance(value.value, ast.Name)
-                and value.value.id in module_names):
-            direct_names.update(
-                t.id for t in node.targets if isinstance(t, ast.Name)
-            )
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if (isinstance(value, ast.Attribute) and value.attr == "load"
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in module_names):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in direct_names:
+                        direct_names.add(target.id)
+                        changed = True
+            elif isinstance(value, ast.Name) and value.id in module_names:
+                # `nps = np` -- a plain module alias, the same hole that aliased
+                # IMPORTS had: a file whose only load is spelled through it
+                # would match nothing and be skipped rather than judged.
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in module_names:
+                        module_names.add(target.id)
+                        changed = True
     return module_names, direct_names
 
 
@@ -184,8 +196,19 @@ def _target_key(node):
     return None
 
 
-#: contextlib adapters that genuinely pass ownership through to what they wrap.
-_ADAPTER_NAMES = {"closing", "nullcontext", "aclosing"}
+#: Adapters that genuinely CLOSE what they wrap.
+#:
+#: `nullcontext` is deliberately NOT here. Its `__exit__` is a no-op: it
+#: discards the wrapped object's own `__exit__`, so
+#: ``with nullcontext(np.load(p)) as d:`` never closes the archive. It is sound
+#: only in the guarded conditional shape below, where it wraps the ndarray arm
+#: and the raw archive goes to the `with` on the other arm.
+_CLOSING_ADAPTERS = {"closing", "aclosing"}
+
+#: Recognised, but only inside a guarded conditional -- never on its own.
+_NULLCONTEXT_NAMES = {"nullcontext"}
+
+_ADAPTER_NAMES = _CLOSING_ADAPTERS | _NULLCONTEXT_NAMES
 
 
 def _contextlib_provenance(tree):
@@ -198,7 +221,7 @@ def _contextlib_provenance(tree):
     arbitrary methods that happen to share a spelling with the real thing, and
     an earlier revision accepted both.
     """
-    module_aliases, bare_names, stack_factories = set(), set(), set()
+    module_aliases, bare_names, stack_factories, bare_kind = set(), set(), set(), {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -207,64 +230,62 @@ def _contextlib_provenance(tree):
         elif isinstance(node, ast.ImportFrom) and node.module == "contextlib":
             for alias in node.names:
                 if alias.name in _ADAPTER_NAMES:
-                    bare_names.add(alias.asname or alias.name)
+                    bound = alias.asname or alias.name
+                    bare_names.add(bound)
+                    bare_kind[bound] = alias.name
                 elif alias.name in {"ExitStack", "AsyncExitStack"}:
                     stack_factories.add(alias.asname or alias.name)
-    return module_aliases, bare_names, stack_factories
+    return module_aliases, bare_names, stack_factories, bare_kind
 
 
-def _is_adapter_call(expr, prov) -> bool:
-    """``contextlib.nullcontext(...)`` / a `from contextlib import` adapter."""
+def _is_adapter_call(expr, prov, names) -> bool:
+    """A contextlib adapter from ``names``, with verified provenance."""
     if not isinstance(expr, ast.Call):
         return False
-    module_aliases, bare_names, _ = prov
+    module_aliases, bare_names, _stacks, bare_kind = prov
     func = expr.func
-    if (isinstance(func, ast.Attribute) and func.attr in _ADAPTER_NAMES
+    if (isinstance(func, ast.Attribute) and func.attr in names
             and isinstance(func.value, ast.Name)
             and func.value.id in module_aliases):
         return True
-    return isinstance(func, ast.Name) and func.id in bare_names
+    # A bare name must resolve to the RIGHT adapter: `from contextlib import
+    # nullcontext as nc` must not satisfy a check for a closing adapter.
+    return (isinstance(func, ast.Name) and func.id in bare_names
+            and bare_kind.get(func.id) in names)
 
 
-def _exit_stack_keys(nodes, prov) -> set:
-    """Targets bound from ``contextlib.ExitStack()`` or an imported ExitStack."""
-    module_aliases, _, stack_factories = prov
-    keys = set()
-    for node in nodes:
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+def _live_exit_stacks(scope, prov) -> list:
+    """``(key, span)`` for stacks that are actually ENTERED by a ``with``.
+
+    A stack only unwinds when its ``__exit__`` runs, so ``st = ExitStack()``
+    without a ``with`` closes nothing, and a stack whose ``with`` has already
+    unwound closes nothing either. An earlier revision tracked stack names in a
+    whole-scope, order-blind set with no rebinding invalidation -- exactly the
+    defect the archive-key logic had been rewritten to remove.
+    """
+    module_aliases, _bare, stack_factories, _kinds = prov
+    live = []
+    for node in _own_scope_nodes(scope):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
-        func = node.value.func
-        ok = (
-            (isinstance(func, ast.Attribute)
-             and func.attr in {"ExitStack", "AsyncExitStack"}
-             and isinstance(func.value, ast.Name)
-             and func.value.id in module_aliases)
-            or (isinstance(func, ast.Name) and func.id in stack_factories)
-        )
-        if ok:
-            for target in node.targets:
-                key = _target_key(target)
-                if key:
-                    keys.add(key)
-    for node in nodes:
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                value = item.context_expr
-                if not isinstance(value, ast.Call):
-                    continue
-                func = value.func
-                ok = (
-                    (isinstance(func, ast.Attribute)
-                     and func.attr in {"ExitStack", "AsyncExitStack"}
-                     and isinstance(func.value, ast.Name)
-                     and func.value.id in module_aliases)
-                    or (isinstance(func, ast.Name) and func.id in stack_factories)
-                )
-                if ok and item.optional_vars is not None:
-                    key = _target_key(item.optional_vars)
-                    if key:
-                        keys.add(key)
-    return keys
+        for item in node.items:
+            value = item.context_expr
+            if not isinstance(value, ast.Call) or item.optional_vars is None:
+                continue
+            func = value.func
+            ok = (
+                (isinstance(func, ast.Attribute)
+                 and func.attr in {"ExitStack", "AsyncExitStack"}
+                 and isinstance(func.value, ast.Name)
+                 and func.value.id in module_aliases)
+                or (isinstance(func, ast.Name) and func.id in stack_factories)
+            )
+            if not ok:
+                continue
+            key = _target_key(item.optional_vars)
+            if key:
+                live.append((key, _span(node)))
+    return live
 
 
 def _denotes(expr, keys, call, prov) -> bool:
@@ -280,10 +301,21 @@ def _denotes(expr, keys, call, prov) -> bool:
     key = _target_key(expr)
     if key is not None and key in keys:
         return True
+    if isinstance(expr, ast.NamedExpr):
+        return _denotes(expr.value, keys, call, prov)
     if isinstance(expr, ast.IfExp):
+        # GUARDED CONDITIONAL OWNERSHIP: one arm wraps the value in
+        # `nullcontext`, the other hands the raw archive to the `with`. That is
+        # sound only because the guard sends an `NpzFile` down the raw arm and
+        # only an ndarray -- which owns nothing -- into `nullcontext`.
+        for wrapped, other in ((expr.body, expr.orelse), (expr.orelse, expr.body)):
+            if (_is_adapter_call(wrapped, prov, _NULLCONTEXT_NAMES)
+                    and any(_denotes(a, keys, call, prov) for a in wrapped.args)
+                    and _denotes(other, keys, call, prov)):
+                return True
         return (_denotes(expr.body, keys, call, prov)
                 and _denotes(expr.orelse, keys, call, prov))
-    if _is_adapter_call(expr, prov):
+    if _is_adapter_call(expr, prov, _CLOSING_ADAPTERS):
         return any(_denotes(arg, keys, call, prov) for arg in expr.args)
     return False
 
@@ -483,7 +515,7 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
     prov = _contextlib_provenance(tree if tree is not None else scope)
 
     nodes = _own_scope_nodes(scope)
-    stack_keys = _exit_stack_keys(nodes, prov)
+    live_stacks = _live_exit_stacks(scope, prov)
     # Anchor acquisition to the STATEMENT that performs the load, not to the
     # call expression's own column: `loaded = np.load(...)` starts to the left
     # of the call, so comparing against the call would skip the very binding
@@ -521,6 +553,20 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
                 current = snapshot
         return current
 
+    def keys_before(position):
+        """Bindings in force just BEFORE ``position``.
+
+        `with d as d:` rebinds `d`, and that erasure is recorded at the `with`'s
+        own position -- so judging the context expression with `keys_at` would
+        apply the rebind before reading the very expression it rebinds. Reusing
+        the handle name is common; this keeps it correct.
+        """
+        current = frozenset()
+        for pos, snapshot in history:
+            if pos < position:
+                current = snapshot
+        return current
+
     # If the load happens inside a loop, an owner OUTSIDE that loop closes only
     # the final iteration's archive and leaks the rest, so it does not count.
     loop_span = None
@@ -539,14 +585,26 @@ def _reaches_a_with(scope, call, tree=None) -> bool:
             continue
         if isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
-                if _denotes(item.context_expr, keys_at(_pos(node)), call, prov):
+                if _denotes(item.context_expr, keys_before(_pos(node)), call, prov):
                     return True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "enter_context"
-                and _target_key(node.func.value) in stack_keys
+                and node.func.attr in {"enter_context", "callback", "push"}
                 and in_force(_pos(node))):
-            if any(_denotes(arg, keys_at(_pos(node)), call, prov)
-                   for arg in node.args):
+            stack_key = _target_key(node.func.value)
+            inside = any(
+                stack_key == key and first <= _pos(node) <= last
+                for key, (first, last) in live_stacks
+            )
+            if not inside:
+                continue
+            current = keys_at(_pos(node))
+            handed = list(node.args)
+            # `stack.callback(d.close)` hands the bound method, not the archive.
+            handed += [
+                arg.value for arg in node.args
+                if isinstance(arg, ast.Attribute) and arg.attr == "close"
+            ]
+            if any(_denotes(arg, current, call, prov) for arg in handed):
                 return True
 
     return _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at)
@@ -1072,6 +1130,113 @@ def test_the_stricter_rules_still_accept_correct_code(source):
     tree, call = _single_load(source)
     assert _reaches_a_with(_scope_of(tree, call), call, tree)
 
+# --- adapter-semantics and ExitStack-liveness controls ----------------------
+#
+# `nullcontext.__exit__` is a NO-OP: it discards the wrapped object's own
+# `__exit__`. Treating it as an ownership adapter meant
+# `with nullcontext(np.load(p)) as d:` read as owned while leaking, and -- worse
+# -- deleting the `isinstance` guard from the production loader, the single most
+# likely simplification, still read as owned.
+#
+# An ExitStack only unwinds when its own `__exit__` runs, so a stack that was
+# never entered, or whose `with` has already unwound, closes nothing.
+
+_PLANTED_ADAPTER_LEAKS = {
+    "unconditional-nullcontext-wraps-the-archive":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.nullcontext(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "unconditional-nullcontext-via-module-alias":
+        "import contextlib as ctx\nimport numpy as np\ndef f(p):\n"
+        "    with ctx.nullcontext(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "production-shape-with-the-guard-deleted":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "exitstack-never-entered":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    stack = contextlib.ExitStack()\n"
+        "    d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "    return d['lattice']\n",
+    "exitstack-already-unwound":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n        pass\n"
+        "    d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "    return d['lattice']\n",
+    "exitstack-rebound-before-enter-context":
+        "import contextlib\nimport numpy as np\ndef f(p, fake):\n"
+        "    with contextlib.ExitStack() as stack:\n        pass\n"
+        "    stack = fake\n"
+        "    d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "    return d['lattice']\n",
+}
+
+_PLANTED_ADAPTER_CORRECT = {
+    "guarded-conditional-nullcontext":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "with-d-as-d-self-rebinding":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    with d as d:\n        return d['lattice']\n",
+    "walrus-directly-in-the-context-expression":
+        "import numpy as np\ndef f(p):\n"
+        "    with (d := np.load(str(p), allow_pickle=False)) as data:\n"
+        "        return data['lattice']\n",
+    "stack-callback-close-in-a-live-stack":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = np.load(str(p), allow_pickle=False)\n"
+        "        stack.callback(d.close)\n"
+        "        return d['lattice']\n",
+    "live-exitstack-enter-context":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "        return d['lattice']\n",
+}
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_ADAPTER_LEAKS.values()),
+                         ids=list(_PLANTED_ADAPTER_LEAKS))
+def test_adapter_and_stack_leaks_are_not_certified(source):
+    """`nullcontext` closes nothing, and an un-entered stack unwinds nothing."""
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_ADAPTER_CORRECT.values()),
+                         ids=list(_PLANTED_ADAPTER_CORRECT))
+def test_adapter_and_stack_correct_shapes_are_accepted(source):
+    """The guarded production shape must survive the tightening.
+
+    `nullcontext` is sound in exactly one place: as one arm of a conditional
+    whose other arm hands the raw archive to the `with`. That is what
+    `scripts/lucid_server.py`, `scripts/portable_genome.py` and the loader this
+    package corrects all do, and rejecting it would demand edits outside this
+    boundary.
+    """
+    tree, call = _single_load(source)
+    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+def test_discovery_finds_return_style_predicate_helpers():
+    """`def is_closed(h): return getattr(h, "closed", True)` is the commoner
+    pytest idiom, and an assert-only rule never scanned such a file at all."""
+    predicate = (
+        'def is_closed(h):\n'
+        '    return getattr(h, "closed", True)\n'
+        'def test_x(handle):\n'
+        '    assert is_closed(handle)\n'
+    )
+    assert _asserts_closure(ast.parse(predicate))
+    assert len(_permissive_closure_defaults(ast.parse(predicate))) == 1
+    assert _asserts_closure(ast.parse('def t(h):\n    assert h.closed\n'))
+
 def test_the_ownership_sweep_itself_can_see_a_planted_defect(tmp_path):
     """Non-vacuity for the sweep, not merely the matcher it calls.
 
@@ -1144,13 +1309,21 @@ def _asserts_closure(tree) -> bool:
     deleted, which is precisely what it exists to catch.
     """
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assert):
+        # An `assert`, or the returned expression of a predicate helper --
+        # `def is_closed(h): return getattr(h, "closed", True)` is the more
+        # common pytest idiom, and an assert-only rule missed it entirely, so
+        # such a file was never scanned for permissive defaults.
+        if isinstance(node, ast.Assert):
+            tested = node.test
+        elif isinstance(node, ast.Return) and node.value is not None:
+            tested = node.value
+        else:
             continue
-        for inner in ast.walk(node.test):
-            if isinstance(inner, ast.Attribute) and inner.attr in {"zip", "fid"}:
+        for inner in ast.walk(tested):
+            if isinstance(inner, ast.Attribute) and inner.attr in {"zip", "fid", "closed"}:
                 return True
             if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
-                    and inner.func.id == "getattr" and len(inner.args) == 3
+                    and inner.func.id == "getattr" and len(inner.args) >= 2
                     and isinstance(inner.args[1], ast.Constant)
                     and inner.args[1].value == "closed"):
                 return True
