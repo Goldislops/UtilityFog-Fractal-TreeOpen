@@ -82,6 +82,13 @@ def _optional_dependency_stubs() -> dict:
 with mock.patch.dict(sys.modules, _optional_dependency_stubs()):
     from scripts import workstream_b_profile_predicates as wb
 
+# `patch.dict` restores by clear()+update(), which evicts anything imported
+# INSIDE the block -- even when the stub mapping was empty. Put the module back,
+# so a later `import scripts.workstream_b_profile_predicates` elsewhere in the
+# session does not re-execute it and hit the SystemExit the stub exists to
+# avoid. `setdefault` never overwrites a real prior entry.
+sys.modules.setdefault("scripts.workstream_b_profile_predicates", wb)
+
 
 try:
     import numpy as np
@@ -162,28 +169,41 @@ def test_allow_pickle_is_the_literal_false():
     assert isinstance(value, ast.Constant) and value.value is False
 
 
+def test_no_mmap_mode_is_supplied():
+    """Load-bearing, and pinned by its own name rather than incidentally.
+
+    `np.load` returns a `np.memmap` when `mmap_mode` is passed. A memmap IS an
+    ndarray subclass, so it would take the `nullcontext` branch and its mapping
+    would never be released -- and it has neither `close()` nor `__enter__`, so
+    the `with` could not own it even if the branch were changed. The exclusion
+    was previously guaranteed only as a side effect of a keyword-set equality
+    inside a test about pickle; relaxing that to a membership check would have
+    silently unpinned it.
+    """
+    call = _np_load_calls(_loader_ast())[0]
+    assert len(call.args) == 1, "mmap_mode could arrive as the second positional"
+    assert "mmap_mode" not in {kw.arg for kw in call.keywords}
+
+
 def test_the_loader_reads_the_three_required_members_in_source_order():
     """Derived from the source, not transcribed, so it cannot drift."""
     loader = _loader_ast()
-    seen = [
-        node.slice.value
+    # Sorted by (lineno, col_offset) because `ast.walk` does not preserve
+    # source order, and two accesses could share a line.
+    accesses = sorted(
+        (node.lineno, node.col_offset, node.slice.value)
         for node in ast.walk(loader)
         if isinstance(node, ast.Subscript)
         and isinstance(node.slice, ast.Constant)
         and isinstance(node.slice.value, str)
-    ]
-    ordered, dedup = [], set()
-    for member in sorted(
-        (n.lineno, n.col_offset, n.slice.value)
-        for n in ast.walk(loader)
-        if isinstance(n, ast.Subscript)
-        and isinstance(n.slice, ast.Constant)
-        and isinstance(n.slice.value, str)
-    ):
-        if member[2] not in dedup:
-            dedup.add(member[2])
-            ordered.append(member[2])
-    assert seen, "no constant-string member access found in the loader"
+    )
+    assert accesses, "no constant-string member access found in the loader"
+
+    ordered, seen = [], set()
+    for _lineno, _col, member in accesses:
+        if member not in seen:
+            seen.add(member)
+            ordered.append(member)
     assert tuple(ordered) == REQUIRED_MEMBERS
 
 
@@ -211,6 +231,7 @@ class _Tracker:
 
     def __init__(self):
         self.opened = []
+        self.handles = []
         self.open_at_load = []
         self.calls = []
 
@@ -220,10 +241,12 @@ class _Tracker:
         def tracking_load(*args, **kwargs):
             self.calls.append((args, dict(kwargs)))
             handle = real_load(*args, **kwargs)
+            # Held for the test's lifetime, so `NpzFile.__del__` cannot close
+            # the archive on our behalf -- a pass must come from production.
             self.opened.append(handle)
+            self.handles.append(getattr(handle, "fid", None))
             # `zip` is set unconditionally by `NpzFile.__init__` and dropped by
-            # `close()`, so it is both the open-before and the closed-after
-            # witness. A plain ndarray (from a `.npy`) has no `zip` at all.
+            # `close()`. A plain ndarray (from a `.npy`) has no `zip` at all.
             self.open_at_load.append(getattr(handle, "zip", None) is not None)
             return handle
 
@@ -237,12 +260,25 @@ class _Tracker:
         )
 
     def assert_archive_is_closed(self):
+        """Both halves, because `zip is None` alone is not enough.
+
+        `NpzFile.close()` drops `zip` BEFORE it closes `fid`, and the `ZipFile`
+        was built over an already-open file object, so `ZipFile.close()`
+        deliberately leaves that descriptor alone. A `close()` that dropped
+        `zip` and returned early would satisfy a `zip`-only assertion while
+        leaking the descriptor -- which is the whole subject of this module.
+        """
         assert self.opened, "np.load was never reached"
         assert self.opened[0].zip is None, "the archive was not closed"
+        assert self.handles and self.handles[0] is not None, (
+            "the archive never owned a file object; a closure claim on it "
+            "would be vacuous"
+        )
+        assert self.handles[0].closed, "the underlying file object is still open"
 
 
 @requires_numpy
-def test_the_real_archive_is_open_at_load_and_closed_before_return(
+def test_the_real_archive_is_open_at_load_and_closed_by_the_loader(
     tmp_path, monkeypatch
 ):
     """The core defect.
@@ -250,6 +286,11 @@ def test_the_real_archive_is_open_at_load_and_closed_before_return(
     The handle is retained by the tracker, so `NpzFile.__del__` cannot fire and
     a passing result cannot come from finalisation. Non-vacuous from both ends:
     the archive is asserted GENUINELY OPEN at load before the closure claim.
+
+    Named precisely. The assertion runs after `load_snapshot` returns, so what
+    it proves is that the LOADER closed the archive -- not the instant at which
+    it did so. The ordering claim that closure precedes downstream work is not
+    made here, because this loader has no downstream work to order against.
     """
     archive = _write_npz(tmp_path, **_valid_members())
     tracker = _Tracker().install(monkeypatch)
@@ -270,6 +311,7 @@ def test_returned_values_survive_closure_unchanged(tmp_path, monkeypatch):
 
     state, memory, gen = wb.load_snapshot(archive)
 
+    tracker.assert_archive_was_open()
     tracker.assert_archive_is_closed()
     assert np.array_equal(state, members["lattice"])
     assert state.dtype == members["lattice"].dtype
@@ -308,6 +350,7 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
     sentinel = RuntimeError("member access exploded")
     real_load = np.load
     opened = []
+    wrapper_reads = []
 
     class _Exploding:
         def __init__(self, inner):
@@ -321,6 +364,10 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
             return self._inner[key]
 
         def __getattr__(self, name):
+            # Guard the classic trap: without this, any access before
+            # `_inner` is assigned recurses until the stack is exhausted.
+            if name == "_inner":
+                raise AttributeError(name)
             return getattr(self._inner, name)
 
         def __enter__(self):
@@ -330,19 +377,32 @@ def test_a_synthetic_member_exception_propagates_by_identity_and_closes(
         def __exit__(self, *exc):
             return self._inner.__exit__(*exc)
 
+    exploders = []
+
     def exploding_load(*args, **kwargs):
         inner = real_load(*args, **kwargs)
         opened.append(inner)
-        return _Exploding(inner)
+        wrapper = _Exploding(inner)
+        exploders.append(wrapper)
+        return wrapper
 
     monkeypatch.setattr(wb.np, "load", exploding_load)
 
     with pytest.raises(RuntimeError) as excinfo:
         wb.load_snapshot(archive)
 
+    wrapper_reads.extend(w.reads for w in exploders)
+
     assert excinfo.value is sentinel, "the exception was replaced, not propagated"
     assert opened, "np.load was never reached"
+    # The wrapper really was used, and `lattice` really was read before the
+    # explosion -- so this proves closure after a MID-EXTRACTION failure, not
+    # after a failure on the very first access.
+    assert wrapper_reads == [2], f"expected two member reads, got {wrapper_reads}"
     assert opened[0].zip is None, "the archive survived a member-access failure"
+    assert opened[0].fid is None or opened[0].fid.closed, (
+        "the underlying file object survived a member-access failure"
+    )
 
 
 @requires_numpy

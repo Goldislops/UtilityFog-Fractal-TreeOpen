@@ -46,66 +46,176 @@ WORKSTREAM_B = "scripts/workstream_b_profile_predicates.py"
 # ---------------------------------------------------------------------------
 
 
-def _np_load_calls(node) -> list:
-    """Every ``np.load(...)`` call inside ``node``.
+def _numpy_load_names(tree):
+    """Resolve, from ``tree``'s own imports, every name meaning NumPy ``load``.
 
-    Deliberately narrow: a bare ``attr == "load"`` filter would also match
-    `json.load` and `tomli.load`, which appear in these same trees. Pickle
-    spellings and aliasing are already covered, far more thoroughly, by
-    `tests/test_snapshot_pickle_policy.py`; this module asks a different
-    question of the same call sites.
+    Returns ``(module_names, direct_names)``. Matching only the literal
+    ``np.load`` was not enough: a module whose only load is spelled
+    ``numpy.load``, ``from numpy import load`` or through an aliased import
+    produced zero matches, and a file with zero matches is skipped entirely --
+    so an unowned archive in any of those spellings was invisible to this gate
+    rather than merely unclassified.
     """
-    return [
-        call for call in ast.walk(node)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "load"
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "np"
+    module_names = {"np", "numpy"}
+    direct_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "numpy":
+                    module_names.add(alias.asname or "numpy")
+        elif isinstance(node, ast.ImportFrom) and node.module == "numpy":
+            for alias in node.names:
+                if alias.name == "load":
+                    direct_names.add(alias.asname or "load")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if (isinstance(value, ast.Attribute) and value.attr == "load"
+                and isinstance(value.value, ast.Name)
+                and value.value.id in module_names):
+            direct_names.update(
+                t.id for t in node.targets if isinstance(t, ast.Name)
+            )
+    return module_names, direct_names
+
+
+def _np_load_calls(node, names=None) -> list:
+    """Every NumPy ``load`` call inside ``node``.
+
+    Deliberately NumPy-qualified: a bare ``attr == "load"`` filter would also
+    match `json.load` and `tomli.load`, which appear in these same trees.
+    ``names`` carries the resolution from the enclosing module, so a function
+    scope can be searched with module-level import knowledge.
+    """
+    module_names, direct_names = names or _numpy_load_names(node)
+    found = []
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if (isinstance(func, ast.Attribute) and func.attr == "load"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in module_names):
+            found.append(call)
+        elif isinstance(func, ast.Name) and func.id in direct_names:
+            found.append(call)
+        elif (isinstance(func, ast.Call) and isinstance(func.func, ast.Name)
+                and func.func.id == "getattr" and len(func.args) == 2
+                and isinstance(func.args[0], ast.Name)
+                and func.args[0].id in module_names
+                and isinstance(func.args[1], ast.Constant)
+                and func.args[1].value == "load"):
+            found.append(call)
+    return found
+
+
+def _enclosing_scopes(tree) -> list:
+    """Every function body in ``tree``, plus the module itself.
+
+    Ownership is judged per SCOPE, never across the whole module. Searching the
+    module tree let a `with` in one function certify a load in another, which
+    is not ownership at all.
+    """
+    scopes = [tree]
+    scopes += [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
+    return scopes
 
 
-def _owned_load_calls(scope) -> set:
-    """Ids of the ``np.load`` calls in ``scope`` whose result reaches a ``with``.
+def _scope_of(tree, call):
+    """The innermost function containing ``call``, or the module tree."""
+    best = tree
+    best_size = None
+    for scope in _enclosing_scopes(tree):
+        if scope is tree:
+            continue
+        if any(node is call for node in ast.walk(scope)):
+            size = sum(1 for _ in ast.walk(scope))
+            if best_size is None or size < best_size:
+                best, best_size = scope, size
+    return best
 
-    TWO shapes are accepted, and accepting both is essential:
 
-      * direct   -- ``with np.load(path, allow_pickle=False) as snap:``
-      * indirect -- ``loaded = np.load(...)``
-                    ``owner = nullcontext(loaded) if isinstance(...) else loaded``
-                    ``with owner as snap:``
+def _wrapped_call_targets(node) -> list:
+    """Calls nested inside ``node`` that could be wrapping an archive.
 
-    The indirect form is CONDITIONAL OWNERSHIP, used deliberately by
-    `scripts/lucid_server.py` and `scripts/portable_genome.py`: `np.load`
-    returns an `NpzFile` for a zip but a plain ndarray for a `.npy`, and an
-    ndarray has no context-manager protocol. A matcher that recognised only the
-    direct shape would report those two correct files as defects.
-
-    Binding is followed transitively through ordinary assignments, so any
-    number of intermediate names is fine.
+    Accepts the standard adapters -- ``contextlib.closing(...)``,
+    ``contextlib.nullcontext(...)`` and ``ExitStack.enter_context(...)`` --
+    so a correct idiom is not reported as a defect.
     """
-    owned = set()
-    for call in _np_load_calls(scope):
-        if _reaches_a_with(scope, call):
-            owned.add(id(call))
-    return owned
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
 
 
 def _reaches_a_with(scope, call) -> bool:
-    withs = [node for node in ast.walk(scope) if isinstance(node, ast.With)]
+    """Is ``call``'s result handed to a ``with`` (or an explicit close) in ``scope``?
 
-    # Direct: the call itself is the context expression.
+    Accepted, because all of these genuinely bound the archive's lifetime:
+
+      * ``with np.load(...) as snap:``                       -- direct
+      * ``with contextlib.closing(np.load(...)) as snap:``   -- wrapped
+      * ``stack.enter_context(np.load(...))``                -- ExitStack
+      * ``loaded = np.load(...)`` / ``owner = nullcontext(loaded) if ... else loaded``
+        / ``with owner as snap:``                            -- CONDITIONAL
+      * ``d = np.load(...)`` / ``try: ... finally: d.close()`` -- explicit close
+
+    The conditional form is used deliberately by `scripts/lucid_server.py` and
+    `scripts/portable_genome.py`, where `np.load` may return an ndarray that
+    has no context-manager protocol. A matcher recognising only the direct
+    shape would report those correct files as defects.
+
+    REBINDING is honoured: if a tracked name is later assigned a value that
+    does not derive from it, the name stops standing for the archive and a
+    later ``with`` on it proves nothing.
+
+    Stated limit, because a static gate cannot do reachability: a ``with``
+    inside a conditional branch is accepted without proving that branch always
+    runs. This gate answers "is the archive given an owner in this scope", not
+    "does that owner run on every path".
+    """
+    withs = [node for node in ast.walk(scope) if isinstance(node, ast.With)]
+    async_withs = [node for node in ast.walk(scope) if isinstance(node, ast.AsyncWith)]
+    withs = withs + async_withs
+
+    # Direct, or wrapped in an adapter that is itself the context expression.
     for node in withs:
         for item in node.items:
             if item.context_expr is call:
                 return True
+            if any(inner is call for inner in _wrapped_call_targets(item.context_expr)):
+                return True
 
-    # Indirect: follow the name the call was bound to, transitively.
+    # Handed straight to an ExitStack.
+    for node in ast.walk(scope):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "enter_context"
+                and any(arg is call for arg in node.args)):
+            return True
+
+    # Bound to a name (plain, walrus, or unpacked) and later owned.
     names: set = set()
     for node in ast.walk(scope):
         if isinstance(node, ast.Assign) and node.value is call:
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            for target in node.targets:
+                names.update(
+                    n.id for n in ast.walk(target) if isinstance(n, ast.Name)
+                )
+        elif isinstance(node, ast.NamedExpr) and node.value is call:
+            names.add(node.target.id)
+        elif isinstance(node, ast.AnnAssign) and node.value is call:
+            if isinstance(node.target, ast.Name):
+                names.add(node.target.id)
     if not names:
+        # Bound to an attribute or subscript (e.g. `self.data = np.load(...)`).
+        # Not name-trackable; treat as owned only if something in this scope
+        # closes it explicitly, otherwise report it and let a human look.
+        for node in ast.walk(scope):
+            if (isinstance(node, ast.Assign) and node.value is call
+                    and any(isinstance(t, (ast.Attribute, ast.Subscript))
+                            for t in node.targets)):
+                return _has_explicit_close(scope, None)
         return False
 
     changed = True
@@ -115,18 +225,51 @@ def _reaches_a_with(scope, call) -> bool:
             if not isinstance(node, ast.Assign):
                 continue
             used = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
-            if not (used & names):
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id not in names:
-                    names.add(target.id)
+            targets = {n.id for t in node.targets
+                       for n in ast.walk(t) if isinstance(n, ast.Name)}
+            if used & names:
+                for name in targets - names:
+                    names.add(name)
+                    changed = True
+            elif targets & names and node.value is not call:
+                # Rebinding: the name no longer stands for the archive.
+                for name in targets & names:
+                    names.discard(name)
                     changed = True
 
     for node in withs:
         for item in node.items:
-            if isinstance(item.context_expr, ast.Name) and item.context_expr.id in names:
+            expr = item.context_expr
+            if isinstance(expr, ast.Name) and expr.id in names:
+                return True
+            if any(isinstance(n, ast.Name) and n.id in names
+                   for n in ast.walk(expr)):
+                return True
+
+    return _has_explicit_close(scope, names)
+
+
+def _has_explicit_close(scope, names) -> bool:
+    """``x.close()`` on a tracked name inside ``scope``."""
+    for node in ast.walk(scope):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "close"):
+            value = node.func.value
+            if names is None:
+                return True
+            if isinstance(value, ast.Name) and value.id in names:
                 return True
     return False
+
+
+def _owned_load_calls(tree) -> set:
+    """Ids of the NumPy loads in ``tree`` whose archive reaches an owner."""
+    names = _numpy_load_names(tree)
+    owned = set()
+    for call in _np_load_calls(tree, names):
+        if _reaches_a_with(_scope_of(tree, call), call):
+            owned.add(id(call))
+    return owned
 
 
 def _unowned_loads(root=None, dirs=None) -> dict:
@@ -168,7 +311,7 @@ def test_the_workstream_b_loader_owns_its_archive():
     assert len(loaders) == 1, "expected exactly one load_snapshot definition"
     loader = loaders[0]
 
-    calls = _np_load_calls(loader)
+    calls = _np_load_calls(loader, _numpy_load_names(tree))
     assert len(calls) == 1, (
         f"expected exactly one np.load in load_snapshot, found {len(calls)}"
     )
@@ -212,27 +355,136 @@ _PLANTED_CONDITIONAL = (
     "        return data['lattice']\n"
 )
 
+#: Correct idioms an earlier revision of this matcher reported as defects.
+#: Keeping them here means a maintainer converting a loader to any of these is
+#: not told their working code is broken.
+_PLANTED_CLOSING = (
+    "import contextlib\n"
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    with contextlib.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+    "        return d['lattice']\n"
+)
+_PLANTED_EXITSTACK = (
+    "import contextlib\n"
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    with contextlib.ExitStack() as stack:\n"
+    "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+    "        return d['lattice']\n"
+)
+_PLANTED_TRY_FINALLY = (
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    d = np.load(str(p), allow_pickle=False)\n"
+    "    try:\n"
+    "        return d['lattice']\n"
+    "    finally:\n"
+    "        d.close()\n"
+)
+_PLANTED_WALRUS = (
+    "import numpy as np\n"
+    "def f(p):\n"
+    "    if (d := np.load(str(p), allow_pickle=False)) is not None:\n"
+    "        with d as data:\n"
+    "            return data['lattice']\n"
+)
 
-def test_the_ownership_matcher_detects_an_unowned_load():
-    """Without this, an empty findings dict could mean a broken matcher."""
-    tree = ast.parse(_PLANTED_UNOWNED)
-    calls = _np_load_calls(tree)
-    assert len(calls) == 1
-    assert not _reaches_a_with(tree, calls[0])
+#: Unowned shapes an earlier revision certified as OWNED. Each is a real way to
+#: leak an archive while looking managed.
+_PLANTED_CROSS_FUNCTION = (
+    "import numpy as np\n"
+    "def a(p):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    return loaded['lattice']\n"
+    "def b(loaded):\n"
+    "    with loaded as d:\n"
+    "        pass\n"
+)
+_PLANTED_REBOUND = (
+    "import contextlib\n"
+    "import numpy as np\n"
+    "def f(p, q):\n"
+    "    loaded = np.load(str(p), allow_pickle=False)\n"
+    "    first = loaded['lattice']\n"
+    "    loaded = contextlib.nullcontext(q)\n"
+    "    with loaded as d:\n"
+    "        pass\n"
+    "    return first\n"
+)
+
+#: Aliased spellings that produced ZERO matches before, so their files were
+#: skipped entirely rather than judged.
+_PLANTED_ALIASED = (
+    "import numpy\n"
+    "def f(p):\n"
+    "    d = numpy.load(str(p), allow_pickle=False)\n"
+    "    return d['lattice']\n"
+)
+_PLANTED_FROM_IMPORT = (
+    "from numpy import load\n"
+    "def f(p):\n"
+    "    d = load(str(p), allow_pickle=False)\n"
+    "    return d['lattice']\n"
+)
+
+
+def _single_load(source):
+    tree = ast.parse(source)
+    calls = _np_load_calls(tree, _numpy_load_names(tree))
+    assert len(calls) == 1, f"expected one NumPy load, found {len(calls)}"
+    return tree, calls[0]
 
 
 @pytest.mark.parametrize(
-    "source", [_PLANTED_DIRECT, _PLANTED_CONDITIONAL],
-    ids=["direct-with", "conditional-nullcontext"],
+    "source",
+    [_PLANTED_UNOWNED, _PLANTED_CROSS_FUNCTION, _PLANTED_REBOUND],
+    ids=["no-owner", "with-in-another-function", "rebound-before-the-with"],
 )
-def test_the_ownership_matcher_accepts_both_correct_shapes(source):
-    """The conditional case is not academic: it is exactly what
-    `scripts/lucid_server.py` and `scripts/portable_genome.py` do, and a
-    matcher that rejected it would demand edits to correct files."""
-    tree = ast.parse(source)
-    calls = _np_load_calls(tree)
-    assert len(calls) == 1
-    assert _reaches_a_with(tree, calls[0])
+def test_the_ownership_matcher_detects_unowned_loads(source):
+    """Without these, an empty findings mapping could mean a broken matcher.
+
+    The last two are not hypothetical: an earlier revision of this matcher
+    searched the whole MODULE tree and propagated names through any assignment
+    that merely mentioned them, so a `with` in a DIFFERENT function -- or one
+    on a name since rebound to something else -- certified a leaking archive as
+    owned.
+    """
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [_PLANTED_DIRECT, _PLANTED_CONDITIONAL, _PLANTED_CLOSING,
+     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY, _PLANTED_WALRUS],
+    ids=["direct-with", "conditional-nullcontext", "contextlib-closing",
+         "exitstack-enter-context", "try-finally-close", "walrus"],
+)
+def test_the_ownership_matcher_accepts_correct_shapes(source):
+    """A gate that rejects working code is worse than no gate.
+
+    The conditional case is what `scripts/lucid_server.py` and
+    `scripts/portable_genome.py` actually do. The other four are standard
+    idioms a maintainer might reasonably convert to -- `ExitStack` especially,
+    since it is the usual answer to acquire-then-conditionally-own.
+    """
+    tree, call = _single_load(source)
+    assert _reaches_a_with(_scope_of(tree, call), call)
+
+
+@pytest.mark.parametrize(
+    "source", [_PLANTED_ALIASED, _PLANTED_FROM_IMPORT],
+    ids=["numpy-load", "from-numpy-import-load"],
+)
+def test_aliased_numpy_load_spellings_are_still_seen(source):
+    """A file whose only load matched nothing was SKIPPED, not judged.
+
+    So an unowned archive spelled `numpy.load` or `from numpy import load` was
+    invisible to this gate rather than merely unclassified.
+    """
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call)
 
 
 def test_the_ownership_sweep_itself_can_see_a_planted_defect(tmp_path):
@@ -268,6 +520,14 @@ def _permissive_closure_defaults(tree) -> list:
 
     Any default is flagged, not just a literal ``True``: a non-literal default
     cannot be read statically and is no safer.
+
+    What this does NOT model, stated so the gate is not mistaken for more than
+    it is: a bare ``assert handle.fid is None`` used as the SOLE witness is
+    equally permissive for the same reason, but distinguishing it from the
+    legitimate ``zip is None and (fid is None or fid.closed)`` conjunction
+    needs dataflow this static matcher does not have. Nor does it see
+    ``h.__dict__.get("closed", True)`` or a ``getattr`` whose attribute name is
+    a variable. It catches the one spelling that actually occurred here.
     """
     found = []
     for node in ast.walk(tree):

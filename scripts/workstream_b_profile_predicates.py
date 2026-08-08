@@ -94,8 +94,16 @@ def load_snapshot(path: pathlib.Path):
 
     Deliberately unchanged: the ``str(path)`` coercion, the literal
     ``allow_pickle=False``, the member access order, ``int()`` on
-    ``generation``, the returned objects, and every exception's identity. There
-    is no fallback and no retry.
+    ``generation``, and the returned objects. There is no fallback and no
+    retry.
+
+    Exception identity is preserved for every failure raised by the load or by
+    a member access -- the caller receives the same object, not merely the same
+    class. The one qualification, stated rather than glossed: if closing the
+    archive itself raises (an ``OSError`` from a flaky mount, say), Python's
+    ``with`` semantics mean the close error reaches the caller and the original
+    survives as its ``__context__``. That window did not exist before, because
+    nothing ran at that point; it is the ordinary cost of owning a resource.
     """
     loaded = np.load(str(path), allow_pickle=False)
     owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
