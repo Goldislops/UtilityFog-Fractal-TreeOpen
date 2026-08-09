@@ -1,7 +1,7 @@
 //\! WASM-safe seedable PRNG using Xoshiro256**.
 //\!
 //\! On native: seeded from getrandom.
-//\! On WASM: seeded from getrandom (crypto.getRandomValues via js feature).
+//\! On WASM: seeded from getrandom (crypto.getRandomValues via wasm_js feature).
 
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256StarStar;
@@ -17,7 +17,7 @@ pub fn create_rng(seed: u64) -> CaRng {
 /// Uses getrandom which maps to crypto.getRandomValues on WASM.
 pub fn create_rng_from_entropy() -> CaRng {
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).unwrap_or_else(|_| {
+    getrandom::fill(&mut seed).unwrap_or_else(|_| {
         // Fallback: use a fixed seed if getrandom fails
         seed = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
                 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
