@@ -3,7 +3,7 @@
 //! This is the heart of the CA engine - one call to step() advances the lattice
 //! by exactly one generation, applying all Phase 3-6c mechanics.
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::memory::{
     VoxelMemoryParams, VOID, STRUCTURAL, COMPUTE, ENERGY, SENSOR, NUM_STATES,
@@ -29,7 +29,7 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
     let params = &config.memory_params;
 
     // Pre-generate random values for this step
-    let rng_vals: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+    let rng_vals: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
 
     // ---- Phase 1: Count neighbors (26 Moore, all 5 states) ----
     let neighbor_counts = filters::count_neighbors_3d(&lattice.states, n);
@@ -107,7 +107,7 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
         .fold(0.0f32, f32::max);
 
     if signal_interval > 0 && gen % signal_interval == 0 {
-        let rng_vals2: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals2: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         let (sa, ca) = phase6c::nervous_system_step(
             &out, &mut lattice.memory, n, params, compute_max_age, &rng_vals2,
         );
@@ -120,19 +120,19 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
 
     // ---- Phase 6: Stochastic transitions ----
     if config.stochastic.enabled {
-        let rng_vals3: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals3: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_stochastic(&mut out, &neighbor_counts, &config, &rng_vals3);
     }
 
     // ---- Phase 7: Forward contagion ----
     if config.contagion.enabled {
-        let rng_vals4: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals4: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_forward_contagion(&mut out, &neighbor_counts, &config, params, &rng_vals4);
     }
 
     // ---- Phase 8: Reverse contagion (COMPUTE reclaims STRUCTURAL) ----
     {
-        let rng_vals5: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals5: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_reverse_contagion(&mut out, &neighbor_counts, params, &rng_vals5);
     }
 
@@ -146,7 +146,7 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
 
     // ---- Phase 11: Energy->Compute conversion (biofilm, super-pod) ----
     {
-        let rng_vals6: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals6: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_energy_conversion(&mut out, &neighbor_counts, &config, &rng_vals6);
     }
 
@@ -158,7 +158,7 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
 
     // ---- Phase 13: Decay resistance ----
     {
-        let rng_vals7: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals7: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_decay_resistance(
             &mut out, &lattice.memory, &nonvoid_counts, &neighbor_counts,
             params, &config.stochastic, &rng_vals7,
@@ -171,7 +171,7 @@ pub fn step(lattice: &mut VoxelLattice, config: &FullConfig, rng: &mut CaRng) ->
     // ---- Phase 15: Analogue mutation (3%, pre_mut snapshot critical) ----
     {
         let pre_mut = out.clone();
-        let rng_vals8: Vec<f32> = (0..n3).map(|_| rng.gen::<f32>()).collect();
+        let rng_vals8: Vec<f32> = (0..n3).map(|_| rng.random::<f32>()).collect();
         apply_analogue_mutation(&mut out, &pre_mut, &config.cosmic, &rng_vals8);
     }
 

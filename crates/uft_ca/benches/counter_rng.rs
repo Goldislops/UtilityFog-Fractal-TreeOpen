@@ -35,7 +35,7 @@
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_xoshiro::Xoshiro256StarStar;
 
 #[path = "support/counter_rng.rs"]
@@ -76,7 +76,7 @@ fn bench_xoshiro_persistent_dense(c: &mut Criterion) {
             // iterations (throughput is sequence-position independent).
             let mut rng = Xoshiro256StarStar::seed_from_u64(SEED);
             b.iter(|| {
-                let v: Vec<f32> = (0..n).map(|_| rng.gen::<f32>()).collect();
+                let v: Vec<f32> = (0..n).map(|_| rng.random::<f32>()).collect();
                 black_box(checksum(v))
             })
         });
@@ -94,7 +94,7 @@ fn bench_xoshiro_reseed_dense(c: &mut Criterion) {
         group.bench_function(label, |b| {
             b.iter(|| {
                 let mut rng = Xoshiro256StarStar::seed_from_u64(black_box(SEED));
-                let v: Vec<f32> = (0..n).map(|_| rng.gen::<f32>()).collect();
+                let v: Vec<f32> = (0..n).map(|_| rng.random::<f32>()).collect();
                 black_box(checksum(v))
             })
         });
