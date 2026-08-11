@@ -1,0 +1,38 @@
+name: wasm-check
+
+on:
+  pull_request:
+    paths:
+      - "crates/uft_ca/**"
+      - ".github/workflows/wasm-check.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/uft_ca/**"
+      - ".github/workflows/wasm-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: crates/uft_ca
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust toolchain with wasm32 target
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Compile uft_ca for wasm32-unknown-unknown
+        run: cargo build --target wasm32-unknown-unknown
