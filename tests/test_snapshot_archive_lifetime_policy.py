@@ -979,13 +979,11 @@ def test_the_ownership_matcher_detects_unowned_loads(source):
 @pytest.mark.parametrize(
     "source",
     [_PLANTED_DIRECT, _PLANTED_CONDITIONAL, _PLANTED_CLOSING,
-     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY, _PLANTED_WALRUS,
-     _PLANTED_ATTRIBUTE_CLOSE, _PLANTED_TUPLE_ASSIGN,
-     _PLANTED_ALIAS_SURVIVES_REBIND],
+     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY,
+     _PLANTED_ATTRIBUTE_CLOSE],
     ids=["direct-with", "conditional-nullcontext", "contextlib-closing",
-         "exitstack-enter-context", "try-finally-close", "walrus",
-         "attribute-target-closed", "tuple-assignment",
-         "alias-survives-a-later-rebind"],
+         "exitstack-enter-context", "try-finally-close",
+         "attribute-target-closed"],
 )
 def test_the_ownership_matcher_accepts_correct_shapes(source):
     """A gate that rejects working code is worse than no gate.
@@ -1238,6 +1236,31 @@ _PLANTED_CONSERVATIVELY_REJECTED = {
         "        stack.callback(d.close)\n"
         "        return d['lattice']\n",
 }
+
+
+#: Narrowed out of the accepted set by the structural contract, and kept as
+#: explicit conservative rejections rather than quietly deleted. Each is
+#: CORRECT Python; none is structurally guaranteed:
+#:   * walrus in an `if` TEST with the owner in the branch body -- if the
+#:     condition were false no owner would run, and a static rule cannot know
+#:     the test is total;
+#:   * tuple binding `d, meta = np.load(...), None` -- the acquisition target
+#:     is not a single name, so the adjacent-unit rule cannot key on it;
+#:   * an alias that survives a later rebind -- the intervening statements are
+#:     not the one permitted owner binding, and either of them can raise.
+_PLANTED_NARROWED_OUT = (
+    _PLANTED_WALRUS, _PLANTED_TUPLE_ASSIGN, _PLANTED_ALIAS_SURVIVES_REBIND,
+)
+
+
+@pytest.mark.parametrize(
+    "source", list(_PLANTED_NARROWED_OUT),
+    ids=["walrus-in-an-if-test", "tuple-binding", "alias-across-a-rebind"],
+)
+def test_correct_but_unmodelled_shapes_are_reported_unowned(source):
+    """Named as the trade they are, not hidden."""
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_CONSERVATIVELY_REJECTED.values()),
