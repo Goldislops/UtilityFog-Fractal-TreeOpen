@@ -248,6 +248,77 @@ def _live_module_aliases(tree, module, before_line) -> set:
             if line < before_line and name not in rebound}
 
 
+#: Names, beyond the module aliases resolved per file, whose meaning Form C's
+#: soundness rests on. `builtins` is here because `builtins.isinstance = fake`
+#: replaces the guard's predicate without ever writing the name `isinstance`.
+_FORM_C_PROTECTED = frozenset({"isinstance", "builtins", "__builtins__"})
+
+
+def _form_c_protected_names(tree) -> set:
+    """Every name in ``tree`` whose meaning Form C depends on."""
+    names = set(_FORM_C_PROTECTED)
+    for node in tree.body if isinstance(tree, ast.Module) else []:
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            if alias.name in {"numpy", "contextlib"}:
+                names.add(alias.asname or alias.name)
+    return names
+
+
+def _form_c_trust_survives(tree) -> bool:
+    """Does this module leave Form C's protected objects alone?
+
+    Form C is sound only if, AT THE GUARD, ``np.ndarray`` is NumPy's array
+    type, ``isinstance`` is the builtin and ``nullcontext`` is contextlib's.
+    Checking that those NAMES are not reassigned is not enough. The same
+    substitution goes through ``setattr(np, "ndarray", object)``, through an
+    alias (``a = np`` then ``a.ndarray = object``), through
+    ``vars(np)["ndarray"] = ...``, through ``builtins.isinstance = ...``, or by
+    handing the module to anything at all. Replace ``np.ndarray`` with
+    ``object`` and the guard becomes TRUE for an ``NpzFile``, which then goes
+    into the ``nullcontext`` arm that closes nothing -- the archive leaks while
+    the three lines still read character-for-character like production.
+
+    So the rule is not "these names are not rebound" but the narrower, purely
+    syntactic "these names are only ever READ, and only in the single position
+    each is legitimately used in": a module alias as the BASE of an attribute
+    access, ``isinstance`` as the FUNCTION of a call. Any other appearance -- a
+    bare argument, an assignment source, a return value, an element of a
+    container -- is refused WITHOUT asking what the receiver does with it,
+    because asking is dataflow analysis, and dataflow analysis is precisely
+    what this gate gave up in exchange for being sound.
+
+    TRUST BOUNDARY, stated plainly so it is not mistaken for more. This is a
+    repository regression gate reading one module's literal source. It cannot
+    resist monkeypatching performed by an IMPORTED module, a plugin, a
+    `conftest`, a `.pth` file or the interpreter's start-up path, and it does
+    not claim to. It closes the class a reviewer could have seen in the file in
+    front of them, which is the class that reaches production by accident.
+    """
+    names = _form_c_protected_names(tree)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Name) and node.id in names):
+            continue
+        if not isinstance(node.ctx, ast.Load):
+            return False
+        parent = parents.get(id(node))
+        if (isinstance(parent, ast.Attribute) and parent.value is node
+                and isinstance(parent.ctx, ast.Load)):
+            continue                      # `np.ndarray`, `contextlib.nullcontext`
+        if isinstance(parent, ast.Call) and parent.func is node:
+            continue                      # `isinstance(loaded, np.ndarray)`
+        # The attribute access must be a READ. `builtins.isinstance = fake`
+        # reads the name `builtins` and writes through it, which is the whole
+        # substitution done without the protected name ever being a target.
+        return False
+    return True
+
+
 def _is_bare_acquisition(statement, call) -> bool:
     """``<single bare name> = <the load>`` and nothing more elaborate.
 
@@ -328,11 +399,19 @@ def _guarded_owner_binding(statement, archive, tree):
     else <archive>`` -- in that ORIENTATION, which is the safety property and
     is asymmetric. Swapping the arms yields the same three lines and puts the
     ``NpzFile`` into the arm that closes nothing.
+
+    The shape is necessary and not sufficient. Form C is the only recognised
+    form whose safety depends on what other OBJECTS mean -- the guard's type,
+    the guard's predicate, the adapter -- so it alone also requires that this
+    module leaves those objects alone. See ``_form_c_trust_survives``, which
+    also states the trust boundary.
     """
     if not (isinstance(statement, ast.Assign)
             and len(statement.targets) == 1
             and isinstance(statement.targets[0], ast.Name)
             and isinstance(statement.value, ast.IfExp)):
+        return None
+    if not _form_c_trust_survives(tree):
         return None
     conditional = statement.value
     line = statement.lineno
@@ -1506,6 +1585,33 @@ _PLANTED_FORM_C = {
         "        else loaded\n"
         "    )\n"
         "    with owner as data:\n        return data['lattice']\n",
+    # The trust rule must not cost ORDINARY use of the protected modules.
+    # Production reads dozens of `np.<something>` attributes and calls
+    # `isinstance` freely; only writing through them, or handing them away,
+    # is refused.
+    "C-alongside-heavy-ordinary-numpy-attribute-use":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n"
+        "        grid = np.asarray(data['lattice'], dtype=np.float32)\n"
+        "        return np.mean(grid), np.zeros(3, dtype=np.uint8)\n",
+    "C-alongside-isinstance-used-elsewhere":
+        "import contextlib\nimport numpy as np\ndef g(x):\n"
+        "    return isinstance(x, dict) or isinstance(x, list)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "C-alongside-an-unrelated-setattr":
+        "import contextlib\nimport numpy as np\ndef f(p, holder):\n"
+        "    setattr(holder, 'seen', True)\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
 }
 
 _PLANTED_RECOGNISED = {**_PLANTED_FORM_A, **_PLANTED_FORM_B, **_PLANTED_FORM_C}
@@ -1818,6 +1924,114 @@ _PLANTED_PROVENANCE_LEAKS = {
         "    with owner as data:\n        return data['lattice']\n",
 }
 
+#: Form C's guard is only as good as the OBJECTS it names. Replace
+#: `np.ndarray` with `object` and the guard is true for an `NpzFile`, which
+#: then goes into the arm that closes nothing -- while the three lines still
+#: read character-for-character like the production loader. Checking that the
+#: names are not reassigned missed every spelling below, because none of them
+#: writes a protected name: they write THROUGH it, or hand it away.
+_PLANTED_FORM_C_TRUST_LEAKS = {
+    "setattr-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "setattr(np, 'ndarray', object)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "delattr-removes-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "delattr(np, 'ndarray')\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "vars-dict-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "vars(np)['ndarray'] = object\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "alias-then-attribute-store-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "numpy_alias = np\nnumpy_alias.ndarray = object\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "alias-then-setattr-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "numpy_alias = np\nsetattr(numpy_alias, 'ndarray', object)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "setattr-replaces-the-adapter":
+        "import contextlib\nimport numpy as np\n"
+        "setattr(contextlib, 'nullcontext', lambda x: x)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "alias-then-attribute-store-replaces-the-adapter":
+        "import contextlib\nimport numpy as np\n"
+        "cl = contextlib\ncl.nullcontext = lambda x: x\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "builtins-attribute-store-replaces-the-predicate":
+        "import builtins\nimport contextlib\nimport numpy as np\n"
+        "builtins.isinstance = lambda a, b: True\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "builtins-setattr-replaces-the-predicate":
+        "import builtins\nimport contextlib\nimport numpy as np\n"
+        "setattr(builtins, 'isinstance', lambda a, b: True)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "numpy-module-handed-to-a-mutator":
+        "import contextlib\nimport numpy as np\n"
+        "def patch(module):\n    module.ndarray = object\n"
+        "patch(np)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "contextlib-module-handed-to-a-mutator":
+        "import contextlib\nimport numpy as np\n"
+        "def patch(module):\n    module.nullcontext = lambda x: x\n"
+        "patch(contextlib)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "predicate-handed-away-for-later-substitution":
+        "import contextlib\nimport numpy as np\n"
+        "def keep(fn):\n    return fn\n"
+        "shim = keep(isinstance)\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+}
+
 _PLANTED_AUDITED_LEAKS = {
     f"{family}::{case}": source
     for family, cases in (
@@ -1826,6 +2040,7 @@ _PLANTED_AUDITED_LEAKS = {
         ("exitstack", _PLANTED_EXITSTACK_LEAKS),
         ("protocol", _PLANTED_PROTOCOL_LEAKS),
         ("provenance", _PLANTED_PROVENANCE_LEAKS),
+        ("form-c-trust", _PLANTED_FORM_C_TRUST_LEAKS),
     )
     for case, source in cases.items()
 }
@@ -1854,6 +2069,26 @@ _PLANTED_AUDITED_ALREADY_REJECTED = {
         "    owner = contextlib.nullcontext(loaded)"
         " if isinstance(loaded, np.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
+    # The two guard-type substitutions that DO write a protected name, and so
+    # were already caught by the rebinding check. Kept beside the ten spellings
+    # that were not, because the pair is the whole lesson: the difference
+    # between them is only where the assignment target happens to sit.
+    "direct-attribute-store-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "np.ndarray = object\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "dunder-dict-subscript-replaces-the-guard-type":
+        "import contextlib\nimport numpy as np\n"
+        "np.__dict__['ndarray'] = object\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
 }
 
 
@@ -1865,7 +2100,13 @@ def test_the_audited_false_certifications_are_refused(source):
     Each was reported OWNED by a matcher that had already been tightened twice
     against this same class of defect. That is the evidence: the shapes were not
     running out. What ends them is not knowing more shapes but recognising
-    fewer -- none of these is form A, B or C, and none of them ever will be.
+    fewer -- the first five families are not form A, B or C and never will be.
+
+    The `form-c-trust` family is the exception worth reading carefully. Those
+    twelve ARE form C, character for character, and they leak anyway, because
+    form C is the one recognised form whose safety depends on what other
+    objects mean. Narrowing the LANGUAGE could not close them; only requiring
+    that the module leave those objects alone could.
     """
     tree, call = _single_load(source)
     assert not _is_owned(tree, call)
