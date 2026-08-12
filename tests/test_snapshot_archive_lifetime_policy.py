@@ -457,157 +457,179 @@ def _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at) -> bool:
     return False
 
 
-def _acquisition_position(scope, call):
-    """Position of the smallest statement in ``scope`` that performs the load."""
-    best = _pos(call)
-    best_size = None
-    for node in _own_scope_nodes(scope):
-        if not isinstance(node, ast.stmt):
-            continue
-        if any(inner is call for inner in ast.walk(node)):
-            size = sum(1 for _ in ast.walk(node))
-            if best_size is None or size < best_size:
-                best, best_size = _pos(node), size
-    return best
+def _stmt_blocks(node):
+    """Every statement list ``node`` owns (body / orelse / finalbody / handlers)."""
+    blocks = []
+    for field in ("body", "orelse", "finalbody"):
+        value = getattr(node, field, None)
+        if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+            blocks.append(value)
+    for handler in getattr(node, "handlers", []) or []:
+        blocks.append(handler.body)
+    return blocks
+
+
+def _locate(scope, target):
+    """``(block, index)`` of the statement in ``scope`` containing ``target``.
+
+    Searches only this scope's own blocks -- never a nested ``def``, ``lambda``
+    or ``class``, which do not execute here.
+    """
+    def search(block):
+        for index, statement in enumerate(block):
+            if any(inner is target for inner in ast.walk(statement)):
+                for sub in _stmt_blocks(statement):
+                    hit = search(sub)
+                    if hit is not None:
+                        return hit
+                return (block, index)
+        return None
+
+    for outer in _stmt_blocks(scope):
+        hit = search(outer)
+        if hit is not None:
+            return hit
+    return None
+
+
+def _is_guarded_owner_binding(node, archive_key, call, prov):
+    """``owner = nullcontext(<archive>) if <guard> else <archive>``.
+
+    The ONLY role in which ``nullcontext`` is sound. Its ``__exit__`` is a
+    no-op, so it never closes anything -- it is acceptable here solely because
+    the guard sends the ndarray down the ``nullcontext`` arm while the raw
+    archive is handed to the ``with`` on the other arm. Both arms must denote
+    the archive, and the wrapping must have verified contextlib provenance.
+    """
+    if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.IfExp):
+        return None
+    keys = {archive_key}
+    body, orelse = node.value.body, node.value.orelse
+    for wrapped, raw in ((body, orelse), (orelse, body)):
+        if (_is_adapter_call(wrapped, prov, _NULLCONTEXT_NAMES)
+                and any(_denotes(a, keys, call, prov) for a in wrapped.args)
+                and _target_key(raw) == archive_key):
+            targets = [_target_key(target) for target in node.targets]
+            return targets[0] if len(targets) == 1 and targets[0] else None
+    return None
+
+
+def _owns_first(with_node, keys, call, prov):
+    """Is the archive the FIRST item of ``with_node``?
+
+    First matters. An earlier item's ``__enter__`` can raise, and if it does,
+    ours never runs -- the archive would be live and unmanaged.
+    """
+    if not with_node.items:
+        return False
+    return _denotes(with_node.items[0].context_expr, keys, call, prov)
 
 
 def _reaches_a_with(scope, call, tree=None) -> bool:
-    """Is ``call``'s result owned, judged in STATEMENT ORDER?
+    """Is ``call``'s archive ownership STRUCTURALLY guaranteed?
 
-    Accepted: ``with np.load(...)``; a contextlib adapter around it or around a
-    tracked alias; ``ExitStack.enter_context`` on a demonstrably tracked stack;
-    an alias later handed to a ``with``; and ``close()`` inside a ``finally``
-    that protects the archive's risky uses.
+    Admission is structural, not a search for an owner somewhere later in
+    source order. Flattened order is not reachability: an owner in a sibling
+    branch, inside a possibly-empty loop, under an unguarded ``if`` or after an
+    early exit is never reached on the path the acquisition takes. And a
+    ``with`` statement is not yet ownership -- ownership begins at a successful
+    ``__enter__``, so anything that can raise in between leaves the archive
+    live and unmanaged.
 
-    Guaranteed by construction:
-      * facts created BEFORE the load cannot be tainted by it;
-      * an alias captures the value at its own assignment point;
-      * rebinding the original name does not erase a valid earlier alias;
-      * rebinding an alias invalidates it from that point onward;
-      * an owner counts only AFTER acquisition;
-      * every alternative of a conditional owner must denote the archive;
-      * adapters need contextlib provenance, not a familiar-looking name.
+    THREE admissions, and nothing else:
 
-    Deliberately conservative. Remaining static limits, stated precisely and
-    without a blanket safety claim, because an earlier revision made one that
-    did not hold:
+    1. FUSED -- the load is the first ``with`` item's context expression, or
+       the sole argument of a provenance-verified CLOSING adapter that is.
+       Acquisition and protection are one operation, so the surrounding
+       ``if``/``for``/``try`` is irrelevant.
+    2. ADJACENT UNIT -- ``d = np.load(...)`` followed IMMEDIATELY, in the same
+       block, by ``with d as x:`` on a bare name; optionally with exactly one
+       intervening statement, which must be the guarded-``nullcontext`` owner
+       binding and nothing else. No other statement may intervene, because any
+       of them could raise.
+    3. LIVE EXITSTACK -- the load is handed to ``enter_context`` on a stack
+       bound by ``with ExitStack() as st:``, inside that ``with``.
+    4. PROTECTING FINALLY -- unchanged: a ``close()`` in a ``finally`` whose
+       ``Try`` spans every post-acquisition use.
 
-      * a ``with`` inside a conditional branch is accepted without proving that
-        branch runs. This is the one limit that can CERTIFY rather than merely
-        over-report, and it is why the gate is a review aid, not a proof.
-      * a load and an owner in mutually exclusive branches (load in ``if``,
-        owner in ``else``) is accepted. Such code would already fail at
-        runtime, but the gate does not reason about it.
-      * ownership handed to another function, or stored and closed elsewhere,
-        is not modelled -- reported unowned.
-      * a target whose key cannot be spelled statically (a computed subscript)
-        is untracked -- reported unowned.
-      * loops are not iterated. An owner inside the same loop as the load is
-        accepted; one outside it is rejected, since it would close only the
-        final iteration's archive.
-
-    Rebinding through ``for``, ``with ... as``, ``except ... as``, ``import
-    ... as``, augmented assignment, ``del``, ``match`` captures and tuple or
-    list targets IS modelled, and each invalidates the key from that point.
+    This is a STRUCTURAL guarantee, not a proof of exception safety. It does
+    not model delegation, aliasing chains, or ownership transferred to a
+    caller; every such case is reported UNOWNED. A conservative rejection of a
+    correct but unrecognised idiom is the intended trade -- certifying a leak
+    is the failure this gate exists to prevent.
     """
-    # Provenance comes from the MODULE's imports, so the tree is required:
-    # `contextlib` is imported at module scope, never inside the function.
     prov = _contextlib_provenance(tree if tree is not None else scope)
-
     nodes = _own_scope_nodes(scope)
-    live_stacks = _live_exit_stacks(scope, prov)
-    # Anchor acquisition to the STATEMENT that performs the load, not to the
-    # call expression's own column: `loaded = np.load(...)` starts to the left
-    # of the call, so comparing against the call would skip the very binding
-    # that introduces the archive.
-    acquired_at = _acquisition_position(scope, call)
 
-    ordered = sorted(nodes, key=_pos)
-    keys: set = set()
-    history = []  # (position, frozenset(keys)) after each step
-
-    for node in ordered:
-        if _pos(node) < acquired_at:
+    # (1) FUSED
+    for node in nodes:
+        if not isinstance(node, (ast.With, ast.AsyncWith)) or not node.items:
             continue
-        rebound = _rebinding_keys(node)
-        if rebound:
-            keys -= rebound
-            history.append((_pos(node), frozenset(keys)))
-            continue
-        binding = _binding_targets(node, call, keys, prov)
-        if binding is None:
-            continue
-        targets, denotes = binding
-        for target in targets:
-            written = _bound_names(target)
-            if denotes:
-                keys |= written
-            else:
-                keys -= written
-        history.append((_pos(node), frozenset(keys)))
+        first = node.items[0].context_expr
+        if isinstance(first, ast.NamedExpr):
+            first = first.value          # `with (d := np.load(...)) as x:`
+        if first is call:
+            return True
+        if (_is_adapter_call(first, prov, _CLOSING_ADAPTERS)
+                and any(arg is call for arg in first.args)):
+            return True
 
-    def keys_at(position):
-        current = frozenset()
-        for pos, snapshot in history:
-            if pos <= position:
-                current = snapshot
-        return current
-
-    def keys_before(position):
-        """Bindings in force just BEFORE ``position``.
-
-        `with d as d:` rebinds `d`, and that erasure is recorded at the `with`'s
-        own position -- so judging the context expression with `keys_at` would
-        apply the rebind before reading the very expression it rebinds. Reusing
-        the handle name is common; this keeps it correct.
-        """
-        current = frozenset()
-        for pos, snapshot in history:
-            if pos < position:
-                current = snapshot
-        return current
-
-    # If the load happens inside a loop, an owner OUTSIDE that loop closes only
-    # the final iteration's archive and leaks the rest, so it does not count.
-    loop_span = None
-    for node in _own_scope_nodes(scope):
-        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-            if any(inner is call for inner in ast.walk(node)):
-                span = _span(node)
-                if loop_span is None or span[0] > loop_span[0]:
-                    loop_span = span
-
-    def in_force(position):
-        return loop_span is None or loop_span[0] <= position <= loop_span[1]
-
-    for node in ordered:
-        if _pos(node) < acquired_at or not in_force(_pos(node)):
-            continue
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                if _denotes(item.context_expr, keys_before(_pos(node)), call, prov):
+    # (3) LIVE EXITSTACK
+    for key, (first_pos, last_pos) in _live_exit_stacks(scope, prov):
+        for node in nodes:
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"enter_context", "callback", "push"}
+                    and _target_key(node.func.value) == key
+                    and first_pos <= _pos(node) <= last_pos):
+                handed = list(node.args) + [
+                    arg.value for arg in node.args
+                    if isinstance(arg, ast.Attribute) and arg.attr == "close"
+                ]
+                if any(arg is call for arg in handed):
                     return True
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"enter_context", "callback", "push"}
-                and in_force(_pos(node))):
-            stack_key = _target_key(node.func.value)
-            inside = any(
-                stack_key == key and first <= _pos(node) <= last
-                for key, (first, last) in live_stacks
-            )
-            if not inside:
-                continue
-            current = keys_at(_pos(node))
-            handed = list(node.args)
-            # `stack.callback(d.close)` hands the bound method, not the archive.
-            handed += [
-                arg.value for arg in node.args
-                if isinstance(arg, ast.Attribute) and arg.attr == "close"
-            ]
-            if any(_denotes(arg, current, call, prov) for arg in handed):
-                return True
 
-    return _closed_in_a_protecting_finally(scope, call, acquired_at, keys_at)
+    # (2) ADJACENT UNIT
+    located = _locate(scope, call)
+    if located is None:
+        return False
+    block, index = located
+    acquisition = block[index]
+    if not isinstance(acquisition, ast.Assign) or acquisition.value is not call:
+        acquisition = None
+    if acquisition is not None:
+        archive_key = None
+        targets = [_target_key(target) for target in acquisition.targets]
+        if len(targets) == 1 and targets[0]:
+            archive_key = targets[0]
+        if archive_key:
+            keys = {archive_key}
+            cursor = index + 1
+            if cursor < len(block):
+                owner_key = _is_guarded_owner_binding(
+                    block[cursor], archive_key, call, prov)
+                if owner_key:
+                    keys.add(owner_key)
+                    cursor += 1
+            if cursor < len(block):
+                candidate = block[cursor]
+                if (isinstance(candidate, (ast.With, ast.AsyncWith))
+                        and _owns_first(candidate, keys, call, prov)
+                        and isinstance(candidate.items[0].context_expr, ast.Name)):
+                    return True
+
+    # (4) PROTECTING FINALLY
+    def keys_at(_position):
+        located_again = _locate(scope, call)
+        if located_again is None:
+            return frozenset()
+        blk, idx = located_again
+        stmt = blk[idx]
+        if isinstance(stmt, ast.Assign) and stmt.value is call:
+            found = {_target_key(x) for x in stmt.targets}
+            return frozenset(k for k in found if k)
+        return frozenset()
+
+    return _closed_in_a_protecting_finally(scope, call, _pos(call), keys_at)
 
 
 def _owned_load_calls(tree) -> set:
@@ -1187,12 +1209,6 @@ _PLANTED_ADAPTER_CORRECT = {
         "import numpy as np\ndef f(p):\n"
         "    with (d := np.load(str(p), allow_pickle=False)) as data:\n"
         "        return data['lattice']\n",
-    "stack-callback-close-in-a-live-stack":
-        "import contextlib\nimport numpy as np\ndef f(p):\n"
-        "    with contextlib.ExitStack() as stack:\n"
-        "        d = np.load(str(p), allow_pickle=False)\n"
-        "        stack.callback(d.close)\n"
-        "        return d['lattice']\n",
     "live-exitstack-enter-context":
         "import contextlib\nimport numpy as np\ndef f(p):\n"
         "    with contextlib.ExitStack() as stack:\n"
@@ -1205,6 +1221,29 @@ _PLANTED_ADAPTER_CORRECT = {
                          ids=list(_PLANTED_ADAPTER_LEAKS))
 def test_adapter_and_stack_leaks_are_not_certified(source):
     """`nullcontext` closes nothing, and an un-entered stack unwinds nothing."""
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+#: CONSERVATIVELY REJECTED. `stack.callback(d.close)` on a live ExitStack is
+#: correct, but the archive is acquired by a separate statement and handed over
+#: as a bound method rather than through `enter_context`, so the structural
+#: rule cannot see the transfer. Reported unowned BY DESIGN: rejecting a safe
+#: idiom costs a reviewer one look; certifying a leak costs the archive.
+_PLANTED_CONSERVATIVELY_REJECTED = {
+    "stack-callback-close-in-a-live-stack":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = np.load(str(p), allow_pickle=False)\n"
+        "        stack.callback(d.close)\n"
+        "        return d['lattice']\n",
+}
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_CONSERVATIVELY_REJECTED.values()),
+                         ids=list(_PLANTED_CONSERVATIVELY_REJECTED))
+def test_unmodelled_but_correct_delegation_is_reported_unowned(source):
+    """Documents the trade rather than hiding it."""
     tree, call = _single_load(source)
     assert not _reaches_a_with(_scope_of(tree, call), call, tree)
 
