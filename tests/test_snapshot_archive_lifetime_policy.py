@@ -255,7 +255,15 @@ _FORM_C_PROTECTED = frozenset({"isinstance", "builtins", "__builtins__"})
 
 
 def _form_c_protected_names(tree) -> set:
-    """Every name in ``tree`` whose meaning Form C depends on."""
+    """The names Form C's meaning depends on, as far as this rule tracks them.
+
+    ``isinstance``, ``builtins`` and ``__builtins__`` are returned
+    unconditionally, whether or not they appear in ``tree``; the module aliases
+    are resolved only from top-level ``import numpy`` / ``import contextlib``
+    statements, matched on the exact module name. So this is neither every name
+    that matters nor only names present -- see the trust boundary in
+    ``_form_c_trust_survives`` for what that leaves open.
+    """
     names = set(_FORM_C_PROTECTED)
     for node in tree.body if isinstance(tree, ast.Module) else []:
         if not isinstance(node, ast.Import):
@@ -280,21 +288,46 @@ def _form_c_trust_survives(tree) -> bool:
     into the ``nullcontext`` arm that closes nothing -- the archive leaks while
     the three lines still read character-for-character like production.
 
-    So the rule is not "these names are not rebound" but the narrower, purely
-    syntactic "these names are only ever READ, and only in the single position
-    each is legitimately used in": a module alias as the BASE of an attribute
-    access, ``isinstance`` as the FUNCTION of a call. Any other appearance -- a
-    bare argument, an assignment source, a return value, an element of a
-    container -- is refused WITHOUT asking what the receiver does with it,
-    because asking is dataflow analysis, and dataflow analysis is precisely
-    what this gate gave up in exchange for being sound.
+    So the rule is not "these names are not rebound" but: each protected NAME
+    may appear only in the single position it is legitimately used in -- a
+    module alias as the Load-ctx BASE of an attribute access, ``isinstance`` as
+    the FUNCTION of a call. Any other appearance -- a bare argument, an
+    assignment source, a return value, an element of a container -- is refused
+    WITHOUT asking what the receiver does with it, because asking is dataflow
+    analysis, and dataflow analysis is precisely what this gate gave up in
+    exchange for being sound.
 
-    TRUST BOUNDARY, stated plainly so it is not mistaken for more. This is a
-    repository regression gate reading one module's literal source. It cannot
-    resist monkeypatching performed by an IMPORTED module, a plugin, a
-    `conftest`, a `.pth` file or the interpreter's start-up path, and it does
-    not claim to. It closes the class a reviewer could have seen in the file in
-    front of them, which is the class that reaches production by accident.
+    TRUST BOUNDARY. Stated as a list of what is NOT covered, because the
+    previous wording here claimed to close "the class a reviewer could have
+    seen in the file", and that was measurably false.
+
+    Only the protected NAMES are watched, so every other way of naming the same
+    object walks straight through. All of these are same-module, module-level,
+    pre-guard substitutions of exactly the objects above, and all are still
+    reported OWNED:
+
+      * a longer write chain -- ``np.__dict__.update(ndarray=object)``,
+        ``np.__dict__.pop("ndarray")``,
+        ``builtins.__dict__.update(isinstance=...)``. Only the name's IMMEDIATE
+        parent is inspected, so a write further up the chain reads as a read;
+      * reaching the module by another route -- ``sys.modules["numpy"]``,
+        ``importlib.import_module("numpy")``, ``import builtins as b`` then
+        ``b.isinstance = ...``. ``sys``, ``importlib`` and an aliased
+        ``builtins`` are not protected names;
+      * binding without a name node -- ``globals()["isinstance"] = ...``,
+        ``exec("isinstance = ...")``;
+      * ``import numpy.linalg`` binds the same module object under the name
+        ``numpy`` while ``alias.name`` is ``"numpy.linalg"``, so that name is
+        never protected -- even though ``import numpy as np2`` IS.
+
+    Closing those needs module-identity and string-execution modelling, which
+    is the general analysis this gate exists without. They are recorded for
+    adjudication rather than patched one spelling at a time, because patching
+    spellings one at a time is what three previous rounds did.
+
+    Beyond the file, it cannot resist monkeypatching from an IMPORTED module, a
+    plugin, a `conftest`, a `.pth` file or the interpreter's start-up path, and
+    does not claim to.
     """
     names = _form_c_protected_names(tree)
     parents = {}
@@ -1587,8 +1620,19 @@ _PLANTED_FORM_C = {
         "    with owner as data:\n        return data['lattice']\n",
     # The trust rule must not cost ORDINARY use of the protected modules.
     # Production reads dozens of `np.<something>` attributes and calls
-    # `isinstance` freely; only writing through them, or handing them away,
-    # is refused.
+    # `isinstance` freely, and all of that is accepted.
+    #
+    # What it DOES cost, stated because the cost is larger than "mutation is
+    # refused" suggests: the rule refuses any appearance outside the one
+    # allowed position, so `if np is None:`, `hasattr(np, "ndarray")`,
+    # `dict(np=np)` and a plain alias `nps = np` all withdraw Form C from the
+    # file, though none mutates anything. That last one is not hypothetical --
+    # `scripts/acoustic_map.py`, `scripts/gpu_benchmark.py`,
+    # `scripts/run_v070_engine.py` and `scripts/continuous_evolution_ca.py` all
+    # write `_xp = np` for their GPU/CPU namespace switch. They pass this gate
+    # today only because their loads are form A, which never consults the trust
+    # rule; converting any of them to form C would be refused with no remedy
+    # short of deleting the switch. Recorded here rather than discovered later.
     "C-alongside-heavy-ordinary-numpy-attribute-use":
         "import contextlib\nimport numpy as np\ndef f(p):\n"
         "    loaded = np.load(str(p), allow_pickle=False)\n"
@@ -2070,9 +2114,10 @@ _PLANTED_AUDITED_ALREADY_REJECTED = {
         " if isinstance(loaded, np.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
     # The two guard-type substitutions that DO write a protected name, and so
-    # were already caught by the rebinding check. Kept beside the ten spellings
-    # that were not, because the pair is the whole lesson: the difference
-    # between them is only where the assignment target happens to sit.
+    # were already caught by the rebinding check. Kept beside the twelve
+    # spellings that were not, because the pair is the whole lesson: the
+    # difference between them is only where the assignment target happens to
+    # sit.
     "direct-attribute-store-replaces-the-guard-type":
         "import contextlib\nimport numpy as np\n"
         "np.ndarray = object\n"
