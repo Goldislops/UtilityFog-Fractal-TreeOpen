@@ -1237,6 +1237,169 @@ def test_discovery_finds_return_style_predicate_helpers():
     assert len(_permissive_closure_defaults(ast.parse(predicate))) == 1
     assert _asserts_closure(ast.parse('def t(h):\n    assert h.closed\n'))
 
+# --- control-flow admission controls ----------------------------------------
+#
+# Every shape in the first set was CERTIFIED by a matcher that searched
+# flattened source order for any later owner. Source order is not
+# reachability: an owner in a sibling branch, inside a possibly-empty loop,
+# under an unguarded `if`, or after an early exit is not reached on the path
+# the acquisition takes.
+#
+# The exception-edge cases matter for the same reason. Ownership begins at a
+# successful `__enter__`, not at the `with` statement, so anything that can
+# raise in between leaves an unmanaged window.
+
+_PLANTED_CONTROL_FLOW_LEAKS = {
+    "acquire-in-if-own-in-mutually-exclusive-else":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    if cond:\n        d = np.load(str(p), allow_pickle=False)\n"
+        "    else:\n        with d as x:\n            pass\n",
+    "acquire-in-try-own-in-except":
+        "import numpy as np\ndef f(p):\n"
+        "    try:\n        d = np.load(str(p), allow_pickle=False)\n"
+        "    except OSError:\n        with d as x:\n            pass\n"
+        "    return d['lattice']\n",
+    "acquire-and-own-in-different-if-arms":
+        "import numpy as np\ndef f(p, a, b):\n"
+        "    if a:\n        d = np.load(str(p), allow_pickle=False)\n"
+        "    elif b:\n        with d as x:\n            pass\n"
+        "    return d['lattice']\n",
+    "owner-inside-a-possibly-empty-for":
+        "import numpy as np\ndef f(p, items):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    for i in items:\n        with d as x:\n            pass\n"
+        "    return d['lattice']\n",
+    "owner-inside-a-possibly-zero-iteration-while":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    while cond:\n        with d as x:\n            pass\n"
+        "    return d['lattice']\n",
+    "owner-under-an-if-with-no-else":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    if cond:\n        with d as x:\n            pass\n"
+        "    return d['lattice']\n",
+    "owner-under-an-if-whose-else-does-not-own":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    if cond:\n        with d as x:\n            pass\n"
+        "    else:\n        pass\n"
+        "    return d['lattice']\n",
+    "early-return-bypasses-the-owner":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    if cond:\n        return d['lattice']\n"
+        "    with d as x:\n        pass\n",
+    "early-raise-bypasses-the-owner":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    if cond:\n        raise ValueError('x')\n"
+        "    with d as x:\n        pass\n",
+    "intervening-statement-can-raise":
+        "import numpy as np\ndef f(p, parse):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    meta = parse(d)\n"
+        "    with d as x:\n        pass\n",
+    "handler-returns-before-the-owner":
+        "import numpy as np\ndef f(p, validate):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        validate(d)\n"
+        "    except ValueError:\n        return None\n"
+        "    with d as x:\n        pass\n",
+    "earlier-with-item-may-prevent-our-enter":
+        "import numpy as np\ndef f(p, acquire_lock):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    with acquire_lock() as l, d as x:\n        pass\n",
+}
+
+#: Reproduced as red-team counterexamples but ALREADY rejected by the existing
+#: rebinding and adapter-provenance machinery. Regression locks, NOT
+#: failing-first evidence -- said plainly so the record is not overstated.
+_PLANTED_ALREADY_REJECTED = {
+    "rebound-before-ownership":
+        "import numpy as np\ndef f(p, normalise):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    d = normalise(d)\n"
+        "    with d as x:\n        pass\n",
+    "adapter-construction-can-fail-before-ownership":
+        "import contextlib\nimport numpy as np\ndef f(p, wrap):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    with contextlib.closing(wrap(d)) as x:\n        pass\n",
+}
+
+#: Shapes whose ownership IS structurally guaranteed. Without these the repair
+#: could pass by rejecting everything.
+_PLANTED_STRUCTURAL_OWNERSHIP = {
+    "fused-direct-with-np-load":
+        "import numpy as np\ndef f(p):\n"
+        "    with np.load(str(p), allow_pickle=False) as d:\n"
+        "        return d['lattice']\n",
+    "fused-inside-an-if":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    if cond:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            return d['lattice']\n",
+    "fused-inside-a-for-body":
+        "import numpy as np\ndef f(paths):\n"
+        "    for p in paths:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            pass\n",
+    "fused-inside-try":
+        "import numpy as np\ndef f(p):\n"
+        "    try:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            return d['lattice']\n"
+        "    except OSError:\n        return None\n",
+    "fused-in-a-closing-adapter":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "adjacent-owner-immediately-after-acquisition":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    with d as x:\n        return x['lattice']\n",
+    "production-guarded-conditional-owner":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "live-exitstack-enter-context":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "        return d['lattice']\n",
+    "protecting-finally-close":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        d.close()\n",
+}
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_CONTROL_FLOW_LEAKS.values()),
+                         ids=list(_PLANTED_CONTROL_FLOW_LEAKS))
+def test_control_flow_leaks_are_not_certified(source):
+    """Source order is not reachability, and a `with` statement is not yet
+    ownership -- ownership begins at a successful ``__enter__``."""
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_ALREADY_REJECTED.values()),
+                         ids=list(_PLANTED_ALREADY_REJECTED))
+def test_already_rejected_shapes_stay_rejected(source):
+    """Not failing-first: the unchanged matcher already refuses these."""
+    tree, call = _single_load(source)
+    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_STRUCTURAL_OWNERSHIP.values()),
+                         ids=list(_PLANTED_STRUCTURAL_OWNERSHIP))
+def test_structurally_guaranteed_ownership_is_accepted(source):
+    """The repair must not pass by rejecting everything."""
+    tree, call = _single_load(source)
+    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+
 def test_the_ownership_sweep_itself_can_see_a_planted_defect(tmp_path):
     """Non-vacuity for the sweep, not merely the matcher it calls.
 
