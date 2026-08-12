@@ -2,9 +2,12 @@
 
 Two independent gates, both static.
 
-1. OWNERSHIP -- every production NumPy load under `scripts/` and `vis/` must
-   hand its result to a `with`, so the archive is released at a defined point
-   rather than whenever finalisation happens to run.
+1. OWNERSHIP -- every production NumPy load under `scripts/` and `vis/` must be
+   written in one of THREE recognised syntactic forms, so the archive is
+   released at a defined point rather than whenever finalisation happens to run.
+   The claim is deliberately about FORM, not about safety: this gate does not
+   decide whether arbitrary code releases a resource, because three rounds of
+   review established that it cannot. See the note above Gate 1.
 
 2. PROOF INTEGRITY -- a closure assertion in the maintained snapshot tests may
    not be written with a permissive default such as
@@ -17,7 +20,10 @@ Both matchers carry planted non-vacuity guards, because "no findings" and
 
 Scope, stated plainly: this is a STATIC gate over literal source. It cannot
 prove an archive was released at runtime, and it does not attempt to model
-ownership handed to another function or stored on an object.
+ownership handed to another function or stored on an object. It also reports
+plenty of CORRECT code as unowned -- `try/finally`, `ExitStack`, `closing` and
+async spellings among them -- which is the trade that makes it sound rather
+than a defect awaiting a fix.
 """
 
 from __future__ import annotations
@@ -44,6 +50,33 @@ WORKSTREAM_B = "scripts/workstream_b_profile_predicates.py"
 # ---------------------------------------------------------------------------
 # Gate 1 -- production archive ownership
 # ---------------------------------------------------------------------------
+#
+# THE RECOGNISED LANGUAGE IS DELIBERATELY TINY, AND THAT IS THE DESIGN.
+#
+# Earlier revisions tried to be a general Python ownership analyser: adapters,
+# `ExitStack`, `try/finally`, aliases, walrus, tuple targets, async spellings.
+# Every review round found more shapes it certified while the archive leaked --
+# not because any single rule was careless, but because "does this arbitrary
+# code release a resource on every path" is not a question a syntactic matcher
+# can answer. Each patch bought one spelling and left the class open.
+#
+# So the question was changed. This gate no longer asks whether code is safe;
+# it asks whether code is one of THREE forms already known to be safe, which
+# between them cover every production site:
+#
+#   A. FUSED      -- `with np.load(...) as archive:`
+#   B. ADJACENT   -- `archive = np.load(...)` then immediately `with archive:`
+#   C. GUARDED    -- the exact production conditional-owner unit
+#
+# Everything else is reported UNOWNED, including correct code. That is not a
+# defect to be fixed later; it is the trade that makes the gate sound. A
+# maintainer who writes a correct idiom this gate does not know is told to use
+# one of the three, which costs a small edit. A gate that guesses at an
+# unfamiliar idiom costs an archive, silently, on the exceptional path.
+#
+# The consequence to accept honestly: this gate does NOT certify that
+# `scripts/` releases every archive. It certifies that every load in `scripts/`
+# is written in one of three forms whose release is structural.
 
 
 def _numpy_load_names(tree):
@@ -55,6 +88,10 @@ def _numpy_load_names(tree):
     produced zero matches, and a file with zero matches is skipped entirely --
     so an unowned archive in any of those spellings was invisible to this gate
     rather than merely unclassified.
+
+    This resolution stays deliberately BROAD, unlike everything below it. A
+    load this fails to see is not judged at all, so breadth here is the
+    conservative direction; breadth in the ownership rules is not.
     """
     module_names = {"np", "numpy"}
     direct_names = set()
@@ -122,678 +159,248 @@ def _np_load_calls(node, names=None) -> list:
     return found
 
 
-def _enclosing_scopes(tree) -> list:
-    """Every function body in ``tree``, plus the module itself."""
-    return [tree] + [
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+def _statement_blocks(tree):
+    """Every statement list in ``tree`` -- module body, function and class
+    bodies, ``if``/``else``, loop bodies, ``try`` parts, ``with`` bodies.
 
-
-def _scope_of(tree, call):
-    """The innermost function containing ``call``, or the module tree."""
-    best, best_size = tree, None
-    for scope in _enclosing_scopes(tree):
-        if scope is tree:
-            continue
-        if any(node is call for node in ast.walk(scope)):
-            size = sum(1 for _ in ast.walk(scope))
-            if best_size is None or size < best_size:
-                best, best_size = scope, size
-    return best
-
-
-def _own_scope_nodes(scope) -> list:
-    """Nodes belonging to ``scope`` itself, not to a nested function or lambda.
-
-    A ``with`` inside a nested ``def`` that is never called owns nothing in the
-    outer function, so descending into one would certify a leak.
+    Forms B and C are properties of ADJACENT STATEMENTS IN ONE BLOCK, so the
+    block is the whole unit of analysis. This replaced a scope walk that had to
+    reason about which nodes "belong" to a scope, then about source positions
+    within it, then about which bindings were still live at a position -- three
+    layers of approximation, each of which shipped a false certification.
     """
-    out = []
-
-    def walk(node):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.Lambda, ast.ClassDef)):
-                continue
-            out.append(child)
-            walk(child)
-
-    walk(scope)
-    return out
-
-
-def _pos(node):
-    """Source position, used to reason about statement ORDER.
-
-    Order is the whole point. An earlier revision computed a whole-scope
-    fixed point over name membership, which cannot tell an alias created
-    BEFORE acquisition from one created after, cannot keep a valid alias alive
-    once the original name is rebound, and cannot tell a `close()` that runs
-    before the load from one that runs after.
-    """
-    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
-
-
-def _target_key(node):
-    """A stable textual key for an assignment target or context expression.
-
-    ``d`` -> ``"d"``; ``self.data`` -> ``"self.data"``; ``cache["s"]`` ->
-    ``"cache['s']"``. A QUALIFIED key is what stops ``self.data = np.load(...)``
-    from tainting ``self``, after which any ``with self.<anything>`` in the
-    method would have certified the load.
-    """
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        base = _target_key(node.value)
-        return f"{base}.{node.attr}" if base else None
-    if isinstance(node, ast.Subscript):
-        base = _target_key(node.value)
-        if base is None or not isinstance(node.slice, ast.Constant):
-            return None
-        return f"{base}[{node.slice.value!r}]"
-    return None
-
-
-#: Adapters that genuinely CLOSE what they wrap.
-#:
-#: `nullcontext` is deliberately NOT here. Its `__exit__` is a no-op: it
-#: discards the wrapped object's own `__exit__`, so
-#: ``with nullcontext(np.load(p)) as d:`` never closes the archive. It is sound
-#: only in the guarded conditional shape below, where it wraps the ndarray arm
-#: and the raw archive goes to the `with` on the other arm.
-_CLOSING_ADAPTERS = {"closing", "aclosing"}
-
-#: Recognised, but only inside a guarded conditional -- never on its own.
-_NULLCONTEXT_NAMES = {"nullcontext"}
-
-_ADAPTER_NAMES = _CLOSING_ADAPTERS | _NULLCONTEXT_NAMES
-
-
-def _contextlib_provenance(tree):
-    """What this module may legitimately call an ownership adapter.
-
-    Returns ``(module_aliases, bare_names, stack_factories)``.
-
-    Provenance is checked because a NAME proves nothing:
-    ``logger.nullcontext(loaded)`` and ``logger.enter_context(...)`` are
-    arbitrary methods that happen to share a spelling with the real thing, and
-    an earlier revision accepted both.
-
-    An import proves nothing on its own either. ``import contextlib`` followed
-    by ``contextlib = fake`` leaves the name spelled identically at the use
-    site while denoting something whose ``closing`` need not close anything, so
-    every name an import binds here is dropped again if the file rebinds it.
-    Module aliases and directly imported adapter names are both covered, and so
-    are the ``ExitStack`` factories, which are trusted the same way.
-    """
-    module_aliases, bare_names, stack_factories, bare_kind = set(), set(), set(), {}
-    established = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "contextlib":
-                    module_aliases.add(alias.asname or "contextlib")
-                    established.append(node)
-        elif isinstance(node, ast.ImportFrom) and node.module == "contextlib":
-            for alias in node.names:
-                if alias.name in _ADAPTER_NAMES:
-                    bound = alias.asname or alias.name
-                    bare_names.add(bound)
-                    bare_kind[bound] = alias.name
-                    established.append(node)
-                elif alias.name in {"ExitStack", "AsyncExitStack"}:
-                    stack_factories.add(alias.asname or alias.name)
-                    established.append(node)
-    rebound = _rebound_names(tree, established)
-    module_aliases -= rebound
-    bare_names -= rebound
-    stack_factories -= rebound
-    bare_kind = {name: kind for name, kind in bare_kind.items() if name in bare_names}
-    return module_aliases, bare_names, stack_factories, bare_kind
-
-
-def _is_adapter_call(expr, prov, names) -> bool:
-    """A contextlib adapter from ``names``, with verified provenance and arity.
-
-    ARITY is load-bearing, not tidiness. ``closing(np.load(p), other)`` raises
-    ``TypeError`` -- but only AFTER ``np.load`` has already opened the archive,
-    and the exception propagates out of a statement that never entered a
-    ``with``, so the archive is left live and unmanaged by the very expression
-    that looks like it owns it. Exactly one positional argument, no keywords and
-    no unpacking is the only call that can actually be the adapter this gate
-    models; anything else is refused rather than guessed at.
-    """
-    if not isinstance(expr, ast.Call):
-        return False
-    if expr.keywords or len(expr.args) != 1 or isinstance(expr.args[0], ast.Starred):
-        return False
-    module_aliases, bare_names, _stacks, bare_kind = prov
-    func = expr.func
-    if (isinstance(func, ast.Attribute) and func.attr in names
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases):
-        return True
-    # A bare name must resolve to the RIGHT adapter: `from contextlib import
-    # nullcontext as nc` must not satisfy a check for a closing adapter.
-    return (isinstance(func, ast.Name) and func.id in bare_names
-            and bare_kind.get(func.id) in names)
-
-
-def _live_exit_stacks(scope, prov) -> list:
-    """``(key, span)`` for stacks that are actually ENTERED by a ``with``.
-
-    A stack only unwinds when its ``__exit__`` runs, so ``st = ExitStack()``
-    without a ``with`` closes nothing, and a stack whose ``with`` has already
-    unwound closes nothing either. An earlier revision tracked stack names in a
-    whole-scope, order-blind set with no rebinding invalidation -- exactly the
-    defect the archive-key logic had been rewritten to remove.
-
-    Being inside the span is necessary and NOT sufficient. The binding must also
-    survive: ``stack = fake`` inside the block leaves the real stack entered and
-    unwinding correctly while ``stack.enter_context(...)`` hands the archive to
-    something else entirely, which is a leak wearing the shape of the supported
-    idiom. A stack rebound anywhere in its own span is dropped.
-    """
-    module_aliases, _bare, stack_factories, _kinds = prov
-    live = []
-    for node in _own_scope_nodes(scope):
-        if not isinstance(node, (ast.With, ast.AsyncWith)):
-            continue
-        for item in node.items:
-            value = item.context_expr
-            if not isinstance(value, ast.Call) or item.optional_vars is None:
-                continue
-            func = value.func
-            ok = (
-                (isinstance(func, ast.Attribute)
-                 and func.attr in {"ExitStack", "AsyncExitStack"}
-                 and isinstance(func.value, ast.Name)
-                 and func.value.id in module_aliases)
-                or (isinstance(func, ast.Name) and func.id in stack_factories)
-            )
-            if not ok:
-                continue
-            key = _target_key(item.optional_vars)
-            if key and not _rebound_inside_span(scope, key, node):
-                live.append((key, _span(node)))
-    return live
-
-
-def _rebound_inside_span(scope, key, establishing) -> bool:
-    """Is ``key`` rebound inside ``establishing``'s span by anything else?
-
-    The ``with`` that entered the stack binds the name itself, so it is excluded
-    by identity; every other binding form in the span invalidates it.
-    """
-    first, last = _span(establishing)
-    for node in _own_scope_nodes(scope):
-        if node is establishing:
-            continue
-        if not (first <= _pos(node) <= last):
-            continue
-        if key in _all_bindings(node):
-            return True
-    return False
-
-
-def _denotes(expr, keys, call, prov) -> bool:
-    """Does ``expr`` certainly denote the archive at this point?
-
-    EVERY alternative of a conditional must denote it. An earlier revision
-    combined the two arms with ``or``, so a one-sided
-    ``nullcontext(loaded) if condition else unrelated`` -- which hands an
-    unrelated object to the ``with`` on the false branch -- was accepted.
-
-    The guarded ``nullcontext`` shape is NOT recognised here. It has exactly one
-    home, ``_is_guarded_owner_binding``, which is the only place that validates
-    the guard. This function once carried a second, weaker copy of that rule
-    which accepted either arm as the wrapped one and never looked at the test at
-    all -- so it admitted the reversed orientation, the one that puts the
-    ``NpzFile`` into the arm that closes nothing.
-    """
-    if expr is call:
-        return True
-    key = _target_key(expr)
-    if key is not None and key in keys:
-        return True
-    if isinstance(expr, ast.NamedExpr):
-        return _denotes(expr.value, keys, call, prov)
-    if isinstance(expr, ast.IfExp):
-        return (_denotes(expr.body, keys, call, prov)
-                and _denotes(expr.orelse, keys, call, prov))
-    if _is_adapter_call(expr, prov, _CLOSING_ADAPTERS):
-        return any(_denotes(arg, keys, call, prov) for arg in expr.args)
-    return False
-
-
-def _bound_names(target) -> set:
-    """Every name a binding target writes, recursing tuples, lists and stars.
-
-    ``_target_key`` returns ``None`` for a tuple, so an earlier revision could
-    not INVALIDATE through ``loaded, meta = something_else, None`` -- the key
-    survived and a later ``with`` certified an archive that had been replaced.
-    """
-    keys = set()
-    if isinstance(target, (ast.Tuple, ast.List)):
-        for element in target.elts:
-            keys |= _bound_names(element)
-        return keys
-    if isinstance(target, ast.Starred):
-        return _bound_names(target.value)
-    key = _target_key(target)
-    if key:
-        keys.add(key)
-    return keys
-
-
-def _rebinding_keys(node) -> set:
-    """Names ``node`` rebinds through a form that is not a plain assignment.
-
-    ``for x in ...``, ``with ... as x``, ``except ... as x``, ``import ... as
-    x``, ``x += ...``, ``del x`` and ``match``-captures all rebind at runtime.
-    An earlier revision recognised only assignments, so every one of these left
-    the tracked key in place and a later ``with`` on that name certified the
-    original archive -- defeating the module's own rebinding control through a
-    different spelling.
-    """
-    keys = set()
-    if isinstance(node, (ast.For, ast.AsyncFor)):
-        keys |= _bound_names(node.target)
-    elif isinstance(node, (ast.With, ast.AsyncWith)):
-        for item in node.items:
-            if item.optional_vars is not None:
-                keys |= _bound_names(item.optional_vars)
-    elif isinstance(node, ast.ExceptHandler):
-        if node.name:
-            keys.add(node.name)
-    elif isinstance(node, (ast.Import, ast.ImportFrom)):
-        for alias in node.names:
-            keys.add(alias.asname or alias.name.split(".")[0])
-    elif isinstance(node, ast.AugAssign):
-        keys |= _bound_names(node.target)
-    elif isinstance(node, ast.Delete):
-        for target in node.targets:
-            keys |= _bound_names(target)
-    elif isinstance(node, getattr(ast, "MatchAs", ())) and getattr(node, "name", None):
-        keys.add(node.name)
-    elif isinstance(node, getattr(ast, "MatchStar", ())) and getattr(node, "name", None):
-        keys.add(node.name)
-    return keys
-
-
-def _all_bindings(node) -> set:
-    """Every name ``node`` binds, by ANY form -- plain assignment included.
-
-    ``_rebinding_keys`` deliberately covers only the non-assignment spellings.
-    Reference LIVENESS needs the whole picture: ``contextlib = fake``,
-    ``np = None`` and ``def closing(...)`` each stop a name denoting what its
-    import bound just as thoroughly as a ``for`` target does.
-    """
-    keys = set(_rebinding_keys(node))
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            keys |= _bound_names(target)
-    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-        keys |= _bound_names(node.target)
-    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        keys.add(node.name)
-    elif isinstance(node, ast.arg):
-        keys.add(node.arg)
-    return keys
+        for _field, value in ast.iter_fields(node):
+            if (isinstance(value, list) and value
+                    and all(isinstance(item, ast.stmt) for item in value)):
+                yield value
 
 
 def _rebound_names(tree, established) -> set:
-    """Names rebound anywhere in ``tree``, ignoring the nodes that BOUND them.
+    """Every name ``tree`` can make mean something other than its import.
 
-    Whole-tree and order-blind ON PURPOSE. A name that is rebound anywhere is
-    refused everywhere, which over-rejects a file that rebinds after its last
-    use -- the conservative direction. The alternative, trusting a name because
-    the rebinding is textually later, is how ``contextlib = fake`` kept
-    certifying archives.
+    Whole-tree and order-blind ON PURPOSE: a name rebound anywhere is refused
+    everywhere. That over-rejects a file which rebinds after its last use, and
+    that is the direction to be wrong in.
+
+    Attribute and subscript targets contribute their ROOT name, because
+    ``contextlib.nullcontext = fake`` leaves ``contextlib`` itself intact while
+    changing the only thing this gate ever reads off it.
     """
     skip = {id(node) for node in established}
     rebound = set()
     for node in ast.walk(tree):
         if id(node) in skip:
             continue
-        rebound |= _all_bindings(node)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            rebound.add(node.id)
+        elif (isinstance(node, (ast.Attribute, ast.Subscript))
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            root = node
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name):
+                rebound.add(root.id)
+        elif isinstance(node, ast.arg):
+            rebound.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rebound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            rebound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                rebound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, getattr(ast, "MatchAs", ())) and getattr(node, "name", None):
+            rebound.add(node.name)
+        elif isinstance(node, getattr(ast, "MatchStar", ())) and getattr(node, "name", None):
+            rebound.add(node.name)
+        elif isinstance(node, getattr(ast, "MatchMapping", ())) and getattr(node, "rest", None):
+            rebound.add(node.rest)
     return rebound
 
 
-def _numpy_import_aliases(tree) -> set:
-    """Names that still denote the NumPy MODULE by live import provenance.
+def _live_module_aliases(tree, module, before_line) -> set:
+    """Names certainly denoting ``module`` at ``before_line``.
 
-    Deliberately narrower than ``_numpy_load_names``, which must be broad
-    because a load it fails to see is not judged at all. A guard is only sound
-    if ``ndarray`` is read off the real NumPy module where it is used, so an
-    assignment-made alias (``nps = np``) and any name rebound anywhere in the
-    file are both refused -- the first because it is not import provenance, the
-    second because the name no longer denotes the import.
+    Three requirements, each of which was a false certification:
+
+      * the ``import`` must be a statement of the MODULE BODY -- one nested in
+        a function, a class, an ``if TYPE_CHECKING:`` block or a
+        ``try/except ImportError`` need not have run, or be in scope, where the
+        guard is written;
+      * it must PRECEDE the use;
+      * the name must not be rebound anywhere in the file.
+
+    Only ``import <module>`` counts. ``from`` imports bind a member, not the
+    module, and are not part of the recognised language.
     """
-    aliases, established = set(), []
-    for node in ast.walk(tree):
+    aliases, established = {}, []
+    for node in tree.body if isinstance(tree, ast.Module) else []:
         if not isinstance(node, ast.Import):
             continue
         for alias in node.names:
-            if alias.name == "numpy":
-                aliases.add(alias.asname or "numpy")
+            if alias.name == module:
+                name = alias.asname or module
+                aliases.setdefault(name, node.lineno)
                 established.append(node)
-    return aliases - _rebound_names(tree, established)
+    rebound = _rebound_names(tree, established)
+    return {name for name, line in aliases.items()
+            if line < before_line and name not in rebound}
 
 
-def _is_sound_ndarray_guard(test, archive_key, tree) -> bool:
-    """``isinstance(<archive>, <numpy>.ndarray)``, and nothing looser.
+def _is_bare_acquisition(statement, call) -> bool:
+    """``<single bare name> = <the load>`` and nothing more elaborate.
 
-    The guard is the ONLY reason the ``nullcontext`` arm is sound: it is what
-    sends an ``NpzFile`` down the RAW arm, where the ``with`` closes it, and an
-    ndarray -- which owns nothing -- into the arm whose ``__exit__`` is a no-op.
-    An arbitrary condition, a test of some other object, a different type, a
-    shadowed ``isinstance`` or an ``ndarray`` read off something that is not
-    NumPy all leave the archive in the arm that closes nothing, while the shape
-    still reads exactly like the production construction.
+    A tuple target, an attribute or subscript target, an annotated assignment
+    with a wrapper, or a walrus are all refused: each needs a different rule
+    about what the name means afterwards, and every such rule was a way in.
     """
-    if not isinstance(test, ast.Call) or test.keywords:
+    return (isinstance(statement, ast.Assign)
+            and statement.value is call
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name))
+
+
+def _owns_the_name(statement, name) -> bool:
+    """A SYNCHRONOUS ``with`` whose FIRST context item is exactly ``name``.
+
+    First, because an earlier item's ``__enter__`` can raise and ours would
+    then never run. Synchronous, because ``NpzFile`` implements ``__enter__``
+    and not ``__aenter__``: ``async with`` on one raises ``TypeError`` after
+    the archive is already open, which is a leak, not a type error.
+    """
+    return (isinstance(statement, ast.With)
+            and bool(statement.items)
+            and isinstance(statement.items[0].context_expr, ast.Name)
+            and statement.items[0].context_expr.id == name)
+
+
+def _is_production_guard(test, archive, tree, line) -> bool:
+    """``isinstance(<archive>, <numpy>.ndarray)`` -- the exact production test.
+
+    The guard is the entire reason the ``nullcontext`` arm is sound: it is what
+    sends an ``NpzFile``, the only object here holding a file handle, down the
+    RAW arm where the ``with`` closes it. Any weakening -- an arbitrary
+    condition, a different subject, a different type, a shadowed or spoofed
+    ``isinstance``, an ``ndarray`` read off something that is not NumPy --
+    routes the archive into the arm whose ``__exit__`` does nothing.
+    """
+    if not isinstance(test, ast.Call) or test.keywords or len(test.args) != 2:
+        return False
+    if any(isinstance(arg, ast.Starred) for arg in test.args):
         return False
     if not (isinstance(test.func, ast.Name) and test.func.id == "isinstance"):
         return False
     if "isinstance" in _rebound_names(tree, []):
         return False
-    if len(test.args) != 2 or any(isinstance(a, ast.Starred) for a in test.args):
-        return False
     subject, expected = test.args
-    if _target_key(subject) != archive_key:
+    if not (isinstance(subject, ast.Name) and subject.id == archive):
         return False
     return (isinstance(expected, ast.Attribute) and expected.attr == "ndarray"
             and isinstance(expected.value, ast.Name)
-            and expected.value.id in _numpy_import_aliases(tree))
+            and expected.value.id in _live_module_aliases(tree, "numpy", line))
 
 
-def _binding_targets(node, call, keys, prov):
-    """``(targets, denotes)`` for an assignment-like ``node``, else ``None``."""
-    if isinstance(node, ast.Assign):
-        targets, value = node.targets, node.value
-    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-        targets, value = [node.target], node.value
-    else:
+def _is_nullcontext_wrap(expr, archive, tree, line) -> bool:
+    """``<contextlib>.nullcontext(<archive>)``, module-qualified, one argument.
+
+    Module-qualified ONLY: all three production sites spell it that way, and a
+    directly imported ``nullcontext`` is therefore surface with no caller to
+    justify it. Exactly one positional argument and no keywords, because
+    ``nullcontext(archive, other)`` raises ``TypeError`` -- after ``np.load``
+    has opened the archive, out of a statement that never entered a ``with``.
+    """
+    if not isinstance(expr, ast.Call) or expr.keywords or len(expr.args) != 1:
+        return False
+    argument = expr.args[0]
+    if not (isinstance(argument, ast.Name) and argument.id == archive):
+        return False
+    func = expr.func
+    return (isinstance(func, ast.Attribute) and func.attr == "nullcontext"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in _live_module_aliases(tree, "contextlib", line))
+
+
+def _guarded_owner_binding(statement, archive, tree):
+    """The owner name bound by the exact production conditional, else ``None``.
+
+    ``owner = nullcontext(<archive>) if isinstance(<archive>, np.ndarray)
+    else <archive>`` -- in that ORIENTATION, which is the safety property and
+    is asymmetric. Swapping the arms yields the same three lines and puts the
+    ``NpzFile`` into the arm that closes nothing.
+    """
+    if not (isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and isinstance(statement.value, ast.IfExp)):
         return None
-    if value is call:
-        return targets, True
-    if isinstance(value, ast.Tuple):
-        matched = []
-        for target in targets:
-            if isinstance(target, ast.Tuple):
-                for sub, element in zip(target.elts, value.elts):
-                    if element is call:
-                        matched.append(sub)
-        if matched:
-            return matched, True
-    return targets, _denotes(value, keys, call, prov)
+    conditional = statement.value
+    line = statement.lineno
+    if not _is_production_guard(conditional.test, archive, tree, line):
+        return None
+    if not _is_nullcontext_wrap(conditional.body, archive, tree, line):
+        return None
+    if not (isinstance(conditional.orelse, ast.Name)
+            and conditional.orelse.id == archive):
+        return None
+    return statement.targets[0].id
 
 
-def _span(node):
-    """(first, last) source positions covered by ``node``."""
-    positions = [_pos(n) for n in ast.walk(node) if hasattr(n, "lineno")]
-    return (min(positions), max(positions)) if positions else (_pos(node), _pos(node))
+def _is_owned(tree, call) -> bool:
+    """Is ``call``'s archive written in one of the THREE recognised forms?
 
+    A. FUSED -- the load IS the first context item of a synchronous ``with``.
+       Acquisition and protection are one operation, so it does not matter what
+       ``if``, loop or ``try`` the statement sits in: whenever the load runs,
+       the ``with`` runs.
 
-def _closed_in_a_protecting_finally(scope, guard, acquired_at, keys) -> bool:
-    """Is a tracked target closed in ``guard``'s ``finally``, which must protect
-    every risky use?
+    B. ADJACENT -- ``archive = np.load(...)`` followed IMMEDIATELY, in the same
+       statement block, by a synchronous ``with`` on that exact bare name.
+       Nothing may intervene, because anything that can raise between the two
+       leaves the archive live and unmanaged.
 
-    A bare ``d.close()`` after a member access does NOT own the archive: if the
-    access raises, the close is never reached.
+    C. GUARDED -- the acquisition, then the exact production conditional-owner
+       assignment, then the owning ``with``: three statements, adjacent, in one
+       block.
 
-    Four things this deliberately requires, each of which was a false negative
-    when it was missing:
-
-      * the ``Try`` must be the statement IMMEDIATELY following the acquisition
-        in the same block -- checked by the caller, because a ``Try`` reached
-        only under an ``if``, only inside a possibly-empty loop, in a sibling
-        branch, or after a statement that can raise does not cover every
-        post-acquisition path, and this function used to accept ANY ``Try`` in
-        the scope;
-      * the ``Try`` and the ``close()`` must belong to THIS scope -- a close
-        inside a nested ``def`` or ``lambda`` registered for later is not run
-        here;
-      * the ``close()`` must be an unconditional statement of ``finalbody``,
-        not buried in an ``if``;
-      * EVERY use of the archive after acquisition must sit inside that
-        ``Try`` -- including uses that are not subscripts, such as passing the
-        archive to a function or iterating it, which an earlier revision could
-        not see, making its ``all(...)`` vacuously true.
+    Anything else is UNOWNED, including correct code. See the note at the top
+    of this gate for why that is the design and not an omission.
     """
-    if not isinstance(guard, ast.Try) or not guard.finalbody or not keys:
-        return False
-    scope_nodes = _own_scope_nodes(scope)
-    in_scope = {id(node) for node in scope_nodes}
+    # A -- FUSED. A purely local property of the load's own parent, so no scope
+    # or ordering analysis is involved at all.
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.With) and node.items
+                and node.items[0].context_expr is call):
+            return True
 
-    closes = [
-        statement.value for statement in guard.finalbody
-        if isinstance(statement, ast.Expr)
-        and isinstance(statement.value, ast.Call)
-        and isinstance(statement.value.func, ast.Attribute)
-        and statement.value.func.attr == "close"
-        and id(statement.value) in in_scope
-        and _target_key(statement.value.func.value) in keys
-    ]
-    if not closes:
-        return False
-    first, last = _span(guard)
-    risky = []
-    for inner in scope_nodes:
-        if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
-            if inner.id in keys and _pos(inner) > acquired_at:
-                risky.append(_pos(inner))
-        elif isinstance(inner, (ast.Subscript, ast.Attribute)):
-            if _target_key(inner.value) in keys and _pos(inner) > acquired_at:
-                risky.append(_pos(inner))
-    return not [use for use in risky if not (first <= use <= last)]
-
-
-def _stmt_blocks(node):
-    """Every statement list ``node`` owns (body / orelse / finalbody / handlers)."""
-    blocks = []
-    for field in ("body", "orelse", "finalbody"):
-        value = getattr(node, field, None)
-        if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
-            blocks.append(value)
-    for handler in getattr(node, "handlers", []) or []:
-        blocks.append(handler.body)
-    return blocks
-
-
-def _locate(scope, target):
-    """``(block, index)`` of the statement in ``scope`` containing ``target``.
-
-    Searches only this scope's own blocks -- never a nested ``def``, ``lambda``
-    or ``class``, which do not execute here.
-    """
-    def search(block):
+    # B and C -- the load must be the whole right-hand side of a bare-name
+    # assignment, and the statements that follow it in ITS OWN block decide.
+    for block in _statement_blocks(tree):
         for index, statement in enumerate(block):
-            if any(inner is target for inner in ast.walk(statement)):
-                for sub in _stmt_blocks(statement):
-                    hit = search(sub)
-                    if hit is not None:
-                        return hit
-                return (block, index)
-        return None
-
-    for outer in _stmt_blocks(scope):
-        hit = search(outer)
-        if hit is not None:
-            return hit
-    return None
-
-
-def _is_guarded_owner_binding(node, archive_key, call, prov, tree):
-    """``owner = nullcontext(<archive>) if isinstance(<archive>, np.ndarray)
-    else <archive>`` -- that construction, in that orientation, and no other.
-
-    The ONLY role in which ``nullcontext`` is sound. Its ``__exit__`` is a
-    no-op, so it never closes anything; it is acceptable here solely because the
-    guard sends the ndarray down the ``nullcontext`` arm while the raw archive
-    is handed to the ``with`` on the other arm.
-
-    So the ORIENTATION is the safety property, and it is asymmetric. Accepting
-    either arm as the wrapped one -- which an earlier revision did -- admits
-    ``loaded if isinstance(loaded, np.ndarray) else nullcontext(loaded)``, which
-    is the same three lines with the arms swapped and puts the ``NpzFile``, the
-    one object here that holds a file handle, into the arm that closes nothing.
-    An unvalidated test is the same defect in a milder spelling: with an
-    arbitrary ``condition`` the archive reaches the no-op arm whenever that
-    condition happens to be true.
-    """
-    if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.IfExp):
-        return None
-    ifexp = node.value
-    if not _is_sound_ndarray_guard(ifexp.test, archive_key, tree):
-        return None
-    if not (_is_adapter_call(ifexp.body, prov, _NULLCONTEXT_NAMES)
-            and _denotes(ifexp.body.args[0], {archive_key}, call, prov)):
-        return None
-    if _target_key(ifexp.orelse) != archive_key:
-        return None
-    targets = [_target_key(target) for target in node.targets]
-    return targets[0] if len(targets) == 1 and targets[0] else None
-
-
-def _owns_first(with_node, keys, call, prov):
-    """Is the archive the FIRST item of ``with_node``?
-
-    First matters. An earlier item's ``__enter__`` can raise, and if it does,
-    ours never runs -- the archive would be live and unmanaged.
-    """
-    if not with_node.items:
-        return False
-    return _denotes(with_node.items[0].context_expr, keys, call, prov)
-
-
-def _reaches_a_with(scope, call, tree=None) -> bool:
-    """Is ``call``'s archive ownership STRUCTURALLY guaranteed?
-
-    Admission is structural, not a search for an owner somewhere later in
-    source order. Flattened order is not reachability: an owner in a sibling
-    branch, inside a possibly-empty loop, under an unguarded ``if`` or after an
-    early exit is never reached on the path the acquisition takes. And a
-    ``with`` statement is not yet ownership -- ownership begins at a successful
-    ``__enter__``, so anything that can raise in between leaves the archive
-    live and unmanaged.
-
-    FOUR admissions, and nothing else:
-
-    1. FUSED -- the load is the first ``with`` item's context expression, or
-       the SOLE positional argument (no keywords, no unpacking) of a CLOSING
-       adapter that is, named through a contextlib import the file has not
-       since rebound. Acquisition and protection are one operation, so the
-       surrounding ``if``/``for``/``try`` is irrelevant.
-    2. ADJACENT UNIT -- ``d = np.load(...)`` followed IMMEDIATELY, in the same
-       block, by ``with d as x:`` on a bare name; optionally with exactly one
-       intervening statement, which must be the guarded-``nullcontext`` owner
-       binding in its exact production orientation, with a validated
-       ``isinstance(d, np.ndarray)`` test, and nothing else. No other statement
-       may intervene, because any of them could raise.
-    3. LIVE EXITSTACK -- the load is the sole positional argument of
-       ``enter_context`` on a stack bound by ``with ExitStack() as st:``, called
-       inside that ``with`` while the name still denotes the entered stack.
-       ``callback`` and ``push`` are NOT admitted: neither closes an archive
-       handed to it directly, and no separately proven safe form of either is
-       implemented here.
-    4. PROTECTING FINALLY -- a ``close()`` in the ``finally`` of a ``Try`` that
-       IMMEDIATELY follows the acquisition in the same block and spans every
-       post-acquisition use. Adjacency is what makes it structural: a ``Try``
-       reached only under a condition protects only the paths that reach it.
-
-    This is a STRUCTURAL guarantee, not a proof of exception safety. It does
-    not model delegation, aliasing chains, or ownership transferred to a
-    caller; every such case is reported UNOWNED. A conservative rejection of a
-    correct but unrecognised idiom is the intended trade -- certifying a leak
-    is the failure this gate exists to prevent.
-    """
-    module = tree if tree is not None else scope
-    prov = _contextlib_provenance(module)
-    nodes = _own_scope_nodes(scope)
-
-    # (1) FUSED
-    for node in nodes:
-        if not isinstance(node, (ast.With, ast.AsyncWith)) or not node.items:
-            continue
-        first = node.items[0].context_expr
-        if isinstance(first, ast.NamedExpr):
-            first = first.value          # `with (d := np.load(...)) as x:`
-        if first is call:
-            return True
-        if (_is_adapter_call(first, prov, _CLOSING_ADAPTERS)
-                and any(arg is call for arg in first.args)):
-            return True
-
-    # (3) LIVE EXITSTACK -- `enter_context` only. `stack.callback(np.load(p))`
-    # registers the ARCHIVE as if it were a callable, so unwinding raises
-    # `TypeError` instead of closing anything, and `push` expects an exit
-    # callback rather than a resource. Both were admitted here; both are refused
-    # now, along with any call that passes the load as one argument among
-    # several, since only the sole-argument transfer is the modelled one.
-    for key, (first_pos, last_pos) in _live_exit_stacks(scope, prov):
-        for node in nodes:
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "enter_context"
-                    and _target_key(node.func.value) == key
-                    and first_pos <= _pos(node) <= last_pos
-                    and not node.keywords and len(node.args) == 1
-                    and node.args[0] is call):
+            if not _is_bare_acquisition(statement, call):
+                continue
+            archive = statement.targets[0].id
+            if index + 1 < len(block) and _owns_the_name(block[index + 1], archive):
                 return True
-
-    # (2) ADJACENT UNIT
-    located = _locate(scope, call)
-    if located is None:
-        return False
-    block, index = located
-    acquisition = block[index]
-    if not isinstance(acquisition, ast.Assign) or acquisition.value is not call:
-        acquisition = None
-    if acquisition is None:
-        return False
-    targets = [_target_key(target) for target in acquisition.targets]
-    if len(targets) != 1 or not targets[0]:
-        return False
-    archive_key = targets[0]
-
-    keys = {archive_key}
-    cursor = index + 1
-    if cursor < len(block):
-        owner_key = _is_guarded_owner_binding(
-            block[cursor], archive_key, call, prov, module)
-        if owner_key:
-            keys.add(owner_key)
-            cursor += 1
-    if cursor < len(block):
-        candidate = block[cursor]
-        if (isinstance(candidate, (ast.With, ast.AsyncWith))
-                and _owns_first(candidate, keys, call, prov)
-                and isinstance(candidate.items[0].context_expr, ast.Name)):
-            return True
-
-    # (4) PROTECTING FINALLY -- the `Try` must be the very next statement, so
-    # that reaching the acquisition means reaching the protection.
-    if index + 1 >= len(block):
-        return False
-    return _closed_in_a_protecting_finally(
-        scope, block[index + 1], _pos(call), {archive_key})
+            if index + 2 < len(block):
+                owner = _guarded_owner_binding(block[index + 1], archive, tree)
+                if owner and _owns_the_name(block[index + 2], owner):
+                    return True
+            # The acquisition has been found; a statement lives in exactly one
+            # block, so no other block can own this archive.
+            return False
+    return False
 
 
 def _owned_load_calls(tree) -> set:
-    """Ids of the NumPy loads in ``tree`` whose archive reaches an owner."""
+    """Ids of the NumPy loads in ``tree`` written in a recognised form."""
     names = _numpy_load_names(tree)
-    owned = set()
-    for call in _np_load_calls(tree, names):
-        if _reaches_a_with(_scope_of(tree, call), call, tree):
-            owned.add(id(call))
-    return owned
+    return {id(call) for call in _np_load_calls(tree, names)
+            if _is_owned(tree, call)}
 
 
 def _unowned_loads(root=None, dirs=None) -> dict:
-    """Map each swept file to how many of its NumPy loads reach no ``with``."""
+    """Map each swept file to how many of its NumPy loads are unrecognised."""
     root = _REPO_ROOT if root is None else root
     dirs = SWEPT_DIRS if dirs is None else dirs
     counts: dict = {}
@@ -835,7 +442,7 @@ def test_the_workstream_b_loader_owns_its_archive():
     assert len(calls) == 1, (
         f"expected exactly one np.load in load_snapshot, found {len(calls)}"
     )
-    assert _reaches_a_with(loader, calls[0], tree), (
+    assert _is_owned(tree, calls[0]), (
         "load_snapshot's archive is not handed to a `with`; release depends on "
         "finalisation, which does not hold on the exceptional path"
     )
@@ -1123,28 +730,26 @@ def test_the_ownership_matcher_detects_unowned_loads(source):
     owned.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize(
     "source",
-    [_PLANTED_DIRECT, _PLANTED_CONDITIONAL, _PLANTED_CLOSING,
-     _PLANTED_EXITSTACK, _PLANTED_TRY_FINALLY,
-     _PLANTED_ATTRIBUTE_CLOSE],
-    ids=["direct-with", "conditional-nullcontext", "contextlib-closing",
-         "exitstack-enter-context", "try-finally-close",
-         "attribute-target-closed"],
+    [_PLANTED_DIRECT, _PLANTED_CONDITIONAL],
+    ids=["direct-with", "conditional-nullcontext"],
 )
 def test_the_ownership_matcher_accepts_correct_shapes(source):
-    """A gate that rejects working code is worse than no gate.
+    """The two shapes production actually writes: form A and form C.
 
-    The conditional case is what `scripts/lucid_server.py` and
-    `scripts/portable_genome.py` actually do. The other four are standard
-    idioms a maintainer might reasonably convert to -- `ExitStack` especially,
-    since it is the usual answer to acquire-then-conditionally-own.
+    `contextlib.closing`, `ExitStack`, `try/finally` and an attribute-target
+    close used to be accepted here too. They are correct Python, and no
+    production site uses any of them; each was an admission whose rules kept
+    certifying leaks, so all four are now conservative rejections -- see
+    `_PLANTED_NARROWED_BY_THE_SMALL_LANGUAGE`, which keeps every one of them as
+    an explicit, named trade rather than deleting the evidence.
     """
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert _is_owned(tree, call)
 
 
 @pytest.mark.parametrize(
@@ -1158,7 +763,7 @@ def test_aliased_numpy_load_spellings_are_still_seen(source):
     invisible to this gate rather than merely unclassified.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 # --- rebinding-form and finally-shape controls ------------------------------
@@ -1268,20 +873,18 @@ def test_rebinding_and_finally_shapes_are_not_certified(source):
     """Thirteen ways to leak an archive while looking managed.
 
     Every one was reported OWNED before this control existed. What rejects them
-    NOW is worth stating exactly, because the honest answer is not the one the
-    shapes suggest: the structural contract retired the whole
-    replay-bindings-in-source-order machinery those first ten were written
-    against. A rebound name never gets the chance to be trusted, because the
-    rebinding is itself an intervening statement and the adjacent-unit rule
-    admits exactly one, the guarded owner binding. The last three are rejected
-    by the `finally` rules directly -- this scope only, unconditional in
-    `finalbody`, every post-acquisition use inside the `Try`.
+    NOW is worth stating exactly, because it is not what the shapes suggest:
+    there is no rebinding analysis and no `finally` analysis left to catch them.
+    The first ten die because a rebinding is a statement, and form B admits no
+    statement between the acquisition and the `with`. The last three die because
+    `try/finally` closure is not a recognised form at all.
 
     They stay because the SHAPES are the regression risk, whichever rule
-    currently catches them.
+    currently catches them -- and the rule that catches them today is the
+    cheapest one this file has ever had.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize(
@@ -1290,34 +893,32 @@ def test_rebinding_and_finally_shapes_are_not_certified(source):
      "def f(paths, report):\n"
      "    for p in paths:\n"
      "        with np.load(str(p), allow_pickle=False) as d:\n"
-     "            report(d['lattice'])\n",
-     "import numpy as np\n"
-     "def f(p, consume):\n"
-     "    d = np.load(str(p), allow_pickle=False)\n"
-     "    try:\n        return consume(d)\n"
-     "    finally:\n        d.close()\n"],
-    ids=["owner-inside-the-same-loop", "non-subscript-use-inside-the-try"],
+     "            report(d['lattice'])\n"],
+    ids=["owner-inside-the-same-loop"],
 )
 def test_the_stricter_rules_still_accept_correct_code(source):
-    """The tightening must not reject working idioms.
+    """A fused load inside a loop body is form A wherever it sits.
 
-    An owner in the same loop as the load is fine -- each iteration's archive is
-    closed. And a non-subscript use is fine when it sits inside the Try the
-    finally protects; it is only a problem outside it.
+    Each iteration's archive is closed by its own `with`, so the enclosing loop
+    is irrelevant -- which is the whole point of form A being a property of the
+    load's own parent node rather than of the surrounding control flow.
     """
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert _is_owned(tree, call)
 
-# --- adapter-semantics and ExitStack-liveness controls ----------------------
+# --- adapter-semantics and stack controls -----------------------------------
 #
 # `nullcontext.__exit__` is a NO-OP: it discards the wrapped object's own
 # `__exit__`. Treating it as an ownership adapter meant
 # `with nullcontext(np.load(p)) as d:` read as owned while leaking, and -- worse
 # -- deleting the `isinstance` guard from the production loader, the single most
-# likely simplification, still read as owned.
+# likely simplification, still read as owned. Form C is the one place
+# `nullcontext` is recognised, and only with that guard intact.
 #
-# An ExitStack only unwinds when its own `__exit__` runs, so a stack that was
-# never entered, or whose `with` has already unwound, closes nothing.
+# The stack shapes below were once judged by a liveness rule. There is no such
+# rule now -- `ExitStack` is not a recognised form in any spelling -- so they
+# are refused for the same reason `print(np.load(p))` is. Kept because the day
+# someone re-adds stack support, these are what fail.
 
 _PLANTED_ADAPTER_LEAKS = {
     "unconditional-nullcontext-wraps-the-archive":
@@ -1361,15 +962,6 @@ _PLANTED_ADAPTER_CORRECT = {
         "import numpy as np\ndef f(p):\n"
         "    d = np.load(str(p), allow_pickle=False)\n"
         "    with d as d:\n        return d['lattice']\n",
-    "walrus-directly-in-the-context-expression":
-        "import numpy as np\ndef f(p):\n"
-        "    with (d := np.load(str(p), allow_pickle=False)) as data:\n"
-        "        return data['lattice']\n",
-    "live-exitstack-enter-context":
-        "import contextlib\nimport numpy as np\ndef f(p):\n"
-        "    with contextlib.ExitStack() as stack:\n"
-        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
-        "        return d['lattice']\n",
 }
 
 
@@ -1378,14 +970,13 @@ _PLANTED_ADAPTER_CORRECT = {
 def test_adapter_and_stack_leaks_are_not_certified(source):
     """`nullcontext` closes nothing, and an un-entered stack unwinds nothing."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
-#: CONSERVATIVELY REJECTED. `stack.callback(d.close)` on a live ExitStack is
-#: correct, but the archive is acquired by a separate statement and handed over
-#: as a bound method rather than through `enter_context`, so the structural
-#: rule cannot see the transfer. Reported unowned BY DESIGN: rejecting a safe
-#: idiom costs a reviewer one look; certifying a leak costs the archive.
+#: CONSERVATIVELY REJECTED. `stack.callback(d.close)` on a live ExitStack does
+#: release the archive, but no `ExitStack` spelling is recognised at all now, so
+#: this is refused along with the rest. Reported unowned BY DESIGN: rejecting a
+#: safe idiom costs a reviewer one look; certifying a leak costs the archive.
 _PLANTED_CONSERVATIVELY_REJECTED = {
     "stack-callback-close-in-a-live-stack":
         "import contextlib\nimport numpy as np\ndef f(p):\n"
@@ -1396,16 +987,15 @@ _PLANTED_CONSERVATIVELY_REJECTED = {
 }
 
 
-#: Narrowed out of the accepted set by the structural contract, and kept as
-#: explicit conservative rejections rather than quietly deleted. Each is
-#: CORRECT Python; none is structurally guaranteed:
-#:   * walrus in an `if` TEST with the owner in the branch body -- if the
-#:     condition were false no owner would run, and a static rule cannot know
-#:     the test is total;
+#: Kept as explicit conservative rejections rather than quietly deleted. Each
+#: is CORRECT Python; none is form A, B or C:
+#:   * walrus in an `if` TEST with the owner in the branch body -- the load is
+#:     not the `with`'s context expression, and it is not a bare-name
+#:     assignment statement either;
 #:   * tuple binding `d, meta = np.load(...), None` -- the acquisition target
-#:     is not a single name, so the adjacent-unit rule cannot key on it;
-#:   * an alias that survives a later rebind -- the intervening statements are
-#:     not the one permitted owner binding, and either of them can raise.
+#:     is not a single bare name, so form B cannot key on it;
+#:   * an alias that survives a later rebind -- statements intervene between
+#:     the acquisition and the `with`, and form B admits none.
 _PLANTED_NARROWED_OUT = (
     _PLANTED_WALRUS, _PLANTED_TUPLE_ASSIGN, _PLANTED_ALIAS_SURVIVES_REBIND,
 )
@@ -1418,7 +1008,7 @@ _PLANTED_NARROWED_OUT = (
 def test_correct_but_unmodelled_shapes_are_reported_unowned(source):
     """Named as the trade they are, not hidden."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_CONSERVATIVELY_REJECTED.values()),
@@ -1426,7 +1016,7 @@ def test_correct_but_unmodelled_shapes_are_reported_unowned(source):
 def test_unmodelled_but_correct_delegation_is_reported_unowned(source):
     """Documents the trade rather than hiding it."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_ADAPTER_CORRECT.values()),
@@ -1441,7 +1031,7 @@ def test_adapter_and_stack_correct_shapes_are_accepted(source):
     boundary.
     """
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert _is_owned(tree, call)
 
 
 def test_discovery_finds_return_style_predicate_helpers():
@@ -1547,8 +1137,8 @@ _PLANTED_ALREADY_REJECTED = {
         "    with contextlib.closing(wrap(d)) as x:\n        pass\n",
 }
 
-#: Shapes whose ownership IS structurally guaranteed. Without these the repair
-#: could pass by rejecting everything.
+#: Forms A, B and C reached from various control-flow positions. Without these
+#: a narrowing could pass by rejecting everything.
 _PLANTED_STRUCTURAL_OWNERSHIP = {
     "fused-direct-with-np-load":
         "import numpy as np\ndef f(p):\n"
@@ -1570,10 +1160,6 @@ _PLANTED_STRUCTURAL_OWNERSHIP = {
         "        with np.load(str(p), allow_pickle=False) as d:\n"
         "            return d['lattice']\n"
         "    except OSError:\n        return None\n",
-    "fused-in-a-closing-adapter":
-        "import contextlib\nimport numpy as np\ndef f(p):\n"
-        "    with contextlib.closing(np.load(str(p), allow_pickle=False)) as d:\n"
-        "        return d['lattice']\n",
     "adjacent-owner-immediately-after-acquisition":
         "import numpy as np\ndef f(p):\n"
         "    d = np.load(str(p), allow_pickle=False)\n"
@@ -1583,16 +1169,6 @@ _PLANTED_STRUCTURAL_OWNERSHIP = {
         "    loaded = np.load(str(p), allow_pickle=False)\n"
         "    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
-    "live-exitstack-enter-context":
-        "import contextlib\nimport numpy as np\ndef f(p):\n"
-        "    with contextlib.ExitStack() as stack:\n"
-        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
-        "        return d['lattice']\n",
-    "protecting-finally-close":
-        "import numpy as np\ndef f(p):\n"
-        "    d = np.load(str(p), allow_pickle=False)\n"
-        "    try:\n        return d['lattice']\n"
-        "    finally:\n        d.close()\n",
 }
 
 
@@ -1602,7 +1178,7 @@ def test_control_flow_leaks_are_not_certified(source):
     """Source order is not reachability, and a `with` statement is not yet
     ownership -- ownership begins at a successful ``__enter__``."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_ALREADY_REJECTED.values()),
@@ -1610,7 +1186,7 @@ def test_control_flow_leaks_are_not_certified(source):
 def test_already_rejected_shapes_stay_rejected(source):
     """Not failing-first: the unchanged matcher already refuses these."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_STRUCTURAL_OWNERSHIP.values()),
@@ -1618,16 +1194,20 @@ def test_already_rejected_shapes_stay_rejected(source):
 def test_structurally_guaranteed_ownership_is_accepted(source):
     """The repair must not pass by rejecting everything."""
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert _is_owned(tree, call)
 
 # --- structural-admission boundary controls ---------------------------------
 #
 # Six routes by which an earlier revision certified a LEAKING archive as owned.
 # What makes them worth planting is that none of them looks wrong: each borrows
-# the vocabulary of a supported admission -- `nullcontext` with a guard, a live
-# `ExitStack`, `closing`, a `finally` that closes -- and spends it on something
-# that does not release the archive. A matcher that keys on the vocabulary
-# rather than the semantics passes all six.
+# the vocabulary of an admission that existed then -- `nullcontext` with a
+# guard, a live `ExitStack`, `closing`, a `finally` that closes -- and spends it
+# on something that does not release the archive. A matcher that keys on the
+# vocabulary rather than the semantics passes all six.
+#
+# Four of the six families below target admissions that no longer exist. Only
+# the guard and provenance families still exercise live rules; the rest are
+# preserved as the cost record of admissions this gate used to carry.
 
 #: (1) The guard, not `nullcontext`, is what makes the conditional owner sound.
 #: Without validating it, every one of these reads as the production shape.
@@ -1848,47 +1428,109 @@ _PLANTED_BOUNDARY_ALREADY_REJECTED = {
         "        pass\n",
 }
 
-#: Every admission the repair had to PRESERVE, one control each. Without these
-#: the six tightenings above could all be satisfied by refusing everything --
-#: and a gate that reports working code as a leak gets switched off.
-_PLANTED_ADMISSION_PRESERVED = {
-    "fused-direct-with-np-load":
+#: The recognised language, one load-bearing control per form. Without these
+#: the narrowing could pass by refusing everything -- and a gate that reports
+#: production as a leak gets switched off within the week.
+_PLANTED_FORM_A = {
+    "A-fused-with-np-load":
         "import numpy as np\ndef f(p):\n"
         "    with np.load(str(p), allow_pickle=False) as d:\n"
         "        return d['lattice']\n",
-    "fused-valid-closing-one-positional":
-        "import contextlib\nimport numpy as np\ndef f(p):\n"
-        "    with contextlib.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+    "A-fused-inside-an-if":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    if cond:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            return d['lattice']\n",
+    "A-fused-inside-a-loop-body":
+        "import numpy as np\ndef f(paths):\n"
+        "    for p in paths:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            pass\n",
+    "A-fused-inside-a-try":
+        "import numpy as np\ndef f(p):\n"
+        "    try:\n"
+        "        with np.load(str(p), allow_pickle=False) as d:\n"
+        "            return d['lattice']\n"
+        "    except OSError:\n        return None\n",
+    "A-fused-through-the-numpy-load-spelling":
+        "import numpy\ndef f(p):\n"
+        "    with numpy.load(str(p), allow_pickle=False) as d:\n"
         "        return d['lattice']\n",
-    "fused-closing-through-an-unrebound-module-alias":
-        "import contextlib as ctx\nimport numpy as np\ndef f(p):\n"
-        "    with ctx.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+    "A-fused-with-a-later-second-with-item":
+        "import numpy as np\ndef f(p, lock):\n"
+        "    with np.load(str(p), allow_pickle=False) as d, lock:\n"
         "        return d['lattice']\n",
-    "fused-closing-through-an-unrebound-direct-import":
-        "from contextlib import closing\nimport numpy as np\ndef f(p):\n"
-        "    with closing(np.load(str(p), allow_pickle=False)) as d:\n"
-        "        return d['lattice']\n",
-    "immediately-adjacent-ownership-by-the-archive-itself":
+}
+
+_PLANTED_FORM_B = {
+    "B-adjacent-owner-immediately-after-acquisition":
         "import numpy as np\ndef f(p):\n"
         "    d = np.load(str(p), allow_pickle=False)\n"
         "    with d as x:\n        return x['lattice']\n",
-    "exact-production-guarded-nullcontext":
+    "B-adjacent-owner-rebinding-the-same-name":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    with d as d:\n        return d['lattice']\n",
+    "B-adjacent-inside-a-loop-body":
+        "import numpy as np\ndef f(paths):\n"
+        "    for p in paths:\n"
+        "        d = np.load(str(p), allow_pickle=False)\n"
+        "        with d as x:\n            pass\n",
+}
+
+_PLANTED_FORM_C = {
+    "C-exact-production-unit":
         "import contextlib\nimport numpy as np\ndef f(p):\n"
         "    loaded = np.load(str(p), allow_pickle=False)\n"
-        "    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
-    "guarded-nullcontext-with-numpy-imported-unaliased":
+    "C-with-numpy-imported-unaliased":
         "import contextlib\nimport numpy\ndef f(p):\n"
         "    loaded = numpy.load(str(p), allow_pickle=False)\n"
         "    owner = contextlib.nullcontext(loaded)"
         " if isinstance(loaded, numpy.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
-    "guarded-nullcontext-through-an-unrebound-direct-import":
-        "from contextlib import nullcontext\nimport numpy as np\ndef f(p):\n"
+    "C-through-an-aliased-contextlib-import":
+        "import contextlib as ctx\nimport numpy as np\ndef f(p):\n"
         "    loaded = np.load(str(p), allow_pickle=False)\n"
-        "    owner = nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded\n"
+        "    owner = ctx.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
         "    with owner as data:\n        return data['lattice']\n",
-    "live-unrebound-exitstack-enter-context":
+    "C-written-over-several-physical-lines":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = (\n"
+        "        contextlib.nullcontext(loaded)\n"
+        "        if isinstance(loaded, np.ndarray)\n"
+        "        else loaded\n"
+        "    )\n"
+        "    with owner as data:\n        return data['lattice']\n",
+}
+
+_PLANTED_RECOGNISED = {**_PLANTED_FORM_A, **_PLANTED_FORM_B, **_PLANTED_FORM_C}
+
+#: CORRECT Python that the recognised language does not cover. Every one of
+#: these releases its archive; none is written in form A, B or C, so all are
+#: reported UNOWNED. They are kept -- not deleted -- because they are the
+#: PRICE of the narrowing, and a price that is not written down gets forgotten
+#: and then re-litigated. Four of them were accepted admissions before this
+#: pass; each admission cost more false certifications than it bought sites,
+#: and the production census found no site using any of them.
+_PLANTED_NARROWED_BY_THE_SMALL_LANGUAGE = {
+    "closing-adapter-around-the-load":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "closing-through-an-aliased-contextlib":
+        "import contextlib as ctx\nimport numpy as np\ndef f(p):\n"
+        "    with ctx.closing(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "closing-through-a-direct-import":
+        "from contextlib import closing\nimport numpy as np\ndef f(p):\n"
+        "    with closing(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "live-exitstack-enter-context":
         "import contextlib\nimport numpy as np\ndef f(p):\n"
         "    with contextlib.ExitStack() as stack:\n"
         "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
@@ -1896,40 +1538,65 @@ _PLANTED_ADMISSION_PRESERVED = {
     "live-exitstack-bound-to-an-attribute-target":
         "import contextlib\nimport numpy as np\nclass C:\n    def f(self, p):\n"
         "        with contextlib.ExitStack() as self.stack:\n"
-        "            d = self.stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "            d = self.stack.enter_context("
+        "np.load(str(p), allow_pickle=False))\n"
         "            return d['lattice']\n",
-    "adjacent-protecting-try-finally":
+    "protecting-try-finally-close":
         "import numpy as np\ndef f(p):\n"
         "    d = np.load(str(p), allow_pickle=False)\n"
         "    try:\n        return d['lattice']\n"
         "    finally:\n        d.close()\n",
-    "adjacent-protecting-try-finally-on-an-attribute-target":
+    "protecting-try-finally-on-an-attribute-target":
         "import numpy as np\nclass C:\n    def f(self, p):\n"
         "        self.data = np.load(str(p), allow_pickle=False)\n"
         "        try:\n            return self.data['lattice']\n"
         "        finally:\n            self.data.close()\n",
-    "adjacent-try-finally-with-a-non-subscript-use-inside":
+    "protecting-try-finally-with-a-non-subscript-use-inside":
         "import numpy as np\ndef f(p, consume):\n"
         "    d = np.load(str(p), allow_pickle=False)\n"
         "    try:\n        return consume(d)\n"
         "    finally:\n        d.close()\n",
+    "guarded-nullcontext-through-a-direct-import":
+        "from contextlib import nullcontext\nimport numpy as np\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "walrus-acquisition-in-the-context-expression":
+        "import numpy as np\ndef f(p):\n"
+        "    with (d := np.load(str(p), allow_pickle=False)) as data:\n"
+        "        return data['lattice']\n",
+    "tuple-acquisition-then-an-adjacent-owner":
+        "import numpy as np\ndef f(p):\n"
+        "    d, meta = np.load(str(p), allow_pickle=False), None\n"
+        "    with d as x:\n        return x['lattice']\n",
+    "attribute-target-acquisition-then-an-adjacent-owner":
+        "import numpy as np\nclass C:\n    def f(self, p):\n"
+        "        self.data = np.load(str(p), allow_pickle=False)\n"
+        "        with self.data as x:\n            return x['lattice']\n",
+    "stack-callback-close-on-a-live-stack":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = np.load(str(p), allow_pickle=False)\n"
+        "        stack.callback(d.close)\n"
+        "        return d['lattice']\n",
 }
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_ADMISSION_LEAKS.values()),
                          ids=list(_PLANTED_ADMISSION_LEAKS))
 def test_admission_boundary_leaks_are_not_certified(source):
-    """Every one of these was certified OWNED by the previous revision.
+    """Certified OWNED two revisions ago; refused by the guard, liveness,
+    arity, provenance and reachability checks added in the revision after.
 
-    They share a mechanism worth naming: the matcher recognised the SHAPE of an
-    admission -- a `nullcontext` conditional, a stack inside its `with`, a
-    `closing` call, a `finally` holding a `close()` -- without checking the one
-    property that made that shape safe. The guard, the liveness of the binding,
-    the arity, the provenance and the reachability are not decoration on those
-    rules; they are the rules.
+    Only two of those five checks still exist -- the form-C guard and import
+    provenance. The other three governed admissions that have since been
+    removed outright, which is why this set now costs nothing to keep and would
+    cost a great deal to have deleted: it is the record of what an admission
+    charged in exchange for the sites it covered.
     """
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
 @pytest.mark.parametrize("source", list(_PLANTED_BOUNDARY_ALREADY_REJECTED.values()),
@@ -1937,19 +1604,280 @@ def test_admission_boundary_leaks_are_not_certified(source):
 def test_boundary_shapes_already_rejected_stay_rejected(source):
     """Not failing-first: the unrepaired matcher refused these too."""
     tree, call = _single_load(source)
-    assert not _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert not _is_owned(tree, call)
 
 
-@pytest.mark.parametrize("source", list(_PLANTED_ADMISSION_PRESERVED.values()),
-                         ids=list(_PLANTED_ADMISSION_PRESERVED))
-def test_every_preserved_admission_is_still_accepted(source):
-    """The tightenings must cost no admission the contract promises to keep.
+@pytest.mark.parametrize("source", list(_PLANTED_RECOGNISED.values()),
+                         ids=list(_PLANTED_RECOGNISED))
+def test_the_recognised_forms_are_accepted(source):
+    """Forms A, B and C, which between them cover all 15 production sites.
 
-    Three of these are what production actually writes, and the rest are the
-    idioms a maintainer converting a loader would reach for first.
+    The narrowing has one obvious failure mode -- refusing everything -- and
+    these are what makes that fail loudly. Form B has no production user today;
+    it is recognised because it is the minimal safe shape a maintainer reaches
+    for when the load will not fit on the `with` line, and refusing it would
+    push people toward `try/finally`, which this gate no longer reads.
     """
     tree, call = _single_load(source)
-    assert _reaches_a_with(_scope_of(tree, call), call, tree)
+    assert _is_owned(tree, call)
+
+
+@pytest.mark.parametrize(
+    "source", list(_PLANTED_NARROWED_BY_THE_SMALL_LANGUAGE.values()),
+    ids=list(_PLANTED_NARROWED_BY_THE_SMALL_LANGUAGE))
+def test_correct_code_outside_the_recognised_language_is_reported_unowned(source):
+    """The price of the narrowing, written down instead of discovered later.
+
+    Every one of these RELEASES its archive. They are reported UNOWNED anyway,
+    because recognising them means carrying rules about adapters, stacks,
+    aliases and `finally` reachability -- and those rules, not the shapes, are
+    what kept certifying real leaks. A maintainer who hits one of these is told
+    to write form A, B or C, which is a small edit; the alternative is a gate
+    that guesses.
+    """
+    tree, call = _single_load(source)
+    assert not _is_owned(tree, call)
+
+
+# --- the audited false-certification matrix ---------------------------------
+#
+# Every shape below was reported OWNED by the matcher this pass replaces, and
+# every one of them LEAKS. They are grouped by the admission that certified
+# them, and all four of those admissions are now gone -- which is the point.
+# Patching these individually was tried; the shapes kept arriving because the
+# admissions, not the shapes, were the defect.
+#
+# They are kept as controls precisely BECAUSE the admissions are gone: nothing
+# stops a future maintainer re-adding `try/finally` or `ExitStack` support on a
+# reasonable-looking day, and these are what will fail when they do.
+
+#: The archive NAME is rebound inside the very `try` whose `finally` closes it,
+#: so the close runs on something else -- silently, with no exception.
+_PLANTED_TRY_REBINDING_LEAKS = {
+    "try-rebind-by-assignment":
+        "import numpy as np\ndef f(p, other):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        d = other\n        return d['lattice']\n"
+        "    finally:\n        d.close()\n",
+    "try-rebind-to-a-member-of-itself":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        d = d['lattice']\n        return d\n"
+        "    finally:\n        d.close()\n",
+    "try-rebind-by-a-loop-target":
+        "import numpy as np\ndef f(p, items):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        for d in items:\n            pass\n"
+        "    finally:\n        d.close()\n",
+    "try-rebind-by-with-as":
+        "import numpy as np\ndef f(p, other):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        with other as d:\n            pass\n"
+        "    finally:\n        d.close()\n",
+    "try-rebind-by-deletion":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        del d\n"
+        "    finally:\n        d.close()\n",
+    "try-rebind-by-a-pattern-capture":
+        "import numpy as np\ndef f(p, mm):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        match mm:\n            case [d]:\n                pass\n"
+        "    finally:\n        d.close()\n",
+}
+
+#: The `finally` runs, and still never performs a valid close.
+_PLANTED_FINALLY_LEAKS = {
+    "raising-statement-before-the-close":
+        "import numpy as np\ndef f(p, cleanup):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        cleanup()\n        d.close()\n",
+    "early-return-in-finalbody-before-the-close":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        if cond:\n            return None\n"
+        "        d.close()\n",
+    "close-supplied-invalid-arguments":
+        "import numpy as np\ndef f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        d.close(True)\n",
+}
+
+#: Registered on a stack that does not unwind it -- the stack is real, entered
+#: and correct; it simply no longer holds the archive when it exits.
+_PLANTED_EXITSTACK_LEAKS = {
+    "pop-all-after-registration":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "        keep = stack.pop_all()\n"
+        "        return d['lattice'], keep\n",
+    "generatorexp-defers-past-the-stack-lifetime":
+        "import contextlib\nimport numpy as np\ndef f(paths):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        return (stack.enter_context("
+        "np.load(str(p), allow_pickle=False)) for p in paths)\n",
+    "nested-function-replaces-the-stack":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.ExitStack() as stack:\n"
+        "        spare = contextlib.ExitStack()\n"
+        "        def swap():\n            nonlocal stack\n            stack = spare\n"
+        "        swap()\n"
+        "        d = stack.enter_context(np.load(str(p), allow_pickle=False))\n"
+        "        return d['lattice']\n",
+    "enter-context-in-an-earlier-with-item":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    stack = contextlib.ExitStack()\n"
+        "    with contextlib.nullcontext("
+        "stack.enter_context(np.load(str(p), allow_pickle=False))) as z, \\\n"
+        "         contextlib.ExitStack() as stack:\n"
+        "        return z['lattice']\n",
+}
+
+#: `NpzFile` is synchronous and has no `aclose`. Each of these opens the
+#: archive and THEN fails on the protocol, which is a leak, not a type error.
+_PLANTED_PROTOCOL_LEAKS = {
+    "aclosing-applied-to-an-npzfile":
+        "import contextlib\nimport numpy as np\nasync def f(p):\n"
+        "    async with contextlib.aclosing("
+        "np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "sync-aclosing-applied-to-an-npzfile":
+        "import contextlib\nimport numpy as np\ndef f(p):\n"
+        "    with contextlib.aclosing(np.load(str(p), allow_pickle=False)) as d:\n"
+        "        return d['lattice']\n",
+    "asyncwith-around-a-synchronous-archive":
+        "import numpy as np\nasync def f(p):\n"
+        "    async with np.load(str(p), allow_pickle=False) as d:\n"
+        "        return d['lattice']\n",
+    "asyncwith-around-an-adjacent-archive":
+        "import numpy as np\nasync def f(p):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    async with d as x:\n        return x['lattice']\n",
+}
+
+#: The import exists somewhere in the file, but does not certainly hold where
+#: the guard reads it -- so the guard raises after the archive is open.
+_PLANTED_PROVENANCE_LEAKS = {
+    "numpy-alias-imported-only-under-type-checking":
+        "import contextlib\nimport numpy\nfrom typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n    import numpy as np\ndef f(p):\n"
+        "    loaded = numpy.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "numpy-alias-imported-under-a-plain-conditional":
+        "import contextlib\nimport numpy\nFLAG = True\nif FLAG:\n"
+        "    import numpy as np\ndef f(p):\n"
+        "    loaded = numpy.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "numpy-alias-imported-in-another-function":
+        "import contextlib\nimport numpy\ndef helper():\n    import numpy as np\n"
+        "    return np\ndef f(p):\n"
+        "    loaded = numpy.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "numpy-alias-imported-only-inside-the-using-function":
+        "import contextlib\nimport numpy\ndef f(p):\n    import numpy as np\n"
+        "    loaded = numpy.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "contextlib-imported-under-a-plain-conditional":
+        "import numpy as np\nFLAG = True\nif FLAG:\n    import contextlib\n"
+        "def f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "contextlib-imported-only-inside-the-using-function":
+        "import numpy as np\ndef f(p):\n    import contextlib\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "match-mapping-rest-rebinds-the-numpy-alias":
+        "import contextlib\nimport numpy as np\ndef f(p, mm):\n"
+        "    match mm:\n        case {**np}:\n            pass\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "adapter-attribute-monkeypatched-on-the-module":
+        "import contextlib\nimport numpy as np\ndef f(p, fake):\n"
+        "    contextlib.nullcontext = fake\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+}
+
+_PLANTED_AUDITED_LEAKS = {
+    f"{family}::{case}": source
+    for family, cases in (
+        ("try-rebinding", _PLANTED_TRY_REBINDING_LEAKS),
+        ("finally", _PLANTED_FINALLY_LEAKS),
+        ("exitstack", _PLANTED_EXITSTACK_LEAKS),
+        ("protocol", _PLANTED_PROTOCOL_LEAKS),
+        ("provenance", _PLANTED_PROVENANCE_LEAKS),
+    )
+    for case, source in cases.items()
+}
+
+#: Reproduced while attacking the same boundaries, but the matcher being
+#: replaced ALREADY refused these. Regression locks, NOT failing-first
+#: evidence, and separated so the record is not overstated.
+_PLANTED_AUDITED_ALREADY_REJECTED = {
+    "early-control-transfer-before-the-protecting-try":
+        "import numpy as np\ndef f(p, cond):\n"
+        "    d = np.load(str(p), allow_pickle=False)\n"
+        "    if cond:\n        return None\n"
+        "    try:\n        return d['lattice']\n"
+        "    finally:\n        d.close()\n",
+    "numpy-alias-conditionally-imported-with-a-fallback-rebind":
+        "import contextlib\nimport numpy\ntry:\n    import numpy as np\n"
+        "except ImportError:\n    np = None\ndef f(p):\n"
+        "    loaded = numpy.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+    "contextlib-conditionally-imported-with-a-fallback-rebind":
+        "import numpy as np\ntry:\n    import contextlib\nexcept ImportError:\n"
+        "    contextlib = None\ndef f(p):\n"
+        "    loaded = np.load(str(p), allow_pickle=False)\n"
+        "    owner = contextlib.nullcontext(loaded)"
+        " if isinstance(loaded, np.ndarray) else loaded\n"
+        "    with owner as data:\n        return data['lattice']\n",
+}
+
+
+@pytest.mark.parametrize("source", list(_PLANTED_AUDITED_LEAKS.values()),
+                         ids=list(_PLANTED_AUDITED_LEAKS))
+def test_the_audited_false_certifications_are_refused(source):
+    """The findings that ended the general-analyser approach.
+
+    Each was reported OWNED by a matcher that had already been tightened twice
+    against this same class of defect. That is the evidence: the shapes were not
+    running out. What ends them is not knowing more shapes but recognising
+    fewer -- none of these is form A, B or C, and none of them ever will be.
+    """
+    tree, call = _single_load(source)
+    assert not _is_owned(tree, call)
+
+
+@pytest.mark.parametrize(
+    "source", list(_PLANTED_AUDITED_ALREADY_REJECTED.values()),
+    ids=list(_PLANTED_AUDITED_ALREADY_REJECTED))
+def test_audited_shapes_already_refused_stay_refused(source):
+    """Not failing-first: the previous matcher refused these too."""
+    tree, call = _single_load(source)
+    assert not _is_owned(tree, call)
 
 
 def test_the_guarded_production_loaders_are_still_owned():
