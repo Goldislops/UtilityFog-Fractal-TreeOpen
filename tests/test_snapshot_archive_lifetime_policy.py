@@ -15,19 +15,22 @@ assert on a real handle.
 
 WHAT REMAINS, and exactly what it claims. `NpzFile` releases its handle by
 setting `fid` to `None`, and `fid` is a CLASS attribute that is only assigned
-on the instance when `np.load` owned the file. So
+on the instance when `np.load` owned the file. So in
 
-    getattr(handle, "closed", True)
+    getattr(handle.fid, "closed", True)
 
-returns its default when the attribute is absent: it reports success for an
-archive that was never closed, and for one that was never even opened. That
-exact spelling is what defect 2 of this PR corrected, and this file exists to
-stop it coming back.
+the subject can be `None` -- an archive that never owned a file has `fid` at
+the class default -- and `getattr` then returns its own default rather than
+reading anything. The assertion reports success for an archive that was never
+closed, and for one that was never even opened. That is the spelling defect 2
+of this PR corrected, and this file exists to stop it coming back.
 
-The claim is deliberately that narrow. This forbids ONE spelling. It does not
-prove that closure assertions are non-vacuous in general -- a bare
-`assert handle.fid is None` used as the sole witness is equally permissive, and
-`h.__dict__.get("closed", True)`, a `getattr` whose attribute name is computed,
+The claim is deliberately that narrow. This forbids ONE spelling: a
+three-argument `getattr` calling the literal name `getattr` with the constant
+attribute `"closed"`. It does not prove that closure assertions are non-vacuous
+in general. A bare `assert handle.fid is None` used as the sole witness is
+equally permissive; `h.__dict__.get("closed", True)`, a `getattr` whose
+attribute name is computed, `builtins.getattr(...)`, an aliased `g = getattr`,
 and `unittest`'s `assertIsNone` are all invisible here. Nothing in this file
 should be read as evidence about any of those.
 """
@@ -35,6 +38,7 @@ should be read as evidence about any of those.
 from __future__ import annotations
 
 import ast
+import tempfile
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -115,3 +119,35 @@ def test_the_matcher_flags_a_planted_offender():
 def test_the_matcher_accepts_a_strict_control():
     """A proof that reads the handle state directly must not be flagged."""
     assert _permissive_closure_defaults(ast.parse(_PLANTED_STRICT)) == []
+
+
+def test_the_scan_itself_can_see_a_planted_file():
+    """Non-vacuity for the SCAN, not merely the matcher it calls.
+
+    The repository test asserts an empty mapping, and an empty mapping is also
+    what a broken walk, a wrong glob or a mangled relative path returns. The
+    two tests above exercise `_permissive_closure_defaults` in isolation; only
+    this one exercises the wiring from file-on-disk to offender mapping.
+
+    `assert scanned` alone would not do: it catches a glob matching ZERO files,
+    not one matching FEWER. `tests/` happens to be flat today, so swapping
+    `rglob` for `glob` would otherwise be undetectable -- which is exactly the
+    kind of silent narrowing this file exists to refuse.
+    """
+    with tempfile.TemporaryDirectory() as name:
+        root = Path(name)
+        (root / TEST_DIR / "nested").mkdir(parents=True)
+        (root / TEST_DIR / "test_offender.py").write_text(
+            _PLANTED_OFFENDER, encoding="utf-8")
+        (root / TEST_DIR / "nested" / "test_nested_offender.py").write_text(
+            _PLANTED_OFFENDER, encoding="utf-8")
+        (root / TEST_DIR / "test_strict.py").write_text(
+            _PLANTED_STRICT, encoding="utf-8")
+
+        offenders, scanned = _offenders(root=root)
+
+    assert scanned == 3, f"expected to read three planted files, read {scanned}"
+    assert offenders == {
+        f"{TEST_DIR}/nested/test_nested_offender.py": [2],
+        f"{TEST_DIR}/test_offender.py": [2],
+    }, offenders
