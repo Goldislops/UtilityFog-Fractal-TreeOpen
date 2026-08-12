@@ -55,3 +55,9 @@ jobs:
 
       - name: Run native test suite
         run: cargo test
+
+      - name: Compile benchmarks (no run)
+        run: cargo bench --no-run
+
+      - name: Type-check python-feature tests (no link)
+        run: cargo check --tests --features python
