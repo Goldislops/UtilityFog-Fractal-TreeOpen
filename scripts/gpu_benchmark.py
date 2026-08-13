@@ -125,6 +125,16 @@ def _load_snapshot(snapshot_path):
 
 def run_benchmarks(snapshot_path: str, num_steps: int = 10):
     """Run the full benchmark suite."""
+    # Refuse a nonpositive step count HERE, before anything observable happens.
+    # Previously the run proceeded through the banner, snapshot loading, rule
+    # loading, RNG construction, the temporary backend switch and every
+    # component benchmark, and only then failed in the timing aggregation --
+    # `np.min([])` on an empty list, or an unbound `first_metrics` because the
+    # step loop never ran. That is a long way to travel, and a lot of state to
+    # touch, to report an argument that was wrong before the function started.
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be positive, got {num_steps}")
+
     print("=" * 72)
     print("  Phase 14a GPU Benchmark — Medusa Stepping Pipeline")
     print("=" * 72)
@@ -170,39 +180,52 @@ def run_benchmarks(snapshot_path: str, num_steps: int = 10):
     # 1. count_neighbors_3d (CPU)
     # Force CPU mode temporarily
     import scripts.continuous_evolution_ca as ca_module
+    # BOTH originals are read before EITHER is written. Reading `_xp` after
+    # forcing `GPU_AVAILABLE = False` meant an engine without an `_xp`
+    # attribute left the backend pinned to CPU on the way out of the
+    # `AttributeError`.
     old_gpu = getattr(ca_module, 'GPU_AVAILABLE', False)
-    ca_module.GPU_AVAILABLE = False
     old_xp = ca_module._xp
+    ca_module.GPU_AVAILABLE = False
     ca_module._xp = np
 
-    median_cpu_neighbors = benchmark_component(
-        "count_neighbors_3d (CPU)",
-        lambda: count_neighbors_3d(lattice),
-        warmup=1, iterations=5
-    )
-    print(f"  count_neighbors_3d (CPU):     {median_cpu_neighbors:8.1f} ms")
+    # Everything that runs under the forced-CPU backend lives inside this
+    # `try`. The restore used to sit after the third benchmark on the success
+    # path only, so any failure in a component, or in the CPU preparation
+    # between them, left `scripts.continuous_evolution_ca` pinned to CPU for
+    # the rest of the process -- module globals, so every later user of the
+    # engine inherited it, including the GPU section immediately below.
+    try:
+        median_cpu_neighbors = benchmark_component(
+            "count_neighbors_3d (CPU)",
+            lambda: count_neighbors_3d(lattice),
+            warmup=1, iterations=5
+        )
+        print(f"  count_neighbors_3d (CPU):     {median_cpu_neighbors:8.1f} ms")
 
-    # 2. _separable_box_filter_3d
-    test_field = np.random.rand(*shape).astype(np.float32)
-    median_box_cpu = benchmark_component(
-        "box_filter_3d R=12 (CPU)",
-        lambda: _separable_box_filter_3d(test_field, radius=12),
-        warmup=1, iterations=5
-    )
-    print(f"  box_filter_3d R=12 (CPU):     {median_box_cpu:8.1f} ms")
+        # 2. _separable_box_filter_3d
+        test_field = np.random.rand(*shape).astype(np.float32)
+        median_box_cpu = benchmark_component(
+            "box_filter_3d R=12 (CPU)",
+            lambda: _separable_box_filter_3d(test_field, radius=12),
+            warmup=1, iterations=5
+        )
+        print(f"  box_filter_3d R=12 (CPU):     {median_box_cpu:8.1f} ms")
 
-    # 3. _max_neighbor_value
-    test_ages = memory_grid[0].copy()
-    median_maxn_cpu = benchmark_component(
-        "max_neighbor_value (CPU)",
-        lambda: _max_neighbor_value(test_ages),
-        warmup=1, iterations=5
-    )
-    print(f"  max_neighbor_value (CPU):     {median_maxn_cpu:8.1f} ms")
-
-    # Restore GPU state
-    ca_module.GPU_AVAILABLE = old_gpu
-    ca_module._xp = old_xp
+        # 3. _max_neighbor_value
+        test_ages = memory_grid[0].copy()
+        median_maxn_cpu = benchmark_component(
+            "max_neighbor_value (CPU)",
+            lambda: _max_neighbor_value(test_ages),
+            warmup=1, iterations=5
+        )
+        print(f"  max_neighbor_value (CPU):     {median_maxn_cpu:8.1f} ms")
+    finally:
+        # Restore GPU state -- on every exit, not just the successful one. The
+        # original exception is untouched: this clause neither swallows nor
+        # replaces it.
+        ca_module.GPU_AVAILABLE = old_gpu
+        ca_module._xp = old_xp
 
     # 4. GPU versions of same components (if available)
     if GPU_AVAILABLE:
