@@ -118,14 +118,34 @@ def get_active_nodes(config: dict) -> list:
 # Safety-net checks
 # ---------------------------------------------------------------------------
 
+def _probe_tcp(address: str, port: int, timeout: float) -> int:
+    """Open one TCP socket, probe ``(address, port)``, and close it.
+
+    Returns the raw ``connect_ex`` result; the caller decides what a value
+    means. The socket is closed on EVERY path, which is the whole point of the
+    helper: both probe sites previously called ``close()`` only after
+    ``settimeout()`` and ``connect_ex()`` had both returned, so an ``OSError``
+    from either one reached the caller's fallback with the descriptor still
+    open. The fallback then reported an unreachable peer, so a host that failed
+    this way leaked one descriptor per probe and stayed silent about it -- and
+    ``poll_gpu_temperatures`` runs once per GPU, on a loop, for the life of the
+    process.
+
+    Closing in ``finally`` also means an exception that is NOT ``OSError``
+    still propagates unchanged, but never with the socket left open.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        return sock.connect_ex((address, port))
+    finally:
+        sock.close()
+
+
 def check_vanguard_mcp(head_ip: str = "192.168.86.29", port: int = 50051,
                        timeout: float = 5.0) -> bool:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((head_ip, port))
-        sock.close()
-        return result == 0
+        return _probe_tcp(head_ip, port, timeout) == 0
     except OSError:
         return False
 
@@ -137,12 +157,11 @@ def poll_gpu_temperatures(nodes: list) -> Dict[str, float]:
         for gpu in node.get("gpus", []):
             key = f"{node_id}/{gpu['id']}"
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)
-                result = sock.connect_ex((node.get("ip", "127.0.0.1"),
-                                          node.get("grpc_port", 50051)))
-                sock.close()
+                result = _probe_tcp(node.get("ip", "127.0.0.1"),
+                                    node.get("grpc_port", 50051), 2.0)
                 if result == 0:
+                    # Reached only after `_probe_tcp` has closed the socket, so
+                    # no descriptor is held across temperature generation.
                     temps[key] = 55.0 + np.random.uniform(-5, 15)
                 else:
                     temps[key] = -1.0
