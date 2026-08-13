@@ -766,6 +766,91 @@ def test_an_engine_without_xp_is_left_completely_untouched():
     assert not hasattr(engine, "_xp"), "an `_xp` was invented that never existed"
 
 
+class _BetweenWrites(KeyboardInterrupt):
+    """Distinctive interrupt, so propagation can be asserted by identity."""
+
+
+def test_an_interrupt_between_the_two_forcing_writes_still_restores():
+    """The forcing assignments must be INSIDE the protected interval.
+
+    Capturing the originals outside the `try` is safe -- it mutates nothing --
+    but the moment the first global is written the `finally` must already be
+    established. With
+
+        ca_module.GPU_AVAILABLE = False
+        ca_module._xp = np
+        try:
+            ...
+        finally:
+            ...
+
+    an asynchronous interrupt delivered between those two writes unwinds past a
+    `finally` that does not yet exist, and the engine is left pinned to CPU
+    with nothing to put it back.
+
+    The interrupt is injected by a `sys.settrace` line hook that fires on a
+    STATE predicate rather than a hard-coded line number: the genuine
+    `run_benchmarks` frame, `GPU_AVAILABLE` already forced to False, and `_xp`
+    still holding the caller's sentinel. That is precisely the window, and it
+    keeps working if the surrounding code moves.
+
+    LIMITATION, stated rather than implied: this shows the window between the
+    two forcing writes is covered. It does not and cannot promise atomicity
+    against an asynchronous interruption delivered inside the cleanup itself --
+    an interrupt landing between the two restore assignments would still leave
+    the second one undone. No pure-Python construct closes that.
+    """
+    engine = _engine_stand_in()
+    sentinel_xp = object()
+    engine.GPU_AVAILABLE = True
+    engine._xp = sentinel_xp
+    archive = _FakeArchive(_contents())
+    boom = _BetweenWrites("between the forcing assignments")
+    components = []
+    fired = []
+
+    def _tripwire_component(name, fn, warmup=2, iterations=10):
+        components.append(name)
+        return 1.0
+
+    def _tracer(frame, event, arg):
+        if frame.f_code is not gpu_benchmark.run_benchmarks.__code__:
+            return None
+        if event == "line" and not fired:
+            ca = frame.f_locals.get("ca_module")
+            if (ca is not None
+                    and getattr(ca, "GPU_AVAILABLE", None) is False
+                    and getattr(ca, "_xp", None) is sentinel_xp):
+                fired.append(frame.f_lineno)
+                raise boom
+        return _tracer
+
+    previous_trace = sys.gettrace()
+    try:
+        with mock.patch.dict(sys.modules, {_ENGINE: engine}), \
+             mock.patch.object(_scripts_package, _ENGINE_ATTR, engine, create=True), \
+             mock.patch.object(gpu_benchmark.np, "load",
+                               mock.Mock(return_value=archive)), \
+             mock.patch.object(gpu_benchmark, "load_rule_spec",
+                               lambda path: {"rule": "stub"}), \
+             mock.patch.object(gpu_benchmark, "init_memory_grid",
+                               lambda shape: _grid(channels=8, size=shape[0])), \
+             mock.patch.object(gpu_benchmark, "benchmark_component",
+                               _tripwire_component), \
+             mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False):
+            sys.settrace(_tracer)
+            with pytest.raises(_BetweenWrites) as caught:
+                gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", 1)
+    finally:
+        sys.settrace(previous_trace)
+
+    assert fired, "the between-writes window was never reached"
+    assert caught.value is boom
+    assert engine.GPU_AVAILABLE is True, "flag left forced after the interrupt"
+    assert engine._xp is sentinel_xp
+    assert components == [], "a component ran despite the interrupt"
+
+
 def test_the_successful_path_still_sees_cpu_mode_for_all_three_components():
     """The repair must not weaken what the forced-CPU interval is for."""
     _archive, rec = _run_benchmarks(num_steps=1)

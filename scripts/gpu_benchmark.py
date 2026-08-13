@@ -186,16 +186,25 @@ def run_benchmarks(snapshot_path: str, num_steps: int = 10):
     # `AttributeError`.
     old_gpu = getattr(ca_module, 'GPU_AVAILABLE', False)
     old_xp = ca_module._xp
-    ca_module.GPU_AVAILABLE = False
-    ca_module._xp = np
 
-    # Everything that runs under the forced-CPU backend lives inside this
-    # `try`. The restore used to sit after the third benchmark on the success
-    # path only, so any failure in a component, or in the CPU preparation
-    # between them, left `scripts.continuous_evolution_ca` pinned to CPU for
-    # the rest of the process -- module globals, so every later user of the
-    # engine inherited it, including the GPU section immediately below.
+    # The FORCING assignments are inside the `try`, not above it. Capturing is
+    # safe outside because it mutates nothing, but the moment the first global
+    # is written the protected interval must already be entered: an
+    # asynchronous interrupt -- a KeyboardInterrupt, or a tracing callback --
+    # delivered between `GPU_AVAILABLE = False` and `_xp = np` would otherwise
+    # unwind past a `finally` that had not yet been established, leaving the
+    # engine pinned to CPU with nothing to put it back.
+    #
+    # Everything that runs under the forced-CPU backend lives in here too. The
+    # restore originally sat after the third benchmark on the success path
+    # only, so any failure in a component, or in the CPU preparation between
+    # them, left `scripts.continuous_evolution_ca` pinned to CPU for the rest
+    # of the process -- module globals, so every later user of the engine
+    # inherited it, including the GPU section immediately below.
     try:
+        ca_module.GPU_AVAILABLE = False
+        ca_module._xp = np
+
         median_cpu_neighbors = benchmark_component(
             "count_neighbors_3d (CPU)",
             lambda: count_neighbors_3d(lattice),
