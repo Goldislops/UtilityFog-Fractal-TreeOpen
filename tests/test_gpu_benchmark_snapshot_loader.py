@@ -288,7 +288,7 @@ class _Recorder:
 
 def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None,
                     component_errors=None, random_rand_error=None,
-                    capture=None):
+                    capture=None, drop_xp=False):
     """Drive the genuine `run_benchmarks()` with every seam controlled.
 
     Returns (archive, recorder). Nothing real is benchmarked: the engine is a
@@ -312,6 +312,10 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None,
     engine.GPU_AVAILABLE = True      # a distinctive prior value...
     engine._xp = sentinel_xp         # ...so restoration is observable
     component_errors = dict(component_errors or {})
+    if drop_xp:
+        # An engine with no `_xp` at all: capturing it must not have been
+        # preceded by a write to `GPU_AVAILABLE`.
+        del engine._xp
     if capture is not None:
         capture["engine"] = engine
         capture["sentinel_xp"] = sentinel_xp
@@ -733,6 +737,28 @@ def test_a_failure_in_the_first_component_still_restores_both_values():
     assert engine._xp is capture["sentinel_xp"]
     assert engine._xp is not np
     assert engine.GPU_AVAILABLE is True
+
+
+def test_an_engine_without_xp_is_left_completely_untouched():
+    """The capture-order half of the repair, which nothing else exercises.
+
+    The base read `old_xp = ca_module._xp` AFTER writing
+    `ca_module.GPU_AVAILABLE = False`, so an engine with no `_xp` attribute
+    raised `AttributeError` with the flag already forced -- and no `try` had
+    been entered yet, so nothing put it back. Both originals are now read
+    before either is written, so the failure happens before any mutation.
+
+    Without this test, reverting just that half of the repair leaves the whole
+    suite green.
+    """
+    capture = {}
+
+    with pytest.raises(AttributeError):
+        _run_benchmarks(num_steps=1, drop_xp=True, capture=capture)
+
+    engine = capture["engine"]
+    assert engine.GPU_AVAILABLE is True, "flag was mutated before the capture failed"
+    assert not hasattr(engine, "_xp"), "an `_xp` was invented that never existed"
 
 
 def test_the_successful_path_still_sees_cpu_mode_for_all_three_components():
