@@ -1,0 +1,63 @@
+name: native-test
+
+on:
+  pull_request:
+    paths:
+      - "crates/uft_ca/**"
+      - ".github/workflows/native-test.yml"
+      - "crates/Cargo.toml"
+      - "crates/Cargo.lock"
+      - "crates/.cargo/**"
+      - "crates/rust-toolchain"
+      - "crates/rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/uft_ca/**"
+      - ".github/workflows/native-test.yml"
+      - "crates/Cargo.toml"
+      - "crates/Cargo.lock"
+      - "crates/.cargo/**"
+      - "crates/rust-toolchain"
+      - "crates/rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: crates/uft_ca
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: stable
+
+      - name: Run native test suite
+        run: cargo test
+
+      - name: Compile benchmarks (no run)
+        run: cargo bench --no-run
+
+      - name: Type-check python-feature tests (no link)
+        run: cargo check --tests --features python
