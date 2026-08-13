@@ -15,8 +15,16 @@ leak: silent, and on the path that fires when the network is already unhappy.
 `poll_gpu_temperatures()` runs one probe per GPU per node, on a polling loop,
 for the life of the orchestrator process.
 
-`_probe_tcp()` now owns the socket for the whole probe and closes it in a
-`finally`, so release does not depend on which call raised.
+`_probe_tcp()` now owns the socket for the whole probe, so release does not
+depend on which call raised.
+
+The close is deliberately not a bare `finally`. A `finally: sock.close()` lets
+a failing `close()` REPLACE the exception being unwound, which converted a
+`ValueError` -- or a `KeyboardInterrupt` -- from `connect_ex` into an `OSError`
+that the callers' handlers then reported as an unreachable peer. On a failed
+probe the close exception is suppressed so the original fault survives; on the
+successful path `close()` is called normally and its exception propagates
+exactly as it did before the helper existed.
 
 No real socket, host, port or service is contacted: `socket.socket` is replaced
 by a factory handing out scripted fakes that record their own `close()` calls.
@@ -281,34 +289,125 @@ def test_successful_probe_generates_a_temperature_in_the_established_band(probe_
         [{"id": "n", "ip": "10.0.0.9", "grpc_port": 50051, "gpus": [{"id": "g"}]}]
     )
 
-    assert 50.0 <= temps["n/g"] <= 70.0
+    assert 50.0 <= temps["n/g"] < 70.0
 
 
-def test_temperature_is_generated_only_after_its_socket_is_closed(probe_sockets):
+def test_temperature_is_generated_only_after_its_socket_is_closed(
+        probe_sockets, monkeypatch):
     """Ordering, not just the final count.
 
-    The generated reading must not be produced while the descriptor is still
-    open, so the socket is asserted closed at the moment `np.random.uniform`
-    runs.
+    A characterization guard rather than failing-first evidence: the base
+    already generated the reading after closing, and this pins that so the
+    repair cannot quietly move the work inside the socket's lifetime. The
+    socket is asserted closed at the moment `np.random.uniform` runs.
     """
     factory = probe_sockets([{"connect_result": 0}])
     observed = []
-
     real_uniform = ce.np.random.uniform
 
-    def recording_uniform(low, high):
+    def recording_uniform(*args, **kwargs):
         observed.append([sock.closed for sock in factory.made])
-        return real_uniform(low, high)
+        return real_uniform(*args, **kwargs)
 
-    ce.np.random.uniform = recording_uniform
-    try:
-        ce.poll_gpu_temperatures(
-            [{"id": "n", "ip": "10.0.0.9", "grpc_port": 50051, "gpus": [{"id": "g"}]}]
-        )
-    finally:
-        ce.np.random.uniform = real_uniform
+    monkeypatch.setattr(ce.np.random, "uniform", recording_uniform)
+    ce.poll_gpu_temperatures(
+        [{"id": "n", "ip": "10.0.0.9", "grpc_port": 50051, "gpus": [{"id": "g"}]}]
+    )
 
     assert observed == [[1]], "temperature generated while the socket was open"
+
+
+# ---------------------------------------------------------------------------
+# A failing close() must not mask the fault already unwinding
+# ---------------------------------------------------------------------------
+
+
+def test_a_failing_close_does_not_mask_an_oserror_probe_failure(probe_sockets):
+    """`close()` raising a non-OSError must not escape past a failed probe.
+
+    A bare `finally: sock.close()` lets the close failure REPLACE the exception
+    being unwound, so this returned `ValueError` instead of the established
+    `False`.
+    """
+    factory = probe_sockets([{"connect_error": OSError("probe failed"),
+                              "close_error": ValueError("close failed")}])
+
+    assert ce.check_vanguard_mcp("10.10.10.10", 50051) is False
+
+    assert _closes(factory) == [1]
+
+
+def test_a_failing_close_does_not_swallow_a_non_oserror_probe_failure(probe_sockets):
+    """The reverse direction, and the more serious one.
+
+    With a bare `finally`, an `OSError` from `close()` replaced the `ValueError`
+    from the probe and was then caught by the `except OSError`, reporting an
+    unreachable peer for what is a caller defect.
+    """
+    boom = ValueError("not a network failure")
+    factory = probe_sockets([{"connect_error": boom,
+                              "close_error": OSError("close failed")}])
+
+    with pytest.raises(ValueError) as caught:
+        ce.check_vanguard_mcp("10.10.10.10", 50051)
+
+    assert caught.value is boom
+    assert _closes(factory) == [1]
+
+
+def test_a_failing_close_does_not_swallow_a_baseexception(probe_sockets):
+    """`KeyboardInterrupt` must not become "peer unreachable"."""
+    boom = KeyboardInterrupt()
+    factory = probe_sockets([{"connect_error": boom,
+                              "close_error": OSError("close failed")}])
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        ce.check_vanguard_mcp("10.10.10.10", 50051)
+
+    assert caught.value is boom
+    assert _closes(factory) == [1]
+
+
+def test_a_failing_close_on_the_success_path_still_propagates(probe_sockets):
+    """Unchanged from the base: nothing is swallowed when the probe SUCCEEDED.
+
+    The suppression above applies only while another exception is unwinding.
+    """
+    factory = probe_sockets([{"connect_result": 0,
+                              "close_error": ValueError("close failed")}])
+
+    with pytest.raises(ValueError):
+        ce.check_vanguard_mcp("10.10.10.10", 50051)
+
+    assert _closes(factory) == [1]
+
+
+def test_a_failing_close_on_the_success_path_is_still_reported_unreachable(
+        probe_sockets):
+    """An `OSError` from a successful probe's `close()` still returns False."""
+    factory = probe_sockets([{"connect_result": 0,
+                              "close_error": OSError("close failed")}])
+
+    assert ce.check_vanguard_mcp("10.10.10.10", 50051) is False
+
+    assert _closes(factory) == [1]
+
+
+def test_polling_survives_a_failing_close_and_keeps_going(probe_sockets):
+    """One GPU's close failure must not abort the GPUs after it."""
+    factory = probe_sockets([
+        {"connect_error": OSError("p"), "close_error": ValueError("c")},
+        {"connect_result": 0},
+        {"connect_result": 111},
+        {"connect_result": 0},
+    ])
+
+    temps = ce.poll_gpu_temperatures(_nodes())
+
+    assert _closes(factory) == [1, 1, 1, 1]
+    assert temps["alpha/gpu0"] == -1.0
+    assert temps["beta/gpu0"] == -1.0
+    assert len(temps) == 4
 
 
 def test_construction_failure_records_minus_one_for_that_gpu(probe_sockets):

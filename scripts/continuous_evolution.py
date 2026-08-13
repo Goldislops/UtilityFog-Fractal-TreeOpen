@@ -131,15 +131,31 @@ def _probe_tcp(address: str, port: int, timeout: float) -> int:
     ``poll_gpu_temperatures`` runs once per GPU, on a loop, for the life of the
     process.
 
-    Closing in ``finally`` also means an exception that is NOT ``OSError``
-    still propagates unchanged, but never with the socket left open.
+    An exception that is NOT ``OSError`` still propagates unchanged, and the
+    socket is closed before it does.
+
+    The close is deliberately NOT a bare ``finally``. If the probe has already
+    failed, a second failure while releasing must not replace the first: a
+    plain ``finally: sock.close()`` lets a failing ``close()`` overwrite the
+    exception being unwound, which turns a ``KeyboardInterrupt`` or a
+    ``ValueError`` from ``connect_ex`` into an ``OSError`` that the callers'
+    handlers then report as an unreachable peer. The original fault wins; a
+    failure to close on a socket that is already being abandoned is not worth
+    losing it over. On the SUCCESS path ``close()`` is called normally, so its
+    exception propagates exactly as it did before this helper existed.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
-        return sock.connect_ex((address, port))
-    finally:
-        sock.close()
+        result = sock.connect_ex((address, port))
+    except BaseException:
+        try:
+            sock.close()
+        except BaseException:
+            pass          # never mask the fault that is already unwinding
+        raise
+    sock.close()
+    return result
 
 
 def check_vanguard_mcp(head_ip: str = "192.168.86.29", port: int = 50051,
