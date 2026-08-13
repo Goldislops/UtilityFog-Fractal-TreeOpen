@@ -348,7 +348,12 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None,
                                 "xp_is_numpy": engine._xp is np})
         if random_rand_error is not None:
             raise random_rand_error
-        return np.random.random_sample(shape)
+        # `gpu_benchmark.np` IS the real numpy module, so this patch rebinds
+        # `numpy.random.rand` process-wide for the duration of the `with`.
+        # Match `rand`'s contract exactly rather than approximately:
+        # `rand()` with no arguments returns a float, while
+        # `random_sample(())` returns a 0-d array.
+        return np.random.random_sample(shape) if shape else np.random.random_sample()
 
     def _measured(label):
         def _record(arg, *rest, **kwargs):
@@ -829,8 +834,24 @@ def test_nonpositive_steps_are_refused_before_anything_is_touched(steps):
 
 
 def test_nonpositive_steps_print_nothing(capsys):
-    with pytest.raises(ValueError):
-        gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", 0)
+    """The refusal precedes even the banner.
+
+    The seams are patched even though the guard should stop execution before
+    any of them: if the guard ever regresses, this test must fail on its
+    assertions rather than reach `cp.cuda.runtime.memGetInfo()` on a
+    CuPy-equipped runner and then a real `np.load` of a path that does not
+    exist. A test that only passes because the code under test is correct is
+    not a safe test.
+    """
+    def _tripwire(*a, **k):
+        raise AssertionError("guard regressed: execution passed the refusal")
+
+    with mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False), \
+         mock.patch.object(gpu_benchmark.np, "load", _tripwire), \
+         mock.patch.object(gpu_benchmark, "load_rule_spec", _tripwire):
+        with pytest.raises(ValueError):
+            gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", 0)
+
     assert capsys.readouterr().out == ""
 
 
