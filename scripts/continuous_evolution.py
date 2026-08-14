@@ -118,14 +118,64 @@ def get_active_nodes(config: dict) -> list:
 # Safety-net checks
 # ---------------------------------------------------------------------------
 
+def _probe_tcp(address: str, port: int, timeout: float) -> int:
+    """Open one TCP socket, probe ``(address, port)``, and attempt to close it.
+
+    Returns the raw ``connect_ex`` result; the caller decides what a value
+    means.
+
+    WHY THIS HELPER EXISTS. Both probe sites previously called ``close()`` only
+    after ``settimeout()`` and ``connect_ex()`` had both returned, so an
+    ``OSError`` from either one reached the caller's fallback with the
+    descriptor still open. The fallback then reported an unreachable peer, so a
+    host that failed this way leaked one descriptor per probe and stayed silent
+    about it -- and ``poll_gpu_temperatures`` runs once per GPU, on a loop, for
+    the life of the process.
+
+    WHAT IS GUARANTEED, and no more. Once the protected probe interval has been
+    entered, exactly one close attempt is made before this function returns or
+    raises. Three qualifications, stated rather than glossed:
+
+      * ACQUISITION IS NOT INTERRUPT-ATOMIC. The socket is constructed before
+        the ``try`` is entered. An asynchronous interruption delivered in that
+        window -- a ``KeyboardInterrupt``, or a tracing callback -- unwinds
+        with a live descriptor and no cleanup registered for it. Nothing in
+        pure Python closes that window.
+      * A CLOSE ATTEMPT IS NOT A RELEASE. If ``close()`` itself raises, the
+        attempt was made and the resource may still be held. This function
+        claims the attempt, not the outcome.
+      * ONLY ``OSError`` IS TRANSLATED BY THE CALLERS. A non-``OSError`` probe
+        fault propagates unchanged, after the close attempt rather than instead
+        of it.
+
+    The close is deliberately NOT a bare ``finally``. If the probe has already
+    failed, a second failure while releasing must not replace the first: a
+    plain ``finally: sock.close()`` lets a failing ``close()`` overwrite the
+    exception being unwound, which turns a ``KeyboardInterrupt`` or a
+    ``ValueError`` from ``connect_ex`` into an ``OSError`` that the callers'
+    handlers then report as an unreachable peer. The original fault wins; a
+    failure to close on a socket that is already being abandoned is not worth
+    losing it over. On the SUCCESS path ``close()`` is called normally, so its
+    exception propagates exactly as it did before this helper existed.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        result = sock.connect_ex((address, port))
+    except BaseException:
+        try:
+            sock.close()
+        except BaseException:
+            pass          # never mask the fault that is already unwinding
+        raise
+    sock.close()
+    return result
+
+
 def check_vanguard_mcp(head_ip: str = "192.168.86.29", port: int = 50051,
                        timeout: float = 5.0) -> bool:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((head_ip, port))
-        sock.close()
-        return result == 0
+        return _probe_tcp(head_ip, port, timeout) == 0
     except OSError:
         return False
 
@@ -137,12 +187,11 @@ def poll_gpu_temperatures(nodes: list) -> Dict[str, float]:
         for gpu in node.get("gpus", []):
             key = f"{node_id}/{gpu['id']}"
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)
-                result = sock.connect_ex((node.get("ip", "127.0.0.1"),
-                                          node.get("grpc_port", 50051)))
-                sock.close()
+                result = _probe_tcp(node.get("ip", "127.0.0.1"),
+                                    node.get("grpc_port", 50051), 2.0)
                 if result == 0:
+                    # Reached only after `_probe_tcp` has closed the socket, so
+                    # no descriptor is held across temperature generation.
                     temps[key] = 55.0 + np.random.uniform(-5, 15)
                 else:
                     temps[key] = -1.0
