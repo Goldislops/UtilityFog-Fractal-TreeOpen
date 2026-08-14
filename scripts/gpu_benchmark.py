@@ -230,9 +230,8 @@ def run_benchmarks(snapshot_path: str, num_steps: int = 10):
         )
         print(f"  max_neighbor_value (CPU):     {median_maxn_cpu:8.1f} ms")
     finally:
-        # Restore GPU state -- on every exit, not just the successful one. The
-        # original exception is untouched: this clause neither swallows nor
-        # replaces it.
+        # Restore the captured backend state whenever cleanup runs to completion.
+        # The two restoration assignments are not interrupt-atomic.
         ca_module.GPU_AVAILABLE = old_gpu
         ca_module._xp = old_xp
 
