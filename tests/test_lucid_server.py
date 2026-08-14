@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
 from unittest import mock
@@ -700,34 +701,114 @@ def test_a_numeric_snapshot_still_produces_cells_and_metrics(confined):
     assert data["metrics"]["grid_size"] == 16
 
 
-@requires_numpy
-def test_the_watcher_survives_a_rejected_snapshot_and_recovers(confined,
-                                                               monkeypatch):
-    """One poll over a poisoned directory, then one over a repaired one.
+class _WatcherStopped(Exception):
+    """Ends the watcher's infinite loop from its own sleep."""
 
-    The watcher must log one bounded reason and broadcast nothing, then pick
-    up the next valid snapshot without a restart.
+
+def _run_watcher(monkeypatch, polls):
+    """Drive the REAL `snapshot_watcher` coroutine for `polls` iterations.
+
+    The loop's trailing `await asyncio.sleep(POLL_INTERVAL)` sits outside its
+    try/except, so raising from a patched sleep ends the coroutine without
+    being swallowed by the broad handler. Returns everything broadcast.
     """
-    poison = confined / "v070_gen000001.npz"
-    _zip_ls(poison, _schema_ls(edge=24))  # admissible-looking, wrong edge
-
     broadcasts = []
+    seen = {"polls": 0}
 
     async def _record(message):
         broadcasts.append(message)
 
+    async def _sleep(_seconds):
+        seen["polls"] += 1
+        if seen["polls"] >= polls:
+            raise _WatcherStopped
+
     monkeypatch.setattr(lucid_server, "broadcast", _record)
+    monkeypatch.setattr(lucid_server.asyncio, "sleep", _sleep)
+
+    async def _drive():
+        try:
+            await lucid_server.snapshot_watcher()
+        except _WatcherStopped:
+            pass
+
+    asyncio.run(_drive())
+    return broadcasts, seen["polls"]
+
+
+@pytest.fixture
+def _fresh_watcher_state(monkeypatch):
+    """`snapshot_watcher` keeps its cursor in module globals."""
     monkeypatch.setattr(lucid_server, "last_snapshot_path", None)
     monkeypatch.setattr(lucid_server, "last_snapshot_mtime", 0)
 
-    with pytest.raises(lucid_server.SnapshotArchiveRejected):
-        lucid_server.extract_render_data(str(poison))
-    assert broadcasts == []
 
-    valid = _write_snapshot_ls(confined / "v070_gen000002.npz", compressed=True)
-    data = lucid_server.extract_render_data(valid)
-    assert data["metrics"]["generation"] == 7, (
-        "a later valid snapshot must still be accepted")
+@requires_numpy
+def test_the_watcher_logs_once_and_broadcasts_nothing_for_a_rejected_snapshot(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The REAL watcher loop runs here.
+
+    Previously this called `extract_render_data` directly and asserted on a
+    patched `broadcast` that the function never calls -- so the assertion could
+    not fail and `snapshot_watcher` was executed by no test at all.
+    """
+    _zip_ls(confined / "v070_gen000001.npz", _declared_ls(512))
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=4)
+    output = capsys.readouterr().out
+
+    assert broadcasts == [], "a rejected snapshot must not be broadcast"
+    assert polls == 4, "the watcher must keep polling after a refusal"
+    assert output.count("Snapshot rejected: edge_out_of_range") == 1, (
+        "exactly one bounded reason code, and it is the typed handler's -- "
+        "the broad handler would have printed 'Snapshot error'")
+    assert "Snapshot error" not in output
+    assert "v070_gen000001" not in output
+
+
+@requires_numpy
+def test_the_watcher_does_not_reprocess_an_unchanged_rejected_snapshot(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The cursor is advanced before extraction, so repeated polls over an
+    unchanged poisoned directory neither re-extract nor re-log."""
+    _zip_ls(confined / "v070_gen000001.npz", _declared_ls(512))
+
+    extractions = []
+    real_extract = lucid_server.extract_render_data
+
+    def _counting_extract(path):
+        extractions.append(path)
+        return real_extract(path)
+
+    monkeypatch.setattr(lucid_server, "extract_render_data", _counting_extract)
+    _run_watcher(monkeypatch, polls=5)
+
+    assert len(extractions) == 1, "the rejected snapshot was reprocessed"
+    assert capsys.readouterr().out.count("Snapshot rejected") == 1
+
+
+@requires_numpy
+def test_the_watcher_accepts_a_later_valid_snapshot(confined, monkeypatch,
+                                                    capsys, _fresh_watcher_state):
+    """Recovery, through the real loop: after a refusal, a newer valid
+    snapshot is broadcast without a restart."""
+    poison = confined / "v070_gen000001.npz"
+    _zip_ls(poison, _declared_ls(512))
+    os.utime(poison, (1_000_000, 1_000_000))
+
+    _run_watcher(monkeypatch, polls=1)
+
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000002.npz",
+                                    compressed=True))
+    os.utime(valid, (2_000_000, 2_000_000))
+
+    broadcasts, _ = _run_watcher(monkeypatch, polls=1)
+    assert len(broadcasts) == 1, "the later valid snapshot was not broadcast"
+    frame = json.loads(broadcasts[0])
+    assert frame["type"] == "frame"
+    assert frame["data"]["metrics"]["generation"] == 7
 
 
 # ===========================================================================
@@ -742,7 +823,7 @@ def test_the_watcher_survives_a_rejected_snapshot_and_recovers(confined,
 #
 # The fixtures are built with the standard library, because NumPy cannot write
 # a duplicate member, a corrupt NPY magic or a lying shape. None is hostile in
-# SIZE: each is a few kilobytes, and the oversized cases lie in their headers
+# SIZE: each is a few hundred kilobytes at most, and the oversized cases lie in their headers
 # rather than on disk.
 # ===========================================================================
 
@@ -805,6 +886,26 @@ def _zip_ls(path, members, *, compressed=True, duplicate=None):
     return str(path)
 
 
+def _declared_ls(edge, channels=8):
+    """The same five members, DECLARING an `edge` it does not carry.
+
+    The guard checks geometry before size arithmetic, so an archive that lies
+    about its shape is refused on the geometry rule without the bytes ever
+    needing to exist. That is what keeps a 512-edge case at a few kilobytes
+    instead of the 4.1 GiB a real 512-cube payload would require.
+    """
+    members = _schema_ls(16, channels)
+    members["lattice.npy"] = _npy_ls(
+        "|u1", (edge, edge, edge), payload=b"",
+        header="{'descr': '|u1', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d), }" % (edge, edge, edge))
+    members["memory_grid.npy"] = _npy_ls(
+        "<f4", (channels, edge, edge, edge), payload=b"",
+        header="{'descr': '<f4', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d, %d), }" % (channels, edge, edge, edge))
+    return members
+
+
 def _hostile_ls(kind, path):
     """Build one hostile archive of the named kind at `path`."""
     members = _schema_ls()
@@ -833,7 +934,7 @@ def _hostile_ls(kind, path):
                    "'shape': (8, 256, 256, 256), }")
         return _zip_ls(path, members)
     if kind == "oversized_edge":
-        return _zip_ls(path, _schema_ls(edge=512))
+        return _zip_ls(path, _declared_ls(512))
     if kind == "header_payload_mismatch":
         members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16)) + b"\x00" * 64
         return _zip_ls(path, members)
@@ -862,7 +963,10 @@ def _hostile_ls(kind, path):
         members["lattice.npy"] = _npy_ls("|u1", (16, 16))
         return _zip_ls(path, members)
     if kind == "spatial_mismatch":
-        members["memory_grid.npy"] = _npy_ls("<f4", (8, 32, 32, 32))
+        members["memory_grid.npy"] = _npy_ls(
+            "<f4", (8, 32, 32, 32), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 32, 32, 32), }")
         return _zip_ls(path, members)
     if kind == "fortran_order":
         members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16), fortran=True)
@@ -880,6 +984,30 @@ _HOSTILE_KINDS = [
     "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
     "spatial_mismatch", "fortran_order", "not_an_npz",
 ]
+
+#: The reason code each hostile kind must produce. Asserting only that a
+#: ValueError was raised would be weak: SnapshotArchiveRejected IS a
+#: ValueError, so an unrelated failure would satisfy it. Pinning the code ties
+#: each fixture to the defect its name claims.
+_EXPECTED_REASON = {
+    "duplicate_member": "member_duplicate",
+    "traversal_name": "member_name_unsafe",
+    "backslash_name": "member_name_unsafe",
+    "missing_member": "member_missing",
+    "extra_member": "member_unexpected",
+    "oversized_declared_payload": "member_payload_too_large",
+    "oversized_edge": "edge_out_of_range",
+    "header_payload_mismatch": "member_size_inconsistent",
+    "invalid_magic": "member_npy_magic_invalid",
+    "invalid_version": "member_npy_version_unsupported",
+    "invalid_header": "member_header_malformed",
+    "object_dtype": "member_dtype_object",
+    "structured_dtype": "member_dtype_structured",
+    "wrong_rank": "member_rank",
+    "spatial_mismatch": "spatial_disagreement",
+    "fortran_order": "member_fortran_order",
+    "not_an_npz": "not_zip_archive",
+}
 
 
 @requires_numpy
@@ -903,8 +1031,10 @@ def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
 
     monkeypatch.setattr(lucid_server.np, "load", _recording_load)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
         lucid_server.extract_render_data(archive)
+    assert excinfo.value.reason == _EXPECTED_REASON[kind], (
+        "the fixture was refused for a different defect than its name claims")
     assert reached == [], "np.load was reached on a hostile archive"
 
 
@@ -926,29 +1056,32 @@ def test_hostile_refusal_names_no_path_member_or_header(kind, tmp_path, monkeypa
 
 @requires_numpy
 @pytest.mark.parametrize("kind", _HOSTILE_KINDS)
-def test_a_rejected_snapshot_sends_no_frame_and_keeps_the_server_alive(
-    kind, tmp_path, monkeypatch
+def test_a_rejected_initial_snapshot_sends_no_frame_and_serves_the_client(
+    kind, tmp_path, monkeypatch, capsys
 ):
-    """The watcher must survive a poisoned directory: no frame, no broadcast,
-    no crash, and the poll loop keeps running."""
+    """The initial-client send, not the watcher.
+
+    `handle_client` sends through `websocket.send`, never through `broadcast`,
+    so an assertion on a patched `broadcast` here would be permanently true and
+    prove nothing. The log line is what distinguishes the typed handler from
+    the pre-existing broad one directly below it, which would print
+    "Initial send error" instead.
+    """
     archive = _hostile_ls(kind, tmp_path / "v070_gen000003.npz")
     monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(lucid_server, "find_latest_snapshot",
                         lambda data_dir: archive)
 
-    sent = []
-
-    async def _record_broadcast(message):
-        sent.append(message)
-
-    monkeypatch.setattr(lucid_server, "broadcast", _record_broadcast)
-
     websocket = FakeWebSocket([PING])
     asyncio.run(lucid_server.handle_client(websocket))
+    output = capsys.readouterr().out
 
-    assert sent == []
     assert [json.loads(s)["type"] for s in websocket.sent] == ["pong"], (
         "a rejected initial snapshot must send no frame, and must not stop the "
         "client from being served"
     )
+    assert "Snapshot rejected:" in output
+    assert "Initial send error" not in output, (
+        "the refusal fell through to the broad handler")
+    assert "v070_gen000003" not in output
     assert websocket not in lucid_server.connected_clients

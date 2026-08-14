@@ -847,6 +847,8 @@ def test_central_directory_ceiling_boundary(root):
 
 
 @pytest.mark.parametrize("count,expected", [
+    (guard.PRODUCTION_POLICY.max_members + guard._COUNT_PARSE_SLACK - 1,
+     "member_unexpected"),
     (guard.PRODUCTION_POLICY.max_members + guard._COUNT_PARSE_SLACK,
      "member_unexpected"),
     (guard.PRODUCTION_POLICY.max_members + guard._COUNT_PARSE_SLACK + 1,

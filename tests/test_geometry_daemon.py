@@ -971,7 +971,7 @@ def test_the_once_path_still_exports_a_valid_snapshot(confined, capsys,
 #
 # The fixtures below are built with the standard library rather than NumPy,
 # because NumPy cannot write a duplicate member, a corrupt NPY magic or a
-# lying shape. None of them is hostile in SIZE: each is a few kilobytes, and
+# lying shape. None of them is hostile in SIZE: each is a few hundred kilobytes at most, and
 # the oversized cases lie in their headers instead of on disk.
 # ===========================================================================
 
@@ -1034,6 +1034,26 @@ def _zip_gd(path, members, *, compressed=True, duplicate=None):
     return str(path)
 
 
+def _declared_gd(edge, channels=8):
+    """The same five members, DECLARING an `edge` it does not carry.
+
+    The guard checks geometry before size arithmetic, so an archive that lies
+    about its shape is refused on the geometry rule without the bytes ever
+    needing to exist. That is what keeps a 512-edge case at a few kilobytes
+    instead of the 4.1 GiB a real 512-cube payload would require.
+    """
+    members = _schema_gd(16, channels)
+    members["lattice.npy"] = _npy_gd(
+        "|u1", (edge, edge, edge), payload=b"",
+        header="{'descr': '|u1', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d), }" % (edge, edge, edge))
+    members["memory_grid.npy"] = _npy_gd(
+        "<f4", (channels, edge, edge, edge), payload=b"",
+        header="{'descr': '<f4', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d, %d), }" % (channels, edge, edge, edge))
+    return members
+
+
 def _hostile_gd(kind, path):
     """Build one hostile archive of the named kind at `path`."""
     members = _schema_gd()
@@ -1062,7 +1082,7 @@ def _hostile_gd(kind, path):
                    "'shape': (8, 256, 256, 256), }")
         return _zip_gd(path, members)
     if kind == "oversized_edge":
-        return _zip_gd(path, _schema_gd(edge=512))
+        return _zip_gd(path, _declared_gd(512))
     if kind == "header_payload_mismatch":
         members["lattice.npy"] = _npy_gd("|u1", (16, 16, 16)) + b"\x00" * 64
         return _zip_gd(path, members)
@@ -1091,7 +1111,10 @@ def _hostile_gd(kind, path):
         members["lattice.npy"] = _npy_gd("|u1", (16, 16))
         return _zip_gd(path, members)
     if kind == "spatial_mismatch":
-        members["memory_grid.npy"] = _npy_gd("<f4", (8, 32, 32, 32))
+        members["memory_grid.npy"] = _npy_gd(
+            "<f4", (8, 32, 32, 32), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 32, 32, 32), }")
         return _zip_gd(path, members)
     if kind == "fortran_order":
         members["lattice.npy"] = _npy_gd("|u1", (16, 16, 16), fortran=True)
@@ -1109,6 +1132,30 @@ _HOSTILE_KINDS = [
     "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
     "spatial_mismatch", "fortran_order", "not_an_npz",
 ]
+
+#: The reason code each hostile kind must produce. Asserting only that a
+#: ValueError was raised would be weak: SnapshotArchiveRejected IS a
+#: ValueError, so an unrelated failure would satisfy it. Pinning the code ties
+#: each fixture to the defect its name claims.
+_EXPECTED_REASON = {
+    "duplicate_member": "member_duplicate",
+    "traversal_name": "member_name_unsafe",
+    "backslash_name": "member_name_unsafe",
+    "missing_member": "member_missing",
+    "extra_member": "member_unexpected",
+    "oversized_declared_payload": "member_payload_too_large",
+    "oversized_edge": "edge_out_of_range",
+    "header_payload_mismatch": "member_size_inconsistent",
+    "invalid_magic": "member_npy_magic_invalid",
+    "invalid_version": "member_npy_version_unsupported",
+    "invalid_header": "member_header_malformed",
+    "object_dtype": "member_dtype_object",
+    "structured_dtype": "member_dtype_structured",
+    "wrong_rank": "member_rank",
+    "spatial_mismatch": "spatial_disagreement",
+    "fortran_order": "member_fortran_order",
+    "not_an_npz": "not_zip_archive",
+}
 
 
 @pytest.mark.parametrize("kind", _HOSTILE_KINDS)
@@ -1131,8 +1178,10 @@ def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
 
     monkeypatch.setattr(geometry_daemon.np, "load", _recording_load)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected) as excinfo:
         geometry_daemon._load_snapshot(archive)
+    assert excinfo.value.reason == _EXPECTED_REASON[kind], (
+        "the fixture was refused for a different defect than its name claims")
     assert reached == [], "np.load was reached on a hostile archive"
 
 

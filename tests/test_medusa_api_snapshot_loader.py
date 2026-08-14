@@ -795,15 +795,29 @@ def test_geometry_route_also_answers_503_for_a_rejected_archive(confined,
     assert response.get_json() == {"error": "snapshot_rejected"}
 
 
-@pytest.mark.parametrize("route", ["/api/health", "/api/status"])
-def test_routes_that_do_not_load_a_snapshot_are_unchanged(route, confined):
+@pytest.mark.parametrize("route,expected", [
+    ("/api/health", 200),
+    ("/api/status", 200),
+    ("/api/telemetry", 404),
+])
+def test_routes_that_do_not_load_a_snapshot_keep_their_own_behaviour(
+    route, expected, confined
+):
     """Health, status, telemetry and the raw download do not go through
-    `_load_snapshot`, so a poisoned directory must not change them."""
+    `_load_snapshot`, so a poisoned directory must not turn any of them into a
+    snapshot refusal.
+
+    Stated exactly, because the obvious phrasing would be wrong: these are not
+    all "unchanged and 200". `/api/telemetry` answers 404 in a directory with
+    no telemetry file, which is its own established behaviour and is what is
+    pinned here. `/api/health` reads no directory at all, so the poisoned file
+    is inert for it -- included anyway as the floor of the comparison.
+    """
     _hostile_ma("missing_member", confined / "v070_gen000010.npz")
     client = medusa_api.app.test_client()
     response = client.get(route)
-    assert response.status_code == 200
-    assert response.get_json().get("error") is None
+    assert response.status_code == expected
+    assert response.get_json().get("error") != "snapshot_rejected"
 
 
 def test_the_raw_snapshot_download_is_unchanged(confined):
@@ -831,7 +845,7 @@ def test_the_raw_snapshot_download_is_unchanged(confined):
 #
 # The fixtures are built with the standard library, because NumPy cannot write
 # a duplicate member, a corrupt NPY magic or a lying shape. None is hostile in
-# SIZE: each is a few kilobytes, and the oversized cases lie in their headers
+# SIZE: each is a few hundred kilobytes at most, and the oversized cases lie in their headers
 # rather than on disk.
 # ===========================================================================
 
@@ -894,6 +908,26 @@ def _zip_ma(path, members, *, compressed=True, duplicate=None):
     return str(path)
 
 
+def _declared_ma(edge, channels=8):
+    """The same five members, DECLARING an `edge` it does not carry.
+
+    The guard checks geometry before size arithmetic, so an archive that lies
+    about its shape is refused on the geometry rule without the bytes ever
+    needing to exist. That is what keeps a 512-edge case at a few kilobytes
+    instead of the 4.1 GiB a real 512-cube payload would require.
+    """
+    members = _schema_ma(16, channels)
+    members["lattice.npy"] = _npy_ma(
+        "|u1", (edge, edge, edge), payload=b"",
+        header="{'descr': '|u1', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d), }" % (edge, edge, edge))
+    members["memory_grid.npy"] = _npy_ma(
+        "<f4", (channels, edge, edge, edge), payload=b"",
+        header="{'descr': '<f4', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d, %d), }" % (channels, edge, edge, edge))
+    return members
+
+
 def _hostile_ma(kind, path):
     """Build one hostile archive of the named kind at `path`."""
     members = _schema_ma()
@@ -922,7 +956,7 @@ def _hostile_ma(kind, path):
                    "'shape': (8, 256, 256, 256), }")
         return _zip_ma(path, members)
     if kind == "oversized_edge":
-        return _zip_ma(path, _schema_ma(edge=512))
+        return _zip_ma(path, _declared_ma(512))
     if kind == "header_payload_mismatch":
         members["lattice.npy"] = _npy_ma("|u1", (16, 16, 16)) + b"\x00" * 64
         return _zip_ma(path, members)
@@ -951,7 +985,10 @@ def _hostile_ma(kind, path):
         members["lattice.npy"] = _npy_ma("|u1", (16, 16))
         return _zip_ma(path, members)
     if kind == "spatial_mismatch":
-        members["memory_grid.npy"] = _npy_ma("<f4", (8, 32, 32, 32))
+        members["memory_grid.npy"] = _npy_ma(
+            "<f4", (8, 32, 32, 32), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 32, 32, 32), }")
         return _zip_ma(path, members)
     if kind == "fortran_order":
         members["lattice.npy"] = _npy_ma("|u1", (16, 16, 16), fortran=True)
@@ -969,6 +1006,30 @@ _HOSTILE_KINDS = [
     "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
     "spatial_mismatch", "fortran_order", "not_an_npz",
 ]
+
+#: The reason code each hostile kind must produce. Asserting only that a
+#: ValueError was raised would be weak: SnapshotArchiveRejected IS a
+#: ValueError, so an unrelated failure would satisfy it. Pinning the code ties
+#: each fixture to the defect its name claims.
+_EXPECTED_REASON = {
+    "duplicate_member": "member_duplicate",
+    "traversal_name": "member_name_unsafe",
+    "backslash_name": "member_name_unsafe",
+    "missing_member": "member_missing",
+    "extra_member": "member_unexpected",
+    "oversized_declared_payload": "member_payload_too_large",
+    "oversized_edge": "edge_out_of_range",
+    "header_payload_mismatch": "member_size_inconsistent",
+    "invalid_magic": "member_npy_magic_invalid",
+    "invalid_version": "member_npy_version_unsupported",
+    "invalid_header": "member_header_malformed",
+    "object_dtype": "member_dtype_object",
+    "structured_dtype": "member_dtype_structured",
+    "wrong_rank": "member_rank",
+    "spatial_mismatch": "spatial_disagreement",
+    "fortran_order": "member_fortran_order",
+    "not_an_npz": "not_zip_archive",
+}
 
 #: The four routes that go through `_load_snapshot`. `/api/health`,
 #: `/api/status`, `/api/telemetry` and `/api/snapshot/latest` deliberately do
@@ -996,8 +1057,10 @@ def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
 
     monkeypatch.setattr(medusa_api.np, "load", _recording_load)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(medusa_api.SnapshotArchiveRejected) as excinfo:
         medusa_api._load_snapshot(archive)
+    assert excinfo.value.reason == _EXPECTED_REASON[kind], (
+        "the fixture was refused for a different defect than its name claims")
     assert reached == [], "np.load was reached on a hostile archive"
 
 
