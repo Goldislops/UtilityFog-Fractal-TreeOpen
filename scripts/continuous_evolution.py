@@ -119,20 +119,34 @@ def get_active_nodes(config: dict) -> list:
 # ---------------------------------------------------------------------------
 
 def _probe_tcp(address: str, port: int, timeout: float) -> int:
-    """Open one TCP socket, probe ``(address, port)``, and close it.
+    """Open one TCP socket, probe ``(address, port)``, and attempt to close it.
 
     Returns the raw ``connect_ex`` result; the caller decides what a value
-    means. The socket is closed on EVERY path, which is the whole point of the
-    helper: both probe sites previously called ``close()`` only after
-    ``settimeout()`` and ``connect_ex()`` had both returned, so an ``OSError``
-    from either one reached the caller's fallback with the descriptor still
-    open. The fallback then reported an unreachable peer, so a host that failed
-    this way leaked one descriptor per probe and stayed silent about it -- and
-    ``poll_gpu_temperatures`` runs once per GPU, on a loop, for the life of the
-    process.
+    means.
 
-    An exception that is NOT ``OSError`` still propagates unchanged, and the
-    socket is closed before it does.
+    WHY THIS HELPER EXISTS. Both probe sites previously called ``close()`` only
+    after ``settimeout()`` and ``connect_ex()`` had both returned, so an
+    ``OSError`` from either one reached the caller's fallback with the
+    descriptor still open. The fallback then reported an unreachable peer, so a
+    host that failed this way leaked one descriptor per probe and stayed silent
+    about it -- and ``poll_gpu_temperatures`` runs once per GPU, on a loop, for
+    the life of the process.
+
+    WHAT IS GUARANTEED, and no more. Once the protected probe interval has been
+    entered, exactly one close attempt is made before this function returns or
+    raises. Three qualifications, stated rather than glossed:
+
+      * ACQUISITION IS NOT INTERRUPT-ATOMIC. The socket is constructed before
+        the ``try`` is entered. An asynchronous interruption delivered in that
+        window -- a ``KeyboardInterrupt``, or a tracing callback -- unwinds
+        with a live descriptor and no cleanup registered for it. Nothing in
+        pure Python closes that window.
+      * A CLOSE ATTEMPT IS NOT A RELEASE. If ``close()`` itself raises, the
+        attempt was made and the resource may still be held. This function
+        claims the attempt, not the outcome.
+      * ONLY ``OSError`` IS TRANSLATED BY THE CALLERS. A non-``OSError`` probe
+        fault propagates unchanged, after the close attempt rather than instead
+        of it.
 
     The close is deliberately NOT a bare ``finally``. If the probe has already
     failed, a second failure while releasing must not replace the first: a
