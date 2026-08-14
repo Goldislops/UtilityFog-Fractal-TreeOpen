@@ -402,16 +402,36 @@ def _marker_ls(tmp_path):
 
 
 def _write_snapshot_ls(path, compressed=False, **members):
-    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    """A real NPZ. Object members pickle on the way in, which is harmless.
+
+    The edge is 16 and all five schema members are present, because the
+    archive now has to be ADMISSIBLE before its member dtypes matter: a 4-cube
+    with three members would be refused for its shape and its membership, and
+    the pickle property below would never be reached.
+    """
     payload = {
-        "lattice": np.ones((4, 4, 4), dtype=np.uint8),
-        "memory_grid": np.zeros((8, 4, 4, 4), dtype=np.float32),
+        "lattice": np.ones((16, 16, 16), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 16, 16, 16), dtype=np.float32),
         "generation": 7,
+        "ca_step": 11,
+        "best_fitness": 0.5,
     }
     payload.update(members)
     writer = np.savez_compressed if compressed else np.savez
     writer(path, **payload)
     return str(path)
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """Point the server's data directory at pytest's own tmp_path.
+
+    Admission confines the archive to the configured data directory, so a
+    fixture written anywhere else is refused for CONTAINMENT before the
+    property under test is reached.
+    """
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    return tmp_path
 
 
 @requires_numpy
@@ -432,14 +452,39 @@ def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
 
 @requires_numpy
 @pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
-def test_object_payload_is_refused_by_extract_render_data(tmp_path, field):
+def test_object_payload_is_refused_by_extract_render_data(confined, field):
+    """The refusal moved EARLIER, and the code says so.
+
+    An object member used to be caught by NumPy at `np.load`. It is now caught
+    by admission from the member's NPY header, before NumPy is involved at
+    all -- so the assertion is the typed reason code, not NumPy's message. The
+    property that matters is unchanged and stronger: the payload never runs.
+    """
     archive = _write_snapshot_ls(
-        tmp_path / f"{field}.npz", **{field: _payload_array_ls(tmp_path)}
+        confined / f"v070_{field}.npz", **{field: _payload_array_ls(confined)}
+    )
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert excinfo.value.reason == "member_dtype_object"
+    assert not _marker_ls(confined).exists(), "the pickle payload executed"
+
+
+@requires_numpy
+def test_numpys_own_pickle_refusal_is_still_in_place_behind_admission(confined):
+    """Second line of defence, kept non-vacuous.
+
+    Admission now stops an object member first, so the load-site refusal would
+    otherwise never be observed again. Calling NumPy directly on the same
+    archive shows it is still exactly as it was.
+    """
+    archive = _write_snapshot_ls(
+        confined / "v070_direct.npz", lattice=_payload_array_ls(confined)
     )
     with pytest.raises(ValueError) as excinfo:
-        lucid_server.extract_render_data(archive)
+        with np.load(archive, allow_pickle=False) as snap:
+            snap["lattice"]
     assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_ls(tmp_path).exists(), "the pickle payload executed"
+    assert not _marker_ls(confined).exists()
 
 
 def _structured_payload_ls(directory):
@@ -462,24 +507,25 @@ def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
 
 
 @requires_numpy
-def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
-    """`kind == 'O'` alone would miss this; NumPy's refusal covers
-    `dtype.hasobject`."""
+def test_an_object_bearing_structured_dtype_is_refused(confined):
+    """`kind == 'O'` alone would miss this. Admission refuses a structured
+    descriptor outright, without needing to reason about which fields carry
+    objects."""
     archive = _write_snapshot_ls(
-        tmp_path / "struct.npz", generation=_structured_payload_ls(tmp_path)
+        confined / "v070_struct.npz", generation=_structured_payload_ls(confined)
     )
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
         lucid_server.extract_render_data(archive)
-    assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_ls(tmp_path).exists()
+    assert excinfo.value.reason == "member_dtype_structured"
+    assert not _marker_ls(confined).exists()
 
 
 @requires_numpy
-def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
+def test_the_archive_is_closed_before_any_cell_iteration(confined, monkeypatch):
     """`extract_render_data` had no context manager: the handle was held open
     across up to MAX_CELLS iterations of per-cell work. `np.argwhere` is the
     first downstream call, so it is the ordering witness."""
-    archive = _write_snapshot_ls(tmp_path / "clean.npz")
+    archive = _write_snapshot_ls(confined / "v070_clean.npz")
     real_load = np.load
     opened = []
 
@@ -507,38 +553,36 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
 
 
 @requires_numpy
-def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
-    """Closure on the exceptional path, witnessed on the real `NpzFile`.
-
-    The docstring claims closure "holds on refusal too because the members are
-    read inside the block". This file's ownership is conditional now, so that
-    claim is newest here and is witnessed rather than asserted.
-    """
+def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
+    """Closure on the exceptional path, witnessed on the real file object the
+    guard opened -- a NumPy handle is never created for a refused archive."""
     archive = _write_snapshot_ls(
-        tmp_path / "refused.npz", lattice=_payload_array_ls(tmp_path)
+        confined / "v070_refused.npz", lattice=_payload_array_ls(confined)
     )
+    import builtins
     opened = []
-    real_load = np.load
+    real_open = builtins.open
 
-    def tracking_load(*args, **kwargs):
-        handle = real_load(*args, **kwargs)
-        opened.append(handle)
+    def _tracking_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        if str(args[0]).endswith(".npz"):
+            opened.append(handle)
         return handle
 
-    monkeypatch.setattr(lucid_server.np, "load", tracking_load)
-    with pytest.raises(ValueError):
+    monkeypatch.setattr(builtins, "open", _tracking_open)
+    with pytest.raises(lucid_server.SnapshotArchiveRejected):
         lucid_server.extract_render_data(str(archive))
 
-    assert len(opened) == 1, "the archive was never opened"
-    # `close()` drops `zip` unconditionally; `fid` is a class attribute
-    # defaulting to None and cannot carry this claim alone.
-    assert opened[0].zip is None, "the archive survived the refusal"
+    assert len(opened) == 1, "the archive was opened more than once, or not at all"
+    assert opened[0].closed, "the descriptor survived the refusal"
 
 
 @requires_numpy
-def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+def test_a_refused_archive_never_reaches_np_load_at_all(confined, monkeypatch):
+    """Stronger than "it was not retried with pickle enabled": NumPy is not
+    asked to open the archive even once."""
     archive = _write_snapshot_ls(
-        tmp_path / "retry.npz", lattice=_payload_array_ls(tmp_path)
+        confined / "v070_retry.npz", lattice=_payload_array_ls(confined)
     )
     real_load = np.load
     calls = []
@@ -548,8 +592,27 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(lucid_server.np, "load", _recording_load)
-    with pytest.raises(ValueError):
+    with pytest.raises(lucid_server.SnapshotArchiveRejected):
         lucid_server.extract_render_data(archive)
+    assert calls == []
+
+
+@requires_numpy
+def test_a_valid_archive_is_loaded_with_pickle_explicitly_disabled(confined,
+                                                                   monkeypatch):
+    """The counterpart control: on the admitted path the explicit literal is
+    still what NumPy receives, so the assertion above is about ordering rather
+    than about the flag having quietly disappeared."""
+    archive = _write_snapshot_ls(confined / "v070_ok.npz", compressed=True)
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+    lucid_server.extract_render_data(archive)
     assert calls == [False]
 
 
@@ -593,37 +656,76 @@ def test_the_named_legacy_npy_class_is_what_numpy_actually_raises():
 
 
 @requires_numpy
-def test_a_numeric_npy_still_fails_exactly_as_it_did_before(tmp_path, monkeypatch):
-    """`extract_render_data` gained its first `with` on this branch.
+def test_a_renamed_numeric_npy_now_receives_a_typed_refusal(confined,
+                                                            monkeypatch):
+    """An explicitly authorized behaviour change, recorded rather than glossed.
 
-    An `NpzFile` needs deterministic ownership; an ndarray does not. Conditional
-    ownership keeps the archive closing while leaving a `.npy` to fail at the
-    same `snap['lattice']` subscript it always did -- and nothing downstream may
-    run, which `np.argwhere` witnesses because it is the first call after the
-    extraction.
+    A numeric `.npy` renamed `.npz` used to reach `np.load`, come back as a
+    plain ndarray, and fail at the `snap['lattice']` subscript with an
+    incidental `IndexError`. It is now refused by admission as not being a ZIP
+    archive, before NumPy sees it. The old class is still derived below and
+    asserted to be a DIFFERENT class from the new failure, so the change
+    cannot be mistaken for the old behaviour surviving.
     """
-    not_an_archive = tmp_path / "snapshot.npy"
-    np.save(not_an_archive, np.zeros((2, 2, 2), dtype=np.uint8))
+    npy_source = confined / "v070_renamed.npy"
+    np.save(npy_source, np.zeros((16, 16, 16), dtype=np.uint8))
+    not_an_archive = confined / "v070_renamed.npz"
+    not_an_archive.write_bytes(npy_source.read_bytes())
 
     reached = []
     monkeypatch.setattr(
         lucid_server.np, "argwhere", lambda *a, **k: reached.append("argwhere")
     )
 
-    with pytest.raises(_legacy_npy_error_class_ls()):
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
         lucid_server.extract_render_data(str(not_an_archive))
 
+    assert excinfo.value.reason == "not_zip_archive"
     assert reached == [], "downstream processing ran on a non-archive input"
+    assert not isinstance(excinfo.value, _legacy_npy_error_class_ls()), (
+        "the new refusal is the old incidental IndexError after all")
 
 
 @requires_numpy
-def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
-    archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))
+def test_a_numeric_snapshot_still_produces_cells_and_metrics(confined):
+    archive = _write_snapshot_ls(confined / "v070_clean.npz",
+                                 generation=np.int64(5))
     data = lucid_server.extract_render_data(archive)
     assert set(data) == {"cells", "metrics"}
     assert data["metrics"]["generation"] == 5
     assert type(data["metrics"]["generation"]) is int
     assert data["cells"], "a fully non-void lattice must yield cells"
+    assert data["metrics"]["grid_size"] == 16
+
+
+@requires_numpy
+def test_the_watcher_survives_a_rejected_snapshot_and_recovers(confined,
+                                                               monkeypatch):
+    """One poll over a poisoned directory, then one over a repaired one.
+
+    The watcher must log one bounded reason and broadcast nothing, then pick
+    up the next valid snapshot without a restart.
+    """
+    poison = confined / "v070_gen000001.npz"
+    _zip_ls(poison, _schema_ls(edge=24))  # admissible-looking, wrong edge
+
+    broadcasts = []
+
+    async def _record(message):
+        broadcasts.append(message)
+
+    monkeypatch.setattr(lucid_server, "broadcast", _record)
+    monkeypatch.setattr(lucid_server, "last_snapshot_path", None)
+    monkeypatch.setattr(lucid_server, "last_snapshot_mtime", 0)
+
+    with pytest.raises(lucid_server.SnapshotArchiveRejected):
+        lucid_server.extract_render_data(str(poison))
+    assert broadcasts == []
+
+    valid = _write_snapshot_ls(confined / "v070_gen000002.npz", compressed=True)
+    data = lucid_server.extract_render_data(valid)
+    assert data["metrics"]["generation"] == 7, (
+        "a later valid snapshot must still be accepted")
 
 
 # ===========================================================================

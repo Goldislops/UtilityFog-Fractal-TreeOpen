@@ -14,13 +14,33 @@ The server:
 """
 
 import asyncio
-import contextlib
 import json
 import glob
 import time
 import os
 import sys
+from pathlib import Path
+
 import numpy as np
+
+# This module is documented as `python scripts/lucid_server.py`, which leaves
+# the repository root off sys.path. The shared snapshot guard lives in the
+# `scripts` package, so the root is put on the path before importing it -- one
+# canonical module name either way, which matters because the guard's
+# exception type is caught by identity below.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    # Appended, not prepended: this must not be able to shadow a standard
+    # library module with a repository file of the same name.
+    sys.path.append(str(PROJECT_ROOT))
+
+from scripts.snapshot_archive_guard import (  # noqa: E402
+    PRODUCTION_POLICY as SNAPSHOT_POLICY,
+)
+from scripts.snapshot_archive_guard import (  # noqa: E402
+    SnapshotArchiveRejected,
+    admit_snapshot,
+)
 
 try:
     import websockets
@@ -74,32 +94,42 @@ def extract_render_data(snap_path):
     still open. Closure is explicit, not left to garbage collection, and it
     holds on refusal too because the members are read inside the block.
 
-    Ownership is CONDITIONAL because ``np.load`` returns two different kinds of
-    thing. A zip archive yields an ``NpzFile``, which owns an operating-system
-    handle and needs that deterministic close. A ``.npy`` yields a plain
-    ndarray, which owns no handle and has no context-manager protocol; wrapping
-    it in ``nullcontext`` lets it reach the same ``snap['lattice']`` subscript
-    that has always been where a NUMERIC non-archive input fails. The archive
-    gains closure without the array losing its established exception.
+    Structural admission
+    --------------------
+    ``admit_snapshot`` now runs first and raises ``SnapshotArchiveRejected``
+    before ``np.load``, its decompressor or its allocator is reached, for an
+    archive that is out of the data directory, not a ZIP, wrong in its
+    membership, hostile in its member names, oversized in its declared or
+    physical size, or wrong in any member's NPY header. The watcher and the
+    initial-client send below each catch that type, log one bounded reason
+    code and send no frame; the server, the watcher and every client stay
+    alive.
 
-    Two limits on that, stated rather than implied. An OBJECT-dtype ``.npy``
-    now fails earlier, at ``np.load`` itself, because pickle is refused before
-    anything is returned -- that is the intended change, not a preserved one.
-    And ``np.load`` returns a ``memmap`` only when passed ``mmap_mode``, which
-    this call site never does; a memmap WOULD own a mapping and would not be
-    closed by this branch, so the argument list here is load-bearing.
+    Ownership is no longer conditional. It used to be, because ``np.load``
+    returns an ``NpzFile`` for a zip and a plain ndarray for a ``.npy``, and
+    only the first owns a handle. Admission refuses non-ZIP input outright, so
+    this call site now only ever sees an ``NpzFile``.
 
-    The claim is an OBJECT-MEMBER REFUSAL and archive resource lifetime -- not
-    whole-archive validation. Nothing here resists decompression
-    amplification, absurd declared shapes, hostile member names or defects in
-    NumPy's own header parsing.
+    That is a DELIBERATE behaviour change, recorded rather than glossed: a
+    numeric ``.npy`` renamed to ``.npz`` used to fail with the incidental
+    ``IndexError`` of a string subscript on an ndarray, and now receives a
+    typed admission refusal instead.
+
+    The guard opens the file once and hands this function the very descriptor
+    it preflighted, so the bytes inspected are the bytes NumPy reads. The
+    inner ``with`` closes the archive; the guard closes the descriptor; both
+    hold on success and on every exceptional exit.
+
+    ``allow_pickle=False`` stays at this call site even though an object-dtype
+    member can no longer survive admission. It is the second line of defence
+    and the property the repository-wide static gate reads.
     """
-    loaded = np.load(snap_path, allow_pickle=False)
-    owner = contextlib.nullcontext(loaded) if isinstance(loaded, np.ndarray) else loaded
-    with owner as snap:
-        state = snap['lattice']
-        mg = snap['memory_grid']
-        gen = int(snap['generation'])
+    with admit_snapshot(snap_path, data_dir=DATA_DIR,
+                        policy=SNAPSHOT_POLICY) as descriptor:
+        with np.load(descriptor, allow_pickle=False) as snap:
+            state = snap['lattice']
+            mg = snap['memory_grid']
+            gen = int(snap['generation'])
 
     n = state.shape[0]
 
@@ -170,15 +200,23 @@ async def snapshot_watcher():
                     last_snapshot_path = latest
                     last_snapshot_mtime = mtime
 
-                    # Extract and broadcast
-                    data = extract_render_data(latest)
-                    msg = json.dumps({'type': 'frame', 'data': data})
-                    await broadcast(msg)
+                    # Extract and broadcast. A refused archive logs one bounded
+                    # reason code and sends nothing; `last_snapshot_path` and
+                    # `last_snapshot_mtime` were already advanced above, so the
+                    # same rejected file is not reprocessed on every poll, and
+                    # a later valid snapshot is picked up normally.
+                    try:
+                        data = extract_render_data(latest)
+                    except SnapshotArchiveRejected as refusal:
+                        print(f"  Snapshot rejected: {refusal.reason}")
+                    else:
+                        msg = json.dumps({'type': 'frame', 'data': data})
+                        await broadcast(msg)
 
-                    gen = data['metrics']['generation']
-                    n_clients = len(connected_clients)
-                    if n_clients > 0:
-                        print(f"  Broadcast gen {gen:,} to {n_clients} client(s) ({len(data['cells'])} cells)")
+                        gen = data['metrics']['generation']
+                        n_clients = len(connected_clients)
+                        if n_clients > 0:
+                            print(f"  Broadcast gen {gen:,} to {n_clients} client(s) ({len(data['cells'])} cells)")
         except Exception as e:
             print(f"  Snapshot error: {e}")
 
@@ -191,12 +229,16 @@ async def handle_client(websocket):
     remote = websocket.remote_address
     print(f"Client connected: {remote}")
 
-    # Send initial snapshot immediately
+    # Send initial snapshot immediately. A refused archive costs this client
+    # its opening frame and nothing else: one bounded reason code is logged,
+    # the connection stays open and its messages are handled as usual.
     try:
         latest = find_latest_snapshot(DATA_DIR)
         if latest:
             data = extract_render_data(latest)
             await websocket.send(json.dumps({'type': 'frame', 'data': data}))
+    except SnapshotArchiveRejected as refusal:
+        print(f"  Snapshot rejected: {refusal.reason}")
     except Exception as e:
         print(f"  Initial send error: {e}")
 

@@ -39,6 +39,9 @@ from threading import Thread
 import numpy as np
 from flask import Flask, jsonify, send_file, Response
 
+from scripts.snapshot_archive_guard import PRODUCTION_POLICY as SNAPSHOT_POLICY
+from scripts.snapshot_archive_guard import SnapshotArchiveRejected, admit_snapshot
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -60,17 +63,34 @@ app.config["API_PORT"] = API_PORT
 # ---------------------------------------------------------------------------
 
 def _find_latest_snapshot():
-    """Find the most recent .npz snapshot."""
+    """Find the most recent .npz snapshot.
+
+    The former one-megabyte minimum is gone. It was a guess at "tiny/corrupt",
+    and it was wrong in both directions: a structurally valid snapshot of a
+    sparse lattice compresses to far less than a megabyte and was skipped,
+    while a hostile archive only had to be padded past the threshold to be
+    selected. Selection is now purely "most recent", and whether the file is
+    usable is decided by ``admit_snapshot`` from the archive's own structure.
+    """
     snapshots = sorted(
         DATA_DIR.glob("v070_gen*.npz"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    # Skip tiny/corrupt files (< 10 MB for 256³)
-    for s in snapshots:
-        if s.stat().st_size > 1_000_000:
-            return s
     return snapshots[0] if snapshots else None
+
+
+def _snapshot_rejected():
+    """The one response every admission refusal produces.
+
+    503 rather than 500: the snapshot is unusable, so the service cannot
+    answer right now, and a later valid snapshot will fix it without any code
+    change. The body carries no reason code, no member name and no traceback --
+    these routes are unauthenticated GETs on a process that binds 0.0.0.0, and
+    the caller who supplied the archive must learn nothing about which check
+    caught it.
+    """
+    return jsonify({"error": "snapshot_rejected"}), 503
 
 
 def _load_snapshot(path):
@@ -113,12 +133,34 @@ def _load_snapshot(path):
     The claim is archive resource lifetime relative to extraction — not an
     indefinitely accumulating descriptor leak, not snapshot validation, endpoint
     totality, API authentication or atomic file access.
+
+    Structural admission
+    --------------------
+    ``admit_snapshot`` now runs first and raises ``SnapshotArchiveRejected``
+    before ``np.load``, its decompressor or its allocator is reached, for an
+    archive that is out of the data directory, not a ZIP, wrong in its
+    membership, hostile in its member names, oversized in its declared or
+    physical size, or wrong in any member's NPY header. The four routes below
+    translate that refusal into a sanitized 503; nothing else about the
+    refusal is exposed.
+
+    The guard opens the file once and hands this helper the very descriptor it
+    preflighted, so the bytes that were inspected are the bytes NumPy reads.
+    ``str(path)`` is therefore gone: there is no second open to convert a path
+    for. Ownership is split and both halves are explicit — the inner ``with``
+    closes the archive, the guard closes the descriptor, on success and on
+    every exceptional exit.
+
+    ``allow_pickle=False`` stays at this call site even though an object-dtype
+    member can no longer survive admission. It is the second line of defence
+    and the property the repository-wide static gate reads.
     """
-    with np.load(str(path), allow_pickle=False) as snap:
-        lattice = snap["lattice"]
-        memory_grid = snap["memory_grid"]
-        generation = int(snap["generation"])
-        best_fitness = float(snap["best_fitness"])
+    with admit_snapshot(path, data_dir=DATA_DIR, policy=SNAPSHOT_POLICY) as descriptor:
+        with np.load(descriptor, allow_pickle=False) as snap:
+            lattice = snap["lattice"]
+            memory_grid = snap["memory_grid"]
+            generation = int(snap["generation"])
+            best_fitness = float(snap["best_fitness"])
     return (lattice, memory_grid, generation, best_fitness)
 
 
@@ -207,7 +249,11 @@ def census():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, fitness = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, fitness = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
+
     N = state.shape[0]
     total = state.size
 
@@ -245,7 +291,10 @@ def equanimity():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, fitness = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, fitness = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
 
     compute_mask = state == 2
     ages = mg[0][compute_mask]
@@ -306,7 +355,11 @@ def acoustic():
     if not snap_path:
         return jsonify({"error": "No data available"}), 404
 
-    state, mg, gen, _ = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, _ = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
+
     N = state.shape[0]
     S = 16
     K = N // S
@@ -352,7 +405,10 @@ def geometry_stl():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, _ = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, _ = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
 
     # Sample non-void cells (limit to 50K for reasonable STL size)
     non_void_coords = np.argwhere(state > 0)
