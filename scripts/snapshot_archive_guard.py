@@ -186,7 +186,11 @@ class MemberSpec:
     kinds: Tuple[str, ...]
     max_payload_bytes: int
     role: str
-    itemsizes: Tuple[int, ...] = (1, 2, 4, 8, 16)
+    #: Default excludes 16 for the same portability reason as
+    #: :data:`_FLOAT_WIDTHS`. Every production spec passes an explicit tuple,
+    #: so this only governs a spec built without one — but leaving 16 here
+    #: would have quietly readmitted `<f16` through any such spec.
+    itemsizes: Tuple[int, ...] = (1, 2, 4, 8)
 
     @property
     def archive_name(self) -> str:
@@ -249,8 +253,7 @@ class SnapshotArchivePolicy:
         return {spec.archive_name: spec for spec in self.members}
 
 
-#: Widths NumPy can construct for each family. Integers: 1, 2, 4, 8 bytes.
-#: Floats: 2 (float16), 4, 8, and 16 (longdouble, where the platform has it).
+#: Widths NumPy can construct portably, per family.
 _INTEGER_WIDTHS = (1, 2, 4, 8)
 #: 16-byte floats are deliberately absent. ``float128``/``longdouble`` is not
 #: portable -- NumPy 2.3.5 on Windows refuses ``<f16`` outright -- and no
@@ -444,11 +447,15 @@ class _LiteralParser:
 
     #: ASCII decimal digits, spelled out. ``str.isdigit()`` is TRUE for the
     #: whole Unicode digit property -- superscripts, circled numerals and so
-    #: on -- while ``int()`` accepts only these ten. Using ``isdigit`` here let
-    #: a header declaring a shape of ``(\xb2,)`` reach ``int()``, which raised a
-    #: bare ``ValueError`` carrying the attacker's character out of the guard
-    #: entirely, past every ``except SnapshotArchiveRejected`` in the
-    #: consumers and into a 500 with a traceback.
+    #: on -- while ``int()`` accepts only these ten, so a shape of ``(\xb2,)``
+    #: reached ``int()`` and raised a bare ``ValueError``.
+    #:
+    #: Stated precisely, because the obvious reading overclaims: the ``except``
+    #: clause in :func:`_read_member_header` now also covers ``ValueError``, so
+    #: that escape is closed twice over and no test can separate the two.
+    #: What this line buys on its own is that the parser refuses the input
+    #: rather than relying on the conversion to fail -- defence in depth, not
+    #: the sole barrier.
     DECIMAL_DIGITS = "0123456789"
 
     def _parse_int(self) -> int:
@@ -553,6 +560,12 @@ def _read_member_header(stream, policy: SnapshotArchivePolicy) -> _MemberHeader:
         raise _reject("member_dtype_structured")
     size_text = match.group("size")
     if not size_text:
+        raise _reject("member_dtype_unsupported")
+    if len(size_text) > 1 and size_text[0] == "0":
+        # `<i000004` normalises to a width of 4 and would pass the allowlist,
+        # but NumPy is handed the DESCRIPTOR STRING, not the normalised width.
+        # Refusing padded forms keeps the thing checked and the thing used the
+        # same thing; NumPy never writes one.
         raise _reject("member_dtype_unsupported")
     if len(size_text) > _MAX_ITEMSIZE_DIGITS:
         # ``int()`` refuses very long decimal strings outright (CPython's
@@ -716,6 +729,10 @@ def _check_member_names(names: Tuple[str, ...], policy: SnapshotArchivePolicy) -
     for name in names:
         if not name or _UNSAFE_NAME_RE.search(name):
             raise _reject("member_name_unsafe")
+        if not name.isascii():
+            # The schema's five names are ASCII. Anything else is either a
+            # different name or an encoding trick, and both are refusals.
+            raise _reject("member_name_unsafe")
 
     seen = set()
     for name in names:
@@ -806,7 +823,15 @@ def newest_first(paths):
         except OSError:
             continue
         described.append((info.st_mtime_ns, os.fspath(candidate), candidate))
-    described.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    # Newest first, and on a tie the LOWEST path first -- not `reverse=True`
+    # over the whole key, which would order tied paths descending. The
+    # producer's filenames are `v070_gen{n:06d}_step{m:06d}_{ts}.npz`, and
+    # `:06d` is a minimum width that production has already outgrown, so
+    # lexicographic order inverts across a digit-count boundary: descending
+    # ties would prefer `v070_gen999999...` over `v070_gen1000000...`, i.e.
+    # the OLDER snapshot. Ties are only reachable on coarse-granularity
+    # storage, but the direction should not be an accident either way.
+    described.sort(key=lambda row: (-row[0], row[1]))
     return [row[2] for row in described]
 
 
@@ -963,7 +988,18 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
         # "not_zip_archive". Nothing raises one today; this keeps that true
         # if anything is ever moved inside the try.
         raise
-    except (zipfile.BadZipFile, OSError, ValueError):
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError,
+            zlib.error):
+        # `NotImplementedError` is the one that had to be added rather than
+        # assumed. `ZipFile()`'s constructor reads the central directory, and
+        # `_RealGetContents` refuses an entry whose "version needed to
+        # extract" exceeds MAX_EXTRACT_VERSION (63) by raising it. Because it
+        # subclasses `RuntimeError`, none of the other three clauses caught it,
+        # so a single byte set to 255 in each central header made a
+        # schema-perfect archive escape the guard untyped -- turning every
+        # Medusa snapshot route into a 500 instead of the promised sanitized
+        # 503, and wedging the geometry daemon in a retry loop because the
+        # broad handler there never records a non-refusal as rejected.
         raise _reject("not_zip_archive") from None
 
     with archive:
@@ -972,7 +1008,18 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
             if entry.is_dir():
                 raise _reject("member_is_directory")
 
+        # BOTH the sanitised name and the raw one. `ZipInfo.filename` has
+        # already been through `_sanitize_filename` (NUL truncation, backslash
+        # folding) and may additionally have been overridden by a 0x7075
+        # Unicode-Path extra field, so an entry can present a schema name here
+        # while `orig_filename` holds something else entirely -- which CPython
+        # then quotes verbatim in its "Overlapped entries" warning, putting
+        # attacker-chosen text on an unattended daemon's stderr from an
+        # ADMITTED archive.
         _check_member_names(tuple(entry.filename for entry in infos), policy)
+        for entry in infos:
+            if entry.orig_filename != entry.filename:
+                raise _reject("member_name_unsafe")
 
         specs = policy.by_archive_name
         headers: Dict[str, _MemberHeader] = {}
@@ -997,12 +1044,17 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
             except SnapshotArchiveRejected:
                 raise  # never re-coded by the broad clause below
             except NotImplementedError:
-                # The same two flags, declared in the LOCAL header only, where
-                # the central-directory check above cannot see them.
-                # `NotImplementedError` subclasses `RuntimeError`, so it would
-                # otherwise be swallowed by the clause below and reported as an
-                # unreadable header. Its message names the flag and is
-                # discarded with `from None`.
+                # Defensive, and stated as such. `ZipFile.open` raises this for
+                # flag bits 5 and 6 -- but it tests `zinfo.flag_bits`, which for
+                # `open(ZipInfo)` is the CENTRAL value, so the check above
+                # always wins and no crafted archive reaches here. Local-header
+                # flag bits are used by CPython only to pick the filename
+                # codec, and are ignored by both zipfile and this guard.
+                #
+                # The clause is kept because `NotImplementedError` subclasses
+                # `RuntimeError`: without it, any future CPython that raises it
+                # from this call would be reported as an unreadable header, and
+                # its message names the flag. Discarded with `from None`.
                 raise _reject("member_flags_unsupported") from None
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError,
                     zlib.error):

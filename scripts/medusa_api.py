@@ -43,6 +43,7 @@ from scripts.snapshot_archive_guard import PRODUCTION_POLICY as SNAPSHOT_POLICY
 from scripts.snapshot_archive_guard import (
     SnapshotArchiveRejected,
     admit_snapshot,
+    entry_fingerprint,
     newest_first,
 )
 
@@ -249,8 +250,19 @@ def status():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    snap_age = time.time() - snap_path.stat().st_mtime
-    snap_size = snap_path.stat().st_size
+    # Non-following, and typed. Selection deliberately KEEPS a dangling link
+    # or a symlink loop as a candidate so it reaches the guard and is refused
+    # with a reason — and when nothing in the window is admissible the newest
+    # is still returned. A following, unguarded `.stat()` here would then raise
+    # `FileNotFoundError`/`ELOOP` into a 500 whose message carries the
+    # attacker-chosen path: the exact disclosure the rest of this change
+    # closes. If the entry cannot be described it is not a snapshot to report.
+    try:
+        _, snap_size, snap_mtime_ns = entry_fingerprint(snap_path)
+    except OSError:
+        return jsonify({"error": "No snapshots found"}), 404
+
+    snap_age = time.time() - snap_mtime_ns / 1_000_000_000
 
     # Count total snapshots
     all_snaps = list(DATA_DIR.glob("v070_gen*.npz"))

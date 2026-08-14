@@ -29,6 +29,7 @@ import struct
 import warnings
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -262,6 +263,35 @@ def _case_not_zip_archive(root, tmp_path):
     path = root / "v070_renamed.npz"
     path.write_bytes(npy_bytes("|u1", (16, 16, 16)))
     return path, None
+
+
+def _set_extract_version(path, version):
+    """Set 'version needed to extract' on every central-directory entry."""
+    data = bytearray(Path(path).read_bytes())
+    offset = 0
+    patched = 0
+    while True:
+        index = data.find(b"PK\x01\x02", offset)
+        if index < 0:
+            break
+        struct.pack_into("<H", data, index + 6, version)
+        patched += 1
+        offset = index + 4
+    assert patched, "no central-directory header found in the fixture"
+    Path(path).write_bytes(bytes(data))
+    return Path(path)
+
+
+def _case_unsupported_extract_version(root, tmp_path):
+    """One byte per entry, and the archive is otherwise schema-perfect.
+
+    `ZipFile()`'s constructor refuses an entry whose "version needed to
+    extract" exceeds MAX_EXTRACT_VERSION (63) with `NotImplementedError` —
+    which subclasses `RuntimeError`, so the BadZipFile/OSError/ValueError
+    clause did not catch it and the exception left `admit_snapshot` untyped.
+    """
+    path = write_npz(root / "v070_extver.npz", schema_members(16))
+    return _set_extract_version(path, 255), None
 
 
 def _zip64_entry_bomb(path, entries):
@@ -723,6 +753,91 @@ def test_a_symlink_out_of_the_data_directory_is_refused(root, tmp_path):
     assert admit(link, root) == "path_not_confined"
 
 
+def test_an_unsupported_extract_version_is_refused_not_escaped(root, tmp_path):
+    """The archive is schema-perfect; one byte per central entry is changed.
+
+    `NotImplementedError` subclasses `RuntimeError`, so the constructor's
+    refusal escaped `admit_snapshot` untyped — turning every Medusa snapshot
+    route into a 500 rather than the sanitized 503, and wedging the geometry
+    daemon, which records only typed refusals in its retry memory.
+    """
+    path, policy = _case_unsupported_extract_version(root, tmp_path)
+    assert admit(path, root, policy) == "not_zip_archive"
+
+
+def test_the_same_archive_is_admitted_at_a_supported_extract_version(root):
+    """Control: the fixture differs from an admitted archive in that field
+    alone, so the refusal above is about the version and nothing else."""
+    path = write_npz(root / "v070_extver_ok.npz", schema_members(16))
+    assert admit(path, root) is None
+    _set_extract_version(path, 255)
+    assert admit(path, root) == "not_zip_archive"
+
+
+@pytest.mark.parametrize("version", [64, 100, 255])
+def test_every_extract_version_above_the_ceiling_is_typed(root, version):
+    path = write_npz(root / ("v070_ev%d.npz" % version), schema_members(16))
+    _set_extract_version(path, version)
+    assert admit(path, root) == "not_zip_archive"
+
+
+def test_a_raw_member_name_differing_from_the_sanitised_one_is_refused(root):
+    """`ZipInfo.filename` is post-`_sanitize_filename` and can additionally be
+    overridden by a 0x7075 extra field, so an entry can present a schema name
+    while `orig_filename` holds something else — which CPython quotes verbatim
+    in its "Overlapped entries" warning, putting attacker-chosen text on an
+    unattended daemon's stderr from an ADMITTED archive."""
+    path = write_npz(root / "v070_rawname.npz", schema_members(16))
+    assert admit(path, root) is None, "the fixture must be admissible first"
+
+    # Injected rather than hand-forged. `ZipInfo.__init__` truncates a NUL on
+    # CONSTRUCTION, so `writestr` cannot store a name that diverges, and a
+    # crafted central entry would additionally have to keep the local header,
+    # the directory size and the EOCD offsets all consistent -- surgery whose
+    # failure mode would be a DIFFERENT refusal, making the test say nothing
+    # about this check. Divergence is what is under test, so divergence is what
+    # is injected.
+    real_infolist = zipfile.ZipFile.infolist
+
+    def _diverging_infolist(self):
+        entries = real_infolist(self)
+        for entry in entries:
+            if entry.filename == "lattice.npy":
+                entry.orig_filename = "lattice.npy\x00../../etc/passwd"
+        return entries
+
+    with mock.patch.object(zipfile.ZipFile, "infolist", _diverging_infolist):
+        reason = admit(path, root)
+    assert reason == "member_name_unsafe"
+
+
+@pytest.mark.parametrize("descr", ["<i000004", "<f00008", "|u01"])
+def test_a_zero_padded_width_is_refused(root, descr):
+    """`<i000004` normalises to a width of 4 and would pass the allowlist, but
+    NumPy is handed the descriptor STRING, not the normalised width."""
+    members = schema_members(16)
+    members["generation.npy"] = npy_bytes(
+        "<i8", (), payload=b"\x00" * 4,
+        header="{'descr': '%s', 'fortran_order': False, 'shape': (), }" % descr)
+    path = write_npz(root / "v070_padded.npz", members)
+    assert admit(path, root) == "member_dtype_unsupported"
+
+
+def test_newest_first_breaks_ties_on_the_lower_path_first(root):
+    """Direction, not merely determinism.
+
+    The producer's `:06d` width has already been outgrown in production, so
+    lexicographic order inverts across a digit-count boundary: a descending
+    tie-break would prefer `v070_gen999999` over `v070_gen1000000` — the OLDER
+    snapshot.
+    """
+    older_name = _touch(root / "v070_gen999999_step1.npz", 7_000_000_000)
+    newer_name = _touch(root / "v070_gen1000000_step1.npz", 7_000_000_000)
+    ordered = guard.newest_first([older_name, newer_name])
+    assert [p.name for p in ordered] == ["v070_gen1000000_step1.npz",
+                                         "v070_gen999999_step1.npz"]
+
+
 def test_a_zip64_entry_bomb_is_refused_before_zipfile_builds_the_directory(root):
     """The refusal must arrive at the ZIP64 check, not later on the names.
 
@@ -845,6 +960,76 @@ def test_unsupported_general_purpose_flag_bits_are_refused(root, bits, label):
     assert admit(path, root) == "member_flags_unsupported", label
 
 
+def test_the_flag_check_refuses_before_the_member_is_ever_opened(root,
+                                                                 monkeypatch):
+    """Ordering, which the reason code alone cannot pin.
+
+    CPython raises `NotImplementedError` for bits 5/6 from `ZipFile.open`, and
+    this guard translates that to the SAME reason code — so deleting the
+    central-directory check entirely would leave every other flag-bit test
+    passing. What distinguishes the two is whether the member is opened at
+    all, so that is what is counted here.
+    """
+    path = write_npz(root / "v070_flagorder.npz", schema_members(16))
+    _set_central_flag_bits(path, 0x0020)
+
+    opens = []
+    real_open = zipfile.ZipFile.open
+
+    def _counting_open(self, name, *args, **kwargs):
+        opens.append(getattr(name, "filename", name))
+        return real_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", _counting_open)
+    assert admit(path, root) == "member_flags_unsupported"
+    assert opens == [], (
+        "the refusal came from ZipFile.open, not from the central directory")
+
+
+def test_the_flag_check_does_not_stop_a_clean_archive_being_opened(root,
+                                                                   monkeypatch):
+    """Anti-vacuity for the counter above: an admissible archive DOES open its
+    members, so `opens == []` means something."""
+    path = write_npz(root / "v070_flagorder_ok.npz", schema_members(16))
+    opens = []
+    real_open = zipfile.ZipFile.open
+
+    def _counting_open(self, name, *args, **kwargs):
+        opens.append(getattr(name, "filename", name))
+        return real_open(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", _counting_open)
+    assert admit(path, root) is None
+    assert len(opens) == 5
+
+
+def test_a_non_ascii_member_name_is_refused(root):
+    """The schema's five names are ASCII; anything else is a different name or
+    an encoding trick, and both are refusals."""
+    members = schema_members(16)
+    members["latticeİ.npy"] = npy_bytes("|u1", (1,))
+    path = write_npz(root / "v070_nonascii.npz", members)
+    assert admit(path, root) == "member_name_unsafe"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"),
+                    reason="FIFOs are a POSIX construct")
+def test_a_fifo_named_like_a_snapshot_does_not_hang_the_guard(root):
+    """`S_ISREG` cannot protect the OPEN itself.
+
+    A plain `open()` of a FIFO blocks until a writer appears, so an attacker
+    able to write to the watched directory could `mkfifo` a `v070_gen*.npz`
+    and hang Lucid's whole asyncio server, or park one Medusa request thread
+    per attempt. `O_NONBLOCK` makes the open return so `S_ISREG` can refuse.
+
+    If this ever regresses it HANGS rather than fails, which is exactly why it
+    is worth having: a hang in CI is a louder signal than a wrong reason code.
+    """
+    fifo = root / "v070_fifo.npz"
+    os.mkfifo(fifo)
+    assert admit(fifo, root) == "path_not_regular_file"
+
+
 def test_a_not_implemented_error_from_zipfile_is_translated(root, monkeypatch):
     """The defensive half of the flag-bit handling.
 
@@ -936,7 +1121,6 @@ def test_a_resolve_failure_is_typed_even_when_injected(root, monkeypatch):
     assert excinfo.value.reason == "path_not_confined"
     assert "symbolic" not in str(excinfo.value)
     assert "v070_resolve" not in str(excinfo.value)
-    assert real_resolve is not None
 
 
 @pytest.mark.parametrize("digits", ["١", "٤", "۸"], ids=["arabic_one",
@@ -947,10 +1131,12 @@ def test_a_non_ascii_digit_width_is_refused(root, digits):
     decimal-digit category — as does `int()`. So `<i١` parsed as a width of 1
     and was admitted, describing a dtype no NumPy can construct."""
     members = schema_members(16)
-    # A payload of exactly one byte, matching the width the non-ASCII digit
-    # decodes to. Without it the archive is refused for a size mismatch and the
-    # dtype rule is never reached -- which would make this test pass for the
-    # wrong reason, and would have passed before the fix too.
+    # A one-byte payload. For `١` (=1) that makes the archive size-consistent,
+    # so ONLY the dtype rule can refuse it -- and reverting the rule admits the
+    # archive outright, which is what makes this case load-bearing. For `٤`
+    # (=4) and `۸` (=8) the sizes do not line up and the refusal arrives as a
+    # size mismatch instead; those two are breadth over the digit class, not
+    # independent proofs of the rule.
     members["generation.npy"] = npy_bytes(
         "<i8", (), payload=b"\x00", version=(3, 0),
         header="{'descr': '<i%s', 'fortran_order': False, 'shape': (), }"

@@ -832,6 +832,48 @@ def test_the_descriptor_is_closed_after_a_payload_refusal(confined, monkeypatch)
     assert opened[0].closed
 
 
+def test_status_does_not_500_when_the_selected_snapshot_cannot_be_described(
+    confined, monkeypatch
+):
+    """The non-following property has to reach `/api/status`, not stop at
+    selection.
+
+    Selection deliberately KEEPS a dangling link or a symlink loop as a
+    candidate so it reaches the guard and is refused with a reason — and when
+    nothing in the window is admissible it still returns the newest. A
+    following, unguarded `.stat()` here then raised `FileNotFoundError`, which
+    Flask turns into a 500 and logs with the attacker-chosen path in the
+    traceback.
+
+    The status code is the load-bearing assertion. Flask's non-debug 500 body
+    is a generic page, so asserting the path is absent from the RESPONSE would
+    hold either way — the disclosure was to the server log, not to the caller.
+    """
+    ghost = confined / "v070_gen_LEAKNAME_0050.npz"
+    monkeypatch.setattr(medusa_api, "_find_latest_snapshot", lambda: ghost)
+    client = medusa_api.app.test_client()
+    response = client.get("/api/status")
+    assert response.status_code == 404, (
+        "a snapshot that cannot be described reached an unguarded stat()")
+    assert response.get_json() == {"error": "No snapshots found"}
+
+
+def test_status_still_reports_a_real_snapshot(confined):
+    """Counterpart control, so the test above is about the missing entry and
+    not about `/api/status` having been broken outright."""
+    archive = Path(_write_snapshot_ma(confined / "v070_gen000051.npz",
+                                      compressed=True))
+    client = medusa_api.app.test_client()
+    with mock.patch.object(medusa_api, "_find_latest_snapshot",
+                           lambda: archive):
+        response = client.get("/api/status")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["latest_snapshot"] == "v070_gen000051.npz"
+    assert payload["snapshot_size_mb"] >= 0
+    assert payload["snapshot_age_seconds"] >= 0
+
+
 def test_selection_survives_a_snapshot_that_disappears_mid_scan(confined,
                                                                 monkeypatch):
     """The glob and the metadata read are separate syscalls, and the producer
@@ -898,6 +940,16 @@ def trimesh_sentinel(monkeypatch):
     return sentinel
 
 
+#: A lattice with SOMETHING in it. `geometry_stl` returns 404 for an all-void
+#: lattice at `if len(non_void_coords) == 0`, which is BEFORE it touches
+#: `trimesh.primitives` — so the default all-zero fixture would make the
+#: counterpart control below assert on a module that was never reached, and
+#: would let the refusal test's `touched == []` pass through the 404 path
+#: instead of through the refusal.
+def _non_void_lattice():
+    return np.ones((16, 16, 16), dtype=np.uint8)
+
+
 def test_geometry_route_answers_503_before_touching_trimesh(confined,
                                                             trimesh_sentinel):
     """Runs in CI rather than skipping: the sentinel replaces the dependency.
@@ -923,8 +975,16 @@ def test_geometry_route_reaches_trimesh_only_once_a_snapshot_is_admitted(
     confined, trimesh_sentinel
 ):
     """The counterpart control, so the assertion above is about the REFUSAL
-    and not about the route being unreachable for some other reason."""
-    archive = _write_snapshot_ma(confined / "v070_gen000012.npz", compressed=True)
+    and not about the route being unreachable for some other reason.
+
+    The lattice must be NON-VOID. With the default all-zero fixture the route
+    returns 404 at `len(non_void_coords) == 0` before any mesh work, so this
+    control would assert on a module the route never reached — and the refusal
+    test above would have been satisfied by that same 404 rather than by the
+    refusal it names.
+    """
+    archive = _write_snapshot_ma(confined / "v070_gen000012.npz",
+                                 compressed=True, lattice=_non_void_lattice())
     client = medusa_api.app.test_client()
     with mock.patch.object(medusa_api, "_find_latest_snapshot",
                            lambda: Path(archive)):
@@ -934,6 +994,7 @@ def test_geometry_route_reaches_trimesh_only_once_a_snapshot_is_admitted(
     # through, and that it was reached only after the snapshot was accepted.
     assert trimesh_sentinel.touched, (
         "an admitted snapshot never reached the mesh stage")
+    assert trimesh_sentinel.touched[0] == "primitives"
     assert response.status_code != 503
 
 

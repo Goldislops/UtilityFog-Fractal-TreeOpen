@@ -27,6 +27,7 @@ output or whole-daemon correctness.
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -287,31 +288,54 @@ def test_original_extraction_exception_propagates_unchanged():
 # -- one controlled daemon cycle ----------------------------------------------
 
 
-class _FakeStat:
-    def __init__(self, size, mtime):
-        self.st_size = size
-        self.st_mtime = mtime
-        self.st_mtime_ns = int(mtime * 1_000_000_000)
-
-
 class _FakeSnapshotPath:
-    def __init__(self, name="v070_gen0001000.npz", size=2_000_000, mtime=100.0):
+    """A stand-in for one snapshot path that is also a REAL directory entry.
+
+    It used to be a pure duck type: `.stat()`, `.name`, `__str__` and nothing
+    else. That worked while discovery sorted on `p.stat().st_mtime`, which
+    accepts any object with a `.stat()`. Discovery now describes candidates
+    with `os.lstat`, which takes only `str | bytes | os.PathLike` -- deliberately,
+    because reading the ENTRY rather than whatever it points at is the whole
+    point of the non-following ordering.
+
+    So the fake owns a real, tiny file and forwards `__fspath__` to it. That
+    keeps the double honest in both directions: `os.lstat` returns real
+    metadata, and `change()` rewrites the real file rather than a fabricated
+    stat result, so the daemon's fingerprint sees a genuine change.
+
+    Backing this with a fabricated `.stat()` instead would have been worse than
+    useless: `os.lstat` on a path that does not exist raises `OSError`,
+    `newest_first` skips it, and every daemon-cycle test would pass while
+    exercising nothing.
+    """
+
+    def __init__(self, directory, name="v070_gen0001000.npz", size=64,
+                 mtime=100.0):
         self.name = name
-        self._stat = _FakeStat(size, mtime)
+        self._real = Path(directory) / name
+        self._real.write_bytes(b"\x00" * size)
+        self._set_mtime(mtime)
+
+    def _set_mtime(self, mtime):
+        stamp = int(mtime * 1_000_000_000)
+        os.utime(self._real, ns=(stamp, stamp))
 
     def stat(self):
-        return self._stat
+        return self._real.stat()
 
     def change(self, size=None, mtime=None):
         """Replace the file at this path, as a rotating producer would."""
-        self._stat = _FakeStat(
-            self._stat.st_size if size is None else size,
-            self._stat.st_mtime if mtime is None else mtime,
-        )
+        if size is not None:
+            self._real.write_bytes(b"\x00" * size)
+        if mtime is not None:
+            self._set_mtime(mtime)
         return self
 
+    def __fspath__(self):
+        return os.fspath(self._real)
+
     def __str__(self):
-        return f"/fake/{self.name}"
+        return os.fspath(self._real)
 
 
 class _FakeDataDir:
@@ -356,7 +380,7 @@ def _run_one_daemon_cycle(archive, tmp_path):
             return None
         return _record
 
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     data_dir = _FakeDataDir([snapshot])
     clock = _FakeClock(stop_after_sleeps=1)
     loader = mock.Mock(return_value=archive)
@@ -428,7 +452,7 @@ def test_daemon_cycle_loads_from_the_admitted_descriptor(tmp_path):
 
 def test_daemon_cycle_keeps_the_snapshot_glob_pattern(tmp_path):
     archive = _FakeArchive(_good_contents(generation=1000))
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     data_dir = _FakeDataDir([snapshot])
     clock = _FakeClock(stop_after_sleeps=1)
     with mock.patch.object(geometry_daemon, "admit_snapshot", _FakeAdmission()), \
@@ -460,7 +484,7 @@ def test_a_small_but_valid_snapshot_is_no_longer_skipped(tmp_path):
     """
     archive = _FakeArchive(_good_contents(generation=7))
     loader = mock.Mock(return_value=archive)
-    data_dir = _FakeDataDir([_FakeSnapshotPath(size=40_000)])
+    data_dir = _FakeDataDir([_FakeSnapshotPath(tmp_path, size=40_000)])
     with mock.patch.object(geometry_daemon, "admit_snapshot", _FakeAdmission()), \
          mock.patch.object(geometry_daemon.np, "load", loader), \
          mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
@@ -531,7 +555,7 @@ def _run_rejecting_daemon(tmp_path, snapshot, refusals, sleeps=1):
 def test_a_rejected_snapshot_runs_no_exporter_and_leaves_the_daemon_alive(
     tmp_path, capsys
 ):
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     calls, attempts = _run_rejecting_daemon(tmp_path, snapshot, refusals=1)
     output = capsys.readouterr().out
     assert calls == [], "an exporter ran on a rejected snapshot"
@@ -542,7 +566,7 @@ def test_a_rejected_snapshot_runs_no_exporter_and_leaves_the_daemon_alive(
 
 
 def test_a_rejection_never_logs_the_archive_name(tmp_path, capsys):
-    snapshot = _FakeSnapshotPath(name="v070_gen_LEAKNAME_0001.npz")
+    snapshot = _FakeSnapshotPath(tmp_path, name="v070_gen_LEAKNAME_0001.npz")
     _run_rejecting_daemon(tmp_path, snapshot, refusals=1)
     output = capsys.readouterr().out
     assert "LEAKNAME" not in output, (
@@ -552,7 +576,7 @@ def test_a_rejection_never_logs_the_archive_name(tmp_path, capsys):
 def test_an_unchanged_rejected_snapshot_is_not_reprocessed(tmp_path, capsys):
     """Fingerprint memory: repeated polls over a poisoned directory must not
     repeat the preflight or repeat the log."""
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     calls, attempts = _run_rejecting_daemon(tmp_path, snapshot, refusals=5,
                                             sleeps=4)
     output = capsys.readouterr().out
@@ -564,7 +588,7 @@ def test_an_unchanged_rejected_snapshot_is_not_reprocessed(tmp_path, capsys):
 def test_a_changed_snapshot_at_the_same_path_is_retried(tmp_path):
     """A rotated or replaced file differs in size or mtime, so the memory must
     not lock the daemon out of a subsequently valid snapshot."""
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     attempts = []
     calls = []
 
@@ -1034,7 +1058,7 @@ def test_the_daemon_loop_does_not_treat_a_programmer_error_as_a_refusal(
     """The watcher's broad handler still catches non-refusals so the daemon
     survives — but it must not record them as rejected snapshots, or the
     fingerprint memory would suppress a real, recurring fault."""
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     data_dir = _FakeDataDir([snapshot])
 
     class _Boom(RuntimeError):

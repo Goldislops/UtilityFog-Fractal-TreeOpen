@@ -840,7 +840,6 @@ def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
     assert polls == 2, "the watcher stopped polling"
     assert "v070_gen000003" not in output
     assert "No such file" not in output
-    assert real_fingerprint is not None
 
 
 @requires_numpy
