@@ -624,3 +624,227 @@ def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
     assert data["metrics"]["generation"] == 5
     assert type(data["metrics"]["generation"]) is int
     assert data["cells"], "a fully non-void lattice must yield cells"
+
+
+# ===========================================================================
+# Structural admission -- a hostile archive must be refused BEFORE np.load
+#
+# `extract_render_data` is reached from the watched directory on every change
+# and from every client connect, with nobody present. Pickle refusal and
+# archive lifetime say nothing about an archive's shape or its cost: an
+# archive could still name members outside the schema, carry traversal-bearing
+# entries, declare a payload of hundreds of gigabytes, or lie about its own
+# sizes, and every one of those reached `np.load` and the allocation behind it.
+#
+# The fixtures are built with the standard library, because NumPy cannot write
+# a duplicate member, a corrupt NPY magic or a lying shape. None is hostile in
+# SIZE: each is a few kilobytes, and the oversized cases lie in their headers
+# rather than on disk.
+# ===========================================================================
+
+import struct  # noqa: E402
+import warnings  # noqa: E402
+import zipfile  # noqa: E402
+
+_NPY_MAGIC = b"\x93NUMPY"
+
+
+def _npy_ls(descr, shape, *, fortran=False, payload=None, header=None,
+            version=(1, 0)):
+    """One `.npy` member as raw bytes, with every field independently forgeable."""
+    if header is None:
+        if not shape:
+            shape_text = "()"
+        elif len(shape) == 1:
+            shape_text = "(%d,)" % shape[0]
+        else:
+            shape_text = "(" + ", ".join(str(d) for d in shape) + ")"
+        header = "{'descr': '%s', 'fortran_order': %s, 'shape': %s, }" % (
+            descr, fortran, shape_text)
+    body = header.encode("latin1")
+    prelude = 10 if version == (1, 0) else 12
+    body += b" " * ((-(prelude + len(body) + 1)) % 64) + b"\n"
+    out = bytearray(_NPY_MAGIC) + bytes(version)
+    out += (struct.pack("<H", len(body)) if version == (1, 0)
+            else struct.pack("<I", len(body)))
+    out += body
+    if payload is None:
+        digits = descr[2:] if descr[0] in "<>|=" else descr[1:]
+        itemsize = int(digits) if digits else 0
+        count = 1
+        for dim in shape:
+            count *= dim
+        payload = b"\x00" * (count * itemsize)
+    return bytes(out) + payload
+
+
+def _schema_ls(edge=16, channels=8):
+    """The five members a `v070_gen` snapshot carries, at a valid edge."""
+    return {
+        "lattice.npy": _npy_ls("|u1", (edge, edge, edge)),
+        "memory_grid.npy": _npy_ls("<f4", (channels, edge, edge, edge)),
+        "generation.npy": _npy_ls("<i8", ()),
+        "ca_step.npy": _npy_ls("<i8", ()),
+        "best_fitness.npy": _npy_ls("<f8", ()),
+    }
+
+
+def _zip_ls(path, members, *, compressed=True, duplicate=None):
+    mode = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # a duplicate name is the point here
+        with zipfile.ZipFile(path, "w", compression=mode) as archive:
+            for name, blob in members.items():
+                archive.writestr(name, blob)
+            if duplicate is not None:
+                archive.writestr(duplicate, members[duplicate])
+    return str(path)
+
+
+def _hostile_ls(kind, path):
+    """Build one hostile archive of the named kind at `path`."""
+    members = _schema_ls()
+    if kind == "duplicate_member":
+        return _zip_ls(path, members, duplicate="lattice.npy")
+    if kind == "traversal_name":
+        members["../../escape.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "backslash_name":
+        members["sub\\escape.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "missing_member":
+        members.pop("ca_step.npy")
+        return _zip_ls(path, members)
+    if kind == "extra_member":
+        members["surprise.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "oversized_declared_payload":
+        members["lattice.npy"] = _npy_ls(
+            "|u8", (256, 256, 256), payload=b"",
+            header="{'descr': '|u8', 'fortran_order': False, "
+                   "'shape': (256, 256, 256), }")
+        members["memory_grid.npy"] = _npy_ls(
+            "<f4", (8, 256, 256, 256), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 256, 256, 256), }")
+        return _zip_ls(path, members)
+    if kind == "oversized_edge":
+        return _zip_ls(path, _schema_ls(edge=512))
+    if kind == "header_payload_mismatch":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16)) + b"\x00" * 64
+        return _zip_ls(path, members)
+    if kind == "invalid_magic":
+        members["lattice.npy"] = b"XXXXXX" + members["lattice.npy"][6:]
+        return _zip_ls(path, members)
+    if kind == "invalid_version":
+        blob = bytearray(members["lattice.npy"])
+        blob[6] = 9
+        members["lattice.npy"] = bytes(blob)
+        return _zip_ls(path, members)
+    if kind == "invalid_header":
+        members["lattice.npy"] = _npy_ls(
+            "|u1", (16, 16, 16), header="{'descr': '|u1', 'shape': (1,), }")
+        return _zip_ls(path, members)
+    if kind == "object_dtype":
+        members["generation.npy"] = _npy_ls("|O", (), payload=b"")
+        return _zip_ls(path, members)
+    if kind == "structured_dtype":
+        members["generation.npy"] = _npy_ls(
+            "<i8", (), payload=b"",
+            header="{'descr': [('payload', '|O'), ('n', '<i4')], "
+                   "'fortran_order': False, 'shape': (1,), }")
+        return _zip_ls(path, members)
+    if kind == "wrong_rank":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16))
+        return _zip_ls(path, members)
+    if kind == "spatial_mismatch":
+        members["memory_grid.npy"] = _npy_ls("<f4", (8, 32, 32, 32))
+        return _zip_ls(path, members)
+    if kind == "fortran_order":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16), fortran=True)
+        return _zip_ls(path, members)
+    if kind == "not_an_npz":
+        Path(path).write_bytes(_npy_ls("|u1", (16, 16, 16)))
+        return str(path)
+    raise AssertionError("unknown hostile archive kind: " + kind)
+
+
+_HOSTILE_KINDS = [
+    "duplicate_member", "traversal_name", "backslash_name", "missing_member",
+    "extra_member", "oversized_declared_payload", "oversized_edge",
+    "header_payload_mismatch", "invalid_magic", "invalid_version",
+    "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
+    "spatial_mismatch", "fortran_order", "not_an_npz",
+]
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
+    """The load-reached recorder is the whole point.
+
+    Asserting only that something was raised would pass on code that let
+    `np.load` open, decompress and allocate first and then failed downstream --
+    which is exactly the behaviour this replaces.
+    """
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000001.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+
+    reached = []
+    real_load = np.load
+
+    def _recording_load(*args, **kwargs):
+        reached.append(args[:1])
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+
+    with pytest.raises(ValueError):
+        lucid_server.extract_render_data(archive)
+    assert reached == [], "np.load was reached on a hostile archive"
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_refusal_names_no_path_member_or_header(kind, tmp_path, monkeypatch):
+    """The refusal reaches unattended logs, so it must carry no archive content."""
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000002.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    message = str(excinfo.value)
+    assert str(tmp_path) not in message
+    assert "v070_gen000002" not in message
+    assert ".npy" not in message
+    assert "descr" not in message and "escape" not in message
+    assert message == message.strip() and "\n" not in message
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_a_rejected_snapshot_sends_no_frame_and_keeps_the_server_alive(
+    kind, tmp_path, monkeypatch
+):
+    """The watcher must survive a poisoned directory: no frame, no broadcast,
+    no crash, and the poll loop keeps running."""
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000003.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: archive)
+
+    sent = []
+
+    async def _record_broadcast(message):
+        sent.append(message)
+
+    monkeypatch.setattr(lucid_server, "broadcast", _record_broadcast)
+
+    websocket = FakeWebSocket([PING])
+    asyncio.run(lucid_server.handle_client(websocket))
+
+    assert sent == []
+    assert [json.loads(s)["type"] for s in websocket.sent] == ["pong"], (
+        "a rejected initial snapshot must send no frame, and must not stop the "
+        "client from being served"
+    )
+    assert websocket not in lucid_server.connected_clients
