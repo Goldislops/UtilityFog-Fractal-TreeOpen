@@ -53,6 +53,7 @@ import re
 import stat
 import struct
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Dict, Iterator, Tuple
 
@@ -63,6 +64,8 @@ __all__ = [
     "PRODUCTION_POLICY",
     "REASON_CODES",
     "admit_snapshot",
+    "newest_first",
+    "entry_fingerprint",
 ]
 
 
@@ -111,8 +114,10 @@ REASON_CODES: Tuple[str, ...] = (
     "member_unexpected",
     "member_missing",
     "member_encrypted",
+    "member_flags_unsupported",
     "member_compression_unsupported",
     "member_payload_too_large",
+    "member_payload_unreadable",
     # NPY header
     "member_header_unreadable",
     "member_npy_magic_invalid",
@@ -206,9 +211,12 @@ class SnapshotArchivePolicy:
     Stated rather than implied: under these production numbers the aggregate
     ceiling cannot be the binding constraint. The accumulator sums
     ``ZipInfo.file_size``, which covers each member's NPY header as well as its
-    payload, so the true worst case is 528 MiB of payload + 3 KiB of scalars +
-    5 x 4 KiB of headers = 553,695,104 bytes, against a ceiling of
-    554,696,704 — about 978 KiB of margin. It is kept because it is the
+    payload, so the true worst case is
+
+        528 MiB + 3 KiB + 5 x 4 KiB = 553,671,680 bytes
+
+    against a ceiling of 554,696,704 — leaving 1,025,024 bytes, exactly
+    1001 KiB. It is kept because it is the
     envelope that would otherwise widen silently if a future policy raised one
     member's ceiling, and it is exercised by tests through an injected policy
     rather than by pretending a production archive reaches it.
@@ -244,7 +252,12 @@ class SnapshotArchivePolicy:
 #: Widths NumPy can construct for each family. Integers: 1, 2, 4, 8 bytes.
 #: Floats: 2 (float16), 4, 8, and 16 (longdouble, where the platform has it).
 _INTEGER_WIDTHS = (1, 2, 4, 8)
-_FLOAT_WIDTHS = (2, 4, 8, 16)
+#: 16-byte floats are deliberately absent. ``float128``/``longdouble`` is not
+#: portable -- NumPy 2.3.5 on Windows refuses ``<f16`` outright -- and no
+#: snapshot member has ever used one. Admitting a width that a consumer's own
+#: NumPy cannot construct would push the failure past the guard, which is the
+#: defect the width allowlist exists to prevent.
+_FLOAT_WIDTHS = (2, 4, 8)
 
 PRODUCTION_MEMBERS: Tuple[MemberSpec, ...] = (
     MemberSpec("lattice", 3, ("u",), 16 * _MIB, ROLE_LATTICE, _INTEGER_WIDTHS),
@@ -272,7 +285,12 @@ _MAX_ITEMSIZE_DIGITS = 6
 
 #: ``<f4``, ``|u1``, ``>i8`` ... byte order optional, size digits required.
 #: A descriptor NumPy would write for a plain numeric array always matches.
-_DESCR_RE = re.compile(r"^(?P<order>[<>|=])?(?P<kind>[a-zA-Z])(?P<size>\d*)$")
+#: ``[0-9]`` rather than ``\d``: a v3.0 NPY header is decoded as UTF-8, and
+#: ``\d`` matches the whole Unicode decimal-digit category. A descriptor of
+#: ``<i١`` (Arabic-Indic digit one) therefore matched, and ``int()`` -- which
+#: also accepts that category -- turned it into a width of 1, admitting a
+#: descriptor string no NumPy can construct.
+_DESCR_RE = re.compile(r"^(?P<order>[<>|=])?(?P<kind>[a-zA-Z])(?P<size>[0-9]*)$")
 
 
 class _HeaderSyntaxError(Exception):
@@ -598,6 +616,11 @@ _LOCAL_FILE_SIGNATURE = b"PK\x03\x04"
 _ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
 
+#: ZIP general-purpose flag bits this guard understands.
+_FLAG_ENCRYPTED = 0x0001          # bit 0
+_FLAG_COMPRESSED_PATCH = 0x0020   # bit 5, Zip 2.7 compressed patched data
+_FLAG_STRONG_ENCRYPTION = 0x0040  # bit 6
+
 _UNSAFE_NAME_RE = re.compile(r"(^/)|(^[A-Za-z]:)|(\\)|(^\.\.$)|(^\.\./)|(/\.\./)|(/\.\.$)|(/)")
 
 
@@ -653,11 +676,22 @@ def _preflight_eocd(fh, size: int, policy: SnapshotArchivePolicy) -> None:
             raise _reject("zip64_unsupported")
 
     record = tail[index:index + _EOCD_SIZE]
-    entries_here, entries_total, directory_size = struct.unpack("<HHI", record[8:16])
-    if entries_here == 0xFFFF or entries_total == 0xFFFF or directory_size == 0xFFFFFFFF:
-        # ZIP64 sentinels. A five-member snapshot inside a 544 MiB ceiling
-        # never needs ZIP64, so this is refused rather than parsed.
-        raise _reject("member_count")
+    entries_here, entries_total, directory_size, directory_offset = struct.unpack(
+        "<HHII", record[8:20])
+    if (entries_here == 0xFFFF or entries_total == 0xFFFF
+            or directory_size == 0xFFFFFFFF or directory_offset == 0xFFFFFFFF):
+        # Every CENTRAL ZIP64 sentinel, the directory offset included. The
+        # offset one matters as much as the counts: it is the field that says
+        # "the real value is in the ZIP64 record", so an archive can carry
+        # honest-looking counts and still redirect `zipfile` through ZIP64.
+        #
+        # This refuses CENTRAL-DIRECTORY ZIP64 structures only. The
+        # LOCAL-header ZIP64 length form stays supported and must: NumPy's
+        # `savez` opens each member with `force_zip64=True`, which reserves
+        # ZIP64 sizes in the local header while the central directory it
+        # writes remains 32-bit. Refusing that would refuse every real
+        # snapshot. Nothing here inspects local headers.
+        raise _reject("zip64_unsupported")
     if entries_here != entries_total:
         raise _reject("member_count")
     if entries_total > policy.max_members + _COUNT_PARSE_SLACK:
@@ -735,6 +769,61 @@ def _check_geometry(
 
 
 # ---------------------------------------------------------------------------
+# Safe candidate discovery
+# ---------------------------------------------------------------------------
+
+def newest_first(paths):
+    """Order snapshot candidates newest-first, safely.
+
+    Discovery runs before admission, over a directory an attacker may be able
+    to write to, so it has to survive that directory changing underneath it and
+    must not itself become a way in. Three properties, each deliberate:
+
+    *Non-following metadata.* ``os.lstat`` describes the directory entry, not
+    whatever it points at. Sorting on ``stat`` meant a symlink could borrow its
+    target's modification time to promote itself to "newest", and it meant a
+    link out of the data directory was followed during ORDERING -- before
+    ``admit_snapshot`` had any say.
+
+    *Entries that vanish are skipped silently.* A snapshot rotated or deleted
+    between the glob and this call raises ``OSError`` here. Every caller was
+    reading that metadata inside a loop whose only handler printed the
+    exception, and ``OSError``'s message carries the full path -- a name the
+    attacker chose. There is nothing to report: the entry is simply gone.
+
+    *A broken link is still a candidate.* ``lstat`` succeeds on a dangling
+    symlink and on a symlink loop, so those are ORDERED rather than filtered.
+    That is the point: they reach :func:`admit_snapshot` and are refused with a
+    typed reason, instead of disappearing from selection and letting an older
+    archive be served with no record of why.
+
+    Ties break on the path so the order is total and reproducible.
+    """
+    described = []
+    for candidate in paths:
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            continue
+        described.append((info.st_mtime_ns, os.fspath(candidate), candidate))
+    described.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [row[2] for row in described]
+
+
+def entry_fingerprint(path):
+    """Identify a directory entry by what changes when it changes.
+
+    ``(path, size, mtime_ns)`` from ``os.lstat``, so a symlink is fingerprinted
+    as itself rather than as its target -- otherwise a rejected link could be
+    made to look "changed" by touching something else entirely, and be retried
+    on every poll. Raises ``OSError`` if the entry is gone; callers treat that
+    as "look again next time".
+    """
+    info = os.lstat(path)
+    return (os.fspath(path), info.st_size, info.st_mtime_ns)
+
+
+# ---------------------------------------------------------------------------
 # The admission context manager
 # ---------------------------------------------------------------------------
 
@@ -757,10 +846,23 @@ def admit_snapshot(
     structurally.
 
     Raises :class:`SnapshotArchiveRejected` — never anything else derived from
-    the archive's contents — for every refusal.
+    the archive's contents — for every refusal. That includes failures raised
+    by the caller's own load out of the yielded descriptor, where they are
+    narrowly identifiable as archive transport: see the translation around the
+    ``yield`` below.
     """
-    root = Path(os.fspath(data_dir)).resolve()
-    candidate = Path(os.fspath(path)).resolve()
+    try:
+        root = Path(os.fspath(data_dir)).resolve()
+        candidate = Path(os.fspath(path)).resolve()
+    except (OSError, RuntimeError):
+        # `resolve()` is not total. A symlink loop raises OSError(ELOOP) on
+        # POSIX and RuntimeError on some paths; a path too long or a
+        # disappearing component raises OSError too. Uncaught, that left the
+        # guard by a route with no reason code and, worse, with the path in the
+        # exception message. If the real path cannot be determined then
+        # confinement cannot be proved, so the fail-closed answer is the
+        # confinement refusal.
+        raise _reject("path_not_confined") from None
 
     if candidate.suffix.lower() != ".npz":
         raise _reject("path_suffix_not_npz")
@@ -812,7 +914,30 @@ def admit_snapshot(
         _preflight_members(fh, policy)
 
         fh.seek(0)
-        yield fh
+        try:
+            yield fh
+        except SnapshotArchiveRejected:
+            # Already typed. Re-raised unchanged so a refusal decided anywhere
+            # inside the caller's block keeps its own reason code.
+            raise
+        except (zipfile.BadZipFile, zlib.error, EOFError):
+            # Archive TRANSPORT failures, and only those.
+            #
+            # Preflight reads each member's header but cannot read its payload
+            # without decompressing it, so a valid header over a corrupt body
+            # or a wrong CRC is undetectable until NumPy extracts. Left
+            # untranslated it surfaced as a raw `zipfile.BadZipFile` -- which
+            # is not a `ValueError`, so it sailed past every consumer's typed
+            # handler into a 500 with a traceback naming the member.
+            #
+            # The list is deliberately short. `zipfile.BadZipFile` covers a bad
+            # CRC and a malformed local header; `zlib.error` covers corrupt
+            # DEFLATE data; `EOFError` covers a stream that ends early. A
+            # `MemoryError`, a `KeyboardInterrupt`, an arbitrary `ValueError`
+            # -- including NumPy's own "EOF: reading array data" -- and every
+            # programmer error stay outside this lane and propagate unchanged.
+            # Nothing from the exception's message reaches the reason.
+            raise _reject("member_payload_unreadable") from None
     finally:
         fh.close()
 
@@ -855,8 +980,15 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
         # -- pass one: directory entry and bounded header, per member --------
         for entry in infos:
             spec = specs[entry.filename]
-            if entry.flag_bits & 0x1:
+            if entry.flag_bits & _FLAG_ENCRYPTED:
                 raise _reject("member_encrypted")
+            if entry.flag_bits & (_FLAG_COMPRESSED_PATCH | _FLAG_STRONG_ENCRYPTION):
+                # Bit 5 is Zip 2.7 "compressed patched data"; bit 6 is strong
+                # encryption. Neither can be read, and both are refused HERE,
+                # from the central directory, before the member is opened --
+                # `zipfile` checks them too, but only once it is already
+                # materialising the entry.
+                raise _reject("member_flags_unsupported")
             if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 raise _reject("member_compression_unsupported")
 
@@ -864,14 +996,29 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
                 member = archive.open(entry)
             except SnapshotArchiveRejected:
                 raise  # never re-coded by the broad clause below
-            except (zipfile.BadZipFile, OSError, ValueError, RuntimeError):
+            except NotImplementedError:
+                # The same two flags, declared in the LOCAL header only, where
+                # the central-directory check above cannot see them.
+                # `NotImplementedError` subclasses `RuntimeError`, so it would
+                # otherwise be swallowed by the clause below and reported as an
+                # unreadable header. Its message names the flag and is
+                # discarded with `from None`.
+                raise _reject("member_flags_unsupported") from None
+            except (zipfile.BadZipFile, OSError, ValueError, RuntimeError,
+                    zlib.error):
                 raise _reject("member_header_unreadable") from None
             with member:
                 try:
                     header = _read_member_header(member, policy)
                 except SnapshotArchiveRejected:
                     raise  # the refusal _read_member_header already decided
-                except (zipfile.BadZipFile, OSError, EOFError):
+                except (zipfile.BadZipFile, OSError, EOFError, zlib.error):
+                    # `zlib.error` is the one that is easy to miss: the header
+                    # read is bounded, but for a DEFLATED member those bounded
+                    # bytes still go through the decompressor, and malformed
+                    # compressed data raises `zlib.error` -- which inherits
+                    # from `Exception`, not `OSError`, so no other clause here
+                    # catches it. Untranslated it escaped the guard entirely.
                     raise _reject("member_header_unreadable") from None
 
             if header.fortran_order:

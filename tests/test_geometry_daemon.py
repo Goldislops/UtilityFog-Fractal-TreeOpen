@@ -903,6 +903,53 @@ def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
     assert opened[0].closed
 
 
+def test_discovery_skips_a_candidate_that_disappears_mid_scan(confined,
+                                                              monkeypatch,
+                                                              capsys):
+    """The glob and the metadata read are separate syscalls. A vanished entry
+    must be skipped silently — the old `p.stat()` raised into the loop's broad
+    handler, which prints the exception, and OSError's message carries the
+    attacker-chosen path."""
+    _write_snapshot_gd(confined / "v070_gen000030.npz", compressed=True)
+    ghost = confined / "v070_gen_GHOSTNAME_0031.npz"
+    real_glob = Path.glob
+
+    def _glob_with_a_ghost(self, pattern):
+        return list(real_glob(self, pattern)) + [ghost]
+
+    monkeypatch.setattr(Path, "glob", _glob_with_a_ghost)
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    exporters = []
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    geometry_daemon.run_once()
+
+    output = capsys.readouterr()
+    assert exporters == ["export_sage_pointcloud", "export_voxel_summary",
+                         "export_stl"], "the ghost blocked a valid snapshot"
+    assert "GHOSTNAME" not in output.out and "GHOSTNAME" not in output.err
+
+
+def test_the_fingerprint_does_not_follow_a_symlink(confined, tmp_path):
+    """A rejected link fingerprinted by its TARGET kept changing whenever
+    anything touched the target, so the daemon re-preflighted and re-logged the
+    same unchanged poison on every poll."""
+    target = tmp_path / "fingerprint_target.npz"
+    target.write_bytes(b"x" * 64)
+    link = confined / "v070_fplink.npz"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    before = geometry_daemon._snapshot_fingerprint(link)
+    target.write_bytes(b"y" * 4096)  # the target changes; the link does not
+    after = geometry_daemon._snapshot_fingerprint(link)
+    assert before == after, "the fingerprint tracked the target, not the entry"
+
+
 def test_a_numeric_snapshot_still_loads_unchanged(confined):
     archive = _write_snapshot_gd(confined / "v070_clean.npz",
                                  generation=np.int64(12))
@@ -939,6 +986,76 @@ def test_the_once_path_exits_nonzero_with_one_bounded_reason(confined, capsys,
     assert "v070_gen000once" not in captured.err
     assert "v070_gen000once" not in captured.out
     assert exporters == [], "an exporter ran on a rejected snapshot"
+
+
+@pytest.mark.parametrize("raised", [
+    MemoryError("oom"),
+    KeyboardInterrupt(),
+    RuntimeError("programmer error"),
+    TypeError("wrong argument"),
+], ids=["memory", "keyboard_interrupt", "runtime", "type"])
+def test_the_once_path_lets_everything_but_a_refusal_propagate(confined,
+                                                               monkeypatch,
+                                                               raised):
+    """Only `SnapshotArchiveRejected` becomes the bounded exit-1 refusal.
+
+    A `MemoryError` means the machine is out of memory, a `KeyboardInterrupt`
+    means the operator asked to stop, and a programmer error means the code is
+    wrong. Reporting any of them as "the snapshot was bad" would hide a real
+    fault behind a sanitized message and exit 1 as though the input were at
+    fault. Each must leave `run_once` exactly as it was raised, and no exporter
+    may run.
+    """
+    _write_snapshot_gd(confined / "v070_gen000prop.npz")
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    def _raise(path, *, data_dir, policy=None):
+        raise raised
+
+    monkeypatch.setattr(geometry_daemon, "admit_snapshot", _raise)
+
+    with pytest.raises(type(raised)) as excinfo:
+        geometry_daemon.run_once()
+
+    assert type(excinfo.value) is type(raised)
+    assert str(excinfo.value) == str(raised)
+    assert not isinstance(excinfo.value, SystemExit), (
+        "a non-refusal was converted into the bounded exit-1 lane")
+    assert exporters == []
+
+
+def test_the_daemon_loop_does_not_treat_a_programmer_error_as_a_refusal(
+    tmp_path, capsys
+):
+    """The watcher's broad handler still catches non-refusals so the daemon
+    survives — but it must not record them as rejected snapshots, or the
+    fingerprint memory would suppress a real, recurring fault."""
+    snapshot = _FakeSnapshotPath()
+    data_dir = _FakeDataDir([snapshot])
+
+    class _Boom(RuntimeError):
+        pass
+
+    def _raise(path, *, data_dir, policy=None):
+        raise _Boom("programmer error")
+
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _raise), \
+         mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
+         mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
+         mock.patch.object(geometry_daemon, "time",
+                           _FakeClock(stop_after_sleeps=1)):
+        try:
+            geometry_daemon.run_daemon()
+        except KeyboardInterrupt:
+            pass
+
+    output = capsys.readouterr().out
+    assert "Snapshot rejected" not in output, (
+        "a programmer error was reported as a snapshot refusal")
 
 
 def test_the_once_path_still_exports_a_valid_snapshot(confined, capsys,

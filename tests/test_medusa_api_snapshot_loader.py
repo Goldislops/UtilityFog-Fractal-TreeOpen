@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -773,6 +775,93 @@ def test_selection_is_bounded_and_does_not_scan_the_whole_directory(confined,
         "when nothing in the window is admissible the newest is still returned")
 
 
+def _corrupt_crc_ma(path):
+    """Break one member's CRC: a valid header over a corrupt body.
+
+    Preflight cannot see this — a payload can only be checked by decompressing
+    it, which is the work admission exists to avoid before it decides.
+    """
+    data = bytearray(Path(path).read_bytes())
+    index = data.find(b"PK\x01\x02")
+    struct.pack_into("<I", data, index + 16, 0xDEADBEEF)
+    Path(path).write_bytes(bytes(data))
+    return Path(path)
+
+
+def test_a_corrupt_payload_becomes_the_same_sanitized_503(confined):
+    """Post-admission archive corruption used to escape as `zipfile.BadZipFile`
+    — which is not a `ValueError`, so it sailed past every typed handler into a
+    500 with a traceback naming the member."""
+    archive = _corrupt_crc_ma(
+        _write_snapshot_ma(confined / "v070_gen000020.npz", compressed=True))
+    client = medusa_api.app.test_client()
+    with mock.patch.object(medusa_api, "_find_latest_snapshot",
+                           lambda: archive):
+        response = client.get("/api/census")
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "snapshot_rejected"}
+    body = response.get_data(as_text=True)
+    assert "lattice" not in body and "CRC" not in body
+    assert "v070_gen000020" not in body and "Traceback" not in body
+
+
+def test_a_corrupt_payload_refusal_carries_only_a_reason_code(confined):
+    archive = _corrupt_crc_ma(
+        _write_snapshot_ma(confined / "v070_gen000021.npz", compressed=True))
+    with pytest.raises(medusa_api.SnapshotArchiveRejected) as excinfo:
+        medusa_api._load_snapshot(archive)
+    assert excinfo.value.reason == "member_payload_unreadable"
+    assert str(excinfo.value) == "member_payload_unreadable"
+
+
+def test_the_descriptor_is_closed_after_a_payload_refusal(confined, monkeypatch):
+    archive = _corrupt_crc_ma(
+        _write_snapshot_ma(confined / "v070_gen000022.npz", compressed=True))
+    opened = []
+    real_fdopen = os.fdopen
+
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(os, "fdopen", _tracking_fdopen)
+    with pytest.raises(medusa_api.SnapshotArchiveRejected):
+        medusa_api._load_snapshot(archive)
+    assert len(opened) == 1
+    assert opened[0].closed
+
+
+def test_selection_survives_a_snapshot_that_disappears_mid_scan(confined,
+                                                                monkeypatch):
+    """The glob and the metadata read are separate syscalls, and the producer
+    rotates snapshots. A vanished entry must be skipped silently, not raise an
+    OSError whose message carries the attacker-chosen path."""
+    good = Path(_write_snapshot_ma(confined / "v070_gen000030.npz",
+                                   compressed=True))
+    ghost = confined / "v070_gen000031.npz"
+    real_glob = Path.glob
+
+    def _glob_with_a_ghost(self, pattern):
+        return list(real_glob(self, pattern)) + [ghost]
+
+    monkeypatch.setattr(Path, "glob", _glob_with_a_ghost)
+    assert medusa_api._find_latest_snapshot() == good
+
+    client = medusa_api.app.test_client()
+    response = client.get("/api/census")
+    assert response.status_code == 200, "a vanished candidate broke the route"
+
+
+def test_selection_survives_a_directory_of_only_vanished_candidates(confined,
+                                                                    monkeypatch):
+    ghosts = [confined / ("v070_gen0000%d.npz" % i) for i in range(40, 45)]
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: list(ghosts))
+    assert medusa_api._find_latest_snapshot() is None
+    client = medusa_api.app.test_client()
+    assert client.get("/api/census").status_code == 404
+
+
 def test_selection_still_prefers_the_most_recent(confined):
     older = Path(_write_snapshot_ma(confined / "v070_gen000001.npz"))
     newer = Path(_write_snapshot_ma(confined / "v070_gen000002.npz"))
@@ -781,11 +870,42 @@ def test_selection_still_prefers_the_most_recent(confined):
     assert medusa_api._find_latest_snapshot() == newer
 
 
-def test_geometry_route_also_answers_503_for_a_rejected_archive(confined,
-                                                                monkeypatch):
-    """The fourth `_load_snapshot` route. Kept separate because it needs
-    trimesh, which is not a CI dependency."""
-    pytest.importorskip("trimesh")
+class _TrimeshSentinel(types.ModuleType):
+    """A stand-in for `trimesh` that records any attribute reached for.
+
+    `/api/geometry/stl` is the fourth `_load_snapshot` route and the only one
+    whose test used to be `importorskip`-gated — so in authoritative CI, which
+    does not install trimesh, it never ran at all. It does not need the real
+    package: the refusal must happen BEFORE any mesh work, and a sentinel
+    proves that far more directly than the real library could, because every
+    attribute access is recorded and the assertion is that none occurred.
+    """
+
+    def __init__(self):
+        super().__init__("trimesh")
+        self.touched = []
+
+    def __getattr__(self, name):
+        self.touched.append(name)
+        raise AssertionError(
+            "trimesh.%s was reached on a rejected snapshot" % name)
+
+
+@pytest.fixture
+def trimesh_sentinel(monkeypatch):
+    sentinel = _TrimeshSentinel()
+    monkeypatch.setitem(sys.modules, "trimesh", sentinel)
+    return sentinel
+
+
+def test_geometry_route_answers_503_before_touching_trimesh(confined,
+                                                            trimesh_sentinel):
+    """Runs in CI rather than skipping: the sentinel replaces the dependency.
+
+    `geometry_stl` imports trimesh first and only then loads the snapshot, so
+    the import must succeed for the refusal to be reachable at all — and
+    nothing on the module may be used once the snapshot is refused.
+    """
     archive = _hostile_ma("missing_member", confined / "v070_gen000009.npz")
     client = medusa_api.app.test_client()
     with mock.patch.object(medusa_api, "_find_latest_snapshot",
@@ -793,6 +913,28 @@ def test_geometry_route_also_answers_503_for_a_rejected_archive(confined,
         response = client.get("/api/geometry/stl")
     assert response.status_code == 503
     assert response.get_json() == {"error": "snapshot_rejected"}
+    assert trimesh_sentinel.touched == [], (
+        "mesh work began before the snapshot was refused")
+    body = response.get_data(as_text=True)
+    assert "v070_gen000009" not in body and "Traceback" not in body
+
+
+def test_geometry_route_reaches_trimesh_only_once_a_snapshot_is_admitted(
+    confined, trimesh_sentinel
+):
+    """The counterpart control, so the assertion above is about the REFUSAL
+    and not about the route being unreachable for some other reason."""
+    archive = _write_snapshot_ma(confined / "v070_gen000012.npz", compressed=True)
+    client = medusa_api.app.test_client()
+    with mock.patch.object(medusa_api, "_find_latest_snapshot",
+                           lambda: Path(archive)):
+        response = client.get("/api/geometry/stl")
+    # The sentinel raises on first attribute use, which Flask turns into a 500.
+    # What matters is that trimesh WAS reached, i.e. admission let the route
+    # through, and that it was reached only after the snapshot was accepted.
+    assert trimesh_sentinel.touched, (
+        "an admitted snapshot never reached the mesh stage")
+    assert response.status_code != 503
 
 
 @pytest.mark.parametrize("route,expected", [

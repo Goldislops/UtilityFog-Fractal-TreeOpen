@@ -40,6 +40,8 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
 from scripts.snapshot_archive_guard import (  # noqa: E402
     SnapshotArchiveRejected,
     admit_snapshot,
+    entry_fingerprint,
+    newest_first,
 )
 
 try:
@@ -61,10 +63,22 @@ connected_clients = set()
 
 
 def find_latest_snapshot(data_dir):
-    """Find the most recent .npz snapshot."""
+    """Find the most recent .npz snapshot.
+
+    Ordering uses non-following metadata and skips entries that vanish during
+    enumeration. `os.path.getmtime` follows symlinks, so a link could borrow
+    its target's modification time to become "newest" before admission had any
+    say, and it raises `OSError` for an entry rotated mid-sort -- which, from
+    inside the watcher's loop, reached a handler that prints the exception, and
+    `OSError`'s message carries the full attacker-chosen path.
+
+    A dangling link or a symlink loop still `lstat`s, so it remains a candidate
+    and is refused by `admit_snapshot` with a typed reason rather than
+    disappearing from selection unrecorded.
+    """
     pattern = os.path.join(data_dir, "v070_gen*.npz")
-    files = sorted(glob.glob(pattern), key=os.path.getmtime)
-    return files[-1] if files else None
+    ordered = newest_first(glob.glob(pattern))
+    return ordered[0] if ordered else None
 
 
 def extract_render_data(snap_path):
@@ -195,8 +209,19 @@ async def snapshot_watcher():
         try:
             latest = find_latest_snapshot(DATA_DIR)
             if latest:
-                mtime = os.path.getmtime(latest)
-                if latest != last_snapshot_path or mtime != last_snapshot_mtime:
+                # The SECOND metadata read, and it needs the same protection as
+                # the first: selection and this line are separate syscalls, so
+                # the chosen snapshot can be rotated away in between. Non-
+                # following, and a vanished entry ends this poll quietly rather
+                # than printing an OSError whose message carries the path.
+                try:
+                    mtime = entry_fingerprint(latest)[2]
+                except OSError:
+                    mtime = None
+
+                if mtime is not None and (
+                    latest != last_snapshot_path or mtime != last_snapshot_mtime
+                ):
                     last_snapshot_path = latest
                     last_snapshot_mtime = mtime
 

@@ -25,6 +25,7 @@ totality.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import sys
@@ -787,6 +788,59 @@ def test_the_watcher_does_not_reprocess_an_unchanged_rejected_snapshot(
 
     assert len(extractions) == 1, "the rejected snapshot was reprocessed"
     assert capsys.readouterr().out.count("Snapshot rejected") == 1
+
+
+@requires_numpy
+def test_the_watcher_survives_candidates_that_disappear_mid_scan(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """Discovery and the watcher's own second metadata read are separate
+    syscalls from the glob, and the producer rotates snapshots. Neither may
+    raise into the loop's broad handler, whose message carries the path."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    ghost = str(confined / "v070_gen_GHOSTNAME_0002.npz")
+    real_glob = glob.glob
+
+    def _glob_with_a_ghost(pattern):
+        return list(real_glob(pattern)) + [ghost]
+
+    monkeypatch.setattr(lucid_server.glob, "glob", _glob_with_a_ghost)
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=2)
+    output = capsys.readouterr().out
+
+    assert len(broadcasts) == 1, "the ghost blocked a valid snapshot"
+    assert "GHOSTNAME" not in output
+    assert "Snapshot error" not in output
+    assert valid.exists()
+
+
+@requires_numpy
+def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The second metadata read specifically: selection succeeded, then the
+    file went away before the watcher fingerprinted it."""
+    chosen = confined / "v070_gen000003.npz"
+    _write_snapshot_ls(chosen, compressed=True)
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: str(chosen))
+
+    real_fingerprint = lucid_server.entry_fingerprint
+
+    def _vanishing(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _vanishing)
+    broadcasts, polls = _run_watcher(monkeypatch, polls=2)
+    output = capsys.readouterr().out
+
+    assert broadcasts == []
+    assert polls == 2, "the watcher stopped polling"
+    assert "v070_gen000003" not in output
+    assert "No such file" not in output
+    assert real_fingerprint is not None
 
 
 @requires_numpy

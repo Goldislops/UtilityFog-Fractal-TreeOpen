@@ -63,7 +63,10 @@ def npy_bytes(descr, shape, *, fortran=False, payload=None, header=None,
             shape_text = "(" + ", ".join(str(dim) for dim in shape) + ")"
         header = "{'descr': '%s', 'fortran_order': %s, 'shape': %s, }" % (
             descr, fortran, shape_text)
-    body = header.encode("latin1")
+    # v3.0 headers are UTF-8 by specification; v1.0 and v2.0 are latin-1.
+    # Encoding v3 as latin-1 would make a non-ASCII descriptor unbuildable, and
+    # a non-ASCII descriptor is exactly what the digit-class tests need.
+    body = header.encode("utf-8" if version == (3, 0) else "latin1")
     prelude = 10 if version == (1, 0) else 12
     body += b" " * ((-(prelude + len(body) + 1)) % 64) + b"\n"
     out = bytearray(_NPY_MAGIC) + bytes(version)
@@ -348,6 +351,30 @@ def _case_member_encrypted(root, tmp_path):
     return set_encrypted_flag(path), None
 
 
+def _set_central_flag_bits(path, bits):
+    """Set general-purpose flag bits on every central-directory entry."""
+    data = bytearray(Path(path).read_bytes())
+    offset = 0
+    patched = 0
+    while True:
+        index = data.find(b"PK\x01\x02", offset)
+        if index < 0:
+            break
+        current = struct.unpack_from("<H", data, index + 8)[0]
+        struct.pack_into("<H", data, index + 8, current | bits)
+        patched += 1
+        offset = index + 4
+    assert patched, "no central-directory header found in the fixture"
+    Path(path).write_bytes(bytes(data))
+    return Path(path)
+
+
+def _case_member_flags_unsupported(root, tmp_path):
+    # Bit 5, Zip 2.7 compressed patched data. Bit 6 is covered separately.
+    path = write_npz(root / "v070_patched.npz", schema_members(16))
+    return _set_central_flag_bits(path, 0x0020), None
+
+
 def _case_member_compression_unsupported(root, tmp_path):
     return write_npz(root / "v070_bz2.npz", schema_members(),
                      compression=zipfile.ZIP_BZIP2), None
@@ -508,6 +535,7 @@ REFUSAL_CASES = {
     "member_unexpected": _case_member_unexpected,
     "member_missing": _case_member_missing,
     "member_encrypted": _case_member_encrypted,
+    "member_flags_unsupported": _case_member_flags_unsupported,
     "member_compression_unsupported": _case_member_compression_unsupported,
     "member_payload_too_large": _case_member_payload_too_large,
     "member_header_unreadable": _case_member_header_unreadable,
@@ -532,11 +560,119 @@ REFUSAL_CASES = {
 }
 
 
+def _case_member_payload_unreadable(root, tmp_path):
+    """A member whose CRC is wrong: a valid header over a corrupt body.
+
+    Preflight cannot see this. It reads each member's HEADER, and a payload can
+    only be checked by decompressing it -- which is exactly the work the guard
+    exists to avoid doing before admission. So the archive is admitted, and the
+    failure surfaces during the caller's extraction.
+    """
+    path = write_npz(root / "v070_crc.npz", schema_members(16))
+    data = bytearray(path.read_bytes())
+    index = data.find(b"PK\x01\x02")
+    assert index > 0, "no central-directory header in the fixture"
+    struct.pack_into("<I", data, index + 16, 0xDEADBEEF)  # CRC-32 field
+    path.write_bytes(bytes(data))
+    return path, None
+
+
+def _read_a_member(handle):
+    """Stand in for what a consumer's `np.load` does with the descriptor.
+
+    Reading a member decompresses it and verifies its CRC, which is the step
+    that raises `zipfile.BadZipFile` -- the exact class NumPy's own extraction
+    raises, through the same `zipfile` machinery.
+    """
+    with zipfile.ZipFile(handle) as archive:
+        archive.read("lattice.npy")
+
+
+#: Reason codes raised from INSIDE the caller's block rather than during
+#: preflight. Kept in their own table because they need a body to run, not
+#: merely an archive to open -- and because the distinction is the point: these
+#: are the failures preflight structurally cannot reach.
+BLOCK_REFUSAL_CASES = {
+    "member_payload_unreadable": (_case_member_payload_unreadable, _read_a_member),
+}
+
+
 def test_every_declared_reason_code_has_a_reproducible_case():
     """Anti-vacuity for the roster itself: no unreachable code may be declared,
     and no case may name a code the module does not declare."""
-    assert set(REFUSAL_CASES) == set(guard.REASON_CODES)
+    assert set(REFUSAL_CASES) | set(BLOCK_REFUSAL_CASES) == set(guard.REASON_CODES)
+    assert not (set(REFUSAL_CASES) & set(BLOCK_REFUSAL_CASES))
     assert len(guard.REASON_CODES) == len(set(guard.REASON_CODES))
+
+
+@pytest.mark.parametrize("reason", sorted(BLOCK_REFUSAL_CASES))
+def test_each_block_reason_code_is_produced_by_its_case(reason, root, tmp_path):
+    build, body = BLOCK_REFUSAL_CASES[reason]
+    path, policy = build(root, tmp_path)
+    with pytest.raises(guard.SnapshotArchiveRejected) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root,
+                                  policy=policy or guard.PRODUCTION_POLICY) as fh:
+            body(fh)
+    assert excinfo.value.reason == reason
+    assert str(excinfo.value) == reason
+
+
+def test_a_corrupt_payload_is_admitted_then_refused_not_refused_early(root,
+                                                                      tmp_path):
+    """The ordering claim, made explicit: this archive PASSES preflight.
+
+    Without this, the CRC case could be passing because some earlier structural
+    check happened to catch it, and the block-boundary translation would be
+    untested.
+    """
+    path, _ = _case_member_payload_unreadable(root, tmp_path)
+    with guard.admit_snapshot(path, data_dir=root) as fh:
+        assert fh.read(4) == b"PK\x03\x04"  # admitted; no refusal raised here
+
+
+@pytest.mark.parametrize("raised", [
+    MemoryError("oom"),
+    KeyboardInterrupt(),
+    ValueError("EOF: reading array data"),
+    RuntimeError("programmer error"),
+    KeyError("lattice"),
+    AttributeError("nope"),
+], ids=["memory", "keyboard_interrupt", "value_error", "runtime", "key",
+        "attribute"])
+def test_the_block_boundary_translates_nothing_else(root, raised):
+    """The narrowness of the translation IS the contract.
+
+    `MemoryError`, `KeyboardInterrupt`, an arbitrary `ValueError` -- NumPy's
+    own "EOF: reading array data" among them -- and every programmer error must
+    leave the block exactly as they were raised. Only archive transport is
+    translated.
+    """
+    path = write_npz(root / "v070_passthrough.npz", schema_members(16))
+    with pytest.raises(type(raised)) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root):
+            raise raised
+    assert type(excinfo.value) is type(raised)
+    assert str(excinfo.value) == str(raised)
+
+
+def test_a_refusal_raised_inside_the_block_keeps_its_own_reason(root):
+    """A `SnapshotArchiveRejected` from the caller's own code is re-raised
+    unchanged rather than re-coded as a payload failure."""
+    path = write_npz(root / "v070_inner.npz", schema_members(16))
+    with pytest.raises(guard.SnapshotArchiveRejected) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root):
+            raise guard.SnapshotArchiveRejected("member_missing")
+    assert excinfo.value.reason == "member_missing"
+
+
+def test_the_descriptor_is_closed_after_a_block_boundary_refusal(root, tmp_path,
+                                                                 opened_files):
+    path, _ = _case_member_payload_unreadable(root, tmp_path)
+    with pytest.raises(guard.SnapshotArchiveRejected):
+        with guard.admit_snapshot(path, data_dir=root) as fh:
+            _read_a_member(fh)
+    assert opened_files, "the guard never opened the archive"
+    assert all(handle.closed for handle in opened_files)
 
 
 @pytest.mark.parametrize("reason", sorted(REFUSAL_CASES))
@@ -695,6 +831,173 @@ def test_an_empty_header_is_a_syntax_error_not_a_depth_overflow():
     with pytest.raises(guard._HeaderSyntaxError) as excinfo:
         guard._parse_literal("{")
     assert "deep" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bits,label", [
+    (0x0020, "compressed patched data (bit 5)"),
+    (0x0040, "strong encryption (bit 6)"),
+    (0x0060, "both"),
+])
+def test_unsupported_general_purpose_flag_bits_are_refused(root, bits, label):
+    """Refused from the central directory, before the member is opened."""
+    path = write_npz(root / "v070_flags.npz", schema_members(16))
+    _set_central_flag_bits(path, bits)
+    assert admit(path, root) == "member_flags_unsupported", label
+
+
+def test_a_not_implemented_error_from_zipfile_is_translated(root, monkeypatch):
+    """The defensive half of the flag-bit handling.
+
+    CPython 3.13 reads bits 5 and 6 from the CENTRAL directory
+    (`zipfile.ZipFile.open` tests `zinfo.flag_bits`), so the check above
+    normally wins and this branch is not reached through a crafted archive.
+    It still matters: `NotImplementedError` subclasses `RuntimeError`, so
+    without an explicit clause it would be swallowed by the broad handler and
+    reported as an unreadable header, and its message names the flag. Injected
+    directly, because inventing an archive that reaches it would be inventing
+    a CPython that does not exist.
+    """
+    path = write_npz(root / "v070_notimpl.npz", schema_members(16))
+    real_open = zipfile.ZipFile.open
+
+    def _raising_open(self, name, *args, **kwargs):
+        raise NotImplementedError("strong encryption (flag bit 6)")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", _raising_open)
+    with pytest.raises(guard.SnapshotArchiveRejected) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root):
+            pass
+    assert excinfo.value.reason == "member_flags_unsupported"
+    assert "flag bit" not in str(excinfo.value)
+    assert "encryption" not in str(excinfo.value)
+    assert real_open is not None  # the real one is restored by monkeypatch
+
+
+def test_malformed_deflate_data_during_the_header_read_is_refused(root):
+    """`zlib.error` inherits from `Exception`, not `OSError`.
+
+    The header read is bounded, but for a DEFLATED member those bounded bytes
+    still go through the decompressor. Corrupt compressed data therefore raised
+    `zlib.error`, which no other clause caught, and it escaped the guard with
+    its own message.
+    """
+    members = schema_members(16)
+    path = root / "v070_deflate.npz"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, blob in members.items():
+            archive.writestr(name, blob)
+
+    # Corrupt the first member's compressed bytes in place, leaving every
+    # directory structure intact so the failure lands in the decompressor.
+    data = bytearray(path.read_bytes())
+    local = data.find(b"PK\x03\x04")
+    name_len = struct.unpack_from("<H", data, local + 26)[0]
+    extra_len = struct.unpack_from("<H", data, local + 28)[0]
+    body = local + 30 + name_len + extra_len
+    data[body:body + 24] = b"\xff" * 24
+    path.write_bytes(bytes(data))
+
+    assert admit(path, root) == "member_header_unreadable"
+
+
+def test_a_resolve_failure_is_refused_inside_the_typed_boundary(root, tmp_path):
+    """`Path.resolve()` is not total: a symlink loop raises OSError(ELOOP).
+
+    Uncaught it left the guard by a route with no reason code and with the path
+    in the message. If the real path cannot be determined then confinement
+    cannot be proved, so the fail-closed answer is the confinement refusal.
+    """
+    loop = root / "v070_loop.npz"
+    other = root / "v070_loop_b.npz"
+    try:
+        loop.symlink_to(other)
+        other.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    reason = admit(loop, root)
+    assert reason in {"path_not_confined", "path_not_regular_file"}
+    assert str(tmp_path) not in reason
+
+
+def test_a_resolve_failure_is_typed_even_when_injected(root, monkeypatch):
+    """Platform-independent proof of the same boundary, so the contract is
+    pinned on Windows runners too."""
+    path = write_npz(root / "v070_resolve.npz", schema_members(16))
+    real_resolve = Path.resolve
+
+    def _failing_resolve(self, *args, **kwargs):
+        raise OSError(40, "Too many levels of symbolic links", str(self))
+
+    monkeypatch.setattr(Path, "resolve", _failing_resolve)
+    with pytest.raises(guard.SnapshotArchiveRejected) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root):
+            pass
+    assert excinfo.value.reason == "path_not_confined"
+    assert "symbolic" not in str(excinfo.value)
+    assert "v070_resolve" not in str(excinfo.value)
+    assert real_resolve is not None
+
+
+@pytest.mark.parametrize("digits", ["١", "٤", "۸"], ids=["arabic_one",
+                                                        "arabic_four",
+                                                        "extended_eight"])
+def test_a_non_ascii_digit_width_is_refused(root, digits):
+    """A v3.0 header is decoded as UTF-8, and `\\d` matches the whole Unicode
+    decimal-digit category — as does `int()`. So `<i١` parsed as a width of 1
+    and was admitted, describing a dtype no NumPy can construct."""
+    members = schema_members(16)
+    # A payload of exactly one byte, matching the width the non-ASCII digit
+    # decodes to. Without it the archive is refused for a size mismatch and the
+    # dtype rule is never reached -- which would make this test pass for the
+    # wrong reason, and would have passed before the fix too.
+    members["generation.npy"] = npy_bytes(
+        "<i8", (), payload=b"\x00", version=(3, 0),
+        header="{'descr': '<i%s', 'fortran_order': False, 'shape': (), }"
+               % digits)
+    path = write_npz(root / "v070_digit.npz", members)
+    assert admit(path, root) == "member_dtype_unsupported"
+
+
+def test_a_sixteen_byte_float_is_refused_portably(root):
+    """`float128`/`longdouble` is not portable — NumPy 2.3.5 on Windows refuses
+    `<f16` outright — and no snapshot member has ever used one. Admitting it
+    would push the failure past the guard onto whichever consumer's NumPy
+    cannot build it."""
+    members = schema_members(16)
+    members["best_fitness.npy"] = npy_bytes("<f16", (), payload=b"\x00" * 16)
+    path = write_npz(root / "v070_f16.npz", members)
+    assert admit(path, root) == "member_dtype_unsupported"
+    assert 16 not in guard._FLOAT_WIDTHS
+
+
+def test_the_zip64_central_directory_offset_sentinel_is_refused(root):
+    """The offset field says "the real value is in the ZIP64 record" just as
+    loudly as the counts do, so an archive can carry honest-looking counts and
+    still redirect `zipfile` through ZIP64."""
+    path = write_npz(root / "v070_z64off.npz", schema_members(16))
+    data = bytearray(path.read_bytes())
+    index = data.rfind(b"PK\x05\x06")
+    struct.pack_into("<I", data, index + 16, 0xFFFFFFFF)
+    path.write_bytes(bytes(data))
+    assert admit(path, root) == "zip64_unsupported"
+
+
+@pytest.mark.parametrize("field,offset", [
+    ("entries_here", 8), ("entries_total", 10), ("directory_size", 12),
+])
+def test_every_central_zip64_sentinel_is_refused_as_zip64(root, field, offset):
+    """All four report the same thing and now share one reason code; they used
+    to be split between `member_count` and `zip64_unsupported`."""
+    path = write_npz(root / ("v070_z64_%s.npz" % field), schema_members(16))
+    data = bytearray(path.read_bytes())
+    index = data.rfind(b"PK\x05\x06")
+    if offset == 12:
+        struct.pack_into("<I", data, index + offset, 0xFFFFFFFF)
+    else:
+        struct.pack_into("<H", data, index + offset, 0xFFFF)
+    path.write_bytes(bytes(data))
+    assert admit(path, root) == "zip64_unsupported"
 
 
 def test_a_zero_channel_memory_grid_is_refused(root):
@@ -952,6 +1255,100 @@ def test_nothing_is_opened_when_the_path_is_refused_before_the_open(root,
 
 
 # ---------------------------------------------------------------------------
+# Safe candidate discovery
+# ---------------------------------------------------------------------------
+
+def _touch(path, mtime_ns):
+    path.write_bytes(b"x")
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+    return path
+
+
+def test_newest_first_orders_by_modification_time(root):
+    older = _touch(root / "v070_a.npz", 1_000_000_000)
+    newer = _touch(root / "v070_b.npz", 3_000_000_000)
+    middle = _touch(root / "v070_c.npz", 2_000_000_000)
+    assert guard.newest_first([older, newer, middle]) == [newer, middle, older]
+
+
+def test_newest_first_breaks_ties_deterministically(root):
+    first = _touch(root / "v070_a.npz", 5_000_000_000)
+    second = _touch(root / "v070_b.npz", 5_000_000_000)
+    forward = guard.newest_first([first, second])
+    backward = guard.newest_first([second, first])
+    assert forward == backward, "the order depends on how the glob happened to yield"
+    assert set(forward) == {first, second}
+
+
+def test_newest_first_silently_skips_an_entry_that_disappeared(root):
+    present = _touch(root / "v070_here.npz", 1_000_000_000)
+    missing = root / "v070_gone.npz"
+    assert not missing.exists()
+    assert guard.newest_first([missing, present]) == [present]
+
+
+def test_newest_first_skips_a_whole_directory_of_vanished_entries(root):
+    """No exception, no partial result, nothing printed — there is nothing to
+    report about an entry that is simply gone."""
+    ghosts = [root / ("v070_ghost%d.npz" % i) for i in range(5)]
+    assert guard.newest_first(ghosts) == []
+
+
+def test_newest_first_keeps_a_broken_symlink_as_a_candidate(root):
+    """`lstat` succeeds on a dangling link, and that is the point: it reaches
+    the guard and is refused with a typed reason instead of vanishing from
+    selection and letting an older archive be served with no record of why."""
+    dangling = root / "v070_dangling.npz"
+    try:
+        dangling.symlink_to(root / "v070_absent_target.npz")
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+    assert guard.newest_first([dangling]) == [dangling]
+    assert admit(dangling, root) == "path_not_regular_file"
+
+
+def test_newest_first_does_not_follow_a_symlink_for_its_ordering(root, tmp_path):
+    """A link must not be able to borrow its target's modification time to
+    promote itself to "newest" — that is ordering deciding admission's question
+    before admission is asked."""
+    target = tmp_path / "outside_target.npz"
+    _touch(target, 9_000_000_000)
+    link = root / "v070_link.npz"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+    os.utime(link, ns=(1_000_000_000, 1_000_000_000), follow_symlinks=False)
+
+    real = _touch(root / "v070_real.npz", 5_000_000_000)
+    ordered = guard.newest_first([link, real])
+    assert ordered[0] == real, "the link borrowed its target's mtime"
+
+
+def test_entry_fingerprint_describes_the_entry_and_raises_when_gone(root):
+    present = _touch(root / "v070_fp.npz", 4_000_000_000)
+    name, size, mtime = guard.entry_fingerprint(present)
+    assert name == os.fspath(present)
+    assert size == 1 and mtime == 4_000_000_000
+
+    with pytest.raises(OSError):
+        guard.entry_fingerprint(root / "v070_never_existed.npz")
+
+
+def test_entry_fingerprint_is_non_following(root, tmp_path):
+    target = tmp_path / "fp_target.npz"
+    target.write_bytes(b"much larger contents")
+    link = root / "v070_fplink.npz"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+    assert guard.entry_fingerprint(link)[1] != target.stat().st_size, (
+        "the fingerprint described the target, so touching the target would "
+        "make a rejected link look changed and be retried every poll")
+
+
+# ---------------------------------------------------------------------------
 # Policy shape
 # ---------------------------------------------------------------------------
 
@@ -1082,7 +1479,8 @@ def test_the_guard_uses_no_numpy_and_no_private_numpy_parser():
         if isinstance(node, ast.ImportFrom) and node.module
     }
     assert imported <= {"__future__", "contextlib", "dataclasses", "os", "re",
-                        "stat", "struct", "zipfile", "pathlib", "typing"}
+                        "stat", "struct", "zipfile", "zlib", "pathlib",
+                        "typing"}
 
 
 # ---------------------------------------------------------------------------

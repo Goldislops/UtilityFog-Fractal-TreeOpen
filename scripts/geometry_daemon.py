@@ -42,6 +42,8 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
 from scripts.snapshot_archive_guard import (  # noqa: E402
     SnapshotArchiveRejected,
     admit_snapshot,
+    entry_fingerprint,
+    newest_first,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -82,7 +84,8 @@ def _load_snapshot(path):
     or a failing `int()` conversion propagates exactly as before, and the `with`
     block still closes the archive on the way out.
 
-    The `str(path)` conversion is preserved verbatim.
+    The `str(path)` conversion is NOT preserved: it was deliberately replaced
+    by same-descriptor loading, described below.
 
     `allow_pickle=False` — an object-dtype member is stored as a pickle, so
     loading one with pickle enabled is arbitrary code execution. This daemon
@@ -134,9 +137,13 @@ def _snapshot_fingerprint(path):
     nor retries it on every poll, while a genuinely new file at the same path
     — a replaced or rotated snapshot — differs in size or modification time
     and is admitted for a fresh attempt.
+
+    Non-following: `stat` described a symlink's TARGET, so a rejected link kept
+    changing fingerprint whenever anything touched the target, and the daemon
+    re-preflighted and re-logged the same unchanged poison on every poll — the
+    exact churn the memory exists to stop.
     """
-    info = path.stat()
-    return (str(path), info.st_size, info.st_mtime_ns)
+    return entry_fingerprint(path)
 
 
 # ---------------------------------------------------------------------------
@@ -300,12 +307,12 @@ def run_daemon():
 
     while True:
         try:
-            # Find latest snapshot
-            snapshots = sorted(
-                DATA_DIR.glob("v070_gen*.npz"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            # Find latest snapshot. Non-following ordering that also drops
+            # entries vanishing mid-enumeration: `p.stat()` followed symlinks,
+            # so a link could borrow its target's mtime to become "newest"
+            # before admission had any say, and it raised OSError into the
+            # broad handler below, whose message carries the path.
+            snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
 
             if not snapshots:
                 time.sleep(WATCH_INTERVAL)
@@ -408,11 +415,7 @@ def run_once():
     nonzero, with no exporter having run. The body is otherwise the block that
     was here before, unchanged.
     """
-    snapshots = sorted(
-        DATA_DIR.glob("v070_gen*.npz"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
     if not snapshots:
         print("No snapshots found!")
         return

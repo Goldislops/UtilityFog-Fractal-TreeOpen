@@ -40,7 +40,11 @@ import numpy as np
 from flask import Flask, jsonify, send_file, Response
 
 from scripts.snapshot_archive_guard import PRODUCTION_POLICY as SNAPSHOT_POLICY
-from scripts.snapshot_archive_guard import SnapshotArchiveRejected, admit_snapshot
+from scripts.snapshot_archive_guard import (
+    SnapshotArchiveRejected,
+    admit_snapshot,
+    newest_first,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -100,12 +104,15 @@ def _find_latest_snapshot():
     ``/api/status`` and ``/api/snapshot/latest`` keep reporting and serving the
     file that is actually there, exactly as before, while the four loading
     routes go on to answer 503.
+
+    Ordering comes from ``newest_first``, which reads non-following metadata
+    and silently drops entries that vanish mid-enumeration. Sorting on
+    ``stat`` let a symlink borrow its target's modification time to promote
+    itself to "newest" — followed during ORDERING, before admission had any
+    say — and let a snapshot rotated during the scan turn a request into a 500
+    whose message carried the attacker-chosen path.
     """
-    snapshots = sorted(
-        DATA_DIR.glob("v070_gen*.npz"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
     for candidate in snapshots[:SNAPSHOT_SELECTION_DEPTH]:
         try:
             with admit_snapshot(candidate, data_dir=DATA_DIR,
@@ -148,9 +155,10 @@ def _load_snapshot(path):
 
     Extraction is not guarded: a missing key or a failing ``int()`` / ``float()``
     conversion propagates exactly as before, and the ``with`` block still closes
-    the archive on the way out. ``str(path)``, the required-key semantics, the
-    extraction order, both conversions and the tuple order are preserved
-    verbatim.
+    the archive on the way out. The required-key semantics, the extraction
+    order, both conversions and the tuple order are preserved verbatim. The
+    ``str(path)`` conversion is NOT: it was deliberately replaced by
+    same-descriptor loading, described below.
 
     ``allow_pickle=False`` -- an object-dtype member is stored as a pickle, so
     loading one with pickle enabled is arbitrary code execution. This helper
