@@ -21,9 +21,21 @@ deterministic recorder rather than a timing loop, arrays are 2x2x2, and
 appended at the end DO write real NPZ archives, but only inside pytest's
 own `tmp_path`.
 
-Scope is archive resource lifetime relative to extraction — not snapshot
-validation, benchmark mathematics, timing methodology, or the separate question
-of exception-safe restoration of the temporary engine globals.
+Two further sections were added later, and are named here because this
+docstring previously listed the first of them as explicitly OUT of scope:
+
+  * TEMPORARY-BACKEND FAILURE ATOMICITY. `run_benchmarks()` forces the engine
+    module's `GPU_AVAILABLE`/`_xp` globals to CPU for the three CPU component
+    benchmarks. The restore used to run on the success path only, so any
+    failure in between left process-global backend state pinned to CPU.
+  * NONPOSITIVE STEP COUNTS, which used to travel through snapshot loading,
+    the backend switch and every component benchmark before failing in the
+    timing aggregation.
+
+Scope is archive resource lifetime relative to extraction, the exception
+atomicity of that temporary backend switch, and the step-count guard — not
+snapshot validation, benchmark mathematics, timing methodology, or
+`benchmark_component()`'s own contract.
 """
 
 from __future__ import annotations
@@ -271,14 +283,24 @@ class _Recorder:
         self.components = []
         self.steps = []
         self.measured = []  # what the measured callables actually received
+        self.random_rand = []  # CPU preparation between two components
 
 
-def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None):
+def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None,
+                    component_errors=None, random_rand_error=None,
+                    capture=None, drop_xp=False):
     """Drive the genuine `run_benchmarks()` with every seam controlled.
 
     Returns (archive, recorder). Nothing real is benchmarked: the engine is a
     scoped stand-in, `benchmark_component` is a deterministic recorder rather
     than a timing loop, and the arrays are 2x2x2.
+
+    `component_errors` maps a component name to an exception raised instead of
+    running it; `random_rand_error` does the same for the `np.random.rand` call
+    that prepares the box-filter input between two of them. `capture`, if
+    given, is populated with the engine stand-in and its sentinel BEFORE the
+    run starts, so a test can inspect the engine's globals even when the run
+    raises and never reaches the return.
     """
     archive = archive if archive is not None else _FakeArchive(
         _contents() if contents is None else contents, raise_on=raise_on
@@ -289,6 +311,16 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None):
     sentinel_xp = object()
     engine.GPU_AVAILABLE = True      # a distinctive prior value...
     engine._xp = sentinel_xp         # ...so restoration is observable
+    component_errors = dict(component_errors or {})
+    if drop_xp:
+        # An engine with no `_xp` at all: capturing it must not have been
+        # preceded by a write to `GPU_AVAILABLE`.
+        del engine._xp
+    if capture is not None:
+        capture["engine"] = engine
+        capture["sentinel_xp"] = sentinel_xp
+        capture["archive"] = archive
+        capture["rec"] = rec
 
     def _load_rule_spec(rule_path):
         rec.load_rule_spec.append({"closed": archive.closed, "path": rule_path,
@@ -305,8 +337,23 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None):
             "iterations": iterations, "gpu": engine.GPU_AVAILABLE,
             "xp_is_numpy": engine._xp is np,
         })
+        if name in component_errors:
+            raise component_errors[name]
         fn()  # exactly once — deterministic, no warmup/iteration timing loop
         return 1.0
+
+    def _random_rand(*shape):
+        rec.random_rand.append({"shape": tuple(shape),
+                                "gpu": engine.GPU_AVAILABLE,
+                                "xp_is_numpy": engine._xp is np})
+        if random_rand_error is not None:
+            raise random_rand_error
+        # `gpu_benchmark.np` IS the real numpy module, so this patch rebinds
+        # `numpy.random.rand` process-wide for the duration of the `with`.
+        # Match `rand`'s contract exactly rather than approximately:
+        # `rand()` with no arguments returns a float, while
+        # `random_sample(())` returns a 0-d array.
+        return np.random.random_sample(shape) if shape else np.random.random_sample()
 
     def _measured(label):
         def _record(arg, *rest, **kwargs):
@@ -345,6 +392,7 @@ def _run_benchmarks(contents=None, archive=None, num_steps=1, raise_on=None):
                            _measured("box_filter")), \
          mock.patch.object(gpu_benchmark, "_max_neighbor_value",
                            _measured("max_neighbor")), \
+         mock.patch.object(gpu_benchmark.np.random, "rand", _random_rand), \
          mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False):
         gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", num_steps)
 
@@ -618,3 +666,287 @@ def test_a_numeric_snapshot_still_loads_and_converts(tmp_path):
     lattice, grid, generation = gpu_benchmark._load_snapshot(archive)
     assert lattice.dtype == np.uint8 and grid.dtype == np.float32
     assert generation == 9 and type(generation) is int
+
+
+# -- temporary-backend failure atomicity --------------------------------------
+#
+# `run_benchmarks()` forces `scripts.continuous_evolution_ca` onto the CPU
+# backend for the three CPU component benchmarks, then restores it. The restore
+# used to sit after the third benchmark on the SUCCESS path only, so any failure
+# in between -- a component, or the `np.random.rand` preparation between two of
+# them -- left the engine's module globals pinned to CPU for the rest of the
+# process. Module globals, so every later user inherited it, starting with the
+# optional GPU section a few lines below.
+#
+# These drive the genuine function; the engine is the same scoped stand-in used
+# above, carrying a distinctive `GPU_AVAILABLE = True` and an identity-sensitive
+# `_xp` sentinel so restoration is observable rather than merely plausible.
+
+_CPU_COMPONENTS = [
+    "count_neighbors_3d (CPU)",
+    "box_filter_3d R=12 (CPU)",
+    "max_neighbor_value (CPU)",
+]
+
+
+class BenchBoom(Exception):
+    """Distinct benchmark failure, so propagation can be asserted by identity."""
+
+
+@pytest.mark.parametrize("failing", _CPU_COMPONENTS)
+def test_backend_is_restored_when_a_cpu_component_fails(failing):
+    boom = BenchBoom(f"{failing} exploded")
+    capture = {}
+
+    with pytest.raises(BenchBoom) as caught:
+        _run_benchmarks(num_steps=1, component_errors={failing: boom},
+                        capture=capture)
+
+    assert caught.value is boom, "the original exception must propagate unwrapped"
+    engine = capture["engine"]
+    assert engine.GPU_AVAILABLE is True
+    assert engine._xp is capture["sentinel_xp"]
+
+
+def test_backend_is_restored_when_cpu_preparation_fails():
+    """`np.random.rand` sits between the first and second components."""
+    boom = BenchBoom("rand exploded")
+    capture = {}
+
+    with pytest.raises(BenchBoom) as caught:
+        _run_benchmarks(num_steps=1, random_rand_error=boom, capture=capture)
+
+    assert caught.value is boom
+    engine = capture["engine"]
+    assert engine.GPU_AVAILABLE is True
+    assert engine._xp is capture["sentinel_xp"]
+    # It really did fail where we think: one component ran, the second did not.
+    assert [c["name"] for c in capture["rec"].components] == _CPU_COMPONENTS[:1]
+    assert len(capture["rec"].random_rand) == 1
+
+
+def test_a_failure_in_the_first_component_still_restores_both_values():
+    """Both globals are restored, not just the flag.
+
+    `_xp` is compared by identity against a sentinel that is not numpy, so a
+    restore that wrote `np` back instead of the previous object would fail here
+    even though the flag looked right.
+    """
+    capture = {}
+    with pytest.raises(BenchBoom):
+        _run_benchmarks(num_steps=1,
+                        component_errors={_CPU_COMPONENTS[0]: BenchBoom("x")},
+                        capture=capture)
+
+    engine = capture["engine"]
+    assert engine._xp is capture["sentinel_xp"]
+    assert engine._xp is not np
+    assert engine.GPU_AVAILABLE is True
+
+
+def test_an_engine_without_xp_is_left_completely_untouched():
+    """The capture-order half of the repair, which nothing else exercises.
+
+    The base read `old_xp = ca_module._xp` AFTER writing
+    `ca_module.GPU_AVAILABLE = False`, so an engine with no `_xp` attribute
+    raised `AttributeError` with the flag already forced -- and no `try` had
+    been entered yet, so nothing put it back. Both originals are now read
+    before either is written, so the failure happens before any mutation.
+
+    Without this test, reverting just that half of the repair leaves the whole
+    suite green.
+    """
+    capture = {}
+
+    with pytest.raises(AttributeError):
+        _run_benchmarks(num_steps=1, drop_xp=True, capture=capture)
+
+    engine = capture["engine"]
+    assert engine.GPU_AVAILABLE is True, "flag was mutated before the capture failed"
+    assert not hasattr(engine, "_xp"), "an `_xp` was invented that never existed"
+
+
+class _BetweenWrites(KeyboardInterrupt):
+    """Distinctive interrupt, so propagation can be asserted by identity."""
+
+
+def test_an_interrupt_between_the_two_forcing_writes_still_restores():
+    """The forcing assignments must be INSIDE the protected interval.
+
+    Capturing the originals outside the `try` is safe -- it mutates nothing --
+    but the moment the first global is written the `finally` must already be
+    established. With
+
+        ca_module.GPU_AVAILABLE = False
+        ca_module._xp = np
+        try:
+            ...
+        finally:
+            ...
+
+    an asynchronous interrupt delivered between those two writes unwinds past a
+    `finally` that does not yet exist, and the engine is left pinned to CPU
+    with nothing to put it back.
+
+    The interrupt is injected by a `sys.settrace` line hook that fires on a
+    STATE predicate rather than a hard-coded line number: the genuine
+    `run_benchmarks` frame, `GPU_AVAILABLE` already forced to False, and `_xp`
+    still holding the caller's sentinel. That is precisely the window, and it
+    keeps working if the surrounding code moves.
+
+    LIMITATION, stated rather than implied: this shows the window between the
+    two forcing writes is covered. It does not and cannot promise atomicity
+    against an asynchronous interruption delivered inside the cleanup itself --
+    an interrupt landing between the two restore assignments would still leave
+    the second one undone. No pure-Python construct closes that.
+    """
+    engine = _engine_stand_in()
+    sentinel_xp = object()
+    engine.GPU_AVAILABLE = True
+    engine._xp = sentinel_xp
+    archive = _FakeArchive(_contents())
+    boom = _BetweenWrites("between the forcing assignments")
+    components = []
+    fired = []
+
+    def _tripwire_component(name, fn, warmup=2, iterations=10):
+        components.append(name)
+        return 1.0
+
+    def _tracer(frame, event, arg):
+        if frame.f_code is not gpu_benchmark.run_benchmarks.__code__:
+            return None
+        if event == "line" and not fired:
+            ca = frame.f_locals.get("ca_module")
+            if (ca is not None
+                    and getattr(ca, "GPU_AVAILABLE", None) is False
+                    and getattr(ca, "_xp", None) is sentinel_xp):
+                fired.append(frame.f_lineno)
+                raise boom
+        return _tracer
+
+    previous_trace = sys.gettrace()
+    try:
+        with mock.patch.dict(sys.modules, {_ENGINE: engine}), \
+             mock.patch.object(_scripts_package, _ENGINE_ATTR, engine, create=True), \
+             mock.patch.object(gpu_benchmark.np, "load",
+                               mock.Mock(return_value=archive)), \
+             mock.patch.object(gpu_benchmark, "load_rule_spec",
+                               lambda path: {"rule": "stub"}), \
+             mock.patch.object(gpu_benchmark, "init_memory_grid",
+                               lambda shape: _grid(channels=8, size=shape[0])), \
+             mock.patch.object(gpu_benchmark, "benchmark_component",
+                               _tripwire_component), \
+             mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False):
+            sys.settrace(_tracer)
+            with pytest.raises(_BetweenWrites) as caught:
+                gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", 1)
+    finally:
+        sys.settrace(previous_trace)
+
+    assert fired, "the between-writes window was never reached"
+    assert caught.value is boom
+    assert engine.GPU_AVAILABLE is True, "flag left forced after the interrupt"
+    assert engine._xp is sentinel_xp
+    assert components == [], "a component ran despite the interrupt"
+
+
+def test_the_successful_path_still_sees_cpu_mode_for_all_three_components():
+    """The repair must not weaken what the forced-CPU interval is for."""
+    _archive, rec = _run_benchmarks(num_steps=1)
+
+    cpu = [c for c in rec.components if c["name"] in _CPU_COMPONENTS]
+    assert [c["name"] for c in cpu] == _CPU_COMPONENTS
+    assert all(c["gpu"] is False for c in cpu)
+    assert all(c["xp_is_numpy"] for c in cpu)
+    # ...and the CPU preparation between them ran under the same forced backend.
+    assert rec.random_rand and all(r["gpu"] is False for r in rec.random_rand)
+    # Restored before anything after the interval.
+    assert rec.engine_after == {"gpu": True, "xp_is_sentinel": True}
+
+
+# -- nonpositive step counts --------------------------------------------------
+#
+# A nonpositive `num_steps` used to travel through the banner, snapshot
+# loading, rule loading, RNG construction, the backend switch and every
+# component benchmark before failing in the timing aggregation -- `np.min([])`
+# on an empty list, or an unbound `first_metrics` because the loop never ran.
+
+
+@pytest.mark.parametrize("steps", [0, -1, -10])
+def test_nonpositive_steps_are_refused_before_anything_is_touched(steps):
+    archive = _FakeArchive(_contents())
+    engine = _engine_stand_in()
+    sentinel_xp = object()
+    engine.GPU_AVAILABLE = True
+    engine._xp = sentinel_xp
+    load_mock = mock.Mock(return_value=archive)
+    touched = []
+
+    def _tripwire(label, result=None):
+        def _fn(*a, **k):
+            touched.append(label)
+            return result
+        return _fn
+
+    with mock.patch.dict(sys.modules, {_ENGINE: engine}), \
+         mock.patch.object(_scripts_package, _ENGINE_ATTR, engine, create=True), \
+         mock.patch.object(gpu_benchmark.np, "load", load_mock), \
+         mock.patch.object(gpu_benchmark, "load_rule_spec",
+                           _tripwire("load_rule_spec", {"rule": "stub"})), \
+         mock.patch.object(gpu_benchmark, "init_memory_grid",
+                           _tripwire("init_memory_grid", _grid())), \
+         mock.patch.object(gpu_benchmark, "benchmark_component",
+                           _tripwire("benchmark_component", 1.0)), \
+         mock.patch.object(gpu_benchmark, "step_ca_lattice",
+                           _tripwire("step_ca_lattice")), \
+         mock.patch.object(gpu_benchmark.np.random, "default_rng",
+                           _tripwire("default_rng")), \
+         mock.patch.object(gpu_benchmark.np.random, "rand",
+                           _tripwire("rand")), \
+         mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False):
+        with pytest.raises(ValueError) as caught:
+            gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", steps)
+
+    assert str(steps) in str(caught.value)
+    # Nothing downstream was reached: no snapshot, rule, RNG, benchmark or step.
+    assert touched == []
+    assert load_mock.call_count == 0
+    assert archive.entered == 0 and archive.closed == 0
+    # ...and the engine globals were never mutated.
+    assert engine.GPU_AVAILABLE is True
+    assert engine._xp is sentinel_xp
+
+
+def test_nonpositive_steps_print_nothing(capsys):
+    """The refusal precedes even the banner.
+
+    The seams are patched even though the guard should stop execution before
+    any of them: if the guard ever regresses, this test must fail on its
+    assertions rather than reach `cp.cuda.runtime.memGetInfo()` on a
+    CuPy-equipped runner and then a real `np.load` of a path that does not
+    exist. A test that only passes because the code under test is correct is
+    not a safe test.
+    """
+    def _tripwire(*a, **k):
+        raise AssertionError("guard regressed: execution passed the refusal")
+
+    with mock.patch.object(gpu_benchmark, "GPU_AVAILABLE", False), \
+         mock.patch.object(gpu_benchmark.np, "load", _tripwire), \
+         mock.patch.object(gpu_benchmark, "load_rule_spec", _tripwire):
+        with pytest.raises(ValueError):
+            gpu_benchmark.run_benchmarks("/fake/v070_gen1000.npz", 0)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_a_single_step_run_is_unaffected(capsys):
+    """The established positive-path contract still holds."""
+    archive, rec = _run_benchmarks(num_steps=1)
+
+    assert len(rec.steps) == 1
+    assert archive.closed == 1
+    assert rec.engine_after == {"gpu": True, "xp_is_sentinel": True}
+    out = capsys.readouterr().out
+    assert "FULL STEP BENCHMARK (1 steps)" in out
+    assert "SUMMARY" in out
