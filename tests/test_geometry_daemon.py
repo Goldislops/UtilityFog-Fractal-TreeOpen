@@ -884,17 +884,19 @@ def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
     archive = _write_snapshot_gd(
         confined / "v070_closed.npz", lattice=_payload_array_gd(confined)
     )
-    import builtins
+    # Hooked on `os.fdopen`, not `builtins.open`: the guard opens through
+    # `os.open` so it can pass O_NONBLOCK and O_NOFOLLOW, and `os.fdopen` is
+    # what turns that descriptor into the file object it yields.
+    import os as _os
     opened = []
-    real_open = builtins.open
+    real_fdopen = _os.fdopen
 
-    def _tracking_open(*args, **kwargs):
-        handle = real_open(*args, **kwargs)
-        if str(args[0]).endswith(".npz"):
-            opened.append(handle)
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
+        opened.append(handle)
         return handle
 
-    monkeypatch.setattr(builtins, "open", _tracking_open)
+    monkeypatch.setattr(_os, "fdopen", _tracking_fdopen)
     with pytest.raises(geometry_daemon.SnapshotArchiveRejected):
         geometry_daemon._load_snapshot(archive)
     assert len(opened) == 1, "the archive was opened more than once, or not at all"

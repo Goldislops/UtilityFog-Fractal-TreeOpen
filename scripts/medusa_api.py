@@ -62,21 +62,57 @@ app.config["API_PORT"] = API_PORT
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: How many of the newest snapshots may be preflighted while looking for a
+#: usable one. The previous code scanned the whole directory, which now holds
+#: five figures' worth of archives; preflighting all of them on every request
+#: would itself be the denial of service. Bounded, so one poisoned batch costs
+#: a fixed amount of work and anything older is simply not considered.
+SNAPSHOT_SELECTION_DEPTH = 8
+
+
 def _find_latest_snapshot():
-    """Find the most recent .npz snapshot.
+    """Find the most recent USABLE .npz snapshot.
 
     The former one-megabyte minimum is gone. It was a guess at "tiny/corrupt",
     and it was wrong in both directions: a structurally valid snapshot of a
     sparse lattice compresses to far less than a megabyte and was skipped,
     while a hostile archive only had to be padded past the threshold to be
-    selected. Selection is now purely "most recent", and whether the file is
-    usable is decided by ``admit_snapshot`` from the archive's own structure.
+    selected.
+
+    What that guess was DOING, though, was not merely filtering — it was a
+    newest-first search that skipped an unusable file and fell back to the
+    previous good one. Dropping it and returning ``snapshots[0]`` would have
+    meant that a single truncated or hostile archive with the newest mtime
+    wedged all four snapshot routes at 503 until a fresh snapshot landed. That
+    is a real regression: ``run_v070_engine._save_snapshot`` writes straight to
+    its final path with no temporary-and-rename, so a partially written archive
+    IS the newest file for as long as the write takes.
+
+    So the search is kept and the predicate is replaced: admission, not size.
+    ``admit_snapshot`` is the same preflight ``_load_snapshot`` will run, and it
+    is bounded, so this costs a bounded number of bounded reads.
+
+    Two things this deliberately does NOT do. It does not hold the descriptor
+    open between selection and loading — ``_load_snapshot`` opens and
+    preflights its own, so a file swapped in between is caught there rather
+    than trusted here; this probe decides only WHICH path to try. And when
+    nothing in the window is admissible it still returns the newest, so
+    ``/api/status`` and ``/api/snapshot/latest`` keep reporting and serving the
+    file that is actually there, exactly as before, while the four loading
+    routes go on to answer 503.
     """
     snapshots = sorted(
         DATA_DIR.glob("v070_gen*.npz"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
+    for candidate in snapshots[:SNAPSHOT_SELECTION_DEPTH]:
+        try:
+            with admit_snapshot(candidate, data_dir=DATA_DIR,
+                                policy=SNAPSHOT_POLICY):
+                return candidate
+        except SnapshotArchiveRejected:
+            continue
     return snapshots[0] if snapshots else None
 
 

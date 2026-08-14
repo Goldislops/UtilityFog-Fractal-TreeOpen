@@ -669,17 +669,18 @@ def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
     archive = _write_snapshot_ma(
         confined / "v070_closed.npz", lattice=_payload_array_ma(confined)
     )
-    import builtins
+    # Hooked on `os.fdopen`, not `builtins.open`: the guard opens through
+    # `os.open` so it can pass O_NONBLOCK and O_NOFOLLOW, and `os.fdopen` is
+    # what turns that descriptor into the file object it yields.
     opened = []
-    real_open = builtins.open
+    real_fdopen = os.fdopen
 
-    def _tracking_open(*args, **kwargs):
-        handle = real_open(*args, **kwargs)
-        if str(args[0]).endswith(".npz"):
-            opened.append(handle)
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
+        opened.append(handle)
         return handle
 
-    monkeypatch.setattr(builtins, "open", _tracking_open)
+    monkeypatch.setattr(os, "fdopen", _tracking_fdopen)
     with pytest.raises(medusa_api.SnapshotArchiveRejected):
         medusa_api._load_snapshot(archive)
     assert len(opened) == 1, "the archive was opened more than once, or not at all"
@@ -713,6 +714,63 @@ def test_selection_no_longer_skips_a_small_snapshot(confined):
                                     compressed=True))
     assert small.stat().st_size < 1_000_000, "the fixture is not small any more"
     assert medusa_api._find_latest_snapshot() == small
+
+
+def test_selection_falls_back_past_an_unusable_newest_snapshot(confined):
+    """The 1 MB rule was not only a filter, it was a SEARCH.
+
+    It walked newest-first and skipped a file that looked unusable, so the API
+    kept answering from the previous good snapshot. Replacing it with a bare
+    `snapshots[0]` would have let one truncated or hostile archive wedge all
+    four snapshot routes at 503 until a fresh snapshot landed — and the
+    producer writes straight to its final path with no temporary-and-rename,
+    so a partially written archive IS the newest file for as long as the write
+    takes. The search is kept; the predicate is now admission.
+    """
+    good = Path(_write_snapshot_ma(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    poison = Path(_hostile_ma("missing_member", confined / "v070_gen000002.npz"))
+    os.utime(good, (1_000_000, 1_000_000))
+    os.utime(poison, (2_000_000, 2_000_000))
+
+    assert medusa_api._find_latest_snapshot() == good
+
+    client = medusa_api.app.test_client()
+    response = client.get("/api/census")
+    assert response.status_code == 200, (
+        "one unusable newest archive must not wedge the route")
+    assert response.get_json()["generation"] == 7
+
+
+def test_selection_is_bounded_and_does_not_scan_the_whole_directory(confined,
+                                                                    monkeypatch):
+    """The old search walked every snapshot in the directory. Preflighting all
+    of a five-figure directory on every request would itself be the denial of
+    service, so the window is bounded — and anything older than it is simply
+    not considered."""
+    depth = medusa_api.SNAPSHOT_SELECTION_DEPTH
+    good = Path(_write_snapshot_ma(confined / "v070_gen000000.npz",
+                                   compressed=True))
+    os.utime(good, (1_000_000, 1_000_000))
+    for index in range(depth + 2):
+        poison = Path(_hostile_ma("missing_member",
+                                  confined / ("v070_gen%06d.npz" % (index + 1))))
+        os.utime(poison, (2_000_000 + index, 2_000_000 + index))
+
+    admitted = []
+    real_admit = medusa_api.admit_snapshot
+
+    def _counting_admit(path, **kwargs):
+        admitted.append(path)
+        return real_admit(path, **kwargs)
+
+    monkeypatch.setattr(medusa_api, "admit_snapshot", _counting_admit)
+    selected = medusa_api._find_latest_snapshot()
+
+    assert len(admitted) == depth, "the search was not bounded to the window"
+    assert selected != good, "a snapshot outside the window must not be found"
+    assert selected.name == "v070_gen%06d.npz" % (depth + 2), (
+        "when nothing in the window is admissible the newest is still returned")
 
 
 def test_selection_still_prefers_the_most_recent(confined):

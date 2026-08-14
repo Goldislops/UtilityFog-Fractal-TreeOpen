@@ -322,7 +322,17 @@ def run_daemon():
             # silence: no repeated reason-code log, no repeated preflight, no
             # export attempt. A file that CHANGES at the same path has a
             # different fingerprint and gets a fresh attempt.
-            fingerprint = _snapshot_fingerprint(latest)
+            try:
+                fingerprint = _snapshot_fingerprint(latest)
+            except OSError:
+                # The file was rotated or deleted between the glob above and
+                # this stat. Letting that escape would reach the broad handler
+                # at the bottom of the loop, which prints the exception — and
+                # OSError's message carries the full path, which is a name the
+                # attacker chose. Nothing to do but look again next poll.
+                time.sleep(WATCH_INTERVAL)
+                continue
+
             if fingerprint == last_rejected:
                 time.sleep(WATCH_INTERVAL)
                 continue

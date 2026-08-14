@@ -100,6 +100,7 @@ REASON_CODES: Tuple[str, ...] = (
     "archive_too_large",
     "archive_truncated",
     "not_zip_archive",
+    "zip64_unsupported",
     "central_directory_too_large",
     "archive_payload_total_too_large",
     # membership
@@ -162,8 +163,17 @@ class MemberSpec:
 
     ``kinds`` are NumPy dtype *family* characters, not exact dtypes: the
     producer writes ``uint8``/``float32``/platform ``int``, and documented
-    legacy snapshots differ in width, so pinning exact widths would refuse
-    valid history. Width is bounded instead by ``max_payload_bytes``.
+    legacy snapshots differ in width, so pinning one exact dtype would refuse
+    valid history.
+
+    ``itemsizes`` bounds that freedom to widths NumPy can actually construct.
+    The descriptor grammar accepts any letter followed by any digits, so
+    ``|u3``, ``<f5`` and ``<i1000`` all parse and all satisfy a family rule --
+    and each of them makes ``np.dtype()`` raise a ``TypeError`` whose message
+    quotes the attacker's descriptor verbatim, from a call site downstream of
+    every ``except SnapshotArchiveRejected``. Admitting a width that cannot
+    exist is the same defect as admitting a wrong family, so it is refused
+    here rather than by NumPy.
     """
 
     name: str
@@ -171,6 +181,7 @@ class MemberSpec:
     kinds: Tuple[str, ...]
     max_payload_bytes: int
     role: str
+    itemsizes: Tuple[int, ...] = (1, 2, 4, 8, 16)
 
     @property
     def archive_name(self) -> str:
@@ -193,11 +204,14 @@ class SnapshotArchivePolicy:
     A 512³ archive is outside this tranche by construction and is refused.
 
     Stated rather than implied: under these production numbers the aggregate
-    ceiling cannot be the binding constraint, because the per-member ceilings
-    already sum to 528 MiB plus three kilobyte-scale scalars. It is kept
-    because it is the envelope that would otherwise widen silently if a future
-    policy raised one member's ceiling, and it is exercised by tests through an
-    injected policy rather than by pretending a production archive reaches it.
+    ceiling cannot be the binding constraint. The accumulator sums
+    ``ZipInfo.file_size``, which covers each member's NPY header as well as its
+    payload, so the true worst case is 528 MiB of payload + 3 KiB of scalars +
+    5 x 4 KiB of headers = 553,695,104 bytes, against a ceiling of
+    554,696,704 — about 978 KiB of margin. It is kept because it is the
+    envelope that would otherwise widen silently if a future policy raised one
+    member's ceiling, and it is exercised by tests through an injected policy
+    rather than by pretending a production archive reaches it.
 
     ``central_directory_max_bytes`` is a bounded-parsing safeguard rather than
     a production capacity: a five-member snapshot's central directory is a few
@@ -227,12 +241,18 @@ class SnapshotArchivePolicy:
         return {spec.archive_name: spec for spec in self.members}
 
 
+#: Widths NumPy can construct for each family. Integers: 1, 2, 4, 8 bytes.
+#: Floats: 2 (float16), 4, 8, and 16 (longdouble, where the platform has it).
+_INTEGER_WIDTHS = (1, 2, 4, 8)
+_FLOAT_WIDTHS = (2, 4, 8, 16)
+
 PRODUCTION_MEMBERS: Tuple[MemberSpec, ...] = (
-    MemberSpec("lattice", 3, ("u",), 16 * _MIB, ROLE_LATTICE),
-    MemberSpec("memory_grid", 4, ("f",), 512 * _MIB, ROLE_MEMORY_GRID),
-    MemberSpec("generation", 0, ("i",), 1 * _KIB, ROLE_SCALAR),
-    MemberSpec("ca_step", 0, ("i",), 1 * _KIB, ROLE_SCALAR),
-    MemberSpec("best_fitness", 0, ("f",), 1 * _KIB, ROLE_SCALAR),
+    MemberSpec("lattice", 3, ("u",), 16 * _MIB, ROLE_LATTICE, _INTEGER_WIDTHS),
+    MemberSpec("memory_grid", 4, ("f",), 512 * _MIB, ROLE_MEMORY_GRID,
+               _FLOAT_WIDTHS),
+    MemberSpec("generation", 0, ("i",), 1 * _KIB, ROLE_SCALAR, _INTEGER_WIDTHS),
+    MemberSpec("ca_step", 0, ("i",), 1 * _KIB, ROLE_SCALAR, _INTEGER_WIDTHS),
+    MemberSpec("best_fitness", 0, ("f",), 1 * _KIB, ROLE_SCALAR, _FLOAT_WIDTHS),
 )
 
 #: The named policy the three services use.
@@ -245,6 +265,10 @@ PRODUCTION_POLICY = SnapshotArchivePolicy(members=PRODUCTION_MEMBERS)
 
 _NPY_MAGIC = b"\x93NUMPY"
 _SUPPORTED_NPY_VERSIONS = frozenset({(1, 0), (2, 0), (3, 0)})
+
+#: Enough digits for any width in :attr:`MemberSpec.itemsizes`, far short of
+#: CPython's integer-string conversion limit.
+_MAX_ITEMSIZE_DIGITS = 6
 
 #: ``<f4``, ``|u1``, ``>i8`` ... byte order optional, size digits required.
 #: A descriptor NumPy would write for a plain numeric array always matches.
@@ -310,6 +334,12 @@ class _LiteralParser:
         self._count()
         self.skip_space()
         char = self._peek()
+        if not char:
+            # `_peek` returns "" at end of input, and "" is a substring of
+            # every string -- so without this the dispatch below would treat
+            # end-of-input as an opening bracket and recurse until the depth
+            # cap fired.
+            raise _HeaderSyntaxError("end of input")
         if char == "{":
             return self._parse_dict()
         if char in "([":
@@ -394,12 +424,21 @@ class _LiteralParser:
         self.pos += 1
         return value
 
+    #: ASCII decimal digits, spelled out. ``str.isdigit()`` is TRUE for the
+    #: whole Unicode digit property -- superscripts, circled numerals and so
+    #: on -- while ``int()`` accepts only these ten. Using ``isdigit`` here let
+    #: a header declaring a shape of ``(\xb2,)`` reach ``int()``, which raised a
+    #: bare ``ValueError`` carrying the attacker's character out of the guard
+    #: entirely, past every ``except SnapshotArchiveRejected`` in the
+    #: consumers and into a 500 with a traceback.
+    DECIMAL_DIGITS = "0123456789"
+
     def _parse_int(self) -> int:
         start = self.pos
         if self._peek() == "-":
             self.pos += 1
         digits = 0
-        while self._peek().isdigit():
+        while self._peek() in self.DECIMAL_DIGITS and self._peek():
             self.pos += 1
             digits += 1
             if digits > self.MAX_INT_DIGITS:
@@ -458,7 +497,12 @@ def _read_member_header(stream, policy: SnapshotArchivePolicy) -> _MemberHeader:
     try:
         text = raw.decode("utf-8" if version == (3, 0) else "latin1")
         parsed = _parse_literal(text.strip())
-    except (UnicodeDecodeError, _HeaderSyntaxError):
+    except (UnicodeDecodeError, _HeaderSyntaxError, ValueError, RecursionError):
+        # ``ValueError`` and ``RecursionError`` are belt-and-braces: the parser
+        # is written not to raise either, but a header is attacker-controlled
+        # and an escape from here would carry its bytes past every
+        # ``except SnapshotArchiveRejected`` in the consumers. Nothing derived
+        # from the archive may leave this function untyped.
         raise _reject("member_header_malformed") from None
 
     if not isinstance(parsed, dict) or set(parsed) != {
@@ -491,6 +535,12 @@ def _read_member_header(stream, policy: SnapshotArchivePolicy) -> _MemberHeader:
         raise _reject("member_dtype_structured")
     size_text = match.group("size")
     if not size_text:
+        raise _reject("member_dtype_unsupported")
+    if len(size_text) > _MAX_ITEMSIZE_DIGITS:
+        # ``int()`` refuses very long decimal strings outright (CPython's
+        # integer-string limit), and the header ceiling alone does not bound
+        # this below that limit. Refused here so the conversion below cannot
+        # raise.
         raise _reject("member_dtype_unsupported")
     itemsize = int(size_text)
     if kind == "U":
@@ -545,6 +595,8 @@ _EOCD_SIGNATURE = b"PK\x05\x06"
 _EOCD_SIZE = 22
 _MAX_EOCD_COMMENT = 0xFFFF
 _LOCAL_FILE_SIGNATURE = b"PK\x03\x04"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_LOCATOR_SIZE = 20
 
 _UNSAFE_NAME_RE = re.compile(r"(^/)|(^[A-Za-z]:)|(\\)|(^\.\.$)|(^\.\./)|(/\.\./)|(/\.\.$)|(/)")
 
@@ -576,6 +628,29 @@ def _preflight_eocd(fh, size: int, policy: SnapshotArchivePolicy) -> None:
     index = tail.rfind(_EOCD_SIGNATURE)
     if index < 0 or len(tail) - index < _EOCD_SIZE:
         raise _reject("not_zip_archive")
+
+    # A ZIP64 end-of-central-directory locator sitting immediately before the
+    # 32-bit record makes every field below ADVISORY. CPython's
+    # ``zipfile._EndRecData`` looks for that locator and, when it is present,
+    # takes the entry count, directory size and directory offset from the
+    # ZIP64 record instead -- without requiring the 0xFFFF/0xFFFFFFFF
+    # sentinels this function refuses further down. A crafted archive can
+    # therefore declare "five entries, a 300-byte directory" here while
+    # ``ZipFile`` goes on to build one ``ZipInfo`` per entry from a directory
+    # that is orders of magnitude larger; measured at 60,000 entries from a
+    # 2.7 MB file, and the physical ceiling permits far more.
+    #
+    # The condition below is exactly the one ``_EndRecData`` uses, read from
+    # the file rather than from the tail window so it cannot be pushed out of
+    # range by a comment. A five-member snapshot inside a 544 MiB ceiling
+    # never needs ZIP64 -- NumPy's ``force_zip64`` affects only LOCAL headers,
+    # and the central directory it writes stays 32-bit -- so the whole
+    # extension is refused rather than parsed.
+    eocd_offset = size - window + index
+    if eocd_offset >= _ZIP64_LOCATOR_SIZE:
+        fh.seek(eocd_offset - _ZIP64_LOCATOR_SIZE)
+        if fh.read(len(_ZIP64_LOCATOR_SIGNATURE)) == _ZIP64_LOCATOR_SIGNATURE:
+            raise _reject("zip64_unsupported")
 
     record = tail[index:index + _EOCD_SIZE]
     entries_here, entries_total, directory_size = struct.unpack("<HHI", record[8:16])
@@ -645,8 +720,17 @@ def _check_geometry(
         raise _reject("spatial_disagreement")
     if grid.shape[0] < 1:
         # The channel count is bounded by the memory-grid payload ceiling
-        # rather than pinned: documented legacy snapshots carry 3 or 5
-        # channels where the current producer writes 8.
+        # rather than pinned. Stated precisely, because the obvious reading is
+        # wrong: this is NOT a claim that a legacy grid is usable. The current
+        # producer writes 8 channels; migration for the documented 3- and
+        # 5-channel forms lives in `continuous_evolution_ca._migrate_memory_grid`
+        # and NONE of the three consumers calls it. Lucid indexes channel 6 and
+        # all three index channel 3, so a grid with fewer channels is admitted
+        # here and then raises IndexError downstream — exactly as it did before
+        # this guard existed. Admission neither introduces that failure nor
+        # repairs it; pinning the count would be a new restriction, and
+        # refusing every legacy form would be a new policy. Both are out of
+        # scope, and the gap is recorded rather than papered over.
         raise _reject("member_shape_invalid")
 
 
@@ -685,9 +769,31 @@ def admit_snapshot(
         # directory pointing anywhere else is refused here.
         raise _reject("path_not_confined")
 
+    # Opened through os.open with O_NONBLOCK and O_NOFOLLOW where the platform
+    # has them (POSIX; both are absent on Windows and default to 0).
+    #
+    # The regular-file test below cannot protect the OPEN itself, and a plain
+    # open() of a FIFO blocks until a writer appears. An attacker who can
+    # write to the watched directory could therefore `mkfifo` a
+    # `v070_gen*.npz` and hang the caller indefinitely -- which for Lucid means
+    # the whole asyncio server, since extraction is synchronous inside the
+    # event loop, and for Medusa means one request thread per attempt.
+    # O_NONBLOCK makes that open return immediately so S_ISREG can refuse it.
+    #
+    # O_NOFOLLOW closes the window between resolving the path and opening it:
+    # confinement is decided on the resolved path, and without this a symlink
+    # swapped in afterwards would still be followed.
+    _flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    _flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fh = open(candidate, "rb")
+        fd = os.open(candidate, _flags)
     except OSError:
+        raise _reject("path_not_regular_file") from None
+
+    try:
+        fh = os.fdopen(fd, "rb")
+    except OSError:
+        os.close(fd)
         raise _reject("path_not_regular_file") from None
 
     try:
@@ -726,6 +832,12 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
     fh.seek(0)
     try:
         archive = zipfile.ZipFile(fh)
+    except SnapshotArchiveRejected:
+        # Re-raised ahead of the bare ValueError below, which would otherwise
+        # silently re-code a refusal raised from within this call as
+        # "not_zip_archive". Nothing raises one today; this keeps that true
+        # if anything is ever moved inside the try.
+        raise
     except (zipfile.BadZipFile, OSError, ValueError):
         raise _reject("not_zip_archive") from None
 
@@ -750,11 +862,15 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
 
             try:
                 member = archive.open(entry)
+            except SnapshotArchiveRejected:
+                raise  # never re-coded by the broad clause below
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError):
                 raise _reject("member_header_unreadable") from None
             with member:
                 try:
                     header = _read_member_header(member, policy)
+                except SnapshotArchiveRejected:
+                    raise  # the refusal _read_member_header already decided
                 except (zipfile.BadZipFile, OSError, EOFError):
                     raise _reject("member_header_unreadable") from None
 
@@ -766,6 +882,8 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
                 raise _reject("member_rank")
             if header.kind not in spec.kinds:
                 raise _reject("member_dtype_family")
+            if header.itemsize not in spec.itemsizes:
+                raise _reject("member_dtype_unsupported")
 
             headers[entry.filename] = header
 

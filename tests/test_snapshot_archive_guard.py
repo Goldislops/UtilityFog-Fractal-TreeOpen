@@ -23,8 +23,8 @@ numeric-value validation, not arbitrary NPZ compatibility.
 from __future__ import annotations
 
 import ast
-import builtins
 import dataclasses
+import os
 import struct
 import warnings
 import zipfile
@@ -261,6 +261,38 @@ def _case_not_zip_archive(root, tmp_path):
     return path, None
 
 
+def _zip64_entry_bomb(path, entries):
+    """A file whose 32-bit EOCD lies and whose ZIP64 record tells the truth.
+
+    `zipfile._EndRecData` consults the ZIP64 locator whenever it is present and
+    takes the entry count and directory size from the ZIP64 record, WITHOUT
+    requiring the 0xFFFF sentinels. So a bounded-looking 32-bit record ("five
+    entries, a 300-byte directory") is advisory, and `ZipFile` goes on to build
+    one `ZipInfo` per real entry. Measured before the fix: 60,000 entries from
+    a 2.7 MB file cost 2.5s and 23 MB of heap, and the archive was only refused
+    afterwards, on its member names.
+    """
+    directory = bytearray()
+    for _ in range(entries):
+        directory += struct.pack("<4s4B4HL2L5H2L", b"PK\x01\x02", 20, 0, 20, 0,
+                                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    cd_offset = 4
+    zip64_offset = cd_offset + len(directory)
+    zip64_eocd = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0,
+                             entries, entries, len(directory), cd_offset)
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, zip64_offset, 1)
+    eocd = struct.pack("<4s4H2LH", b"PK\x05\x06", 0, 0, 5, 5, 300, cd_offset, 0)
+    Path(path).write_bytes(b"PK\x03\x04" + bytes(directory) + zip64_eocd
+                           + locator + eocd)
+    return Path(path)
+
+
+def _case_zip64_unsupported(root, tmp_path):
+    # Small on purpose: 64 entries is enough to prove the refusal, and the
+    # point of the fix is that the count never gets to matter.
+    return _zip64_entry_bomb(root / "v070_zip64.npz", 64), None
+
+
 def _case_central_directory_too_large(root, tmp_path):
     path = write_npz(root / "v070_cd.npz", schema_members())
     return path, dataclasses.replace(guard.PRODUCTION_POLICY,
@@ -466,6 +498,7 @@ REFUSAL_CASES = {
     "archive_too_large": _case_archive_too_large,
     "archive_truncated": _case_archive_truncated,
     "not_zip_archive": _case_not_zip_archive,
+    "zip64_unsupported": _case_zip64_unsupported,
     "central_directory_too_large": _case_central_directory_too_large,
     "archive_payload_total_too_large": _case_archive_payload_total_too_large,
     "member_count": _case_member_count,
@@ -552,6 +585,116 @@ def test_a_symlink_out_of_the_data_directory_is_refused(root, tmp_path):
     except (OSError, NotImplementedError):  # pragma: no cover - platform gate
         pytest.skip("symlink creation is not permitted in this environment")
     assert admit(link, root) == "path_not_confined"
+
+
+def test_a_zip64_entry_bomb_is_refused_before_zipfile_builds_the_directory(root):
+    """The refusal must arrive at the ZIP64 check, not later on the names.
+
+    Before the fix this archive was refused as `member_name_unsafe` — a
+    verdict reached only AFTER `ZipFile` had materialised every entry, which
+    is the cost the bound exists to prevent. The reason code is therefore the
+    load-bearing assertion here, not merely that something was refused.
+    """
+    bomb = _zip64_entry_bomb(root / "v070_bomb.npz", 512)
+    assert admit(bomb, root) == "zip64_unsupported"
+
+
+@pytest.mark.parametrize("entries", [1, 5, 64])
+def test_the_zip64_refusal_does_not_depend_on_the_entry_count(root, entries):
+    bomb = _zip64_entry_bomb(root / ("v070_b%d.npz" % entries), entries)
+    assert admit(bomb, root) == "zip64_unsupported"
+
+
+@pytest.mark.parametrize("descr,member,shape", [
+    ("|u3", "lattice.npy", (16, 16, 16)),
+    ("<u5", "lattice.npy", (16, 16, 16)),
+    ("<f5", "memory_grid.npy", (8, 16, 16, 16)),
+    ("<f3", "memory_grid.npy", (8, 16, 16, 16)),
+    ("<i1000", "generation.npy", ()),
+    ("<i3", "ca_step.npy", ()),
+], ids=["u3", "u5", "f5", "f3", "i1000", "i3"])
+def test_a_width_numpy_cannot_construct_is_refused(root, descr, member, shape):
+    """`np.dtype('|u3')` raises TypeError, and its message quotes the
+    descriptor verbatim — from a call site downstream of every
+    `except SnapshotArchiveRejected`. A family rule alone admitted all of
+    these."""
+    members = schema_members(16)
+    itemsize = int(descr[2:]) if descr[0] in "<>|=" else int(descr[1:])
+    count = 1
+    for dim in shape:
+        count *= dim
+    members[member] = npy_bytes(descr, shape,
+                                payload=b"\x00" * (count * itemsize))
+    path = write_npz(root / "v070_width.npz", members)
+    assert admit(path, root) == "member_dtype_unsupported"
+
+
+@pytest.mark.parametrize("descr,member,shape", [
+    ("|u1", "lattice.npy", (16, 16, 16)),
+    ("<u2", "lattice.npy", (16, 16, 16)),
+    ("<f2", "memory_grid.npy", (8, 16, 16, 16)),
+    ("<f8", "memory_grid.npy", (8, 16, 16, 16)),
+    ("<i4", "generation.npy", ()),
+    ("<i8", "ca_step.npy", ()),
+], ids=["u1", "u2", "f2", "f8", "i4", "i8"])
+def test_every_width_numpy_can_construct_is_still_admitted(root, descr, member,
+                                                           shape):
+    """The counterpart control: the width rule must not have quietly become a
+    single pinned dtype, which would refuse legacy widths."""
+    members = schema_members(16)
+    itemsize = int(descr[2:]) if descr[0] in "<>|=" else int(descr[1:])
+    count = 1
+    for dim in shape:
+        count *= dim
+    members[member] = npy_bytes(descr, shape,
+                                payload=b"\x00" * (count * itemsize))
+    path = write_npz(root / "v070_okwidth.npz", members)
+    assert admit(path, root) is None
+
+
+@pytest.mark.parametrize("dimension", ["\xb2", "\xb3", "¹"], ids=[
+    "superscript_two", "superscript_three", "superscript_one"])
+def test_a_unicode_digit_dimension_is_refused_and_not_leaked(root, dimension):
+    """`str.isdigit()` is true for the whole Unicode digit property; `int()`
+    accepts only ASCII decimals. The parser used the former, so a header
+    declaring a shape of `(\\xb2,)` raised a bare ValueError carrying the
+    attacker's character out of the guard entirely."""
+    members = schema_members(16)
+    members["generation.npy"] = npy_bytes(
+        "<i8", (), payload=b"",
+        header="{'descr': '<i8', 'fortran_order': False, 'shape': (%s,), }"
+               % dimension)
+    path = write_npz(root / "v070_unicode.npz", members)
+    assert admit(path, root) == "member_header_malformed"
+
+
+def test_no_input_makes_the_guard_raise_an_untyped_error(root, tmp_path):
+    """The module's central promise, asserted over every case at once: nothing
+    derived from an archive's contents may leave `admit_snapshot` except as a
+    reason code."""
+    for reason, build in sorted(REFUSAL_CASES.items()):
+        path, policy = build(root, tmp_path)
+        try:
+            with guard.admit_snapshot(path, data_dir=root,
+                                      policy=policy or guard.PRODUCTION_POLICY):
+                pass
+        except guard.SnapshotArchiveRejected as exc:
+            assert exc.reason in guard.REASON_CODES
+        except Exception as exc:  # noqa: BLE001 - the escape IS the defect
+            raise AssertionError(
+                "%s escaped as %s: %s" % (reason, type(exc).__name__, exc))
+
+
+def test_an_empty_header_is_a_syntax_error_not_a_depth_overflow():
+    """`_peek()` returns "" at end of input and "" is a substring of every
+    string, so the value dispatch treated end-of-input as an opening bracket
+    and recursed to the depth cap instead of reporting the real problem."""
+    with pytest.raises(guard._HeaderSyntaxError) as excinfo:
+        guard._parse_literal("")
+    assert "deep" not in str(excinfo.value)
+    with pytest.raises(guard._HeaderSyntaxError) as excinfo:
+        guard._parse_literal("{")
+    assert "deep" not in str(excinfo.value)
 
 
 def test_a_zero_channel_memory_grid_is_refused(root):
@@ -726,20 +869,22 @@ def test_entry_count_parse_bound_boundary(root, count, expected):
 
 @pytest.fixture
 def opened_files(monkeypatch):
-    """Record every file object the guard opens, without perturbing the rest."""
-    records = []
-    real_open = builtins.open
+    """Record every file object the guard opens.
 
-    def _tracking_open(*args, **kwargs):
-        handle = real_open(*args, **kwargs)
-        try:
-            if str(args[0]).endswith(".npz"):
-                records.append(handle)
-        except Exception:  # pragma: no cover - defensive only
-            pass
+    Hooked on `os.fdopen`, not `builtins.open`: the guard opens through
+    `os.open` so it can pass O_NONBLOCK and O_NOFOLLOW, which a plain `open()`
+    cannot express. `os.fdopen` is what turns that descriptor into the file
+    object the guard yields, so it is the exact seam.
+    """
+    records = []
+    real_fdopen = os.fdopen
+
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
+        records.append(handle)
         return handle
 
-    monkeypatch.setattr(builtins, "open", _tracking_open)
+    monkeypatch.setattr(os, "fdopen", _tracking_fdopen)
     return records
 
 
@@ -858,10 +1003,9 @@ def test_a_high_entropy_archive_is_admitted_too(root):
     """The mirror control: an archive that does not compress at all is equally
     admissible, so admission is not keyed on compressibility in either
     direction."""
-    import os as _os
     members = schema_members(16)
     members["lattice.npy"] = npy_bytes(
-        "|u1", (16, 16, 16), payload=_os.urandom(16 ** 3))
+        "|u1", (16, 16, 16), payload=os.urandom(16 ** 3))
     path = write_npz(root / "v070_entropy.npz", members)
     with zipfile.ZipFile(path) as archive:
         info = archive.getinfo("lattice.npy")
