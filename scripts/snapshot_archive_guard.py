@@ -352,7 +352,14 @@ def _syntax_gate(text: str) -> None:
     """
     try:
         ast.parse(text, mode="eval")
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError):
+        # `MemoryError` is deliberately NOT here. By the time this runs the
+        # custom parser has already bounded the header bytes, the nesting
+        # depth, the integer digit runs and the token count, so running out of
+        # memory inside `ast.parse` is a statement about the machine, not
+        # evidence that the archive is malformed. Translating it would report a
+        # system failure as a bad snapshot and, in the geometry daemon, record
+        # that file in the retry memory so it is never reconsidered.
         raise _HeaderSyntaxError("not a Python expression") from None
 
 
@@ -1169,7 +1176,17 @@ def admit_snapshot(
 #: be coincidence, and the module alone would capture unrelated `ValueError`s
 #: raised elsewhere in NumPy's reader.
 _NUMPY_EOF_FUNCTION = "_read_bytes"
-_NUMPY_EOF_MODULE = ("numpy", "lib", "format")
+
+#: Matched against the frame's ``__name__``, NOT against its filename.
+#:
+#: The previous version compared FILESYSTEM PATH COMPONENTS against
+#: ``("numpy", "lib", "format")`` and was dead on every NumPy version -- the
+#: file is ``format.py``, so ``format`` is never a path component. NumPy 2.1
+#: then moved the implementation to ``numpy/lib/_format_impl.py``, which the
+#: same check would also have missed. Both module names are listed explicitly
+#: rather than pattern-matched, so a rename is a test failure rather than a
+#: silently widening prefix rule.
+_NUMPY_EOF_MODULES = frozenset({"numpy.lib.format", "numpy.lib._format_impl"})
 
 
 def _is_numpy_array_data_eof(exc: BaseException) -> bool:
@@ -1178,12 +1195,12 @@ def _is_numpy_array_data_eof(exc: BaseException) -> bool:
     Three conditions, all required:
 
     * the message carries NumPy's EOF-reading-array-data signature;
-    * a frame in the traceback is `numpy.lib.format._read_bytes`;
-    * that frame's file really is NumPy's `lib/format.py`.
+    * a frame in the traceback is named ``_read_bytes``;
+    * that frame's module is one of :data:`_NUMPY_EOF_MODULES`.
 
-    A hand-raised `ValueError` with the identical message fails the second and
-    third; a genuine NumPy truncation passes all three. This is why the check
-    is not a string comparison: the message is the weakest of the three
+    A hand-raised ``ValueError`` with the identical message fails the second
+    and third; a genuine NumPy truncation passes all three. This is why the
+    check is not a string comparison: the message is the weakest of the three
     signals and the easiest to imitate.
     """
     message = str(exc)
@@ -1193,11 +1210,9 @@ def _is_numpy_array_data_eof(exc: BaseException) -> bool:
     traceback = exc.__traceback__
     while traceback is not None:
         frame = traceback.tb_frame
-        if frame.f_code.co_name == _NUMPY_EOF_FUNCTION:
-            parts = os.path.normpath(frame.f_code.co_filename).split(os.sep)
-            lowered = [part.lower() for part in parts]
-            if all(part in lowered for part in _NUMPY_EOF_MODULE):
-                return True
+        if (frame.f_code.co_name == _NUMPY_EOF_FUNCTION
+                and frame.f_globals.get("__name__") in _NUMPY_EOF_MODULES):
+            return True
         traceback = traceback.tb_next
     return False
 

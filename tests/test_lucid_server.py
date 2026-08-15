@@ -845,9 +845,126 @@ def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
 @pytest.fixture(autouse=True)
 def _reset_metadata_warning():
     """The warning's rate limiter is module state; keep tests independent."""
-    lucid_server._clear_metadata_failures()
+    for lane in (lucid_server.DISCOVERY_LANE, lucid_server.FINGERPRINT_LANE):
+        lucid_server._clear_metadata_failures(lane)
     yield
-    lucid_server._clear_metadata_failures()
+    for lane in (lucid_server.DISCOVERY_LANE, lucid_server.FINGERPRINT_LANE):
+        lucid_server._clear_metadata_failures(lane)
+
+
+@requires_numpy
+def test_a_persistent_second_read_failure_warns_once_across_many_polls(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The REAL watcher, the REAL `find_latest_snapshot`, many polls.
+
+    This is the shape that defeated the rate limit. Discovery SUCCEEDS on every
+    poll -- there is a perfectly good snapshot in the directory -- while the
+    watcher's second metadata read persistently fails. With one shared warning
+    state, each successful discovery cleared it and the next second-read
+    failure warned into a freshly-armed lane, so the limiter was real and
+    simply never applied.
+
+    `find_latest_snapshot` is deliberately NOT patched: substituting a lambda
+    would remove the very call whose success does the clearing, and the test
+    would pass against the broken code.
+    """
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+
+    def _always_fails(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _always_fails)
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=8)
+    output = capsys.readouterr().out
+
+    assert polls == 8, "the watcher stopped polling"
+    assert broadcasts == [], "a frame went out despite the failure"
+    assert output.count("Snapshot metadata unreadable") == 1, (
+        "the rate limit did not hold across polls")
+    assert "v070_gen000001" not in output
+    assert "No such file" not in output and "Errno" not in output
+    assert "Snapshot error" not in output
+
+
+@requires_numpy
+def test_the_second_read_warning_repeats_after_the_interval(confined,
+                                                            monkeypatch, capsys,
+                                                            _fresh_watcher_state):
+    """Rate-limited, not silenced: after the interval elapses the condition is
+    reported again."""
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+
+    monkeypatch.setattr(
+        lucid_server, "entry_fingerprint",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(2, "gone")))
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+    now[0] += lucid_server.METADATA_WARNING_INTERVAL + 1
+    _run_watcher(monkeypatch, polls=2)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+
+@requires_numpy
+def test_a_recovered_second_read_re_arms_its_own_lane(confined, monkeypatch,
+                                                       capsys,
+                                                       _fresh_watcher_state):
+    """Recovery re-arms the lane that recovered, so a later episode is
+    reported rather than staying suppressed for ever."""
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+    real_fingerprint = lucid_server.entry_fingerprint
+    failing = [True]
+
+    def _sometimes(path):
+        if failing[0]:
+            raise FileNotFoundError(2, "gone")
+        return real_fingerprint(path)
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _sometimes)
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+    failing[0] = False
+    _run_watcher(monkeypatch, polls=2)
+    capsys.readouterr()
+
+    failing[0] = True
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1, (
+        "the lane did not re-arm after recovering")
+
+
+def test_a_lone_transient_failure_stays_silent(confined, monkeypatch, capsys):
+    """A single rotated file is ordinary and must not produce a line."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert capsys.readouterr().out == "", "a lone failure was reported"
+
+
+def test_the_two_lanes_do_not_clear_each_other(confined, monkeypatch, capsys):
+    """The property in isolation: success in one lane must not reset the
+    other's episode."""
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    lucid_server._clear_metadata_failures(lucid_server.DISCOVERY_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    assert capsys.readouterr().out == "", (
+        "clearing the discovery lane re-armed the fingerprint lane")
 
 
 @requires_numpy
@@ -880,6 +997,11 @@ def test_a_directory_of_unreadable_candidates_warns_once(confined, monkeypatch,
     ghosts = [str(confined / ("v070_gen_LEAKNAME_%d.npz" % i)) for i in range(4)]
     monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
 
+    # The FIRST failure is deliberately silent: a lone one is an ordinary
+    # rotation. The condition has to persist before it is worth a line.
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert capsys.readouterr().out == ""
+
     assert lucid_server.find_latest_snapshot(str(confined)) is None
     first = capsys.readouterr().out
     assert "Snapshot metadata unreadable" in first
@@ -903,7 +1025,8 @@ def test_the_metadata_warning_is_rate_limited_on_a_monotonic_clock(confined,
     now = [1000.0]
     monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
 
-    lucid_server.find_latest_snapshot(str(confined))
+    lucid_server.find_latest_snapshot(str(confined))   # first: silent
+    lucid_server.find_latest_snapshot(str(confined))   # second: warns
     assert "Snapshot metadata unreadable" in capsys.readouterr().out
 
     now[0] += lucid_server.METADATA_WARNING_INTERVAL - 1
@@ -923,6 +1046,7 @@ def test_a_successful_read_clears_the_warning_state(confined, monkeypatch,
     ghosts = [str(confined / "v070_gen_ghost.npz")]
     monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
     lucid_server.find_latest_snapshot(str(confined))
+    lucid_server.find_latest_snapshot(str(confined))
     capsys.readouterr()
 
     real = Path(_write_snapshot_ls(confined / "v070_gen000009.npz",
@@ -931,6 +1055,7 @@ def test_a_successful_read_clears_the_warning_state(confined, monkeypatch,
     assert lucid_server.find_latest_snapshot(str(confined)) == str(real)
 
     monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    lucid_server.find_latest_snapshot(str(confined))
     lucid_server.find_latest_snapshot(str(confined))
     assert "Snapshot metadata unreadable" in capsys.readouterr().out
 

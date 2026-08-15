@@ -667,6 +667,72 @@ def test_a_corrupt_payload_is_admitted_then_refused_not_refused_early(root,
         assert fh.read(4) == b"PK\x03\x04"  # admitted; no refusal raised here
 
 
+@pytest.mark.parametrize("modname,expected", [
+    ("numpy.lib.format", True),           # NumPy < 2.1
+    ("numpy.lib._format_impl", True),     # NumPy >= 2.1
+    ("numpy.lib.npyio", False),           # NumPy, but not the reader
+    ("my.own.module", False),             # a consumer imitating the message
+])
+def test_the_numpy_eof_classifier_matches_on_module_not_filename(modname,
+                                                                  expected):
+    """The previous check compared FILESYSTEM PATH COMPONENTS against
+    `("numpy", "lib", "format")` and was dead on every NumPy version: the file
+    is `format.py`, so `format` is never a path component. NumPy 2.1 then moved
+    the implementation to `_format_impl.py`, which the same check would also
+    have missed. Matching on the frame's `__name__` fixes both, and both module
+    names are listed explicitly so a rename fails a test rather than silently
+    widening a prefix rule.
+    """
+    namespace = {"__name__": modname}
+    exec(compile("def _read_bytes():\n"
+                 "    raise ValueError('EOF: reading array data, expected 512"
+                 " bytes got 100')\n", "irrelevant_filename.py", "exec"),
+         namespace)
+    try:
+        namespace["_read_bytes"]()
+    except ValueError as exc:
+        assert guard._is_numpy_array_data_eof(exc) is expected
+
+
+def test_the_numpy_eof_classifier_still_requires_the_message():
+    """Module and function alone are not enough: an unrelated `ValueError`
+    from the same reader must not be translated."""
+    namespace = {"__name__": "numpy.lib.format"}
+    exec(compile("def _read_bytes():\n    raise ValueError('bad magic')\n",
+                 "f.py", "exec"), namespace)
+    try:
+        namespace["_read_bytes"]()
+    except ValueError as exc:
+        assert guard._is_numpy_array_data_eof(exc) is False
+
+
+def test_a_memory_error_from_the_syntax_gate_propagates(monkeypatch):
+    """`MemoryError` is a statement about the MACHINE, not about the archive.
+
+    By the time the gate runs, the custom parser has already bounded the header
+    bytes, the nesting depth, the integer digit runs and the token count, so
+    running out of memory there is a system failure. Translating it would
+    report that as a bad snapshot -- and in the geometry daemon would record
+    the file in the retry memory so it is never reconsidered.
+    """
+    def _oom(*args, **kwargs):
+        raise MemoryError("out of memory")
+
+    monkeypatch.setattr(guard.ast, "parse", _oom)
+    with pytest.raises(MemoryError) as excinfo:
+        guard._parse_literal("{'descr': '|u1', 'fortran_order': False, "
+                             "'shape': (1,), }")
+    assert str(excinfo.value) == "out of memory"
+
+
+def test_the_syntax_gate_still_translates_a_real_syntax_error(monkeypatch):
+    """Anti-vacuity for the boundary above: the gate has not simply stopped
+    catching things."""
+    with pytest.raises(guard._HeaderSyntaxError):
+        guard._parse_literal("{'descr': '|u1', 'fortran_order': False, "
+                             "'shape': (016,), }")
+
+
 @pytest.mark.parametrize("raised", [
     MemoryError("oom"),
     KeyboardInterrupt(),
@@ -1166,10 +1232,13 @@ def _zip_with_raw_members(path, members):
     """
     out = bytearray()
     directory = []
-    for name, (raw, plain, method) in members.items():
+    for name, spec in members.items():
+        raw, plain, method = spec[0], spec[1], spec[2]
+        override_crc = spec[3] if len(spec) > 3 else None
         encoded = name.encode("ascii")
         offset = len(out)
-        crc = zlib.crc32(plain) & 0xFFFFFFFF
+        crc = (zlib.crc32(plain) & 0xFFFFFFFF if override_crc is None
+               else override_crc)
         out += struct.pack("<4s5H3L2H", b"PK\x03\x04", 20, 0, method, 0, 0,
                            crc, len(raw), len(plain), len(encoded), 0)
         out += encoded
@@ -2284,6 +2353,93 @@ def test_a_pickled_member_cannot_even_reach_numpy(root, tmp_path):
     members["generation.npy"] = npy_bytes("|O", (), payload=b"")
     path = write_npz(root / "v070_pickled.npz", members)
     assert admit(path, root) == "member_dtype_object"
+
+
+def _archive_with_short_payload(path, member, drop):
+    """A schema-perfect archive whose `member` stores fewer bytes than it declares.
+
+    Built rather than cut. Deleting bytes from a finished archive would shift
+    every offset after them and leave the central directory pointing at the
+    wrong places, so the archive would be refused as malformed and the test
+    would prove nothing.
+
+    Here the member's declared uncompressed size stays FULL while its stored
+    bytes are short, and its CRC matches the bytes actually present -- so
+    `zipfile` has nothing to object to, preflight admits it (preflight reads
+    headers, not payloads, and the header's arithmetic still agrees with the
+    declared `file_size`), and the shortfall only surfaces when NumPy
+    materialises the array and reads past the end.
+    """
+    plain = schema_members(16)
+    built = {}
+    for name, blob in plain.items():
+        if name == member:
+            short = blob[:-drop]
+            built[name] = (short, blob, zipfile.ZIP_STORED,
+                           zlib.crc32(short) & 0xFFFFFFFF)
+        else:
+            built[name] = (blob, blob, zipfile.ZIP_STORED)
+    return _zip_with_raw_members(path, built)
+
+
+@requires_numpy
+def test_a_truncated_payload_becomes_member_payload_unreadable(root):
+    """The real NumPy path, end to end.
+
+    An otherwise schema-perfect, CRC-correct archive whose stored payload ends
+    early. Preflight admits it — it reads headers, not payloads — and NumPy
+    raises its truncated-read `ValueError` from `_read_bytes` during array
+    materialisation. That must arrive as the typed refusal, not as a raw
+    `ValueError` past every consumer's handler.
+    """
+    path = _archive_with_short_payload(root / "v070_truncated.npz",
+                                       "memory_grid.npy", 4096)
+    assert admit(path, root) is None, "the fixture must preflight clean"
+
+    with pytest.raises(guard.SnapshotArchiveRejected) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root) as handle:
+            with np.load(handle, allow_pickle=False) as archive:
+                archive["memory_grid"]
+    assert excinfo.value.reason == "member_payload_unreadable"
+    assert str(excinfo.value) == "member_payload_unreadable"
+
+
+@requires_numpy
+def test_the_descriptor_is_closed_after_a_truncated_payload_refusal(root,
+                                                                    opened_files):
+    path = _archive_with_short_payload(root / "v070_trunc_close.npz",
+                                       "memory_grid.npy", 4096)
+    with pytest.raises(guard.SnapshotArchiveRejected):
+        with guard.admit_snapshot(path, data_dir=root) as handle:
+            with np.load(handle, allow_pickle=False) as archive:
+                archive["memory_grid"]
+    assert opened_files, "the guard never opened the archive"
+    assert all(handle.closed for handle in opened_files)
+
+
+@requires_numpy
+def test_a_manual_value_error_with_the_identical_message_is_not_translated(root):
+    """The control that makes the translation meaningful: the same words, from
+    a frame that is not NumPy's reader, must pass straight through."""
+    path = write_npz(root / "v070_manual.npz", schema_members(16))
+    message = "EOF: reading array data, expected 512 bytes got 100"
+    with pytest.raises(ValueError) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root):
+            raise ValueError(message)
+    assert type(excinfo.value) is ValueError
+    assert str(excinfo.value) == message
+
+
+@requires_numpy
+def test_a_scalar_conversion_failure_is_not_translated(root):
+    """`int()` on a non-scalar member raises `ValueError` too, and it is an
+    ordinary downstream failure that must keep its own identity."""
+    path = write_npz(root / "v070_scalar.npz", schema_members(16))
+    with pytest.raises(ValueError) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root) as handle:
+            with np.load(handle, allow_pickle=False) as archive:
+                int(archive["lattice"])
+    assert not isinstance(excinfo.value, guard.SnapshotArchiveRejected)
 
 
 @requires_numpy

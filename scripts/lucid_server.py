@@ -51,8 +51,21 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
 #: line, at most this often, on a monotonic clock so a system clock step cannot
 #: suppress or spam it.
 METADATA_WARNING_INTERVAL = 300.0
-_metadata_failures = 0
-_metadata_warned_at = None
+
+#: TWO independent lanes, and the separation is the whole point.
+#:
+#: Discovery and the watcher's second fingerprint read are different syscalls
+#: on different entries, and they fail independently. With one shared counter a
+#: persistent second-read failure warned on EVERY poll: discovery succeeded,
+#: cleared the state, then the second read failed into a freshly-armed lane.
+#: The rate limit was real and simply never applied. Success in one lane must
+#: not be able to clear an active failure episode in the other.
+DISCOVERY_LANE = "discovery"
+FINGERPRINT_LANE = "fingerprint"
+_metadata_state = {
+    DISCOVERY_LANE: {"failures": 0, "warned_at": None},
+    FINGERPRINT_LANE: {"failures": 0, "warned_at": None},
+}
 
 try:
     import websockets
@@ -102,10 +115,13 @@ def find_latest_snapshot(data_dir):
     # empty directory, and it must not be reported as one: it means the
     # watcher is running blind. Warned about once, rate-limited, path-free.
     if not listing.ordered and listing.unreadable:
-        _note_metadata_failure()
+        _note_metadata_failure(DISCOVERY_LANE)
         return None
     if listing.ordered:
-        _clear_metadata_failures()
+        # Only the DISCOVERY lane. Clearing both here is what made the second
+        # read's rate limit ineffective: discovery succeeds on every poll, so a
+        # shared state was re-armed on every poll.
+        _clear_metadata_failures(DISCOVERY_LANE)
 
     return first_admissible(
         listing.ordered,
@@ -243,32 +259,33 @@ async def broadcast(message):
         )
 
 
-def _note_metadata_failure():
-    """Count a metadata failure and warn once if they are persisting.
+def _note_metadata_failure(lane=DISCOVERY_LANE):
+    """Count a failure in one lane and warn once if that lane is persisting.
 
-    A single failure is an ordinary rotation and is not worth a line. A run of
-    them means the watcher is running blind, which silence would hide — so one
-    FIXED message is emitted, rate-limited on a monotonic clock. The message
-    carries no path, no filename and no exception text: the entry that failed
-    is attacker-named, and this is the one place a name could otherwise reach
-    the log by accident.
+    A LONE failure is an ordinary rotation and is not worth a line, so the
+    first one in a lane is silent. A repeat means the watcher is running blind
+    in that lane, which silence would hide — so one FIXED message is emitted,
+    then rate-limited on a monotonic clock. The message carries no path, no
+    filename and no exception text: the entry that failed is attacker-named,
+    and this is the one place a name could otherwise reach the log by accident.
     """
-    global _metadata_failures, _metadata_warned_at
+    state = _metadata_state[lane]
+    state["failures"] += 1
 
-    _metadata_failures += 1
+    if state["failures"] < 2:
+        return  # a single transient failure stays silent
+
     now = time.monotonic()
-    if _metadata_warned_at is not None and now - _metadata_warned_at < METADATA_WARNING_INTERVAL:
+    warned_at = state["warned_at"]
+    if warned_at is not None and now - warned_at < METADATA_WARNING_INTERVAL:
         return
-    _metadata_warned_at = now
+    state["warned_at"] = now
     print("  Snapshot metadata unreadable; watcher is not seeing new snapshots")
 
 
-def _clear_metadata_failures():
-    """A successful read means the condition is over; the next run warns again."""
-    global _metadata_failures, _metadata_warned_at
-
-    _metadata_failures = 0
-    _metadata_warned_at = None
+def _clear_metadata_failures(lane=DISCOVERY_LANE):
+    """A successful read ends the episode in THAT lane, and only that lane."""
+    _metadata_state[lane] = {"failures": 0, "warned_at": None}
 
 
 async def snapshot_watcher():
@@ -288,9 +305,9 @@ async def snapshot_watcher():
                     mtime = entry_fingerprint(latest)[2]
                 except OSError:
                     mtime = None
-                    _note_metadata_failure()
+                    _note_metadata_failure(FINGERPRINT_LANE)
                 else:
-                    _clear_metadata_failures()
+                    _clear_metadata_failures(FINGERPRINT_LANE)
 
                 if mtime is not None and (
                     latest != last_snapshot_path or mtime != last_snapshot_mtime
