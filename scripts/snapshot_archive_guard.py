@@ -26,10 +26,23 @@ key or a conversion; those failures are deliberately untouched.
 
 Design notes that matter
 ------------------------
+*Ordering of refusals.* Every STRUCTURAL refusal happens before the consumer's
+``np.load`` — that is the point of the module. It is not the whole story, and
+saying only that would overclaim: a payload can only be checked by
+decompressing it, which is the work admission exists to avoid, so a valid
+header over a corrupt body is undetectable until NumPy materialises the array.
+A narrow set of payload-TRANSPORT failures is therefore translated during
+materialisation instead, at the yielded-descriptor boundary. Exactly four
+things are translated — ``zipfile.BadZipFile``, ``zlib.error``, ``EOFError``,
+and NumPy's array-data EOF identified by its own traceback frame — and nothing
+else.
+
 *One descriptor.* The file is opened exactly once, preflighted on that
 descriptor, rewound, and handed to the consumer. A pathname is never validated
-and then reopened for loading, so there is no window between the check and the
-use.
+and then reopened for loading, which closes the reopen and re-resolution
+races. Stated precisely: it does NOT freeze the bytes. A writer mutating the
+file in place while the descriptor is open is a different hazard, is not
+addressed here, and is disclosed rather than implied away.
 
 *Sanitized refusals.* Every refusal carries a fixed reason code from
 :data:`REASON_CODES` and nothing else. No path, filename, member name, header
@@ -46,6 +59,7 @@ per member, declared payload in aggregate, and physical archive size.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import dataclasses
 import os
@@ -65,6 +79,9 @@ __all__ = [
     "REASON_CODES",
     "admit_snapshot",
     "newest_first",
+    "order_candidates",
+    "CandidateListing",
+    "first_admissible",
     "entry_fingerprint",
 ]
 
@@ -244,6 +261,15 @@ class SnapshotArchivePolicy:
     min_edge: int = 16
     max_edge: int = 256
     edge_multiple: int = 16
+    #: The lowest memory-grid channel count every unattended consumer can
+    #: actually read. Lucid indexes channel 6; all three index channel 3.
+    min_memory_channels: int = 7
+    #: Compressed source bytes a single member may consume before its NPY
+    #: header has been obtained. See :class:`_SourceMeter`.
+    max_header_source_bytes: int = 512 * _KIB
+    #: How many of the newest candidates a consumer may preflight while looking
+    #: for a usable snapshot.
+    selection_depth: int = 8
     #: Per-dimension sanity bound applied before any multiplication, so a
     #: header declaring 10**300 cells is refused rather than multiplied out.
     max_dimension: int = 2 ** 32
@@ -293,11 +319,41 @@ _MAX_ITEMSIZE_DIGITS = 6
 #: ``<i١`` (Arabic-Indic digit one) therefore matched, and ``int()`` -- which
 #: also accepts that category -- turned it into a width of 1, admitting a
 #: descriptor string no NumPy can construct.
-_DESCR_RE = re.compile(r"^(?P<order>[<>|=])?(?P<kind>[a-zA-Z])(?P<size>[0-9]*)$")
+#: Matched with ``fullmatch``, not ``match``. With ``$`` and ``match`` a
+#: descriptor of ``"<f4\n"`` was accepted, because ``$`` also matches just
+#: before a trailing newline -- so the guard checked a descriptor NumPy would
+#: never see and NumPy received one the guard never checked.
+_DESCR_RE = re.compile(r"(?P<order>[<>|=])?(?P<kind>[a-zA-Z])(?P<size>[0-9]*)")
 
 
 class _HeaderSyntaxError(Exception):
     """Internal: the header text is not the restricted literal we accept."""
+
+
+def _syntax_gate(text: str) -> None:
+    """Require the header to be a syntactically valid Python expression.
+
+    Run AFTER the capped parser, never before, and that order is the whole
+    point: :func:`ast.parse` is a full parser with no depth or size limits of
+    its own, so it must only ever see text the custom parser has already bounded
+    to a few kilobytes, a depth of four and a few hundred tokens.
+
+    It PARSES; it does not evaluate. ``mode="eval"`` produces an expression
+    tree and nothing is compiled or run — no ``eval``, no ``exec``, no
+    ``literal_eval``, and no private NumPy helper, all of which remain banned
+    and are asserted absent by a test over this module's AST.
+
+    Why it exists: the custom parser is deliberately narrower than Python, and
+    a narrower parser is safe. The hazard is being narrower in one direction
+    and WIDER in another -- accepting something NumPy's own
+    ``ast.literal_eval``-based reader would reject, so the guard blesses a
+    header NumPy then refuses, or vice versa. This closes that gap
+    systematically rather than one discovered case at a time.
+    """
+    try:
+        ast.parse(text, mode="eval")
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        raise _HeaderSyntaxError("not a Python expression") from None
 
 
 def _parse_literal(text: str) -> object:
@@ -318,6 +374,8 @@ def _parse_literal(text: str) -> object:
     parser.skip_space()
     if parser.pos != len(parser.text):
         raise _HeaderSyntaxError("trailing content")
+    # Bounds first, syntax second. See `_syntax_gate`.
+    _syntax_gate(text)
     return value
 
 
@@ -521,7 +579,13 @@ def _read_member_header(stream, policy: SnapshotArchivePolicy) -> _MemberHeader:
 
     try:
         text = raw.decode("utf-8" if version == (3, 0) else "latin1")
-        parsed = _parse_literal(text.strip())
+        # The FULL decoded text, not a stripped one. `str.strip()` removes
+        # every Unicode whitespace character, NBSP among them -- so a header
+        # padded with NBSP was silently normalised here and accepted, while
+        # NumPy's own reader saw the NBSP and refused. Stripping is left to the
+        # parser, whose `skip_space` covers exactly the ASCII whitespace NumPy
+        # actually writes.
+        parsed = _parse_literal(text)
     except (UnicodeDecodeError, _HeaderSyntaxError, ValueError, RecursionError):
         # ``ValueError`` and ``RecursionError`` are belt-and-braces: the parser
         # is written not to raise either, but a header is attacker-controlled
@@ -548,7 +612,7 @@ def _read_member_header(stream, policy: SnapshotArchivePolicy) -> _MemberHeader:
     if not isinstance(descr, str):
         raise _reject("member_header_malformed")
 
-    match = _DESCR_RE.match(descr)
+    match = _DESCR_RE.fullmatch(descr)
     if match is None:
         raise _reject("member_dtype_unsupported")
     kind = match.group("kind")
@@ -628,6 +692,12 @@ _MAX_EOCD_COMMENT = 0xFFFF
 _LOCAL_FILE_SIGNATURE = b"PK\x03\x04"
 _ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
 _ZIP64_LOCATOR_SIZE = 20
+
+#: ZIP64 extended information, as a central-directory extra-field tag.
+_EXTRA_TAG_ZIP64 = 0x0001
+#: A five-member snapshot's extra fields are a few dozen bytes. The cap only
+#: has to keep the TLV walk bounded against a crafted entry.
+_MAX_EXTRA_BYTES = 4096
 
 #: ZIP general-purpose flag bits this guard understands.
 _FLAG_ENCRYPTED = 0x0001          # bit 0
@@ -713,6 +783,46 @@ def _preflight_eocd(fh, size: int, policy: SnapshotArchivePolicy) -> None:
         raise _reject("central_directory_too_large")
 
 
+def _check_extra_fields(entry) -> None:
+    """Walk a central entry's extra field as TLVs and refuse ZIP64.
+
+    The end-of-central-directory checks catch an archive that is ZIP64 as a
+    WHOLE. They say nothing about a single entry carrying a ZIP64 extended
+    information field, which is where a per-entry 64-bit size or offset lives —
+    and `zipfile` reads exactly that field to decide what an entry's real sizes
+    and header offset are. Refusing it here keeps the rule the same at both
+    scales: central-directory ZIP64 is out of scope for a five-member snapshot
+    under a 544 MiB ceiling.
+
+    Bounded and total: a fixed byte cap, a walk that only ever moves forward,
+    and a truncated or malformed TLV run is refused rather than guessed at.
+    Redundant forms — the tag repeated, or a zero-length payload — are refused
+    on the tag alone, so declaring it in a way `zipfile` happens to ignore is
+    not a way past this.
+
+    The LOCAL header is deliberately untouched. NumPy's `savez` opens every
+    member with `force_zip64=True`, which reserves ZIP64 sizes in the local
+    header while the central directory it writes stays 32-bit; refusing that
+    would refuse every real snapshot.
+    """
+    extra = entry.extra or b""
+    if len(extra) > _MAX_EXTRA_BYTES:
+        raise _reject("zip64_unsupported")
+
+    offset = 0
+    while offset < len(extra):
+        if offset + 4 > len(extra):
+            # A trailing fragment too short to be a header. Malformed, and the
+            # remainder cannot be interpreted, so it is not admitted.
+            raise _reject("zip64_unsupported")
+        tag, size = struct.unpack_from("<HH", extra, offset)
+        if tag == _EXTRA_TAG_ZIP64:
+            raise _reject("zip64_unsupported")
+        offset += 4 + size
+        if offset > len(extra):
+            raise _reject("zip64_unsupported")
+
+
 def _check_member_names(names: Tuple[str, ...], policy: SnapshotArchivePolicy) -> None:
     """Name safety first, then exact schema membership.
 
@@ -769,25 +879,108 @@ def _check_geometry(
 
     if grid.shape[1:] != edges:
         raise _reject("spatial_disagreement")
-    if grid.shape[0] < 1:
-        # The channel count is bounded by the memory-grid payload ceiling
-        # rather than pinned. Stated precisely, because the obvious reading is
-        # wrong: this is NOT a claim that a legacy grid is usable. The current
-        # producer writes 8 channels; migration for the documented 3- and
-        # 5-channel forms lives in `continuous_evolution_ca._migrate_memory_grid`
-        # and NONE of the three consumers calls it. Lucid indexes channel 6 and
-        # all three index channel 3, so a grid with fewer channels is admitted
-        # here and then raises IndexError downstream — exactly as it did before
-        # this guard existed. Admission neither introduces that failure nor
-        # repairs it; pinning the count would be a new restriction, and
-        # refusing every legacy form would be a new policy. Both are out of
-        # scope, and the gap is recorded rather than papered over.
+    if grid.shape[0] < policy.min_memory_channels:
+        # A FLOOR, not a pin. The unattended consumers index fixed channels:
+        # Lucid reads channel 6, and all three read channel 3. A grid with
+        # fewer was admitted here and then raised `IndexError` downstream --
+        # inside `handle_client`, inside the watcher, inside a route -- which
+        # is the failure mode this guard exists to move forward of `np.load`.
+        #
+        # Seven, not eight, because seven is what the consumers actually
+        # require: channel 6 is the highest index any of them touches.
+        # Requiring exactly eight would refuse a grid every consumer could
+        # read, and requiring one admitted grids none of them can. The
+        # documented 3- and 5-channel legacy forms are refused by this floor,
+        # and that is the right answer: `_migrate_memory_grid` exists but no
+        # consumer here calls it, so those archives could only ever have
+        # crashed.
         raise _reject("member_shape_invalid")
 
 
 # ---------------------------------------------------------------------------
 # Safe candidate discovery
 # ---------------------------------------------------------------------------
+
+#: `v070_gen{generation}_step{ca_step}_{timestamp}.npz`, as
+#: `run_v070_engine._save_snapshot` writes it. Both numbers are captured so
+#: ordering can compare them as NUMBERS; the digit runs are capped so a
+#: pathological name cannot turn ordering into arbitrary-precision work.
+#: The digit runs are followed by a non-digit assertion so an over-long run is
+#: NOT silently truncated to its first eighteen characters and trusted.
+_SNAPSHOT_NAME_RE = re.compile(
+    r"^v070_gen(?P<generation>[0-9]{1,18})(?![0-9])"
+    r"(?:_step(?P<step>[0-9]{1,18})(?![0-9]))?")
+
+#: Sorts before every real generation, so an unparseable name never displaces
+#: one that carries a number.
+_NO_SEQUENCE = (-1, -1)
+
+
+def _sequence_of(candidate) -> Tuple[int, int]:
+    """`(generation, step)` from a snapshot's filename, or ``_NO_SEQUENCE``.
+
+    Names are attacker-influenced, so this is deliberately total and bounded:
+    a name that does not match, or whose digit run exceeds 18 characters,
+    simply carries no sequence rather than raising or being trusted.
+    """
+    name = os.path.basename(os.fspath(candidate))
+    match = _SNAPSHOT_NAME_RE.match(name)
+    if match is None:
+        return _NO_SEQUENCE
+    step = match.group("step")
+    return (int(match.group("generation")), int(step) if step else -1)
+
+
+@dataclasses.dataclass(frozen=True)
+class CandidateListing:
+    """What discovery could actually see.
+
+    ``ordered`` is newest-first. ``unreadable`` counts entries that matched the
+    glob but whose metadata could not be read — which is NOT the same thing as
+    an empty directory, and the two must not be reported identically: one means
+    "no snapshots yet", the other means "the directory is there and something
+    is wrong with it".
+    """
+
+    ordered: list
+    unreadable: int
+
+    @property
+    def had_candidates(self) -> bool:
+        return bool(self.ordered) or self.unreadable > 0
+
+
+def order_candidates(paths) -> CandidateListing:
+    """Order snapshot candidates newest-first and report what was skipped.
+
+    See :func:`newest_first` for the ordering rules; this is the same work with
+    the count of undescribable entries retained.
+    """
+    described = []
+    unreadable = 0
+    for candidate in paths:
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            unreadable += 1
+            continue
+        generation, step = _sequence_of(candidate)
+        described.append((info.st_mtime_ns, generation, step,
+                          os.fspath(candidate), candidate))
+
+    # Newest modification time first; then the highest generation, then the
+    # highest step; then the lowest path, purely so the order is total.
+    #
+    # The numeric keys are what matter. `:06d` in the producer's format is a
+    # MINIMUM width that production has already outgrown, so comparing the
+    # names as text inverts across a digit-count boundary --
+    # `"v070_gen999999" > "v070_gen1000000"` is true as strings and false as
+    # generations. Ties in `st_mtime_ns` are only reachable on coarse-grained
+    # storage, but when they happen the answer should be the newer SNAPSHOT,
+    # not the alphabetically later filename.
+    described.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    return CandidateListing([row[4] for row in described], unreadable)
+
 
 def newest_first(paths):
     """Order snapshot candidates newest-first, safely.
@@ -814,25 +1007,13 @@ def newest_first(paths):
     typed reason, instead of disappearing from selection and letting an older
     archive be served with no record of why.
 
-    Ties break on the path so the order is total and reproducible.
+    Equal modification times are broken by the snapshot's own sequence --
+    generation, then step -- and only then by the path, as a last resort to
+    make the order total. Comparing names as text would invert across a
+    digit-count boundary, because the producer's `:06d` is a minimum width that
+    production has already outgrown.
     """
-    described = []
-    for candidate in paths:
-        try:
-            info = os.lstat(candidate)
-        except OSError:
-            continue
-        described.append((info.st_mtime_ns, os.fspath(candidate), candidate))
-    # Newest first, and on a tie the LOWEST path first -- not `reverse=True`
-    # over the whole key, which would order tied paths descending. The
-    # producer's filenames are `v070_gen{n:06d}_step{m:06d}_{ts}.npz`, and
-    # `:06d` is a minimum width that production has already outgrown, so
-    # lexicographic order inverts across a digit-count boundary: descending
-    # ties would prefer `v070_gen999999...` over `v070_gen1000000...`, i.e.
-    # the OLDER snapshot. Ties are only reachable on coarse-granularity
-    # storage, but the direction should not be an accident either way.
-    described.sort(key=lambda row: (-row[0], row[1]))
-    return [row[2] for row in described]
+    return order_candidates(paths).ordered
 
 
 def entry_fingerprint(path):
@@ -945,6 +1126,22 @@ def admit_snapshot(
             # Already typed. Re-raised unchanged so a refusal decided anywhere
             # inside the caller's block keeps its own reason code.
             raise
+        except ValueError as exc:
+            # NumPy signals a truncated member as a plain `ValueError` from
+            # `numpy.lib.format._read_bytes` -- "EOF: reading array data ...".
+            # That IS archive transport and belongs in this lane, but
+            # `ValueError` is also what a scalar conversion raises, what a
+            # consumer's own code raises, and what a programmer error looks
+            # like. Matching on the message alone would capture all of them,
+            # including a hand-raised `ValueError` whose text was copied
+            # verbatim.
+            #
+            # So identification is positional as well as textual: the exception
+            # must have come THROUGH NumPy's `_read_bytes` frame, and carry the
+            # EOF/array-data signature. Anything else propagates untouched.
+            if _is_numpy_array_data_eof(exc):
+                raise _reject("member_payload_unreadable") from None
+            raise
         except (zipfile.BadZipFile, zlib.error, EOFError):
             # Archive TRANSPORT failures, and only those.
             #
@@ -967,6 +1164,150 @@ def admit_snapshot(
         fh.close()
 
 
+#: The frame NumPy raises its truncated-read `ValueError` from, and the module
+#: that frame must belong to. Both are required: the function name alone could
+#: be coincidence, and the module alone would capture unrelated `ValueError`s
+#: raised elsewhere in NumPy's reader.
+_NUMPY_EOF_FUNCTION = "_read_bytes"
+_NUMPY_EOF_MODULE = ("numpy", "lib", "format")
+
+
+def _is_numpy_array_data_eof(exc: BaseException) -> bool:
+    """Is this exactly NumPy's truncated-array-data read?
+
+    Three conditions, all required:
+
+    * the message carries NumPy's EOF-reading-array-data signature;
+    * a frame in the traceback is `numpy.lib.format._read_bytes`;
+    * that frame's file really is NumPy's `lib/format.py`.
+
+    A hand-raised `ValueError` with the identical message fails the second and
+    third; a genuine NumPy truncation passes all three. This is why the check
+    is not a string comparison: the message is the weakest of the three
+    signals and the easiest to imitate.
+    """
+    message = str(exc)
+    if "EOF" not in message or "array data" not in message:
+        return False
+
+    traceback = exc.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_name == _NUMPY_EOF_FUNCTION:
+            parts = os.path.normpath(frame.f_code.co_filename).split(os.sep)
+            lowered = [part.lower() for part in parts]
+            if all(part in lowered for part in _NUMPY_EOF_MODULE):
+                return True
+        traceback = traceback.tb_next
+    return False
+
+
+def first_admissible(candidates, *, data_dir, policy=None, depth=None):
+    """The newest candidate that passes admission, else the newest candidate.
+
+    The bounded newest-first search every unattended consumer needs, in one
+    place. Without it a single unusable archive with the newest modification
+    time stalls a service outright -- and the producer writes straight to its
+    final path with no temporary-and-rename, so a partially written snapshot IS
+    the newest file for as long as the write takes.
+
+    Bounded on purpose: preflighting a five-figure directory on every request
+    would itself be the denial of service, so at most ``depth`` candidates are
+    tried and anything older is not considered.
+
+    When nothing in the window is admissible the NEWEST candidate is returned
+    anyway, unadmitted. That is deliberate: the caller then runs its own
+    ordinary load, gets the typed refusal, and reports it through the path it
+    already has. Returning ``None`` would turn "every recent snapshot is
+    broken" into "there are no snapshots", which is a different and less
+    honest thing to say.
+
+    Holds no descriptor across selection. Each probe opens and closes its own,
+    and the caller's load opens another and preflights it again, so a file
+    swapped in between is caught there rather than trusted here.
+    """
+    policy = policy or PRODUCTION_POLICY
+    depth = policy.selection_depth if depth is None else depth
+    candidates = list(candidates)
+    for candidate in candidates[:depth]:
+        try:
+            with admit_snapshot(candidate, data_dir=data_dir, policy=policy):
+                return candidate
+        except SnapshotArchiveRejected:
+            continue
+    return candidates[0] if candidates else None
+
+
+class _SourceBudgetExceeded(Exception):
+    """Internal: a member ate its header-discovery budget."""
+
+
+class _SourceMeter:
+    """A read-only file proxy that meters SOURCE bytes, with a resettable budget.
+
+    The header read is bounded in OUTPUT -- at most a few kilobytes of
+    decompressed NPY header. That says nothing about INPUT. A DEFLATE stream
+    can emit empty non-final blocks indefinitely: each consumes compressed
+    bytes and produces nothing, so `read(4096)` keeps pulling source forever
+    while the output counter never moves. Bounding the output alone left the
+    work unbounded.
+
+    So this meters what is actually read from the file, across everything the
+    header discovery touches for one member: the local header, its name, its
+    extra fields, and the compressed bytes consumed before the NPY header
+    emerges. The budget is reset per member, because it is a per-member
+    property.
+
+    Deliberately NOT compared against the member's `compress_size`. A
+    legitimate high-entropy 512 MiB memory grid has a large `compress_size`
+    and a header in its first few hundred bytes; charging it for the payload it
+    has not read yet would refuse exactly the archives that are fine.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self._budget = None
+        self.consumed = 0
+
+    def start(self, budget):
+        self._budget = budget
+        self.consumed = 0
+
+    def release(self):
+        self._budget = None
+
+    def read(self, size=-1):
+        data = self._raw.read(size)
+        self.consumed += len(data)
+        if self._budget is not None and self.consumed > self._budget:
+            raise _SourceBudgetExceeded
+        return data
+
+    def seek(self, *args, **kwargs):
+        return self._raw.seek(*args, **kwargs)
+
+    def tell(self):
+        return self._raw.tell()
+
+    def seekable(self):
+        return True
+
+    def readable(self):
+        return True
+
+    def writable(self):
+        return False
+
+    def flush(self):
+        return None
+
+    def close(self):
+        # The guard owns the real descriptor's lifetime; closing the proxy
+        # must not take it with us, because `zipfile.ZipFile.close()` runs
+        # while the caller still needs the file.
+        return None
+
+
 def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
     """Validate every member's directory entry and NPY header, then geometry.
 
@@ -980,8 +1321,9 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
     declared size.
     """
     fh.seek(0)
+    metered = _SourceMeter(fh)
     try:
-        archive = zipfile.ZipFile(fh)
+        archive = zipfile.ZipFile(metered)
     except SnapshotArchiveRejected:
         # Re-raised ahead of the bare ValueError below, which would otherwise
         # silently re-code a refusal raised from within this call as
@@ -1038,11 +1380,19 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
                 raise _reject("member_flags_unsupported")
             if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                 raise _reject("member_compression_unsupported")
+            _check_extra_fields(entry)
 
+            # Everything from here to the header is charged to this member's
+            # source budget, and only this member's: the local header, its
+            # name, its extra fields, and any compressed bytes the decompressor
+            # pulls before the NPY header appears.
+            metered.start(policy.max_header_source_bytes)
             try:
                 member = archive.open(entry)
             except SnapshotArchiveRejected:
                 raise  # never re-coded by the broad clause below
+            except _SourceBudgetExceeded:
+                raise _reject("member_header_unreadable") from None
             except NotImplementedError:
                 # Defensive, and stated as such. `ZipFile.open` raises this for
                 # flag bits 5 and 6 -- but it tests `zinfo.flag_bits`, which for
@@ -1059,19 +1409,35 @@ def _preflight_members(fh, policy: SnapshotArchivePolicy) -> None:
             except (zipfile.BadZipFile, OSError, ValueError, RuntimeError,
                     zlib.error):
                 raise _reject("member_header_unreadable") from None
-            with member:
-                try:
-                    header = _read_member_header(member, policy)
-                except SnapshotArchiveRejected:
-                    raise  # the refusal _read_member_header already decided
-                except (zipfile.BadZipFile, OSError, EOFError, zlib.error):
-                    # `zlib.error` is the one that is easy to miss: the header
-                    # read is bounded, but for a DEFLATED member those bounded
-                    # bytes still go through the decompressor, and malformed
-                    # compressed data raises `zlib.error` -- which inherits
-                    # from `Exception`, not `OSError`, so no other clause here
-                    # catches it. Untranslated it escaped the guard entirely.
-                    raise _reject("member_header_unreadable") from None
+            try:
+                with member:
+                    try:
+                        header = _read_member_header(member, policy)
+                    except SnapshotArchiveRejected:
+                        raise  # the refusal _read_member_header already decided
+                    except _SourceBudgetExceeded:
+                        # The member consumed its whole source budget without
+                        # yielding an NPY header -- the empty-non-final-DEFLATE
+                        # shape, where output stays at zero while input is
+                        # consumed without limit.
+                        raise _reject("member_header_unreadable") from None
+                    except (zipfile.BadZipFile, OSError, EOFError, zlib.error):
+                        # `zlib.error` is the one that is easy to miss: the
+                        # header read is bounded, but for a DEFLATED member
+                        # those bounded bytes still go through the
+                        # decompressor, and malformed compressed data raises
+                        # `zlib.error` -- which inherits from `Exception`, not
+                        # `OSError`, so no other clause here catches it.
+                        # Untranslated it escaped the guard entirely.
+                        raise _reject("member_header_unreadable") from None
+            except _SourceBudgetExceeded:
+                # `ZipExtFile.close()` reads the remainder of the member to
+                # validate its CRC, which is charged to this budget too.
+                raise _reject("member_header_unreadable") from None
+            finally:
+                # Released before the next member, and before the size passes,
+                # so no later read is charged to this member's budget.
+                metered.release()
 
             if header.fortran_order:
                 # Fortran order changes the element traversal every consumer

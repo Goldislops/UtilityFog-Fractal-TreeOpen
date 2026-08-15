@@ -44,6 +44,7 @@ from scripts.snapshot_archive_guard import (
     SnapshotArchiveRejected,
     admit_snapshot,
     entry_fingerprint,
+    first_admissible,
     newest_first,
 )
 
@@ -113,15 +114,12 @@ def _find_latest_snapshot():
     say — and let a snapshot rotated during the scan turn a request into a 500
     whose message carried the attacker-chosen path.
     """
-    snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
-    for candidate in snapshots[:SNAPSHOT_SELECTION_DEPTH]:
-        try:
-            with admit_snapshot(candidate, data_dir=DATA_DIR,
-                                policy=SNAPSHOT_POLICY):
-                return candidate
-        except SnapshotArchiveRejected:
-            continue
-    return snapshots[0] if snapshots else None
+    return first_admissible(
+        newest_first(DATA_DIR.glob("v070_gen*.npz")),
+        data_dir=DATA_DIR,
+        policy=SNAPSHOT_POLICY,
+        depth=SNAPSHOT_SELECTION_DEPTH,
+    )
 
 
 def _snapshot_rejected():
@@ -185,14 +183,25 @@ def _load_snapshot(path):
     before ``np.load``, its decompressor or its allocator is reached, for an
     archive that is out of the data directory, not a ZIP, wrong in its
     membership, hostile in its member names, oversized in its declared or
-    physical size, or wrong in any member's NPY header. The four routes below
+    physical size, or wrong in any member's NPY header.
+
+    Structural refusals all precede loading. A narrow set of payload-TRANSPORT
+    failures cannot: a payload is only checkable by decompressing it, so a
+    valid header over a corrupt body surfaces during array materialisation and
+    is translated there instead. Exactly four things are translated --
+    BadZipFile, zlib.error, EOFError, and NumPy's array-data EOF identified by
+    its own traceback frame. The four routes below
     translate that refusal into a sanitized 503; nothing else about the
     refusal is exposed.
 
     The guard opens the file once and hands this helper the very descriptor it
     preflighted, so the bytes that were inspected are the bytes NumPy reads.
     ``str(path)`` is therefore gone: there is no second open to convert a path
-    for. Ownership is split and both halves are explicit — the inner ``with``
+    for. That closes the pathname REOPEN and RE-RESOLUTION races — the guard
+    never validates one path and then loads another — but it does not freeze
+    the bytes: a writer mutating the file in place while the descriptor is open
+    is a different hazard, out of scope here, and disclosed as such.
+    Ownership is split and both halves are explicit — the inner ``with``
     closes the archive, the guard closes the descriptor, on success and on
     every exceptional exit.
 

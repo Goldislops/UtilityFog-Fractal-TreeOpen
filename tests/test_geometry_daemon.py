@@ -1082,6 +1082,72 @@ def test_the_daemon_loop_does_not_treat_a_programmer_error_as_a_refusal(
         "a programmer error was reported as a snapshot refusal")
 
 
+def test_the_once_path_falls_back_past_an_unusable_newest_snapshot(confined,
+                                                                    capsys,
+                                                                    monkeypatch):
+    """One unusable archive with the newest mtime must not stall exports.
+
+    The producer writes straight to its final path with no
+    temporary-and-rename, so a partially written snapshot IS the newest file
+    for as long as the write takes.
+    """
+    good = Path(_write_snapshot_gd(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    poison = Path(_hostile_gd("missing_member", confined / "v070_gen000002.npz"))
+    os.utime(good, (1_000_000, 1_000_000))
+    os.utime(poison, (2_000_000, 2_000_000))
+
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    geometry_daemon.run_once()
+
+    assert exporters == ["export_sage_pointcloud", "export_voxel_summary",
+                         "export_stl"], "the poison archive stalled the export"
+    assert "Done!" in capsys.readouterr().out
+
+
+def test_the_once_path_distinguishes_unreadable_candidates_from_none(confined,
+                                                                     capsys,
+                                                                     monkeypatch):
+    """`[]` means two very different things and must not be reported alike.
+
+    An empty directory is "nothing to export"; a directory whose every
+    candidate failed its metadata read is a fault, and a wrapper checking the
+    exit status has to be able to tell them apart.
+    """
+    ghosts = [confined / ("v070_gen_LEAKNAME_%d.npz" % i) for i in range(4)]
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: list(ghosts))
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    with pytest.raises(SystemExit) as excinfo:
+        geometry_daemon.run_once()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Snapshot candidates unreadable"
+    assert "LEAKNAME" not in captured.err and "LEAKNAME" not in captured.out
+    assert "No snapshots found" not in captured.out
+    assert exporters == []
+
+
+def test_the_once_path_still_reports_a_genuinely_empty_directory(confined,
+                                                                 capsys):
+    """The counterpart: no candidates at all is not a fault, and must not
+    become one."""
+    geometry_daemon.run_once()
+    captured = capsys.readouterr()
+    assert "No snapshots found!" in captured.out
+    assert captured.err == ""
+
+
 def test_the_once_path_still_exports_a_valid_snapshot(confined, capsys,
                                                       monkeypatch):
     """The counterpart control, so the test above is about the REFUSAL and not

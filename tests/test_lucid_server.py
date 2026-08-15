@@ -842,6 +842,121 @@ def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
     assert "No such file" not in output
 
 
+@pytest.fixture(autouse=True)
+def _reset_metadata_warning():
+    """The warning's rate limiter is module state; keep tests independent."""
+    lucid_server._clear_metadata_failures()
+    yield
+    lucid_server._clear_metadata_failures()
+
+
+@requires_numpy
+def test_selection_falls_back_past_an_unusable_newest_snapshot(confined):
+    """One unusable archive with the newest mtime must not stall the watcher."""
+    good = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    poison = Path(_hostile_ls("missing_member", confined / "v070_gen000002.npz"))
+    os.utime(good, (1_000_000, 1_000_000))
+    os.utime(poison, (2_000_000, 2_000_000))
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(good)
+
+
+@requires_numpy
+def test_selection_returns_the_newest_when_none_is_admissible(confined):
+    """Not `None`: the caller runs its ordinary load and the typed refusal is
+    logged, rather than the directory being reported as empty."""
+    first = Path(_hostile_ls("missing_member", confined / "v070_gen000002.npz"))
+    second = Path(_hostile_ls("missing_member", confined / "v070_gen000001.npz"))
+    os.utime(second, (1_000_000, 1_000_000))
+    os.utime(first, (2_000_000, 2_000_000))
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(first)
+
+
+def test_a_directory_of_unreadable_candidates_warns_once(confined, monkeypatch,
+                                                          capsys):
+    """Candidates matched the glob and none could be described. That is not an
+    empty directory — it means the watcher is running blind, and silence there
+    would hide it."""
+    ghosts = [str(confined / ("v070_gen_LEAKNAME_%d.npz" % i)) for i in range(4)]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    first = capsys.readouterr().out
+    assert "Snapshot metadata unreadable" in first
+    assert "LEAKNAME" not in first
+    assert "No such file" not in first and "Errno" not in first
+
+    # Suppressed while the condition persists: one line, not one per poll.
+    for _ in range(5):
+        lucid_server.find_latest_snapshot(str(confined))
+    assert capsys.readouterr().out == ""
+
+
+def test_the_metadata_warning_is_rate_limited_on_a_monotonic_clock(confined,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """A monotonic clock, so a system-clock step can neither suppress the
+    warning for ever nor make it repeat every poll."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    lucid_server.find_latest_snapshot(str(confined))
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    now[0] += lucid_server.METADATA_WARNING_INTERVAL - 1
+    lucid_server.find_latest_snapshot(str(confined))
+    assert capsys.readouterr().out == "", "warned again inside the interval"
+
+    now[0] += 2
+    lucid_server.find_latest_snapshot(str(confined))
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+
+@requires_numpy
+def test_a_successful_read_clears_the_warning_state(confined, monkeypatch,
+                                                    capsys):
+    """Recovery: once metadata reads work again, a later failure run warns
+    again rather than staying suppressed for ever."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    lucid_server.find_latest_snapshot(str(confined))
+    capsys.readouterr()
+
+    real = Path(_write_snapshot_ls(confined / "v070_gen000009.npz",
+                                   compressed=True))
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: [str(real)])
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(real)
+
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    lucid_server.find_latest_snapshot(str(confined))
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+
+@requires_numpy
+def test_the_second_fingerprint_read_failure_also_warns(confined, monkeypatch,
+                                                         capsys,
+                                                         _fresh_watcher_state):
+    """Selection and the watcher's fingerprint are separate syscalls, so the
+    second read needs the same treatment as the first."""
+    chosen = Path(_write_snapshot_ls(confined / "v070_gen000003.npz",
+                                     compressed=True))
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: str(chosen))
+
+    def _vanishing(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _vanishing)
+    _run_watcher(monkeypatch, polls=3)
+    output = capsys.readouterr().out
+
+    assert output.count("Snapshot metadata unreadable") == 1
+    assert "v070_gen000003" not in output and "No such file" not in output
+
+
 @requires_numpy
 def test_the_watcher_accepts_a_later_valid_snapshot(confined, monkeypatch,
                                                     capsys, _fresh_watcher_state):

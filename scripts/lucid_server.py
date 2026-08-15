@@ -41,8 +41,18 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
     SnapshotArchiveRejected,
     admit_snapshot,
     entry_fingerprint,
-    newest_first,
+    first_admissible,
+    order_candidates,
 )
+
+#: A metadata failure is usually one rotated file and says nothing worth
+#: printing. A PERSISTENT one — a dropped share, a permissions change — means
+#: the watcher is running blind, and silence there is its own defect. One fixed
+#: line, at most this often, on a monotonic clock so a system clock step cannot
+#: suppress or spam it.
+METADATA_WARNING_INTERVAL = 300.0
+_metadata_failures = 0
+_metadata_warned_at = None
 
 try:
     import websockets
@@ -75,10 +85,33 @@ def find_latest_snapshot(data_dir):
     A dangling link or a symlink loop still `lstat`s, so it remains a candidate
     and is refused by `admit_snapshot` with a typed reason rather than
     disappearing from selection unrecorded.
+
+    Selection is a bounded newest-first SEARCH, not just "the newest file".
+    Without it one unusable archive with the newest modification time stalls
+    the watcher outright -- and the producer writes straight to its final path
+    with no temporary-and-rename, so a partially written snapshot IS the newest
+    file for as long as the write takes. When nothing in the window is
+    admissible the newest candidate is returned anyway, so the existing typed
+    refusal runs and is logged rather than being silently reported as "no
+    snapshots".
     """
     pattern = os.path.join(data_dir, "v070_gen*.npz")
-    ordered = newest_first(glob.glob(pattern))
-    return ordered[0] if ordered else None
+    listing = order_candidates(glob.glob(pattern))
+
+    # Candidates matched the glob but NONE could be described. That is not an
+    # empty directory, and it must not be reported as one: it means the
+    # watcher is running blind. Warned about once, rate-limited, path-free.
+    if not listing.ordered and listing.unreadable:
+        _note_metadata_failure()
+        return None
+    if listing.ordered:
+        _clear_metadata_failures()
+
+    return first_admissible(
+        listing.ordered,
+        data_dir=data_dir,
+        policy=SNAPSHOT_POLICY,
+    )
 
 
 def extract_render_data(snap_path):
@@ -114,7 +147,14 @@ def extract_render_data(snap_path):
     before ``np.load``, its decompressor or its allocator is reached, for an
     archive that is out of the data directory, not a ZIP, wrong in its
     membership, hostile in its member names, oversized in its declared or
-    physical size, or wrong in any member's NPY header. The watcher and the
+    physical size, or wrong in any member's NPY header.
+
+    Structural refusals all precede loading. A narrow set of payload-TRANSPORT
+    failures cannot: a payload is only checkable by decompressing it, so a
+    valid header over a corrupt body surfaces during array materialisation and
+    is translated there instead. Exactly four things are translated --
+    BadZipFile, zlib.error, EOFError, and NumPy's array-data EOF identified by
+    its own traceback frame. The watcher and the
     initial-client send below each catch that type, log one bounded reason
     code and send no frame; the server, the watcher and every client stay
     alive.
@@ -130,7 +170,9 @@ def extract_render_data(snap_path):
     typed admission refusal instead.
 
     The guard opens the file once and hands this function the very descriptor
-    it preflighted, so the bytes inspected are the bytes NumPy reads. The
+    it preflighted, so the bytes inspected are the bytes NumPy reads -- which closes the pathname
+    reopen and re-resolution races, though not in-place mutation of the file
+    while the descriptor is open. The
     inner ``with`` closes the archive; the guard closes the descriptor; both
     hold on success and on every exceptional exit.
 
@@ -201,6 +243,34 @@ async def broadcast(message):
         )
 
 
+def _note_metadata_failure():
+    """Count a metadata failure and warn once if they are persisting.
+
+    A single failure is an ordinary rotation and is not worth a line. A run of
+    them means the watcher is running blind, which silence would hide — so one
+    FIXED message is emitted, rate-limited on a monotonic clock. The message
+    carries no path, no filename and no exception text: the entry that failed
+    is attacker-named, and this is the one place a name could otherwise reach
+    the log by accident.
+    """
+    global _metadata_failures, _metadata_warned_at
+
+    _metadata_failures += 1
+    now = time.monotonic()
+    if _metadata_warned_at is not None and now - _metadata_warned_at < METADATA_WARNING_INTERVAL:
+        return
+    _metadata_warned_at = now
+    print("  Snapshot metadata unreadable; watcher is not seeing new snapshots")
+
+
+def _clear_metadata_failures():
+    """A successful read means the condition is over; the next run warns again."""
+    global _metadata_failures, _metadata_warned_at
+
+    _metadata_failures = 0
+    _metadata_warned_at = None
+
+
 async def snapshot_watcher():
     """Watch for new snapshots and broadcast to clients."""
     global last_snapshot_path, last_snapshot_mtime
@@ -218,6 +288,9 @@ async def snapshot_watcher():
                     mtime = entry_fingerprint(latest)[2]
                 except OSError:
                     mtime = None
+                    _note_metadata_failure()
+                else:
+                    _clear_metadata_failures()
 
                 if mtime is not None and (
                     latest != last_snapshot_path or mtime != last_snapshot_mtime

@@ -43,7 +43,8 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
     SnapshotArchiveRejected,
     admit_snapshot,
     entry_fingerprint,
-    newest_first,
+    first_admissible,
+    order_candidates,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -105,12 +106,21 @@ def _load_snapshot(path):
     before `np.load`, its decompressor or its allocator is reached, for an
     archive that is out of the data directory, not a ZIP, wrong in its
     membership, hostile in its member names, oversized in its declared or
-    physical size, or wrong in any member's NPY header. Both call sites — the
+    physical size, or wrong in any member's NPY header.
+
+    Structural refusals all precede loading. A narrow set of payload-TRANSPORT
+    failures cannot: a payload is only checkable by decompressing it, so a
+    valid header over a corrupt body surfaces during array materialisation and
+    is translated there instead. Exactly four things are translated --
+    BadZipFile, zlib.error, EOFError, and NumPy's array-data EOF identified by
+    its own traceback frame. Both call sites — the
     daemon loop and `--once` — catch that type and stop before any exporter
     runs.
 
     The guard opens the file once and hands this helper the very descriptor it
-    preflighted, so the bytes inspected are the bytes NumPy reads. `str(path)`
+    preflighted, so the bytes inspected are the bytes NumPy reads -- which closes the pathname
+    reopen and re-resolution races, though not in-place mutation of the file
+    while the descriptor is open. `str(path)`
     is therefore gone: there is no second open to convert a path for. The
     inner `with` closes the archive, the guard closes the descriptor, on
     success and on every exceptional exit.
@@ -312,13 +322,18 @@ def run_daemon():
             # so a link could borrow its target's mtime to become "newest"
             # before admission had any say, and it raised OSError into the
             # broad handler below, whose message carries the path.
-            snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
+            listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
 
-            if not snapshots:
+            if not listing.ordered:
                 time.sleep(WATCH_INTERVAL)
                 continue
 
-            latest = snapshots[0]
+            # A bounded newest-first SEARCH, so one unusable archive with the
+            # newest modification time does not stall exports outright. When
+            # nothing in the window is admissible the newest is returned
+            # anyway, and the typed refusal below reports it as it always did.
+            latest = first_admissible(listing.ordered, data_dir=DATA_DIR,
+                                      policy=SNAPSHOT_POLICY)
 
             # Skip if same as last time or too soon
             if latest == last_snapshot:
@@ -415,13 +430,26 @@ def run_once():
     nonzero, with no exporter having run. The body is otherwise the block that
     was here before, unchanged.
     """
-    snapshots = newest_first(DATA_DIR.glob("v070_gen*.npz"))
-    if not snapshots:
+    listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+
+    if not listing.ordered:
+        if listing.unreadable:
+            # NOT the same thing as an empty directory, and reporting them
+            # identically would hide a real fault: candidates matched the glob
+            # and every one of them failed its metadata read. Fixed text, no
+            # path — the entries are attacker-named — and a nonzero exit so a
+            # cron or CI wrapper can tell this from "nothing to export".
+            print("Snapshot candidates unreadable", file=sys.stderr)
+            sys.exit(1)
         print("No snapshots found!")
         return
 
+    # Bounded newest-first search, as in the daemon loop.
+    selected = first_admissible(listing.ordered, data_dir=DATA_DIR,
+                                policy=SNAPSHOT_POLICY)
+
     try:
-        state, mg, gen = _load_snapshot(snapshots[0])
+        state, mg, gen = _load_snapshot(selected)
     except SnapshotArchiveRejected as refusal:
         # Exactly one bounded reason on stderr, then a nonzero exit. Only the
         # typed refusal is caught here: a MemoryError, a KeyboardInterrupt or
