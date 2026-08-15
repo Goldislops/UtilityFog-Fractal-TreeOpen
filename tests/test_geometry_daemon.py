@@ -27,6 +27,7 @@ output or whole-daemon correctness.
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -102,12 +103,45 @@ def _good_contents(generation=7):
     }
 
 
+_DESCRIPTOR = object()
+
+
+class _FakeAdmission:
+    """Stand-in for the shared guard.
+
+    Records how it was called, hands back a sentinel descriptor, and records
+    that its block was exited. Using a sentinel rather than a real file is what
+    lets the lifetime tests below stay free of any archive on disk, while the
+    real guard is exercised end to end by the hostile-archive tests.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.exited = 0
+
+    def __call__(self, path, *, data_dir, policy=None):
+        self.calls.append({"path": path, "data_dir": data_dir, "policy": policy})
+        return self
+
+    def __enter__(self):
+        return _DESCRIPTOR
+
+    def __exit__(self, exc_type, exc, tb):
+        self.exited += 1
+        return False  # never suppress anything
+
+
 def _load_with(archive, path="/fake/v070_gen0001000.npz"):
-    """Run the real `_load_snapshot` against `archive`; return the load mock."""
+    """Run the real `_load_snapshot` against `archive`.
+
+    Returns (result, load mock, admission recorder).
+    """
     loader = mock.Mock(return_value=archive)
-    with mock.patch.object(geometry_daemon.np, "load", loader):
+    admission = _FakeAdmission()
+    with mock.patch.object(geometry_daemon, "admit_snapshot", admission), \
+         mock.patch.object(geometry_daemon.np, "load", loader):
         result = geometry_daemon._load_snapshot(path)
-    return result, loader
+    return result, loader, admission
 
 
 # -- helper contract ----------------------------------------------------------
@@ -116,7 +150,7 @@ def _load_with(archive, path="/fake/v070_gen0001000.npz"):
 def test_helper_returns_the_exact_extracted_objects():
     contents = _good_contents(generation=7)
     archive = _FakeArchive(contents)
-    (state, memory_grid, generation), _ = _load_with(archive)
+    (state, memory_grid, generation), *_ = _load_with(archive)
     assert state is contents["lattice"]
     assert memory_grid is contents["memory_grid"]
     assert generation == 7
@@ -125,19 +159,53 @@ def test_helper_returns_the_exact_extracted_objects():
 
 def test_helper_preserves_the_int_generation_conversion():
     archive = _FakeArchive(_good_contents(generation=_IntLike()))
-    (_, _, generation), _ = _load_with(archive)
+    (_, _, generation), *_ = _load_with(archive)
     assert generation == 42
     assert type(generation) is int
 
 
-def test_helper_calls_np_load_with_the_same_path_conversion_and_allow_pickle():
+def test_helper_loads_from_the_admitted_descriptor_with_allow_pickle_false():
+    """The path is handed to the guard; NumPy is handed the descriptor the
+    guard opened. There is no second open and no `str(path)` conversion left
+    to make, because a pathname is never re-resolved for loading."""
     archive = _FakeArchive(_good_contents())
-    _, loader = _load_with(archive, path=Path("/fake/dir/v070_gen42.npz"))
+    path = Path("/fake/dir/v070_gen42.npz")
+    _, loader, admission = _load_with(archive, path=path)
     assert loader.call_count == 1
     args, kwargs = loader.call_args
-    assert args == (str(Path("/fake/dir/v070_gen42.npz")),)
-    assert type(args[0]) is str
+    assert args == (_DESCRIPTOR,)
     assert kwargs == {"allow_pickle": False}
+    assert [call["path"] for call in admission.calls] == [path]
+
+
+def test_helper_admits_against_the_module_data_dir_and_named_policy():
+    archive = _FakeArchive(_good_contents())
+    _, _, admission = _load_with(archive)
+    assert len(admission.calls) == 1
+    assert admission.calls[0]["data_dir"] is geometry_daemon.DATA_DIR
+    assert admission.calls[0]["policy"] is geometry_daemon.SNAPSHOT_POLICY
+    assert admission.exited == 1
+
+
+def test_admission_precedes_the_load():
+    """Ordering, not merely presence: the guard must have decided before
+    NumPy was asked for anything."""
+    order = []
+    archive = _FakeArchive(_good_contents())
+
+    class _OrderedAdmission(_FakeAdmission):
+        def __call__(self, path, *, data_dir, policy=None):
+            order.append("admit")
+            return super().__call__(path, data_dir=data_dir, policy=policy)
+
+    def _ordered_load(*args, **kwargs):
+        order.append("load")
+        return archive
+
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _OrderedAdmission()), \
+         mock.patch.object(geometry_daemon.np, "load", _ordered_load):
+        geometry_daemon._load_snapshot("/fake/v070_gen1.npz")
+    assert order == ["admit", "load"]
 
 
 def test_helper_enters_the_archive_context_exactly_once():
@@ -157,7 +225,7 @@ def test_archive_is_already_closed_when_the_helper_returns():
     """The assertion runs immediately after the return, while this frame still
     holds a live reference to the archive — so closure was explicit."""
     archive = _FakeArchive(_good_contents())
-    (state, memory_grid, generation), _ = _load_with(archive)
+    (state, memory_grid, generation), *_ = _load_with(archive)
     assert archive.closed == 1
     assert state is not None and generation == 7
 
@@ -220,32 +288,83 @@ def test_original_extraction_exception_propagates_unchanged():
 # -- one controlled daemon cycle ----------------------------------------------
 
 
-class _FakeStat:
-    def __init__(self, size, mtime):
-        self.st_size = size
-        self.st_mtime = mtime
-
-
 class _FakeSnapshotPath:
-    def __init__(self, name="v070_gen0001000.npz", size=2_000_000, mtime=100.0):
+    """A stand-in for one snapshot path that is also a REAL directory entry.
+
+    It used to be a pure duck type: `.stat()`, `.name`, `__str__` and nothing
+    else. That worked while discovery sorted on `p.stat().st_mtime`, which
+    accepts any object with a `.stat()`. Discovery now describes candidates
+    with `os.lstat`, which takes only `str | bytes | os.PathLike` -- deliberately,
+    because reading the ENTRY rather than whatever it points at is the whole
+    point of the non-following ordering.
+
+    So the fake owns a real, tiny file and forwards `__fspath__` to it. That
+    keeps the double honest in both directions: `os.lstat` returns real
+    metadata, and `change()` rewrites the real file rather than a fabricated
+    stat result, so the daemon's fingerprint sees a genuine change.
+
+    Backing this with a fabricated `.stat()` instead would have been worse than
+    useless: `os.lstat` on a path that does not exist raises `OSError`,
+    `newest_first` skips it, and every daemon-cycle test would pass while
+    exercising nothing.
+    """
+
+    def __init__(self, directory, name="v070_gen0001000.npz", size=64,
+                 mtime=100.0):
         self.name = name
-        self._stat = _FakeStat(size, mtime)
+        self._real = Path(directory) / name
+        self._real.write_bytes(b"\x00" * size)
+        self._set_mtime(mtime)
+
+    def _set_mtime(self, mtime):
+        stamp = int(mtime * 1_000_000_000)
+        os.utime(self._real, ns=(stamp, stamp))
 
     def stat(self):
-        return self._stat
+        return self._real.stat()
+
+    def change(self, size=None, mtime=None):
+        """Replace the file at this path, as a rotating producer would."""
+        if size is not None:
+            self._real.write_bytes(b"\x00" * size)
+        if mtime is not None:
+            self._set_mtime(mtime)
+        return self
+
+    def __fspath__(self):
+        return os.fspath(self._real)
 
     def __str__(self):
-        return f"/fake/{self.name}"
+        return os.fspath(self._real)
 
 
 class _FakeDataDir:
-    def __init__(self, paths):
+    """A stand-in data directory that is also a REAL one.
+
+    It used to expose `glob()` and nothing else, which was enough while the
+    daemon only globbed it. `DATA_DIR` is now also handed to `admit_snapshot`
+    as the confinement root by the bounded admission search, and that resolves
+    it as a path — so a `glob`-only duck type made the search raise `TypeError`
+    into the daemon's broad handler and no cycle ran at all.
+
+    So it forwards `__fspath__` to the real directory the fake snapshots were
+    written into, which is what confinement should be comparing against
+    anyway.
+    """
+
+    def __init__(self, paths, directory=None):
         self.paths = list(paths)
         self.globs = []
+        if directory is None and self.paths:
+            directory = Path(os.fspath(self.paths[0])).parent
+        self._directory = Path(directory) if directory is not None else Path(".")
 
     def glob(self, pattern):
         self.globs.append(pattern)
         return list(self.paths)
+
+    def __fspath__(self):
+        return os.fspath(self._directory)
 
 
 class _FakeClock:
@@ -280,12 +399,13 @@ def _run_one_daemon_cycle(archive, tmp_path):
             return None
         return _record
 
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     data_dir = _FakeDataDir([snapshot])
     clock = _FakeClock(stop_after_sleeps=1)
     loader = mock.Mock(return_value=archive)
 
-    with mock.patch.object(geometry_daemon.np, "load", loader), \
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _FakeAdmission()), \
+         mock.patch.object(geometry_daemon.np, "load", loader), \
          mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
          mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
          mock.patch.object(geometry_daemon, "time", clock), \
@@ -340,21 +460,22 @@ def test_daemon_cycle_passes_the_same_objects_to_every_exporter(tmp_path):
     assert by_name["stl"][2] == tmp_path
 
 
-def test_daemon_cycle_loads_with_the_preserved_call_shape(tmp_path):
+def test_daemon_cycle_loads_from_the_admitted_descriptor(tmp_path):
     archive = _FakeArchive(_good_contents(generation=1000))
-    _, loader, snapshot = _run_one_daemon_cycle(archive, tmp_path)
+    _, loader, _snapshot = _run_one_daemon_cycle(archive, tmp_path)
     assert loader.call_count == 1
     args, kwargs = loader.call_args
-    assert args == (str(snapshot),)
+    assert args == (_DESCRIPTOR,)
     assert kwargs == {"allow_pickle": False}
 
 
 def test_daemon_cycle_keeps_the_snapshot_glob_pattern(tmp_path):
     archive = _FakeArchive(_good_contents(generation=1000))
-    snapshot = _FakeSnapshotPath()
+    snapshot = _FakeSnapshotPath(tmp_path)
     data_dir = _FakeDataDir([snapshot])
     clock = _FakeClock(stop_after_sleeps=1)
-    with mock.patch.object(geometry_daemon.np, "load",
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _FakeAdmission()), \
+         mock.patch.object(geometry_daemon.np, "load",
                            mock.Mock(return_value=archive)), \
          mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
          mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
@@ -371,21 +492,164 @@ def test_daemon_cycle_keeps_the_snapshot_glob_pattern(tmp_path):
     assert data_dir.globs == ["v070_gen*.npz"]
 
 
-def test_daemon_skips_tiny_snapshot_without_loading(tmp_path):
-    """The established tiny-file threshold still short-circuits before any load."""
-    archive = _FakeArchive(_good_contents())
+def test_a_small_but_valid_snapshot_is_no_longer_skipped(tmp_path):
+    """The one-megabyte minimum is gone.
+
+    It was a guess at "tiny/corrupt" and it was wrong in both directions: a
+    sparse but structurally valid snapshot compresses far below a megabyte and
+    was skipped for ever, while a hostile archive only had to be padded past
+    the threshold to be processed. Admission decides usability now, so a
+    valid 40 kB snapshot must be loaded.
+    """
+    archive = _FakeArchive(_good_contents(generation=7))
     loader = mock.Mock(return_value=archive)
-    data_dir = _FakeDataDir([_FakeSnapshotPath(size=999_999)])
-    with mock.patch.object(geometry_daemon.np, "load", loader), \
+    data_dir = _FakeDataDir([_FakeSnapshotPath(tmp_path, size=40_000)])
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _FakeAdmission()), \
+         mock.patch.object(geometry_daemon.np, "load", loader), \
          mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
          mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
+         mock.patch.object(geometry_daemon, "export_sage_pointcloud",
+                           lambda *a: None), \
+         mock.patch.object(geometry_daemon, "export_voxel_summary",
+                           lambda *a: None), \
+         mock.patch.object(geometry_daemon, "export_stl", lambda *a: None), \
          mock.patch.object(geometry_daemon, "time", _FakeClock(stop_after_sleeps=1)):
         try:
             geometry_daemon.run_daemon()
         except KeyboardInterrupt:
             pass
-    assert loader.call_count == 0
-    assert archive.entered == 0
+    assert loader.call_count == 1
+    assert archive.entered == 1
+
+
+def _run_rejecting_daemon(tmp_path, snapshot, refusals, sleeps=1):
+    """Drive `run_daemon()` with an admission that refuses `refusals` times.
+
+    Returns (exporter calls, printed output lines, admission attempt count).
+    """
+    attempts = []
+
+    class _RefusingAdmission:
+        def __call__(self, path, *, data_dir, policy=None):
+            attempts.append(str(path))
+            if len(attempts) <= refusals:
+                raise geometry_daemon.SnapshotArchiveRejected("member_missing")
+            return self
+
+        def __enter__(self):
+            return _DESCRIPTOR
+
+        def __exit__(self, *exc):
+            return False
+
+    calls = []
+    data_dir = _FakeDataDir([snapshot])
+    clock = _FakeClock(stop_after_sleeps=sleeps)
+    archive = _FakeArchive(_good_contents())
+
+    def _recorder(name):
+        def _record(*args):
+            calls.append(name)
+            return None
+        return _record
+
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _RefusingAdmission()), \
+         mock.patch.object(geometry_daemon.np, "load",
+                           mock.Mock(return_value=archive)), \
+         mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
+         mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
+         mock.patch.object(geometry_daemon, "time", clock), \
+         mock.patch.object(geometry_daemon, "export_sage_pointcloud",
+                           _recorder("csv")), \
+         mock.patch.object(geometry_daemon, "export_voxel_summary",
+                           _recorder("json")), \
+         mock.patch.object(geometry_daemon, "export_stl", _recorder("stl")):
+        try:
+            geometry_daemon.run_daemon()
+        except KeyboardInterrupt:
+            pass
+    return calls, attempts
+
+
+def test_a_rejected_snapshot_runs_no_exporter_and_leaves_the_daemon_alive(
+    tmp_path, capsys
+):
+    snapshot = _FakeSnapshotPath(tmp_path)
+    calls, attempts = _run_rejecting_daemon(tmp_path, snapshot, refusals=1)
+    output = capsys.readouterr().out
+    assert calls == [], "an exporter ran on a rejected snapshot"
+    assert attempts == [str(snapshot)]
+    assert "Snapshot rejected: member_missing" in output
+    # The daemon reached its sleep, which is how this loop is stopped at all.
+    assert output.count("Snapshot rejected") == 1
+
+
+def test_a_rejection_never_logs_the_archive_name(tmp_path, capsys):
+    snapshot = _FakeSnapshotPath(tmp_path, name="v070_gen_LEAKNAME_0001.npz")
+    _run_rejecting_daemon(tmp_path, snapshot, refusals=1)
+    output = capsys.readouterr().out
+    assert "LEAKNAME" not in output, (
+        "the daemon logged a rejected archive's chosen name")
+
+
+def test_an_unchanged_rejected_snapshot_is_not_reprocessed(tmp_path, capsys):
+    """Fingerprint memory: repeated polls over a poisoned directory must not
+    repeat the preflight or repeat the log."""
+    snapshot = _FakeSnapshotPath(tmp_path)
+    calls, attempts = _run_rejecting_daemon(tmp_path, snapshot, refusals=5,
+                                            sleeps=4)
+    output = capsys.readouterr().out
+    assert calls == []
+    assert attempts == [str(snapshot)], "the rejected archive was re-preflighted"
+    assert output.count("Snapshot rejected") == 1
+
+
+def test_a_changed_snapshot_at_the_same_path_is_retried(tmp_path):
+    """A rotated or replaced file differs in size or mtime, so the memory must
+    not lock the daemon out of a subsequently valid snapshot."""
+    snapshot = _FakeSnapshotPath(tmp_path)
+    attempts = []
+    calls = []
+
+    class _RefuseThenAccept:
+        def __call__(self, path, *, data_dir, policy=None):
+            attempts.append(snapshot.stat().st_mtime_ns)
+            if len(attempts) == 1:
+                raise geometry_daemon.SnapshotArchiveRejected("member_missing")
+            return self
+
+        def __enter__(self):
+            return _DESCRIPTOR
+
+        def __exit__(self, *exc):
+            return False
+
+    class _ChangingClock(_FakeClock):
+        def sleep(self, seconds):
+            snapshot.change(mtime=self.now + len(self.sleeps) + 1)
+            super().sleep(seconds)
+
+    data_dir = _FakeDataDir([snapshot])
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _RefuseThenAccept()), \
+         mock.patch.object(geometry_daemon.np, "load",
+                           mock.Mock(return_value=_FakeArchive(_good_contents()))), \
+         mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
+         mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
+         mock.patch.object(geometry_daemon, "time",
+                           _ChangingClock(stop_after_sleeps=2)), \
+         mock.patch.object(geometry_daemon, "export_sage_pointcloud",
+                           lambda *a: calls.append("csv")), \
+         mock.patch.object(geometry_daemon, "export_voxel_summary",
+                           lambda *a: calls.append("json")), \
+         mock.patch.object(geometry_daemon, "export_stl",
+                           lambda *a: calls.append("stl")):
+        try:
+            geometry_daemon.run_daemon()
+        except KeyboardInterrupt:
+            pass
+
+    assert len(attempts) == 2, "the changed snapshot was never retried"
+    assert calls == ["csv", "json", "stl"], "the retry did not export"
 
 
 # -- both load sites use the helper -------------------------------------------
@@ -440,6 +704,18 @@ def test_daemon_path_uses_the_helper():
 def test_once_path_uses_the_helper():
     """The `--once` production path calls the closing helper, not a second load."""
     tree = _module_tree()
+    once = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_once"
+    )
+    assert len(_helper_calls(once)) == 1
+    assert _np_load_calls(once) == []
+
+
+def test_the_main_block_delegates_to_the_two_named_entry_points():
+    """`run_once` is the real `--once` path, not a paraphrase of it: the
+    `__main__` block calls it and does no snapshot work of its own."""
+    tree = _module_tree()
     main_blocks = [
         node for node in tree.body
         if isinstance(node, ast.If) and any(
@@ -449,7 +725,12 @@ def test_once_path_uses_the_helper():
     ]
     assert len(main_blocks) == 1
     main_block = main_blocks[0]
-    assert len(_helper_calls(main_block)) == 1
+    called = {
+        node.func.id for node in ast.walk(main_block)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert {"run_once", "run_daemon"} <= called
+    assert _helper_calls(main_block) == []
     assert _np_load_calls(main_block) == []
 
 
@@ -498,16 +779,36 @@ def _marker_gd(tmp_path):
 
 
 def _write_snapshot_gd(path, compressed=False, **members):
-    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    """A real NPZ. Object members pickle on the way in, which is harmless.
+
+    The edge is 16 and all five schema members are present, because the
+    archive now has to be ADMISSIBLE before its member dtypes matter: a 2-cube
+    with three members would be refused for its shape and its membership, and
+    the pickle property below would never be reached.
+    """
     payload = {
-        "lattice": np.zeros((2, 2, 2), dtype=np.uint8),
-        "memory_grid": np.zeros((8, 2, 2, 2), dtype=np.float32),
+        "lattice": np.zeros((16, 16, 16), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 16, 16, 16), dtype=np.float32),
         "generation": 7,
+        "ca_step": 11,
+        "best_fitness": 0.5,
     }
     payload.update(members)
     writer = np.savez_compressed if compressed else np.savez
     writer(path, **payload)
     return str(path)
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """Point the daemon's data directory at pytest's own tmp_path.
+
+    Admission confines the archive to the configured data directory, so a
+    fixture written anywhere else is refused for CONTAINMENT before the
+    property under test is reached.
+    """
+    monkeypatch.setattr(geometry_daemon, "DATA_DIR", tmp_path)
+    return tmp_path
 
 
 def test_gd_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
@@ -526,27 +827,51 @@ def test_gd_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
 
 
 @pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
-def test_object_payload_is_refused_by_the_helper(tmp_path, field):
+def test_object_payload_is_refused_by_the_helper(confined, field):
+    """The refusal moved EARLIER, and the code says so.
+
+    An object member used to be caught by NumPy at `np.load`. It is now caught
+    by admission from the member's NPY header, before NumPy is involved at
+    all -- so the assertion is the typed reason code, not NumPy's message. The
+    property that matters is unchanged and stronger: the payload never runs.
+    """
     archive = _write_snapshot_gd(
-        tmp_path / f"{field}.npz", **{field: _payload_array_gd(tmp_path)}
+        confined / f"v070_{field}.npz", **{field: _payload_array_gd(confined)}
+    )
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected) as excinfo:
+        geometry_daemon._load_snapshot(archive)
+    assert excinfo.value.reason == "member_dtype_object"
+    assert not _marker_gd(confined).exists(), "the pickle payload executed"
+
+
+def test_numpys_own_pickle_refusal_is_still_in_place_behind_admission(confined):
+    """Second line of defence, kept non-vacuous.
+
+    Admission now stops an object member first, so the load-site refusal would
+    otherwise never be observed again. Calling NumPy directly on the same
+    archive shows it is still exactly as it was.
+    """
+    archive = _write_snapshot_gd(
+        confined / "v070_direct.npz", lattice=_payload_array_gd(confined)
     )
     with pytest.raises(ValueError) as excinfo:
-        geometry_daemon._load_snapshot(archive)
+        with np.load(archive, allow_pickle=False) as snap:
+            snap["lattice"]
     assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_gd(tmp_path).exists(), "the pickle payload executed"
+    assert not _marker_gd(confined).exists()
 
 
-def test_a_compressed_hostile_archive_is_refused_the_same_way(tmp_path):
+def test_a_compressed_hostile_archive_is_refused_the_same_way(confined):
     """Real producers use `np.savez_compressed`, so the hostile fixture
     exercises that shape too rather than only the uncompressed one."""
     archive = _write_snapshot_gd(
-        tmp_path / "compressed.npz", compressed=True,
-        lattice=_payload_array_gd(tmp_path),
+        confined / "v070_compressed.npz", compressed=True,
+        lattice=_payload_array_gd(confined),
     )
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected) as excinfo:
         geometry_daemon._load_snapshot(archive)
-    assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_gd(tmp_path).exists()
+    assert excinfo.value.reason == "member_dtype_object"
+    assert not _marker_gd(confined).exists()
 
 
 def test_the_compressed_payload_also_fires_when_pickle_is_enabled(tmp_path):
@@ -559,9 +884,11 @@ def test_the_compressed_payload_also_fires_when_pickle_is_enabled(tmp_path):
     assert _marker_gd(tmp_path).exists(), "the compressed payload is inert"
 
 
-def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+def test_a_refused_archive_never_reaches_np_load_at_all(confined, monkeypatch):
+    """Stronger than "it was not retried with pickle enabled": NumPy is not
+    asked to open the archive even once."""
     archive = _write_snapshot_gd(
-        tmp_path / "retry.npz", lattice=_payload_array_gd(tmp_path)
+        confined / "v070_retry.npz", lattice=_payload_array_gd(confined)
     )
     real_load = np.load
     calls = []
@@ -571,38 +898,529 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(geometry_daemon.np, "load", _recording_load)
-    with pytest.raises(ValueError):
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected):
         geometry_daemon._load_snapshot(archive)
+    assert calls == []
+
+
+def test_a_valid_archive_is_loaded_with_pickle_explicitly_disabled(confined,
+                                                                   monkeypatch):
+    """The counterpart control: on the admitted path the explicit literal is
+    still what NumPy receives, so the assertion above is about ordering rather
+    than about the flag having quietly disappeared."""
+    archive = _write_snapshot_gd(confined / "v070_ok.npz", compressed=True)
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(geometry_daemon.np, "load", _recording_load)
+    geometry_daemon._load_snapshot(archive)
     assert calls == [False]
 
 
-def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
+def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
+    """Closure on the exceptional path, witnessed on the real file object the
+    guard opened rather than on a NumPy handle that is never created."""
     archive = _write_snapshot_gd(
-        tmp_path / "closed.npz", lattice=_payload_array_gd(tmp_path)
+        confined / "v070_closed.npz", lattice=_payload_array_gd(confined)
     )
-    real_load = np.load
+    # Hooked on `os.fdopen`, not `builtins.open`: the guard opens through
+    # `os.open` so it can pass O_NONBLOCK and O_NOFOLLOW, and `os.fdopen` is
+    # what turns that descriptor into the file object it yields.
+    import os as _os
     opened = []
+    real_fdopen = _os.fdopen
 
-    def _tracking_load(*args, **kwargs):
-        handle = real_load(*args, **kwargs)
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(geometry_daemon.np, "load", _tracking_load)
-    with pytest.raises(ValueError):
+    monkeypatch.setattr(_os, "fdopen", _tracking_fdopen)
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected):
         geometry_daemon._load_snapshot(archive)
-    assert len(opened) == 1
-    # `zip` is the primary witness: `close()` drops it unconditionally,
-    # whereas `fid` is a CLASS attribute defaulting to None, so asserting
-    # on it alone would pass on a handle that was never closed at all.
-    assert opened[0].zip is None and (
-        opened[0].fid is None or opened[0].fid.closed
-    )
+    assert len(opened) == 1, "the archive was opened more than once, or not at all"
+    assert opened[0].closed
 
 
-def test_a_numeric_snapshot_still_loads_unchanged(tmp_path):
-    archive = _write_snapshot_gd(tmp_path / "clean.npz", generation=np.int64(12))
+def test_discovery_skips_a_candidate_that_disappears_mid_scan(confined,
+                                                              monkeypatch,
+                                                              capsys):
+    """The glob and the metadata read are separate syscalls. A vanished entry
+    must be skipped silently — the old `p.stat()` raised into the loop's broad
+    handler, which prints the exception, and OSError's message carries the
+    attacker-chosen path."""
+    _write_snapshot_gd(confined / "v070_gen000030.npz", compressed=True)
+    ghost = confined / "v070_gen_GHOSTNAME_0031.npz"
+    real_glob = Path.glob
+
+    def _glob_with_a_ghost(self, pattern):
+        return list(real_glob(self, pattern)) + [ghost]
+
+    monkeypatch.setattr(Path, "glob", _glob_with_a_ghost)
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    exporters = []
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    geometry_daemon.run_once()
+
+    output = capsys.readouterr()
+    assert exporters == ["export_sage_pointcloud", "export_voxel_summary",
+                         "export_stl"], "the ghost blocked a valid snapshot"
+    assert "GHOSTNAME" not in output.out and "GHOSTNAME" not in output.err
+
+
+def test_the_fingerprint_does_not_follow_a_symlink(confined, tmp_path):
+    """A rejected link fingerprinted by its TARGET kept changing whenever
+    anything touched the target, so the daemon re-preflighted and re-logged the
+    same unchanged poison on every poll."""
+    target = tmp_path / "fingerprint_target.npz"
+    target.write_bytes(b"x" * 64)
+    link = confined / "v070_fplink.npz"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform gate
+        pytest.skip("symlink creation is not permitted in this environment")
+
+    before = geometry_daemon._snapshot_fingerprint(link)
+    target.write_bytes(b"y" * 4096)  # the target changes; the link does not
+    after = geometry_daemon._snapshot_fingerprint(link)
+    assert before == after, "the fingerprint tracked the target, not the entry"
+
+
+def test_a_numeric_snapshot_still_loads_unchanged(confined):
+    archive = _write_snapshot_gd(confined / "v070_clean.npz",
+                                 generation=np.int64(12))
     state, grid, generation = geometry_daemon._load_snapshot(archive)
-    assert state.shape == (2, 2, 2)
-    assert grid.shape == (8, 2, 2, 2)
+    assert state.shape == (16, 16, 16)
+    assert grid.shape == (8, 16, 16, 16)
     assert generation == 12 and type(generation) is int
+
+
+def test_the_once_path_exits_nonzero_with_one_bounded_reason(confined, capsys,
+                                                             monkeypatch):
+    """`--once` has no loop to stay alive in: it reports and fails.
+
+    The REAL `run_once` runs here, with only admission replaced.
+    """
+    _write_snapshot_gd(confined / "v070_gen000once.npz")
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    def _refuse(path, *, data_dir, policy=None):
+        raise geometry_daemon.SnapshotArchiveRejected("member_missing")
+
+    monkeypatch.setattr(geometry_daemon, "admit_snapshot", _refuse)
+
+    with pytest.raises(SystemExit) as excinfo:
+        geometry_daemon.run_once()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Snapshot rejected: member_missing"
+    assert "v070_gen000once" not in captured.err
+    assert "v070_gen000once" not in captured.out
+    assert exporters == [], "an exporter ran on a rejected snapshot"
+
+
+@pytest.mark.parametrize("raised", [
+    MemoryError("oom"),
+    KeyboardInterrupt(),
+    RuntimeError("programmer error"),
+    TypeError("wrong argument"),
+], ids=["memory", "keyboard_interrupt", "runtime", "type"])
+def test_the_once_path_lets_everything_but_a_refusal_propagate(confined,
+                                                               monkeypatch,
+                                                               raised):
+    """Only `SnapshotArchiveRejected` becomes the bounded exit-1 refusal.
+
+    A `MemoryError` means the machine is out of memory, a `KeyboardInterrupt`
+    means the operator asked to stop, and a programmer error means the code is
+    wrong. Reporting any of them as "the snapshot was bad" would hide a real
+    fault behind a sanitized message and exit 1 as though the input were at
+    fault. Each must leave `run_once` exactly as it was raised, and no exporter
+    may run.
+    """
+    _write_snapshot_gd(confined / "v070_gen000prop.npz")
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    def _raise(path, *, data_dir, policy=None):
+        raise raised
+
+    monkeypatch.setattr(geometry_daemon, "admit_snapshot", _raise)
+
+    with pytest.raises(type(raised)) as excinfo:
+        geometry_daemon.run_once()
+
+    assert type(excinfo.value) is type(raised)
+    assert str(excinfo.value) == str(raised)
+    assert not isinstance(excinfo.value, SystemExit), (
+        "a non-refusal was converted into the bounded exit-1 lane")
+    assert exporters == []
+
+
+def test_the_daemon_loop_does_not_treat_a_programmer_error_as_a_refusal(
+    tmp_path, capsys
+):
+    """The watcher's broad handler still catches non-refusals so the daemon
+    survives — but it must not record them as rejected snapshots, or the
+    fingerprint memory would suppress a real, recurring fault."""
+    snapshot = _FakeSnapshotPath(tmp_path)
+    data_dir = _FakeDataDir([snapshot])
+
+    class _Boom(RuntimeError):
+        pass
+
+    def _raise(path, *, data_dir, policy=None):
+        raise _Boom("programmer error")
+
+    with mock.patch.object(geometry_daemon, "admit_snapshot", _raise), \
+         mock.patch.object(geometry_daemon, "DATA_DIR", data_dir), \
+         mock.patch.object(geometry_daemon, "GEO_DIR", tmp_path), \
+         mock.patch.object(geometry_daemon, "time",
+                           _FakeClock(stop_after_sleeps=1)):
+        try:
+            geometry_daemon.run_daemon()
+        except KeyboardInterrupt:
+            pass
+
+    output = capsys.readouterr().out
+    assert "Snapshot rejected" not in output, (
+        "a programmer error was reported as a snapshot refusal")
+
+
+def test_the_once_path_falls_back_past_an_unusable_newest_snapshot(confined,
+                                                                    capsys,
+                                                                    monkeypatch):
+    """One unusable archive with the newest mtime must not stall exports.
+
+    The producer writes straight to its final path with no
+    temporary-and-rename, so a partially written snapshot IS the newest file
+    for as long as the write takes.
+    """
+    good = Path(_write_snapshot_gd(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    poison = Path(_hostile_gd("missing_member", confined / "v070_gen000002.npz"))
+    os.utime(good, (1_000_000, 1_000_000))
+    os.utime(poison, (2_000_000, 2_000_000))
+
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    geometry_daemon.run_once()
+
+    assert exporters == ["export_sage_pointcloud", "export_voxel_summary",
+                         "export_stl"], "the poison archive stalled the export"
+    assert "Done!" in capsys.readouterr().out
+
+
+def test_the_once_path_distinguishes_unreadable_candidates_from_none(confined,
+                                                                     capsys,
+                                                                     monkeypatch):
+    """`[]` means two very different things and must not be reported alike.
+
+    An empty directory is "nothing to export"; a directory whose every
+    candidate failed its metadata read is a fault, and a wrapper checking the
+    exit status has to be able to tell them apart.
+    """
+    ghosts = [confined / ("v070_gen_LEAKNAME_%d.npz" % i) for i in range(4)]
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: list(ghosts))
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n))
+
+    with pytest.raises(SystemExit) as excinfo:
+        geometry_daemon.run_once()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "Snapshot candidates unreadable"
+    assert "LEAKNAME" not in captured.err and "LEAKNAME" not in captured.out
+    assert "No snapshots found" not in captured.out
+    assert exporters == []
+
+
+def test_the_once_path_still_reports_a_genuinely_empty_directory(confined,
+                                                                 capsys):
+    """The counterpart: no candidates at all is not a fault, and must not
+    become one."""
+    geometry_daemon.run_once()
+    captured = capsys.readouterr()
+    assert "No snapshots found!" in captured.out
+    assert captured.err == ""
+
+
+def test_the_once_path_still_exports_a_valid_snapshot(confined, capsys,
+                                                      monkeypatch):
+    """The counterpart control, so the test above is about the REFUSAL and not
+    about `run_once` being broken."""
+    _write_snapshot_gd(confined / "v070_gen000ok.npz", compressed=True)
+    exporters = []
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", confined)
+    for name in ("export_sage_pointcloud", "export_voxel_summary", "export_stl"):
+        monkeypatch.setattr(geometry_daemon, name,
+                            lambda *a, _n=name: exporters.append(_n) or None)
+
+    geometry_daemon.run_once()
+
+    assert exporters == ["export_sage_pointcloud", "export_voxel_summary",
+                         "export_stl"]
+    assert "Done!" in capsys.readouterr().out
+
+
+# ===========================================================================
+# Structural admission -- a hostile archive must be refused BEFORE np.load
+#
+# Pickle refusal and archive lifetime say nothing about an archive's shape or
+# its cost. This daemon loads whatever appears in the watched directory, so an
+# archive can still name members outside the schema, carry traversal-bearing
+# entries, declare a payload of hundreds of gigabytes, or lie about its own
+# sizes -- and every one of those reached `np.load` and the allocation behind
+# it.
+#
+# The fixtures below are built with the standard library rather than NumPy,
+# because NumPy cannot write a duplicate member, a corrupt NPY magic or a
+# lying shape. None of them is hostile in SIZE: each is a few hundred kilobytes at most, and
+# the oversized cases lie in their headers instead of on disk.
+# ===========================================================================
+
+import struct  # noqa: E402
+import warnings  # noqa: E402
+import zipfile  # noqa: E402
+
+_NPY_MAGIC = b"\x93NUMPY"
+
+
+def _npy_gd(descr, shape, *, fortran=False, payload=None, header=None,
+            version=(1, 0)):
+    """One `.npy` member as raw bytes, with every field independently forgeable."""
+    if header is None:
+        if not shape:
+            shape_text = "()"
+        elif len(shape) == 1:
+            shape_text = "(%d,)" % shape[0]
+        else:
+            shape_text = "(" + ", ".join(str(d) for d in shape) + ")"
+        header = "{'descr': '%s', 'fortran_order': %s, 'shape': %s, }" % (
+            descr, fortran, shape_text)
+    body = header.encode("latin1")
+    prelude = 10 if version == (1, 0) else 12
+    body += b" " * ((-(prelude + len(body) + 1)) % 64) + b"\n"
+    out = bytearray(_NPY_MAGIC) + bytes(version)
+    out += (struct.pack("<H", len(body)) if version == (1, 0)
+            else struct.pack("<I", len(body)))
+    out += body
+    if payload is None:
+        digits = descr[2:] if descr[0] in "<>|=" else descr[1:]
+        itemsize = int(digits) if digits else 0
+        count = 1
+        for dim in shape:
+            count *= dim
+        payload = b"\x00" * (count * itemsize)
+    return bytes(out) + payload
+
+
+def _schema_gd(edge=16, channels=8):
+    """The five members a `v070_gen` snapshot carries, at a valid edge."""
+    return {
+        "lattice.npy": _npy_gd("|u1", (edge, edge, edge)),
+        "memory_grid.npy": _npy_gd("<f4", (channels, edge, edge, edge)),
+        "generation.npy": _npy_gd("<i8", ()),
+        "ca_step.npy": _npy_gd("<i8", ()),
+        "best_fitness.npy": _npy_gd("<f8", ()),
+    }
+
+
+def _zip_gd(path, members, *, compressed=True, duplicate=None):
+    mode = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # a duplicate name is the point here
+        with zipfile.ZipFile(path, "w", compression=mode) as archive:
+            for name, blob in members.items():
+                archive.writestr(name, blob)
+            if duplicate is not None:
+                archive.writestr(duplicate, members[duplicate])
+    return str(path)
+
+
+def _declared_gd(edge, channels=8):
+    """The same five members, DECLARING an `edge` it does not carry.
+
+    The guard checks geometry before size arithmetic, so an archive that lies
+    about its shape is refused on the geometry rule without the bytes ever
+    needing to exist. That is what keeps a 512-edge case at a few kilobytes
+    instead of the 4.1 GiB a real 512-cube payload would require.
+    """
+    members = _schema_gd(16, channels)
+    members["lattice.npy"] = _npy_gd(
+        "|u1", (edge, edge, edge), payload=b"",
+        header="{'descr': '|u1', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d), }" % (edge, edge, edge))
+    members["memory_grid.npy"] = _npy_gd(
+        "<f4", (channels, edge, edge, edge), payload=b"",
+        header="{'descr': '<f4', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d, %d), }" % (channels, edge, edge, edge))
+    return members
+
+
+def _hostile_gd(kind, path):
+    """Build one hostile archive of the named kind at `path`."""
+    members = _schema_gd()
+    if kind == "duplicate_member":
+        return _zip_gd(path, members, duplicate="lattice.npy")
+    if kind == "traversal_name":
+        members["../../escape.npy"] = _npy_gd("|u1", (1,))
+        return _zip_gd(path, members)
+    if kind == "backslash_name":
+        members["sub\\escape.npy"] = _npy_gd("|u1", (1,))
+        return _zip_gd(path, members)
+    if kind == "missing_member":
+        members.pop("ca_step.npy")
+        return _zip_gd(path, members)
+    if kind == "extra_member":
+        members["surprise.npy"] = _npy_gd("|u1", (1,))
+        return _zip_gd(path, members)
+    if kind == "oversized_declared_payload":
+        members["lattice.npy"] = _npy_gd(
+            "|u8", (256, 256, 256), payload=b"",
+            header="{'descr': '|u8', 'fortran_order': False, "
+                   "'shape': (256, 256, 256), }")
+        members["memory_grid.npy"] = _npy_gd(
+            "<f4", (8, 256, 256, 256), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 256, 256, 256), }")
+        return _zip_gd(path, members)
+    if kind == "oversized_edge":
+        return _zip_gd(path, _declared_gd(512))
+    if kind == "header_payload_mismatch":
+        members["lattice.npy"] = _npy_gd("|u1", (16, 16, 16)) + b"\x00" * 64
+        return _zip_gd(path, members)
+    if kind == "invalid_magic":
+        members["lattice.npy"] = b"XXXXXX" + members["lattice.npy"][6:]
+        return _zip_gd(path, members)
+    if kind == "invalid_version":
+        blob = bytearray(members["lattice.npy"])
+        blob[6] = 9
+        members["lattice.npy"] = bytes(blob)
+        return _zip_gd(path, members)
+    if kind == "invalid_header":
+        members["lattice.npy"] = _npy_gd(
+            "|u1", (16, 16, 16), header="{'descr': '|u1', 'shape': (1,), }")
+        return _zip_gd(path, members)
+    if kind == "object_dtype":
+        members["generation.npy"] = _npy_gd("|O", (), payload=b"")
+        return _zip_gd(path, members)
+    if kind == "structured_dtype":
+        members["generation.npy"] = _npy_gd(
+            "<i8", (), payload=b"",
+            header="{'descr': [('payload', '|O'), ('n', '<i4')], "
+                   "'fortran_order': False, 'shape': (1,), }")
+        return _zip_gd(path, members)
+    if kind == "wrong_rank":
+        members["lattice.npy"] = _npy_gd("|u1", (16, 16))
+        return _zip_gd(path, members)
+    if kind == "spatial_mismatch":
+        members["memory_grid.npy"] = _npy_gd(
+            "<f4", (8, 32, 32, 32), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 32, 32, 32), }")
+        return _zip_gd(path, members)
+    if kind == "fortran_order":
+        members["lattice.npy"] = _npy_gd("|u1", (16, 16, 16), fortran=True)
+        return _zip_gd(path, members)
+    if kind == "not_an_npz":
+        Path(path).write_bytes(_npy_gd("|u1", (16, 16, 16)))
+        return str(path)
+    raise AssertionError("unknown hostile archive kind: " + kind)
+
+
+_HOSTILE_KINDS = [
+    "duplicate_member", "traversal_name", "backslash_name", "missing_member",
+    "extra_member", "oversized_declared_payload", "oversized_edge",
+    "header_payload_mismatch", "invalid_magic", "invalid_version",
+    "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
+    "spatial_mismatch", "fortran_order", "not_an_npz",
+]
+
+#: The reason code each hostile kind must produce. Asserting only that a
+#: ValueError was raised would be weak: SnapshotArchiveRejected IS a
+#: ValueError, so an unrelated failure would satisfy it. Pinning the code ties
+#: each fixture to the defect its name claims.
+_EXPECTED_REASON = {
+    "duplicate_member": "member_duplicate",
+    "traversal_name": "member_name_unsafe",
+    "backslash_name": "member_name_unsafe",
+    "missing_member": "member_missing",
+    "extra_member": "member_unexpected",
+    "oversized_declared_payload": "member_payload_too_large",
+    "oversized_edge": "edge_out_of_range",
+    "header_payload_mismatch": "member_size_inconsistent",
+    "invalid_magic": "member_npy_magic_invalid",
+    "invalid_version": "member_npy_version_unsupported",
+    "invalid_header": "member_header_malformed",
+    "object_dtype": "member_dtype_object",
+    "structured_dtype": "member_dtype_structured",
+    "wrong_rank": "member_rank",
+    "spatial_mismatch": "spatial_disagreement",
+    "fortran_order": "member_fortran_order",
+    "not_an_npz": "not_zip_archive",
+}
+
+
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
+    """The load-reached recorder is the whole point.
+
+    Asserting only that something was raised would pass on code that let
+    `np.load` open, decompress and allocate first and then failed downstream --
+    which is exactly the behaviour this replaces.
+    """
+    archive = _hostile_gd(kind, tmp_path / "v070_gen000001.npz")
+    monkeypatch.setattr(geometry_daemon, "DATA_DIR", tmp_path)
+
+    reached = []
+    real_load = np.load
+
+    def _recording_load(*args, **kwargs):
+        reached.append(args[:1])
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(geometry_daemon.np, "load", _recording_load)
+
+    with pytest.raises(geometry_daemon.SnapshotArchiveRejected) as excinfo:
+        geometry_daemon._load_snapshot(archive)
+    assert excinfo.value.reason == _EXPECTED_REASON[kind], (
+        "the fixture was refused for a different defect than its name claims")
+    assert reached == [], "np.load was reached on a hostile archive"
+
+
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_refusal_names_no_path_member_or_header(kind, tmp_path, monkeypatch):
+    """The refusal reaches unattended logs, so it must carry no archive content."""
+    archive = _hostile_gd(kind, tmp_path / "v070_gen000002.npz")
+    monkeypatch.setattr(geometry_daemon, "DATA_DIR", tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        geometry_daemon._load_snapshot(archive)
+    message = str(excinfo.value)
+    assert str(tmp_path) not in message
+    assert "v070_gen000002" not in message
+    assert ".npy" not in message
+    assert "descr" not in message and "escape" not in message
+    assert message == message.strip() and "\n" not in message

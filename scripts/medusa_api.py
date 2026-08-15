@@ -39,6 +39,15 @@ from threading import Thread
 import numpy as np
 from flask import Flask, jsonify, send_file, Response
 
+from scripts.snapshot_archive_guard import PRODUCTION_POLICY as SNAPSHOT_POLICY
+from scripts.snapshot_archive_guard import (
+    SnapshotArchiveRejected,
+    admit_snapshot,
+    entry_fingerprint,
+    first_admissible,
+    newest_first,
+)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -59,18 +68,71 @@ app.config["API_PORT"] = API_PORT
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: How many of the newest snapshots may be preflighted while looking for a
+#: usable one. The previous code scanned the whole directory, which now holds
+#: five figures' worth of archives; preflighting all of them on every request
+#: would itself be the denial of service. Bounded, so one poisoned batch costs
+#: a fixed amount of work and anything older is simply not considered.
+SNAPSHOT_SELECTION_DEPTH = 8
+
+
 def _find_latest_snapshot():
-    """Find the most recent .npz snapshot."""
-    snapshots = sorted(
-        DATA_DIR.glob("v070_gen*.npz"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    """Find the most recent USABLE .npz snapshot.
+
+    The former one-megabyte minimum is gone. It was a guess at "tiny/corrupt",
+    and it was wrong in both directions: a structurally valid snapshot of a
+    sparse lattice compresses to far less than a megabyte and was skipped,
+    while a hostile archive only had to be padded past the threshold to be
+    selected.
+
+    What that guess was DOING, though, was not merely filtering — it was a
+    newest-first search that skipped an unusable file and fell back to the
+    previous good one. Dropping it and returning ``snapshots[0]`` would have
+    meant that a single truncated or hostile archive with the newest mtime
+    wedged all four snapshot routes at 503 until a fresh snapshot landed. That
+    is a real regression: ``run_v070_engine._save_snapshot`` writes straight to
+    its final path with no temporary-and-rename, so a partially written archive
+    IS the newest file for as long as the write takes.
+
+    So the search is kept and the predicate is replaced: admission, not size.
+    ``admit_snapshot`` is the same preflight ``_load_snapshot`` will run, and it
+    is bounded, so this costs a bounded number of bounded reads.
+
+    Two things this deliberately does NOT do. It does not hold the descriptor
+    open between selection and loading — ``_load_snapshot`` opens and
+    preflights its own, so a file swapped in between is caught there rather
+    than trusted here; this probe decides only WHICH path to try. And when
+    nothing in the window is admissible it still returns the newest, so
+    ``/api/status`` and ``/api/snapshot/latest`` keep reporting and serving the
+    file that is actually there, exactly as before, while the four loading
+    routes go on to answer 503.
+
+    Ordering comes from ``newest_first``, which reads non-following metadata
+    and silently drops entries that vanish mid-enumeration. Sorting on
+    ``stat`` let a symlink borrow its target's modification time to promote
+    itself to "newest" — followed during ORDERING, before admission had any
+    say — and let a snapshot rotated during the scan turn a request into a 500
+    whose message carried the attacker-chosen path.
+    """
+    return first_admissible(
+        newest_first(DATA_DIR.glob("v070_gen*.npz")),
+        data_dir=DATA_DIR,
+        policy=SNAPSHOT_POLICY,
+        depth=SNAPSHOT_SELECTION_DEPTH,
     )
-    # Skip tiny/corrupt files (< 10 MB for 256³)
-    for s in snapshots:
-        if s.stat().st_size > 1_000_000:
-            return s
-    return snapshots[0] if snapshots else None
+
+
+def _snapshot_rejected():
+    """The one response every admission refusal produces.
+
+    503 rather than 500: the snapshot is unusable, so the service cannot
+    answer right now, and a later valid snapshot will fix it without any code
+    change. The body carries no reason code, no member name and no traceback --
+    these routes are unauthenticated GETs on a process that binds 0.0.0.0, and
+    the caller who supplied the archive must learn nothing about which check
+    caught it.
+    """
+    return jsonify({"error": "snapshot_rejected"}), 503
 
 
 def _load_snapshot(path):
@@ -92,9 +154,10 @@ def _load_snapshot(path):
 
     Extraction is not guarded: a missing key or a failing ``int()`` / ``float()``
     conversion propagates exactly as before, and the ``with`` block still closes
-    the archive on the way out. ``str(path)``, the required-key semantics, the
-    extraction order, both conversions and the tuple order are preserved
-    verbatim.
+    the archive on the way out. The required-key semantics, the extraction
+    order, both conversions and the tuple order are preserved verbatim. The
+    ``str(path)`` conversion is NOT: it was deliberately replaced by
+    same-descriptor loading, described below.
 
     ``allow_pickle=False`` -- an object-dtype member is stored as a pickle, so
     loading one with pickle enabled is arbitrary code execution. This helper
@@ -113,12 +176,45 @@ def _load_snapshot(path):
     The claim is archive resource lifetime relative to extraction — not an
     indefinitely accumulating descriptor leak, not snapshot validation, endpoint
     totality, API authentication or atomic file access.
+
+    Structural admission
+    --------------------
+    ``admit_snapshot`` now runs first and raises ``SnapshotArchiveRejected``
+    before ``np.load``, its decompressor or its allocator is reached, for an
+    archive that is out of the data directory, not a ZIP, wrong in its
+    membership, hostile in its member names, oversized in its declared or
+    physical size, or wrong in any member's NPY header.
+
+    Structural refusals all precede loading. A narrow set of payload-TRANSPORT
+    failures cannot: a payload is only checkable by decompressing it, so a
+    valid header over a corrupt body surfaces during array materialisation and
+    is translated there instead. Exactly four things are translated --
+    BadZipFile, zlib.error, EOFError, and NumPy's array-data EOF identified by
+    its own traceback frame. The four routes below
+    translate that refusal into a sanitized 503; nothing else about the
+    refusal is exposed.
+
+    The guard opens the file once and hands this helper the very descriptor it
+    preflighted, so the bytes that were inspected are the bytes NumPy reads.
+    ``str(path)`` is therefore gone: there is no second open to convert a path
+    for. That closes the pathname REOPEN and RE-RESOLUTION races — the guard
+    never validates one path and then loads another — but it does not freeze
+    the bytes: a writer mutating the file in place while the descriptor is open
+    is a different hazard, out of scope here, and disclosed as such.
+    Ownership is split and both halves are explicit — the inner ``with``
+    closes the archive, the guard closes the descriptor, on success and on
+    every exceptional exit.
+
+    ``allow_pickle=False`` stays at this call site even though an object-dtype
+    member can no longer survive admission. It is the second line of defence
+    and the property the repository-wide static gate reads.
     """
-    with np.load(str(path), allow_pickle=False) as snap:
-        lattice = snap["lattice"]
-        memory_grid = snap["memory_grid"]
-        generation = int(snap["generation"])
-        best_fitness = float(snap["best_fitness"])
+    with admit_snapshot(path, data_dir=DATA_DIR, policy=SNAPSHOT_POLICY) as descriptor:
+        with np.load(descriptor, allow_pickle=False) as snap:
+            lattice = snap["lattice"]
+            memory_grid = snap["memory_grid"]
+            generation = int(snap["generation"])
+            best_fitness = float(snap["best_fitness"])
     return (lattice, memory_grid, generation, best_fitness)
 
 
@@ -163,8 +259,19 @@ def status():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    snap_age = time.time() - snap_path.stat().st_mtime
-    snap_size = snap_path.stat().st_size
+    # Non-following, and typed. Selection deliberately KEEPS a dangling link
+    # or a symlink loop as a candidate so it reaches the guard and is refused
+    # with a reason — and when nothing in the window is admissible the newest
+    # is still returned. A following, unguarded `.stat()` here would then raise
+    # `FileNotFoundError`/`ELOOP` into a 500 whose message carries the
+    # attacker-chosen path: the exact disclosure the rest of this change
+    # closes. If the entry cannot be described it is not a snapshot to report.
+    try:
+        _, snap_size, snap_mtime_ns = entry_fingerprint(snap_path)
+    except OSError:
+        return jsonify({"error": "No snapshots found"}), 404
+
+    snap_age = time.time() - snap_mtime_ns / 1_000_000_000
 
     # Count total snapshots
     all_snaps = list(DATA_DIR.glob("v070_gen*.npz"))
@@ -207,7 +314,11 @@ def census():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, fitness = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, fitness = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
+
     N = state.shape[0]
     total = state.size
 
@@ -245,7 +356,10 @@ def equanimity():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, fitness = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, fitness = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
 
     compute_mask = state == 2
     ages = mg[0][compute_mask]
@@ -306,7 +420,11 @@ def acoustic():
     if not snap_path:
         return jsonify({"error": "No data available"}), 404
 
-    state, mg, gen, _ = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, _ = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
+
     N = state.shape[0]
     S = 16
     K = N // S
@@ -352,7 +470,10 @@ def geometry_stl():
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
-    state, mg, gen, _ = _load_snapshot(snap_path)
+    try:
+        state, mg, gen, _ = _load_snapshot(snap_path)
+    except SnapshotArchiveRejected:
+        return _snapshot_rejected()
 
     # Sample non-void cells (limit to 50K for reasonable STL size)
     non_void_coords = np.argwhere(state > 0)

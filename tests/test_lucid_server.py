@@ -25,7 +25,9 @@ totality.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
+import os
 import sys
 import types
 from unittest import mock
@@ -402,16 +404,36 @@ def _marker_ls(tmp_path):
 
 
 def _write_snapshot_ls(path, compressed=False, **members):
-    """A real NPZ. Object members pickle on the way in, which is harmless."""
+    """A real NPZ. Object members pickle on the way in, which is harmless.
+
+    The edge is 16 and all five schema members are present, because the
+    archive now has to be ADMISSIBLE before its member dtypes matter: a 4-cube
+    with three members would be refused for its shape and its membership, and
+    the pickle property below would never be reached.
+    """
     payload = {
-        "lattice": np.ones((4, 4, 4), dtype=np.uint8),
-        "memory_grid": np.zeros((8, 4, 4, 4), dtype=np.float32),
+        "lattice": np.ones((16, 16, 16), dtype=np.uint8),
+        "memory_grid": np.zeros((8, 16, 16, 16), dtype=np.float32),
         "generation": 7,
+        "ca_step": 11,
+        "best_fitness": 0.5,
     }
     payload.update(members)
     writer = np.savez_compressed if compressed else np.savez
     writer(path, **payload)
     return str(path)
+
+
+@pytest.fixture
+def confined(tmp_path, monkeypatch):
+    """Point the server's data directory at pytest's own tmp_path.
+
+    Admission confines the archive to the configured data directory, so a
+    fixture written anywhere else is refused for CONTAINMENT before the
+    property under test is reached.
+    """
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    return tmp_path
 
 
 @requires_numpy
@@ -432,14 +454,39 @@ def test_ls_payload_fixture_actually_fires_when_pickle_is_enabled(tmp_path):
 
 @requires_numpy
 @pytest.mark.parametrize("field", ["lattice", "memory_grid", "generation"])
-def test_object_payload_is_refused_by_extract_render_data(tmp_path, field):
+def test_object_payload_is_refused_by_extract_render_data(confined, field):
+    """The refusal moved EARLIER, and the code says so.
+
+    An object member used to be caught by NumPy at `np.load`. It is now caught
+    by admission from the member's NPY header, before NumPy is involved at
+    all -- so the assertion is the typed reason code, not NumPy's message. The
+    property that matters is unchanged and stronger: the payload never runs.
+    """
     archive = _write_snapshot_ls(
-        tmp_path / f"{field}.npz", **{field: _payload_array_ls(tmp_path)}
+        confined / f"v070_{field}.npz", **{field: _payload_array_ls(confined)}
+    )
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert excinfo.value.reason == "member_dtype_object"
+    assert not _marker_ls(confined).exists(), "the pickle payload executed"
+
+
+@requires_numpy
+def test_numpys_own_pickle_refusal_is_still_in_place_behind_admission(confined):
+    """Second line of defence, kept non-vacuous.
+
+    Admission now stops an object member first, so the load-site refusal would
+    otherwise never be observed again. Calling NumPy directly on the same
+    archive shows it is still exactly as it was.
+    """
+    archive = _write_snapshot_ls(
+        confined / "v070_direct.npz", lattice=_payload_array_ls(confined)
     )
     with pytest.raises(ValueError) as excinfo:
-        lucid_server.extract_render_data(archive)
+        with np.load(archive, allow_pickle=False) as snap:
+            snap["lattice"]
     assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_ls(tmp_path).exists(), "the pickle payload executed"
+    assert not _marker_ls(confined).exists()
 
 
 def _structured_payload_ls(directory):
@@ -462,24 +509,25 @@ def test_the_structured_payload_also_fires_when_pickle_is_enabled(tmp_path):
 
 
 @requires_numpy
-def test_an_object_bearing_structured_dtype_is_refused(tmp_path):
-    """`kind == 'O'` alone would miss this; NumPy's refusal covers
-    `dtype.hasobject`."""
+def test_an_object_bearing_structured_dtype_is_refused(confined):
+    """`kind == 'O'` alone would miss this. Admission refuses a structured
+    descriptor outright, without needing to reason about which fields carry
+    objects."""
     archive = _write_snapshot_ls(
-        tmp_path / "struct.npz", generation=_structured_payload_ls(tmp_path)
+        confined / "v070_struct.npz", generation=_structured_payload_ls(confined)
     )
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
         lucid_server.extract_render_data(archive)
-    assert "allow_pickle=False" in str(excinfo.value)
-    assert not _marker_ls(tmp_path).exists()
+    assert excinfo.value.reason == "member_dtype_structured"
+    assert not _marker_ls(confined).exists()
 
 
 @requires_numpy
-def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
+def test_the_archive_is_closed_before_any_cell_iteration(confined, monkeypatch):
     """`extract_render_data` had no context manager: the handle was held open
     across up to MAX_CELLS iterations of per-cell work. `np.argwhere` is the
     first downstream call, so it is the ordering witness."""
-    archive = _write_snapshot_ls(tmp_path / "clean.npz")
+    archive = _write_snapshot_ls(confined / "v070_clean.npz")
     real_load = np.load
     opened = []
 
@@ -507,38 +555,38 @@ def test_the_archive_is_closed_before_any_cell_iteration(tmp_path, monkeypatch):
 
 
 @requires_numpy
-def test_the_real_archive_is_closed_after_a_refusal(tmp_path, monkeypatch):
-    """Closure on the exceptional path, witnessed on the real `NpzFile`.
-
-    The docstring claims closure "holds on refusal too because the members are
-    read inside the block". This file's ownership is conditional now, so that
-    claim is newest here and is witnessed rather than asserted.
-    """
+def test_the_descriptor_is_closed_after_a_refusal(confined, monkeypatch):
+    """Closure on the exceptional path, witnessed on the real file object the
+    guard opened -- a NumPy handle is never created for a refused archive."""
     archive = _write_snapshot_ls(
-        tmp_path / "refused.npz", lattice=_payload_array_ls(tmp_path)
+        confined / "v070_refused.npz", lattice=_payload_array_ls(confined)
     )
+    # Hooked on `os.fdopen`, not `builtins.open`: the guard opens through
+    # `os.open` so it can pass O_NONBLOCK and O_NOFOLLOW, and `os.fdopen` is
+    # what turns that descriptor into the file object it yields.
+    import os as _os
     opened = []
-    real_load = np.load
+    real_fdopen = _os.fdopen
 
-    def tracking_load(*args, **kwargs):
-        handle = real_load(*args, **kwargs)
+    def _tracking_fdopen(*args, **kwargs):
+        handle = real_fdopen(*args, **kwargs)
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(lucid_server.np, "load", tracking_load)
-    with pytest.raises(ValueError):
+    monkeypatch.setattr(_os, "fdopen", _tracking_fdopen)
+    with pytest.raises(lucid_server.SnapshotArchiveRejected):
         lucid_server.extract_render_data(str(archive))
 
-    assert len(opened) == 1, "the archive was never opened"
-    # `close()` drops `zip` unconditionally; `fid` is a class attribute
-    # defaulting to None and cannot carry this claim alone.
-    assert opened[0].zip is None, "the archive survived the refusal"
+    assert len(opened) == 1, "the archive was opened more than once, or not at all"
+    assert opened[0].closed, "the descriptor survived the refusal"
 
 
 @requires_numpy
-def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
+def test_a_refused_archive_never_reaches_np_load_at_all(confined, monkeypatch):
+    """Stronger than "it was not retried with pickle enabled": NumPy is not
+    asked to open the archive even once."""
     archive = _write_snapshot_ls(
-        tmp_path / "retry.npz", lattice=_payload_array_ls(tmp_path)
+        confined / "v070_retry.npz", lattice=_payload_array_ls(confined)
     )
     real_load = np.load
     calls = []
@@ -548,8 +596,27 @@ def test_a_refusal_is_never_retried_with_pickle_enabled(tmp_path, monkeypatch):
         return real_load(*args, **kwargs)
 
     monkeypatch.setattr(lucid_server.np, "load", _recording_load)
-    with pytest.raises(ValueError):
+    with pytest.raises(lucid_server.SnapshotArchiveRejected):
         lucid_server.extract_render_data(archive)
+    assert calls == []
+
+
+@requires_numpy
+def test_a_valid_archive_is_loaded_with_pickle_explicitly_disabled(confined,
+                                                                   monkeypatch):
+    """The counterpart control: on the admitted path the explicit literal is
+    still what NumPy receives, so the assertion above is about ordering rather
+    than about the flag having quietly disappeared."""
+    archive = _write_snapshot_ls(confined / "v070_ok.npz", compressed=True)
+    real_load = np.load
+    calls = []
+
+    def _recording_load(*args, **kwargs):
+        calls.append(kwargs.get("allow_pickle"))
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+    lucid_server.extract_render_data(archive)
     assert calls == [False]
 
 
@@ -593,34 +660,721 @@ def test_the_named_legacy_npy_class_is_what_numpy_actually_raises():
 
 
 @requires_numpy
-def test_a_numeric_npy_still_fails_exactly_as_it_did_before(tmp_path, monkeypatch):
-    """`extract_render_data` gained its first `with` on this branch.
+def test_a_renamed_numeric_npy_now_receives_a_typed_refusal(confined,
+                                                            monkeypatch):
+    """An explicitly authorized behaviour change, recorded rather than glossed.
 
-    An `NpzFile` needs deterministic ownership; an ndarray does not. Conditional
-    ownership keeps the archive closing while leaving a `.npy` to fail at the
-    same `snap['lattice']` subscript it always did -- and nothing downstream may
-    run, which `np.argwhere` witnesses because it is the first call after the
-    extraction.
+    A numeric `.npy` renamed `.npz` used to reach `np.load`, come back as a
+    plain ndarray, and fail at the `snap['lattice']` subscript with an
+    incidental `IndexError`. It is now refused by admission as not being a ZIP
+    archive, before NumPy sees it. The old class is still derived below and
+    asserted to be a DIFFERENT class from the new failure, so the change
+    cannot be mistaken for the old behaviour surviving.
     """
-    not_an_archive = tmp_path / "snapshot.npy"
-    np.save(not_an_archive, np.zeros((2, 2, 2), dtype=np.uint8))
+    npy_source = confined / "v070_renamed.npy"
+    np.save(npy_source, np.zeros((16, 16, 16), dtype=np.uint8))
+    not_an_archive = confined / "v070_renamed.npz"
+    not_an_archive.write_bytes(npy_source.read_bytes())
 
     reached = []
     monkeypatch.setattr(
         lucid_server.np, "argwhere", lambda *a, **k: reached.append("argwhere")
     )
 
-    with pytest.raises(_legacy_npy_error_class_ls()):
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
         lucid_server.extract_render_data(str(not_an_archive))
 
+    assert excinfo.value.reason == "not_zip_archive"
     assert reached == [], "downstream processing ran on a non-archive input"
+    assert not isinstance(excinfo.value, _legacy_npy_error_class_ls()), (
+        "the new refusal is the old incidental IndexError after all")
 
 
 @requires_numpy
-def test_a_numeric_snapshot_still_produces_cells_and_metrics(tmp_path):
-    archive = _write_snapshot_ls(tmp_path / "clean.npz", generation=np.int64(5))
+def test_a_numeric_snapshot_still_produces_cells_and_metrics(confined):
+    archive = _write_snapshot_ls(confined / "v070_clean.npz",
+                                 generation=np.int64(5))
     data = lucid_server.extract_render_data(archive)
     assert set(data) == {"cells", "metrics"}
     assert data["metrics"]["generation"] == 5
     assert type(data["metrics"]["generation"]) is int
     assert data["cells"], "a fully non-void lattice must yield cells"
+    assert data["metrics"]["grid_size"] == 16
+
+
+class _WatcherStopped(Exception):
+    """Ends the watcher's infinite loop from its own sleep."""
+
+
+def _run_watcher(monkeypatch, polls):
+    """Drive the REAL `snapshot_watcher` coroutine for `polls` iterations.
+
+    The loop's trailing `await asyncio.sleep(POLL_INTERVAL)` sits outside its
+    try/except, so raising from a patched sleep ends the coroutine without
+    being swallowed by the broad handler. Returns everything broadcast.
+    """
+    broadcasts = []
+    seen = {"polls": 0}
+
+    async def _record(message):
+        broadcasts.append(message)
+
+    async def _sleep(_seconds):
+        seen["polls"] += 1
+        if seen["polls"] >= polls:
+            raise _WatcherStopped
+
+    monkeypatch.setattr(lucid_server, "broadcast", _record)
+    monkeypatch.setattr(lucid_server.asyncio, "sleep", _sleep)
+
+    async def _drive():
+        try:
+            await lucid_server.snapshot_watcher()
+        except _WatcherStopped:
+            pass
+
+    asyncio.run(_drive())
+    return broadcasts, seen["polls"]
+
+
+@pytest.fixture
+def _fresh_watcher_state(monkeypatch):
+    """`snapshot_watcher` keeps its cursor in module globals."""
+    monkeypatch.setattr(lucid_server, "last_snapshot_path", None)
+    monkeypatch.setattr(lucid_server, "last_snapshot_mtime", 0)
+
+
+@requires_numpy
+def test_the_watcher_logs_once_and_broadcasts_nothing_for_a_rejected_snapshot(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The REAL watcher loop runs here.
+
+    Previously this called `extract_render_data` directly and asserted on a
+    patched `broadcast` that the function never calls -- so the assertion could
+    not fail and `snapshot_watcher` was executed by no test at all.
+    """
+    _zip_ls(confined / "v070_gen000001.npz", _declared_ls(512))
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=4)
+    output = capsys.readouterr().out
+
+    assert broadcasts == [], "a rejected snapshot must not be broadcast"
+    assert polls == 4, "the watcher must keep polling after a refusal"
+    assert output.count("Snapshot rejected: edge_out_of_range") == 1, (
+        "exactly one bounded reason code, and it is the typed handler's -- "
+        "the broad handler would have printed 'Snapshot error'")
+    assert "Snapshot error" not in output
+    assert "v070_gen000001" not in output
+
+
+@requires_numpy
+def test_the_watcher_does_not_reprocess_an_unchanged_rejected_snapshot(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The cursor is advanced before extraction, so repeated polls over an
+    unchanged poisoned directory neither re-extract nor re-log."""
+    _zip_ls(confined / "v070_gen000001.npz", _declared_ls(512))
+
+    extractions = []
+    real_extract = lucid_server.extract_render_data
+
+    def _counting_extract(path):
+        extractions.append(path)
+        return real_extract(path)
+
+    monkeypatch.setattr(lucid_server, "extract_render_data", _counting_extract)
+    _run_watcher(monkeypatch, polls=5)
+
+    assert len(extractions) == 1, "the rejected snapshot was reprocessed"
+    assert capsys.readouterr().out.count("Snapshot rejected") == 1
+
+
+@requires_numpy
+def test_the_watcher_survives_candidates_that_disappear_mid_scan(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """Discovery and the watcher's own second metadata read are separate
+    syscalls from the glob, and the producer rotates snapshots. Neither may
+    raise into the loop's broad handler, whose message carries the path."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    ghost = str(confined / "v070_gen_GHOSTNAME_0002.npz")
+    real_glob = glob.glob
+
+    def _glob_with_a_ghost(pattern):
+        return list(real_glob(pattern)) + [ghost]
+
+    monkeypatch.setattr(lucid_server.glob, "glob", _glob_with_a_ghost)
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=2)
+    output = capsys.readouterr().out
+
+    assert len(broadcasts) == 1, "the ghost blocked a valid snapshot"
+    assert "GHOSTNAME" not in output
+    assert "Snapshot error" not in output
+    assert valid.exists()
+
+
+@requires_numpy
+def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The second metadata read specifically: selection succeeded, then the
+    file went away before the watcher fingerprinted it."""
+    chosen = confined / "v070_gen000003.npz"
+    _write_snapshot_ls(chosen, compressed=True)
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: str(chosen))
+
+    real_fingerprint = lucid_server.entry_fingerprint
+
+    def _vanishing(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _vanishing)
+    broadcasts, polls = _run_watcher(monkeypatch, polls=2)
+    output = capsys.readouterr().out
+
+    assert broadcasts == []
+    assert polls == 2, "the watcher stopped polling"
+    assert "v070_gen000003" not in output
+    assert "No such file" not in output
+
+
+@pytest.fixture(autouse=True)
+def _reset_metadata_warning():
+    """The warning's rate limiter is module state; keep tests independent."""
+    for lane in (lucid_server.DISCOVERY_LANE, lucid_server.FINGERPRINT_LANE):
+        lucid_server._clear_metadata_failures(lane)
+    yield
+    for lane in (lucid_server.DISCOVERY_LANE, lucid_server.FINGERPRINT_LANE):
+        lucid_server._clear_metadata_failures(lane)
+
+
+@requires_numpy
+def test_a_persistent_second_read_failure_warns_once_across_many_polls(
+    confined, monkeypatch, capsys, _fresh_watcher_state
+):
+    """The REAL watcher, the REAL `find_latest_snapshot`, many polls.
+
+    This is the shape that defeated the rate limit. Discovery SUCCEEDS on every
+    poll -- there is a perfectly good snapshot in the directory -- while the
+    watcher's second metadata read persistently fails. With one shared warning
+    state, each successful discovery cleared it and the next second-read
+    failure warned into a freshly-armed lane, so the limiter was real and
+    simply never applied.
+
+    `find_latest_snapshot` is deliberately NOT patched: substituting a lambda
+    would remove the very call whose success does the clearing, and the test
+    would pass against the broken code.
+    """
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+
+    def _always_fails(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _always_fails)
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    broadcasts, polls = _run_watcher(monkeypatch, polls=8)
+    output = capsys.readouterr().out
+
+    assert polls == 8, "the watcher stopped polling"
+    assert broadcasts == [], "a frame went out despite the failure"
+    assert output.count("Snapshot metadata unreadable") == 1, (
+        "the rate limit did not hold across polls")
+    assert "v070_gen000001" not in output
+    assert "No such file" not in output and "Errno" not in output
+    assert "Snapshot error" not in output
+
+
+@requires_numpy
+def test_the_second_read_warning_repeats_after_the_interval(confined,
+                                                            monkeypatch, capsys,
+                                                            _fresh_watcher_state):
+    """Rate-limited, not silenced: after the interval elapses the condition is
+    reported again."""
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+
+    monkeypatch.setattr(
+        lucid_server, "entry_fingerprint",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError(2, "gone")))
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+    now[0] += lucid_server.METADATA_WARNING_INTERVAL + 1
+    _run_watcher(monkeypatch, polls=2)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+
+@requires_numpy
+def test_a_recovered_second_read_re_arms_its_own_lane(confined, monkeypatch,
+                                                       capsys,
+                                                       _fresh_watcher_state):
+    """Recovery re-arms the lane that recovered, so a later episode is
+    reported rather than staying suppressed for ever."""
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+    real_fingerprint = lucid_server.entry_fingerprint
+    failing = [True]
+
+    def _sometimes(path):
+        if failing[0]:
+            raise FileNotFoundError(2, "gone")
+        return real_fingerprint(path)
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _sometimes)
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1
+
+    failing[0] = False
+    _run_watcher(monkeypatch, polls=2)
+    capsys.readouterr()
+
+    failing[0] = True
+    _run_watcher(monkeypatch, polls=4)
+    assert capsys.readouterr().out.count("Snapshot metadata unreadable") == 1, (
+        "the lane did not re-arm after recovering")
+
+
+def test_a_lone_transient_failure_stays_silent(confined, monkeypatch, capsys):
+    """A single rotated file is ordinary and must not produce a line."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert capsys.readouterr().out == "", "a lone failure was reported"
+
+
+def test_the_two_lanes_do_not_clear_each_other(confined, monkeypatch, capsys):
+    """The property in isolation: success in one lane must not reset the
+    other's episode."""
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    lucid_server._clear_metadata_failures(lucid_server.DISCOVERY_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    assert capsys.readouterr().out == "", (
+        "clearing the discovery lane re-armed the fingerprint lane")
+
+
+@requires_numpy
+def test_selection_falls_back_past_an_unusable_newest_snapshot(confined):
+    """One unusable archive with the newest mtime must not stall the watcher."""
+    good = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    poison = Path(_hostile_ls("missing_member", confined / "v070_gen000002.npz"))
+    os.utime(good, (1_000_000, 1_000_000))
+    os.utime(poison, (2_000_000, 2_000_000))
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(good)
+
+
+@requires_numpy
+def test_selection_returns_the_newest_when_none_is_admissible(confined):
+    """Not `None`: the caller runs its ordinary load and the typed refusal is
+    logged, rather than the directory being reported as empty."""
+    first = Path(_hostile_ls("missing_member", confined / "v070_gen000002.npz"))
+    second = Path(_hostile_ls("missing_member", confined / "v070_gen000001.npz"))
+    os.utime(second, (1_000_000, 1_000_000))
+    os.utime(first, (2_000_000, 2_000_000))
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(first)
+
+
+def test_a_directory_of_unreadable_candidates_warns_once(confined, monkeypatch,
+                                                          capsys):
+    """Candidates matched the glob and none could be described. That is not an
+    empty directory — it means the watcher is running blind, and silence there
+    would hide it."""
+    ghosts = [str(confined / ("v070_gen_LEAKNAME_%d.npz" % i)) for i in range(4)]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+
+    # The FIRST failure is deliberately silent: a lone one is an ordinary
+    # rotation. The condition has to persist before it is worth a line.
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert capsys.readouterr().out == ""
+
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    first = capsys.readouterr().out
+    assert "Snapshot metadata unreadable" in first
+    assert "LEAKNAME" not in first
+    assert "No such file" not in first and "Errno" not in first
+
+    # Suppressed while the condition persists: one line, not one per poll.
+    for _ in range(5):
+        lucid_server.find_latest_snapshot(str(confined))
+    assert capsys.readouterr().out == ""
+
+
+def test_the_metadata_warning_is_rate_limited_on_a_monotonic_clock(confined,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """A monotonic clock, so a system-clock step can neither suppress the
+    warning for ever nor make it repeat every poll."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+
+    now = [1000.0]
+    monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
+
+    lucid_server.find_latest_snapshot(str(confined))   # first: silent
+    lucid_server.find_latest_snapshot(str(confined))   # second: warns
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    now[0] += lucid_server.METADATA_WARNING_INTERVAL - 1
+    lucid_server.find_latest_snapshot(str(confined))
+    assert capsys.readouterr().out == "", "warned again inside the interval"
+
+    now[0] += 2
+    lucid_server.find_latest_snapshot(str(confined))
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+
+@requires_numpy
+def test_a_successful_read_clears_the_warning_state(confined, monkeypatch,
+                                                    capsys):
+    """Recovery: once metadata reads work again, a later failure run warns
+    again rather than staying suppressed for ever."""
+    ghosts = [str(confined / "v070_gen_ghost.npz")]
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    lucid_server.find_latest_snapshot(str(confined))
+    lucid_server.find_latest_snapshot(str(confined))
+    capsys.readouterr()
+
+    real = Path(_write_snapshot_ls(confined / "v070_gen000009.npz",
+                                   compressed=True))
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: [str(real)])
+    assert lucid_server.find_latest_snapshot(str(confined)) == str(real)
+
+    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    lucid_server.find_latest_snapshot(str(confined))
+    lucid_server.find_latest_snapshot(str(confined))
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+
+@requires_numpy
+def test_the_second_fingerprint_read_failure_also_warns(confined, monkeypatch,
+                                                         capsys,
+                                                         _fresh_watcher_state):
+    """Selection and the watcher's fingerprint are separate syscalls, so the
+    second read needs the same treatment as the first."""
+    chosen = Path(_write_snapshot_ls(confined / "v070_gen000003.npz",
+                                     compressed=True))
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: str(chosen))
+
+    def _vanishing(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+
+    monkeypatch.setattr(lucid_server, "entry_fingerprint", _vanishing)
+    _run_watcher(monkeypatch, polls=3)
+    output = capsys.readouterr().out
+
+    assert output.count("Snapshot metadata unreadable") == 1
+    assert "v070_gen000003" not in output and "No such file" not in output
+
+
+@requires_numpy
+def test_the_watcher_accepts_a_later_valid_snapshot(confined, monkeypatch,
+                                                    capsys, _fresh_watcher_state):
+    """Recovery, through the real loop: after a refusal, a newer valid
+    snapshot is broadcast without a restart."""
+    poison = confined / "v070_gen000001.npz"
+    _zip_ls(poison, _declared_ls(512))
+    os.utime(poison, (1_000_000, 1_000_000))
+
+    _run_watcher(monkeypatch, polls=1)
+
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000002.npz",
+                                    compressed=True))
+    os.utime(valid, (2_000_000, 2_000_000))
+
+    broadcasts, _ = _run_watcher(monkeypatch, polls=1)
+    assert len(broadcasts) == 1, "the later valid snapshot was not broadcast"
+    frame = json.loads(broadcasts[0])
+    assert frame["type"] == "frame"
+    assert frame["data"]["metrics"]["generation"] == 7
+
+
+# ===========================================================================
+# Structural admission -- a hostile archive must be refused BEFORE np.load
+#
+# `extract_render_data` is reached from the watched directory on every change
+# and from every client connect, with nobody present. Pickle refusal and
+# archive lifetime say nothing about an archive's shape or its cost: an
+# archive could still name members outside the schema, carry traversal-bearing
+# entries, declare a payload of hundreds of gigabytes, or lie about its own
+# sizes, and every one of those reached `np.load` and the allocation behind it.
+#
+# The fixtures are built with the standard library, because NumPy cannot write
+# a duplicate member, a corrupt NPY magic or a lying shape. None is hostile in
+# SIZE: each is a few hundred kilobytes at most, and the oversized cases lie in their headers
+# rather than on disk.
+# ===========================================================================
+
+import struct  # noqa: E402
+import warnings  # noqa: E402
+import zipfile  # noqa: E402
+
+_NPY_MAGIC = b"\x93NUMPY"
+
+
+def _npy_ls(descr, shape, *, fortran=False, payload=None, header=None,
+            version=(1, 0)):
+    """One `.npy` member as raw bytes, with every field independently forgeable."""
+    if header is None:
+        if not shape:
+            shape_text = "()"
+        elif len(shape) == 1:
+            shape_text = "(%d,)" % shape[0]
+        else:
+            shape_text = "(" + ", ".join(str(d) for d in shape) + ")"
+        header = "{'descr': '%s', 'fortran_order': %s, 'shape': %s, }" % (
+            descr, fortran, shape_text)
+    body = header.encode("latin1")
+    prelude = 10 if version == (1, 0) else 12
+    body += b" " * ((-(prelude + len(body) + 1)) % 64) + b"\n"
+    out = bytearray(_NPY_MAGIC) + bytes(version)
+    out += (struct.pack("<H", len(body)) if version == (1, 0)
+            else struct.pack("<I", len(body)))
+    out += body
+    if payload is None:
+        digits = descr[2:] if descr[0] in "<>|=" else descr[1:]
+        itemsize = int(digits) if digits else 0
+        count = 1
+        for dim in shape:
+            count *= dim
+        payload = b"\x00" * (count * itemsize)
+    return bytes(out) + payload
+
+
+def _schema_ls(edge=16, channels=8):
+    """The five members a `v070_gen` snapshot carries, at a valid edge."""
+    return {
+        "lattice.npy": _npy_ls("|u1", (edge, edge, edge)),
+        "memory_grid.npy": _npy_ls("<f4", (channels, edge, edge, edge)),
+        "generation.npy": _npy_ls("<i8", ()),
+        "ca_step.npy": _npy_ls("<i8", ()),
+        "best_fitness.npy": _npy_ls("<f8", ()),
+    }
+
+
+def _zip_ls(path, members, *, compressed=True, duplicate=None):
+    mode = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # a duplicate name is the point here
+        with zipfile.ZipFile(path, "w", compression=mode) as archive:
+            for name, blob in members.items():
+                archive.writestr(name, blob)
+            if duplicate is not None:
+                archive.writestr(duplicate, members[duplicate])
+    return str(path)
+
+
+def _declared_ls(edge, channels=8):
+    """The same five members, DECLARING an `edge` it does not carry.
+
+    The guard checks geometry before size arithmetic, so an archive that lies
+    about its shape is refused on the geometry rule without the bytes ever
+    needing to exist. That is what keeps a 512-edge case at a few kilobytes
+    instead of the 4.1 GiB a real 512-cube payload would require.
+    """
+    members = _schema_ls(16, channels)
+    members["lattice.npy"] = _npy_ls(
+        "|u1", (edge, edge, edge), payload=b"",
+        header="{'descr': '|u1', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d), }" % (edge, edge, edge))
+    members["memory_grid.npy"] = _npy_ls(
+        "<f4", (channels, edge, edge, edge), payload=b"",
+        header="{'descr': '<f4', 'fortran_order': False, 'shape': "
+               "(%d, %d, %d, %d), }" % (channels, edge, edge, edge))
+    return members
+
+
+def _hostile_ls(kind, path):
+    """Build one hostile archive of the named kind at `path`."""
+    members = _schema_ls()
+    if kind == "duplicate_member":
+        return _zip_ls(path, members, duplicate="lattice.npy")
+    if kind == "traversal_name":
+        members["../../escape.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "backslash_name":
+        members["sub\\escape.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "missing_member":
+        members.pop("ca_step.npy")
+        return _zip_ls(path, members)
+    if kind == "extra_member":
+        members["surprise.npy"] = _npy_ls("|u1", (1,))
+        return _zip_ls(path, members)
+    if kind == "oversized_declared_payload":
+        members["lattice.npy"] = _npy_ls(
+            "|u8", (256, 256, 256), payload=b"",
+            header="{'descr': '|u8', 'fortran_order': False, "
+                   "'shape': (256, 256, 256), }")
+        members["memory_grid.npy"] = _npy_ls(
+            "<f4", (8, 256, 256, 256), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 256, 256, 256), }")
+        return _zip_ls(path, members)
+    if kind == "oversized_edge":
+        return _zip_ls(path, _declared_ls(512))
+    if kind == "header_payload_mismatch":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16)) + b"\x00" * 64
+        return _zip_ls(path, members)
+    if kind == "invalid_magic":
+        members["lattice.npy"] = b"XXXXXX" + members["lattice.npy"][6:]
+        return _zip_ls(path, members)
+    if kind == "invalid_version":
+        blob = bytearray(members["lattice.npy"])
+        blob[6] = 9
+        members["lattice.npy"] = bytes(blob)
+        return _zip_ls(path, members)
+    if kind == "invalid_header":
+        members["lattice.npy"] = _npy_ls(
+            "|u1", (16, 16, 16), header="{'descr': '|u1', 'shape': (1,), }")
+        return _zip_ls(path, members)
+    if kind == "object_dtype":
+        members["generation.npy"] = _npy_ls("|O", (), payload=b"")
+        return _zip_ls(path, members)
+    if kind == "structured_dtype":
+        members["generation.npy"] = _npy_ls(
+            "<i8", (), payload=b"",
+            header="{'descr': [('payload', '|O'), ('n', '<i4')], "
+                   "'fortran_order': False, 'shape': (1,), }")
+        return _zip_ls(path, members)
+    if kind == "wrong_rank":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16))
+        return _zip_ls(path, members)
+    if kind == "spatial_mismatch":
+        members["memory_grid.npy"] = _npy_ls(
+            "<f4", (8, 32, 32, 32), payload=b"",
+            header="{'descr': '<f4', 'fortran_order': False, "
+                   "'shape': (8, 32, 32, 32), }")
+        return _zip_ls(path, members)
+    if kind == "fortran_order":
+        members["lattice.npy"] = _npy_ls("|u1", (16, 16, 16), fortran=True)
+        return _zip_ls(path, members)
+    if kind == "not_an_npz":
+        Path(path).write_bytes(_npy_ls("|u1", (16, 16, 16)))
+        return str(path)
+    raise AssertionError("unknown hostile archive kind: " + kind)
+
+
+_HOSTILE_KINDS = [
+    "duplicate_member", "traversal_name", "backslash_name", "missing_member",
+    "extra_member", "oversized_declared_payload", "oversized_edge",
+    "header_payload_mismatch", "invalid_magic", "invalid_version",
+    "invalid_header", "object_dtype", "structured_dtype", "wrong_rank",
+    "spatial_mismatch", "fortran_order", "not_an_npz",
+]
+
+#: The reason code each hostile kind must produce. Asserting only that a
+#: ValueError was raised would be weak: SnapshotArchiveRejected IS a
+#: ValueError, so an unrelated failure would satisfy it. Pinning the code ties
+#: each fixture to the defect its name claims.
+_EXPECTED_REASON = {
+    "duplicate_member": "member_duplicate",
+    "traversal_name": "member_name_unsafe",
+    "backslash_name": "member_name_unsafe",
+    "missing_member": "member_missing",
+    "extra_member": "member_unexpected",
+    "oversized_declared_payload": "member_payload_too_large",
+    "oversized_edge": "edge_out_of_range",
+    "header_payload_mismatch": "member_size_inconsistent",
+    "invalid_magic": "member_npy_magic_invalid",
+    "invalid_version": "member_npy_version_unsupported",
+    "invalid_header": "member_header_malformed",
+    "object_dtype": "member_dtype_object",
+    "structured_dtype": "member_dtype_structured",
+    "wrong_rank": "member_rank",
+    "spatial_mismatch": "spatial_disagreement",
+    "fortran_order": "member_fortran_order",
+    "not_an_npz": "not_zip_archive",
+}
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_archive_is_refused_before_np_load(kind, tmp_path, monkeypatch):
+    """The load-reached recorder is the whole point.
+
+    Asserting only that something was raised would pass on code that let
+    `np.load` open, decompress and allocate first and then failed downstream --
+    which is exactly the behaviour this replaces.
+    """
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000001.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+
+    reached = []
+    real_load = np.load
+
+    def _recording_load(*args, **kwargs):
+        reached.append(args[:1])
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(lucid_server.np, "load", _recording_load)
+
+    with pytest.raises(lucid_server.SnapshotArchiveRejected) as excinfo:
+        lucid_server.extract_render_data(archive)
+    assert excinfo.value.reason == _EXPECTED_REASON[kind], (
+        "the fixture was refused for a different defect than its name claims")
+    assert reached == [], "np.load was reached on a hostile archive"
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_hostile_refusal_names_no_path_member_or_header(kind, tmp_path, monkeypatch):
+    """The refusal reaches unattended logs, so it must carry no archive content."""
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000002.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    with pytest.raises(ValueError) as excinfo:
+        lucid_server.extract_render_data(archive)
+    message = str(excinfo.value)
+    assert str(tmp_path) not in message
+    assert "v070_gen000002" not in message
+    assert ".npy" not in message
+    assert "descr" not in message and "escape" not in message
+    assert message == message.strip() and "\n" not in message
+
+
+@requires_numpy
+@pytest.mark.parametrize("kind", _HOSTILE_KINDS)
+def test_a_rejected_initial_snapshot_sends_no_frame_and_serves_the_client(
+    kind, tmp_path, monkeypatch, capsys
+):
+    """The initial-client send, not the watcher.
+
+    `handle_client` sends through `websocket.send`, never through `broadcast`,
+    so an assertion on a patched `broadcast` here would be permanently true and
+    prove nothing. The log line is what distinguishes the typed handler from
+    the pre-existing broad one directly below it, which would print
+    "Initial send error" instead.
+    """
+    archive = _hostile_ls(kind, tmp_path / "v070_gen000003.npz")
+    monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot",
+                        lambda data_dir: archive)
+
+    websocket = FakeWebSocket([PING])
+    asyncio.run(lucid_server.handle_client(websocket))
+    output = capsys.readouterr().out
+
+    assert [json.loads(s)["type"] for s in websocket.sent] == ["pong"], (
+        "a rejected initial snapshot must send no frame, and must not stop the "
+        "client from being served"
+    )
+    assert "Snapshot rejected:" in output
+    assert "Initial send error" not in output, (
+        "the refusal fell through to the broad handler")
+    assert "v070_gen000003" not in output
+    assert websocket not in lucid_server.connected_clients

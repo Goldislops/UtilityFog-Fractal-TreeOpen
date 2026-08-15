@@ -25,6 +25,28 @@ from datetime import datetime
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# This module is documented as `python scripts/geometry_daemon.py`, which
+# leaves the repository root off sys.path. The shared snapshot guard lives in
+# the `scripts` package, so the root is put on the path before importing it --
+# one canonical module name either way, which matters because the guard's
+# exception type is caught by identity below.
+if str(PROJECT_ROOT) not in sys.path:
+    # Appended, not prepended: this must not be able to shadow a standard
+    # library module with a repository file of the same name.
+    sys.path.append(str(PROJECT_ROOT))
+
+from scripts.snapshot_archive_guard import (  # noqa: E402
+    PRODUCTION_POLICY as SNAPSHOT_POLICY,
+)
+from scripts.snapshot_archive_guard import (  # noqa: E402
+    SnapshotArchiveRejected,
+    admit_snapshot,
+    entry_fingerprint,
+    first_admissible,
+    order_candidates,
+)
+
 DATA_DIR = PROJECT_ROOT / "data"
 GEO_DIR = DATA_DIR / "geometry"
 GEO_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,7 +85,8 @@ def _load_snapshot(path):
     or a failing `int()` conversion propagates exactly as before, and the `with`
     block still closes the archive on the way out.
 
-    The `str(path)` conversion is preserved verbatim.
+    The `str(path)` conversion is NOT preserved: it was deliberately replaced
+    by same-descriptor loading, described below.
 
     `allow_pickle=False` — an object-dtype member is stored as a pickle, so
     loading one with pickle enabled is arbitrary code execution. This daemon
@@ -75,15 +98,62 @@ def _load_snapshot(path):
     no fallback retry and no override.
 
     The claim here is an OBJECT-MEMBER REFUSAL plus archive resource lifetime
-    — not snapshot validation, whole-archive security, deterministic export or
-    atomic output. Nothing here resists decompression amplification, absurd
-    declared shapes, hostile member names or NumPy header defects.
+    — not deterministic export or atomic output.
+
+    Structural admission
+    --------------------
+    `admit_snapshot` now runs first and raises `SnapshotArchiveRejected`
+    before `np.load`, its decompressor or its allocator is reached, for an
+    archive that is out of the data directory, not a ZIP, wrong in its
+    membership, hostile in its member names, oversized in its declared or
+    physical size, or wrong in any member's NPY header.
+
+    Structural refusals all precede loading. A narrow set of payload-TRANSPORT
+    failures cannot: a payload is only checkable by decompressing it, so a
+    valid header over a corrupt body surfaces during array materialisation and
+    is translated there instead. Exactly four things are translated --
+    BadZipFile, zlib.error, EOFError, and NumPy's array-data EOF identified by
+    its own traceback frame. Both call sites — the
+    daemon loop and `--once` — catch that type and stop before any exporter
+    runs.
+
+    The guard opens the file once and hands this helper the very descriptor it
+    preflighted, so the bytes inspected are the bytes NumPy reads -- which closes the pathname
+    reopen and re-resolution races, though not in-place mutation of the file
+    while the descriptor is open. `str(path)`
+    is therefore gone: there is no second open to convert a path for. The
+    inner `with` closes the archive, the guard closes the descriptor, on
+    success and on every exceptional exit.
+
+    Extraction failures are still NOT caught, translated or suppressed: a
+    missing key or a failing `int()` conversion propagates exactly as before.
+
+    `allow_pickle=False` stays at this call site even though an object-dtype
+    member can no longer survive admission. It is the second line of defence
+    and the property the repository-wide static gate reads.
     """
-    with np.load(str(path), allow_pickle=False) as snap:
-        state = snap["lattice"]
-        memory_grid = snap["memory_grid"]
-        generation = int(snap["generation"])
+    with admit_snapshot(path, data_dir=DATA_DIR, policy=SNAPSHOT_POLICY) as descriptor:
+        with np.load(descriptor, allow_pickle=False) as snap:
+            state = snap["lattice"]
+            memory_grid = snap["memory_grid"]
+            generation = int(snap["generation"])
     return state, memory_grid, generation
+
+
+def _snapshot_fingerprint(path):
+    """Identify a snapshot by the attributes that change when it changes.
+
+    A rejected archive is remembered by this triple so the daemon neither logs
+    nor retries it on every poll, while a genuinely new file at the same path
+    — a replaced or rotated snapshot — differs in size or modification time
+    and is admitted for a fresh attempt.
+
+    Non-following: `stat` described a symlink's TARGET, so a rejected link kept
+    changing fingerprint whenever anything touched the target, and the daemon
+    re-preflighted and re-logged the same unchanged poison on every poll — the
+    exact churn the memory exists to stop.
+    """
+    return entry_fingerprint(path)
 
 
 # ---------------------------------------------------------------------------
@@ -243,24 +313,49 @@ def run_daemon():
 
     last_export_time = 0
     last_snapshot = None
+    last_rejected = None
 
     while True:
         try:
-            # Find latest snapshot
-            snapshots = sorted(
-                DATA_DIR.glob("v070_gen*.npz"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            # Find latest snapshot. Non-following ordering that also drops
+            # entries vanishing mid-enumeration: `p.stat()` followed symlinks,
+            # so a link could borrow its target's mtime to become "newest"
+            # before admission had any say, and it raised OSError into the
+            # broad handler below, whose message carries the path.
+            listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
 
-            if not snapshots:
+            if not listing.ordered:
                 time.sleep(WATCH_INTERVAL)
                 continue
 
-            latest = snapshots[0]
+            # A bounded newest-first SEARCH, so one unusable archive with the
+            # newest modification time does not stall exports outright. When
+            # nothing in the window is admissible the newest is returned
+            # anyway, and the typed refusal below reports it as it always did.
+            latest = first_admissible(listing.ordered, data_dir=DATA_DIR,
+                                      policy=SNAPSHOT_POLICY)
 
             # Skip if same as last time or too soon
             if latest == last_snapshot:
+                time.sleep(WATCH_INTERVAL)
+                continue
+
+            # An unchanged archive that was already refused is skipped in
+            # silence: no repeated reason-code log, no repeated preflight, no
+            # export attempt. A file that CHANGES at the same path has a
+            # different fingerprint and gets a fresh attempt.
+            try:
+                fingerprint = _snapshot_fingerprint(latest)
+            except OSError:
+                # The file was rotated or deleted between the glob above and
+                # this stat. Letting that escape would reach the broad handler
+                # at the bottom of the loop, which prints the exception — and
+                # OSError's message carries the full path, which is a name the
+                # attacker chose. Nothing to do but look again next poll.
+                time.sleep(WATCH_INTERVAL)
+                continue
+
+            if fingerprint == last_rejected:
                 time.sleep(WATCH_INTERVAL)
                 continue
 
@@ -268,16 +363,29 @@ def run_daemon():
                 time.sleep(WATCH_INTERVAL)
                 continue
 
-            # Skip tiny/corrupt files
-            if latest.stat().st_size < 1_000_000:
-                time.sleep(WATCH_INTERVAL)
-                continue
-
-            print(f"\n  [GEO] New snapshot: {latest.name}")
+            # The former one-megabyte minimum is gone. It was a guess at
+            # "tiny/corrupt" and it was wrong in both directions: a sparse but
+            # structurally valid snapshot compresses to far less and was
+            # skipped, while a hostile archive only had to be padded past the
+            # threshold to be processed. Admission decides usability instead.
 
             # Load snapshot. The archive is closed inside the helper, so it is
             # already released before any exporter below runs.
-            state, mg, gen = _load_snapshot(latest)
+            try:
+                state, mg, gen = _load_snapshot(latest)
+            except SnapshotArchiveRejected as refusal:
+                # One bounded reason code. Nothing about the archive's path,
+                # name, members or headers is logged, because this daemon runs
+                # unattended over a directory anyone able to write there can
+                # fill.
+                print(f"  [GEO] Snapshot rejected: {refusal.reason}")
+                last_rejected = fingerprint
+                time.sleep(WATCH_INTERVAL)
+                continue
+
+            # Logged only once the archive has been admitted, so a refused
+            # file's chosen name never reaches the log at all.
+            print(f"\n  [GEO] New snapshot: {latest.name}")
 
             # Export geometry
             t0 = time.time()
@@ -313,6 +421,59 @@ def run_daemon():
         time.sleep(WATCH_INTERVAL)
 
 
+def run_once():
+    """Single export from the latest snapshot — the `--once` production path.
+
+    Split out of the `__main__` block, which pytest never executes, so the
+    refusal contract is reachable by a test rather than restated by one: a
+    rejected archive prints exactly one bounded reason on stderr and exits
+    nonzero, with no exporter having run. The body is otherwise the block that
+    was here before, unchanged.
+    """
+    listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+
+    if not listing.ordered:
+        if listing.unreadable:
+            # NOT the same thing as an empty directory, and reporting them
+            # identically would hide a real fault: candidates matched the glob
+            # and every one of them failed its metadata read. Fixed text, no
+            # path — the entries are attacker-named — and a nonzero exit so a
+            # cron or CI wrapper can tell this from "nothing to export".
+            print("Snapshot candidates unreadable", file=sys.stderr)
+            sys.exit(1)
+        print("No snapshots found!")
+        return
+
+    # Bounded newest-first search, as in the daemon loop.
+    selected = first_admissible(listing.ordered, data_dir=DATA_DIR,
+                                policy=SNAPSHOT_POLICY)
+
+    try:
+        state, mg, gen = _load_snapshot(selected)
+    except SnapshotArchiveRejected as refusal:
+        # Exactly one bounded reason on stderr, then a nonzero exit. Only the
+        # typed refusal is caught here: a MemoryError, a KeyboardInterrupt or
+        # a programmer error must not be turned into "the snapshot was bad".
+        print(f"Snapshot rejected: {refusal.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Exporting geometry for gen {gen:,}...")
+
+    csv = export_sage_pointcloud(state, mg, gen, GEO_DIR)
+    if csv:
+        print(f"  Sage CSV: {csv}")
+
+    js = export_voxel_summary(state, mg, gen, GEO_DIR)
+    if js:
+        print(f"  Summary: {js}")
+
+    stl = export_stl(state, gen, GEO_DIR)
+    if stl:
+        print(f"  STL: {stl} ({stl.stat().st_size / 1024 / 1024:.1f} MB)")
+
+    print("Done!")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Geometry Export Daemon (Phase 16b)")
@@ -325,31 +486,6 @@ if __name__ == "__main__":
     EXPORT_INTERVAL = args.export_interval
 
     if args.once:
-        # Single export from latest snapshot
-        snapshots = sorted(
-            DATA_DIR.glob("v070_gen*.npz"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if snapshots:
-            state, mg, gen = _load_snapshot(snapshots[0])
-
-            print(f"Exporting geometry for gen {gen:,}...")
-
-            csv = export_sage_pointcloud(state, mg, gen, GEO_DIR)
-            if csv:
-                print(f"  Sage CSV: {csv}")
-
-            js = export_voxel_summary(state, mg, gen, GEO_DIR)
-            if js:
-                print(f"  Summary: {js}")
-
-            stl = export_stl(state, gen, GEO_DIR)
-            if stl:
-                print(f"  STL: {stl} ({stl.stat().st_size / 1024 / 1024:.1f} MB)")
-
-            print("Done!")
-        else:
-            print("No snapshots found!")
+        run_once()
     else:
         run_daemon()
