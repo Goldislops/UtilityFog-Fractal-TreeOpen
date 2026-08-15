@@ -2431,14 +2431,40 @@ def test_a_manual_value_error_with_the_identical_message_is_not_translated(root)
 
 
 @requires_numpy
-def test_a_scalar_conversion_failure_is_not_translated(root):
-    """`int()` on a non-scalar member raises `ValueError` too, and it is an
-    ordinary downstream failure that must keep its own identity."""
+def test_a_numpy_scalar_conversion_failure_is_not_translated(root):
+    """An ordinary downstream conversion failure keeps its own identity.
+
+    Stated exactly, because the obvious guess is wrong: `int()` on a
+    multi-element array raises `TypeError` ("only 0-dimensional arrays can be
+    converted to Python scalars"), not `ValueError`. The property under test is
+    that it passes through untouched, whatever its type -- so the assertion
+    names the type NumPy actually raises rather than the one that would have
+    been convenient.
+    """
     path = write_npz(root / "v070_scalar.npz", schema_members(16))
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(TypeError) as excinfo:
         with guard.admit_snapshot(path, data_dir=root) as handle:
             with np.load(handle, allow_pickle=False) as archive:
                 int(archive["lattice"])
+    assert type(excinfo.value) is TypeError
+    assert not isinstance(excinfo.value, guard.SnapshotArchiveRejected)
+
+
+@requires_numpy
+def test_a_value_error_from_the_consumers_own_conversion_is_not_translated(root):
+    """The `ValueError` half of the same property, on the lane that matters.
+
+    `member_payload_unreadable` is reached through a `ValueError` clause, so a
+    `ValueError` raised by the caller's own conversion code inside the block is
+    the case most at risk of being swallowed.
+    """
+    path = write_npz(root / "v070_convert.npz", schema_members(16))
+    with pytest.raises(ValueError) as excinfo:
+        with guard.admit_snapshot(path, data_dir=root) as handle:
+            with np.load(handle, allow_pickle=False) as archive:
+                archive["generation"]
+                int("not a number")
+    assert type(excinfo.value) is ValueError
     assert not isinstance(excinfo.value, guard.SnapshotArchiveRejected)
 
 
