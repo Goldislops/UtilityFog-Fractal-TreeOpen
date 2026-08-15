@@ -339,13 +339,32 @@ class _FakeSnapshotPath:
 
 
 class _FakeDataDir:
-    def __init__(self, paths):
+    """A stand-in data directory that is also a REAL one.
+
+    It used to expose `glob()` and nothing else, which was enough while the
+    daemon only globbed it. `DATA_DIR` is now also handed to `admit_snapshot`
+    as the confinement root by the bounded admission search, and that resolves
+    it as a path — so a `glob`-only duck type made the search raise `TypeError`
+    into the daemon's broad handler and no cycle ran at all.
+
+    So it forwards `__fspath__` to the real directory the fake snapshots were
+    written into, which is what confinement should be comparing against
+    anyway.
+    """
+
+    def __init__(self, paths, directory=None):
         self.paths = list(paths)
         self.globs = []
+        if directory is None and self.paths:
+            directory = Path(os.fspath(self.paths[0])).parent
+        self._directory = Path(directory) if directory is not None else Path(".")
 
     def glob(self, pattern):
         self.globs.append(pattern)
         return list(self.paths)
+
+    def __fspath__(self):
+        return os.fspath(self._directory)
 
 
 class _FakeClock:

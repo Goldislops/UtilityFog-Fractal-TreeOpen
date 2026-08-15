@@ -49,6 +49,10 @@ _ENV_BEFORE_IMPORT = os.environ.get(_EVENT_BUS_ENV_KEY)
 with mock.patch.dict(os.environ, {_EVENT_BUS_ENV_KEY: "1"}):
     from scripts import medusa_api  # noqa: E402  (import inside the scoped override)
 
+# The bounded admission search lives in the guard, so a test that counts
+# probes has to patch it there rather than on the consumer's imported name.
+from scripts import snapshot_archive_guard  # noqa: E402
+
 _ENV_AFTER_IMPORT = os.environ.get(_EVENT_BUS_ENV_KEY)
 
 
@@ -759,14 +763,20 @@ def test_selection_is_bounded_and_does_not_scan_the_whole_directory(confined,
                                   confined / ("v070_gen%06d.npz" % (index + 1))))
         os.utime(poison, (2_000_000 + index, 2_000_000 + index))
 
+    # Patched on the GUARD, not on `medusa_api`. The bounded search moved into
+    # `snapshot_archive_guard.first_admissible`, which resolves
+    # `admit_snapshot` in its own module — so a patch on the consumer's name no
+    # longer intercepts the probes and this counter would sit at zero while the
+    # search ran normally.
     admitted = []
-    real_admit = medusa_api.admit_snapshot
+    real_admit = snapshot_archive_guard.admit_snapshot
 
     def _counting_admit(path, **kwargs):
         admitted.append(path)
         return real_admit(path, **kwargs)
 
-    monkeypatch.setattr(medusa_api, "admit_snapshot", _counting_admit)
+    monkeypatch.setattr(snapshot_archive_guard, "admit_snapshot",
+                        _counting_admit)
     selected = medusa_api._find_latest_snapshot()
 
     assert len(admitted) == depth, "the search was not bounded to the window"
