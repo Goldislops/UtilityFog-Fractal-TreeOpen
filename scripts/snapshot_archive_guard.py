@@ -1161,11 +1161,19 @@ def admit_snapshot(
             #
             # The list is deliberately short. `zipfile.BadZipFile` covers a bad
             # CRC and a malformed local header; `zlib.error` covers corrupt
-            # DEFLATE data; `EOFError` covers a stream that ends early. A
-            # `MemoryError`, a `KeyboardInterrupt`, an arbitrary `ValueError`
-            # -- including NumPy's own "EOF: reading array data" -- and every
-            # programmer error stay outside this lane and propagate unchanged.
-            # Nothing from the exception's message reaches the reason.
+            # DEFLATE data; `EOFError` covers a stream that ends early.
+            #
+            # NumPy's own array-data EOF is the fourth translated case, and it
+            # is handled by the `except ValueError` clause ABOVE, not here --
+            # it arrives as a plain `ValueError`, so it is admitted to this
+            # lane only when `_is_numpy_array_data_eof` positively identifies
+            # it by its `_read_bytes` frame and module as well as its message.
+            #
+            # What stays outside the lane and propagates unchanged: a
+            # `MemoryError`, a `KeyboardInterrupt`, any `ValueError` that the
+            # classifier does NOT match -- a manually raised one carrying the
+            # same text among them -- and every programmer error. Nothing from
+            # any exception's message reaches the reason.
             raise _reject("member_payload_unreadable") from None
     finally:
         fh.close()

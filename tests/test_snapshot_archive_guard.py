@@ -745,10 +745,18 @@ def test_the_syntax_gate_still_translates_a_real_syntax_error(monkeypatch):
 def test_the_block_boundary_translates_nothing_else(root, raised):
     """The narrowness of the translation IS the contract.
 
-    `MemoryError`, `KeyboardInterrupt`, an arbitrary `ValueError` -- NumPy's
-    own "EOF: reading array data" among them -- and every programmer error must
-    leave the block exactly as they were raised. Only archive transport is
-    translated.
+    `MemoryError`, `KeyboardInterrupt`, a non-matching `ValueError` and every
+    programmer error must leave the block exactly as they were raised.
+
+    The `value_error` case carries NumPy's array-data EOF TEXT but is raised
+    here, by hand -- it is not NumPy's own `_read_bytes` exception, and that is
+    the point of including it. A genuine classified NumPy array-data EOF IS
+    translated, by the `except ValueError` clause that runs before this one;
+    `_is_numpy_array_data_eof` tells the two apart by the raising frame and its
+    module, not by the message. So this parameter proves the classifier cannot
+    be fooled by the words alone, and
+    `test_a_truncated_payload_becomes_member_payload_unreadable` covers the
+    real thing.
     """
     path = write_npz(root / "v070_passthrough.npz", schema_members(16))
     with pytest.raises(type(raised)) as excinfo:
