@@ -2487,3 +2487,438 @@ def test_admitted_producer_shapes_match_what_the_engine_writes(root):
             "lattice.npy", "memory_grid.npy",
         ]
     assert admit(path, root) is None
+
+
+# ===========================================================================
+# Bounded snapshot-discovery primitive
+#
+# `discover_snapshot_candidates` owns its own `os.scandir` so that the work of
+# LOOKING for candidates is bounded, which nothing downstream can do: by the
+# time `order_candidates` receives an iterable the whole directory has already
+# been materialised -- `glob.glob` is `list(iglob(...))`, and even `iglob`
+# reaches `_listdir`, which is `return list(it)`.
+#
+# The primitive is UNUSED by production in this tranche. No consumer imports
+# it, no production cap is chosen, and `SnapshotArchivePolicy` /
+# `PRODUCTION_POLICY` are untouched. Limits are injected explicitly by every
+# test below, which is what makes this work independent of calibration.
+#
+# Directory contents come from a deterministic fake `scandir` context manager
+# yielding proxy entries. Built-in `os.DirEntry.stat` is never patched -- it
+# cannot be, and a test that appeared to do so would be lying about what it
+# exercised.
+# ===========================================================================
+
+
+class _ProxyStat:
+    def __init__(self, mtime_ns, size):
+        self.st_mtime_ns = mtime_ns
+        self.st_size = size
+
+
+class _ProxyEntry:
+    """One directory entry, with recorded metadata access."""
+
+    def __init__(self, name, mtime_ns=1000, size=64, stat_error=None):
+        self.name = name
+        self._stat = _ProxyStat(mtime_ns, size)
+        self._stat_error = stat_error
+        self._recorder = None
+
+    def stat(self, *, follow_symlinks=True):
+        if self._recorder is not None:
+            self._recorder.stat_calls.append((self.name, follow_symlinks))
+        if self._stat_error is not None:
+            raise self._stat_error
+        return self._stat
+
+
+class _FakeScandir:
+    """A recording stand-in for `os.scandir`.
+
+    Records every entry YIELDED -- distinct from processed -- every `stat` call
+    with its `follow_symlinks` argument, and whether the iterator was closed.
+    """
+
+    def __init__(self, entries, open_error=None, iteration_error_after=None):
+        self.entries = list(entries)
+        self.open_error = open_error
+        self.iteration_error_after = iteration_error_after
+        self.yielded = []
+        self.stat_calls = []
+        self.closed = 0
+        self.opened_with = []
+        for entry in self.entries:
+            entry._recorder = self
+
+    def __call__(self, directory):
+        self.opened_with.append(directory)
+        if self.open_error is not None:
+            raise self.open_error
+        return self
+
+    def __enter__(self):
+        return self._iterate()
+
+    def __exit__(self, *exc):
+        self.closed += 1
+        return False
+
+    def _iterate(self):
+        for index, entry in enumerate(self.entries):
+            if (self.iteration_error_after is not None
+                    and index == self.iteration_error_after):
+                raise OSError(5, "Input/output error")
+            self.yielded.append(entry.name)
+            yield entry
+
+
+def _entries(count, start=0, stat_error=None):
+    return [_ProxyEntry("v070_gen%06d_step000001_x.npz" % (start + i),
+                        stat_error=stat_error)
+            for i in range(count)]
+
+
+def _install(monkeypatch, fake):
+    monkeypatch.setattr(guard.os, "scandir", fake)
+    return fake
+
+
+def _policy(entries, candidates):
+    return guard.CandidateDiscoveryPolicy(max_directory_entries=entries,
+                                          max_candidates=candidates)
+
+
+def _discover(directory, policy):
+    return guard.discover_snapshot_candidates(directory, policy=policy)
+
+
+# -- policy validation --------------------------------------------------------
+
+@pytest.mark.parametrize("field", ["max_directory_entries", "max_candidates"])
+@pytest.mark.parametrize("value", [0, -1, -100, 1.5, "8", None, True, False],
+                         ids=["zero", "minus_one", "minus_hundred", "float",
+                              "str", "none", "true", "false"])
+def test_an_invalid_discovery_cap_is_refused(field, value):
+    """`True` is an `int` to Python and would silently become a cap of 1, so
+    booleans are rejected explicitly rather than by an `isinstance` that
+    happens to accept them."""
+    kwargs = {"max_directory_entries": 10, "max_candidates": 5}
+    kwargs[field] = value
+    with pytest.raises((ValueError, TypeError)):
+        guard.CandidateDiscoveryPolicy(**kwargs)
+
+
+def test_a_valid_discovery_policy_is_frozen():
+    policy = _policy(10, 5)
+    assert policy.max_directory_entries == 10 and policy.max_candidates == 5
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.max_candidates = 6
+
+
+def test_the_discovery_policy_is_separate_from_the_archive_policy():
+    """This tranche must not alter admission: `SnapshotArchivePolicy` and
+    `PRODUCTION_POLICY` keep exactly the fields they had."""
+    assert not hasattr(guard.PRODUCTION_POLICY, "max_directory_entries")
+    assert not hasattr(guard.PRODUCTION_POLICY, "max_candidates")
+    assert guard.CandidateDiscoveryPolicy is not guard.SnapshotArchivePolicy
+
+
+# -- caps: boundary and one beyond -------------------------------------------
+
+def test_exactly_the_entry_cap_succeeds(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(10)))
+    result = _discover(root, _policy(10, 100))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.processed == 10 and result.matched == 10
+    assert len(result.ordered) == 10
+
+
+def test_one_past_the_entry_cap_fails_closed(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(11)))
+    result = _discover(root, _policy(10, 100))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    assert result.processed == 10
+    assert not hasattr(result, "ordered"), (
+        "a failure must not carry a partial prefix at all")
+
+
+def test_exactly_the_candidate_cap_succeeds(root, monkeypatch):
+    entries = _entries(5) + [_ProxyEntry("noise%d.txt" % i) for i in range(5)]
+    _install(monkeypatch, _FakeScandir(entries))
+    result = _discover(root, _policy(100, 5))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.matched == 5 and result.processed == 10
+
+
+def test_one_past_the_candidate_cap_fails_closed(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(6)))
+    result = _discover(root, _policy(100, 5))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED
+    assert result.matched_so_far == 5
+
+
+# -- processed versus yielded, and the unstatted overflow entry --------------
+
+def test_processed_is_bounded_and_yields_allow_one_look_ahead(root, monkeypatch):
+    """Exact-boundary admission has to SEE the entry that would exceed the cap
+    in order to refuse at exactly the cap, so the iterator yields at most one
+    more than it processes. Both bounds are asserted, because conflating them
+    would hide either an off-by-one or an unbounded scan."""
+    fake = _install(monkeypatch, _FakeScandir(_entries(50)))
+    result = _discover(root, _policy(10, 100))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.processed == 10
+    assert len(fake.yielded) <= 10 + 1
+    assert len(fake.yielded) == 11, "expected exactly one look-ahead"
+
+
+def test_the_overflow_causing_entry_is_never_statted(root, monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(_entries(6)))
+    result = _discover(root, _policy(100, 5))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert len(fake.stat_calls) == 5
+    statted = set(name for name, _ in fake.stat_calls)
+    assert fake.yielded[5] not in statted
+
+
+def test_metadata_calls_are_bounded_by_the_candidate_cap(root, monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(_entries(500)))
+    _discover(root, _policy(10000, 20))
+    assert len(fake.stat_calls) <= 20
+
+
+# -- floods -------------------------------------------------------------------
+
+def test_a_flood_of_matching_names_bounds_metadata_calls(root, monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(_entries(5000)))
+    result = _discover(root, _policy(100000, 25))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED
+    assert len(fake.stat_calls) == 25
+
+
+def test_a_flood_of_nonmatching_names_cannot_make_the_scan_unbounded(root,
+                                                                     monkeypatch):
+    """The refutation of "just take the first N matches", made executable:
+    non-matching entries are cheap individually and unbounded in aggregate, so
+    the ENTRY cap must exist independently of the candidate cap. Zero metadata
+    calls, because nothing matched."""
+    noise = [_ProxyEntry("unrelated-%d.log" % i) for i in range(5000)]
+    fake = _install(monkeypatch, _FakeScandir(noise))
+    result = _discover(root, _policy(64, 25))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    assert result.processed == 64
+    assert len(fake.stat_calls) == 0
+
+
+# -- failure modes ------------------------------------------------------------
+
+def test_a_missing_directory_is_successful_empty_discovery(root, monkeypatch):
+    """Preserved from current behaviour: `Path.glob` on a missing directory
+    yields nothing rather than raising, and consumers answer "no snapshots".
+    Turning that into a fault would change a 404 into a 503."""
+    _install(monkeypatch, _FakeScandir(
+        [], open_error=FileNotFoundError(2, "No such file or directory")))
+    result = _discover(root, _policy(10, 5))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.ordered == () and result.matched == 0
+
+
+def test_a_not_a_directory_error_is_also_successful_empty(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(
+        [], open_error=NotADirectoryError(20, "Not a directory")))
+    assert isinstance(_discover(root, _policy(10, 5)), guard.DiscoverySucceeded)
+
+
+def test_another_open_error_is_a_directory_open_failure(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(
+        [], open_error=PermissionError(13, "Permission denied")))
+    result = _discover(root, _policy(10, 5))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.DIRECTORY_OPEN_FAILED
+
+
+def test_an_error_after_iteration_begins_is_an_iteration_failure(root,
+                                                                 monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(10), iteration_error_after=4))
+    result = _discover(root, _policy(100, 100))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ITERATION_FAILED
+    assert result.processed == 4
+
+
+def test_a_reason_carries_no_path_or_exception_text(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir([], open_error=PermissionError(
+        13, "Permission denied", "/attacker/chosen/LEAKNAME")))
+    result = _discover(root, _policy(10, 5))
+    text = result.reason.value + " " + repr(result)
+    assert "LEAKNAME" not in text and "Permission" not in text
+
+
+# -- partial discard and closure ---------------------------------------------
+
+@pytest.mark.parametrize("build", [
+    lambda: _FakeScandir(_entries(11)),
+    lambda: _FakeScandir(_entries(20)),
+    lambda: _FakeScandir(_entries(10), iteration_error_after=6),
+], ids=["entry_overflow", "candidate_overflow", "iteration_error"])
+def test_every_failure_discards_the_partial_prefix(root, monkeypatch, build):
+    _install(monkeypatch, build())
+    result = _discover(root, _policy(10, 8))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert not hasattr(result, "ordered")
+    retained = [v for v in dataclasses.asdict(result).values()
+                if isinstance(v, (list, tuple)) and v]
+    assert retained == [], "a failure must not retain candidates in any field"
+
+
+@pytest.mark.parametrize("build", [
+    lambda: _FakeScandir(_entries(3)),
+    lambda: _FakeScandir(_entries(50)),
+    lambda: _FakeScandir(_entries(10), iteration_error_after=2),
+], ids=["success", "overflow", "iteration_error"])
+def test_the_iterator_is_closed_on_every_exit(root, monkeypatch, build):
+    fake = _install(monkeypatch, build())
+    _discover(root, _policy(10, 8))
+    assert fake.closed == 1
+
+
+# -- unreadable entries -------------------------------------------------------
+
+def test_an_unreadable_candidate_is_counted_and_skipped(root, monkeypatch):
+    entries = _entries(3) + [_ProxyEntry(
+        "v070_gen000009_step1_x.npz",
+        stat_error=FileNotFoundError(2, "gone"))]
+    _install(monkeypatch, _FakeScandir(entries))
+    result = _discover(root, _policy(100, 100))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.unreadable == 1
+    assert result.matched == 4 and len(result.ordered) == 3
+
+
+def test_all_matching_candidates_unreadable_is_an_explicit_property(root,
+                                                                    monkeypatch):
+    entries = _entries(4, stat_error=FileNotFoundError(2, "gone"))
+    _install(monkeypatch, _FakeScandir(entries))
+    result = _discover(root, _policy(100, 100))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.ordered == ()
+    assert result.all_matching_unreadable is True
+
+
+def test_a_genuinely_empty_directory_is_not_all_unreadable(root, monkeypatch):
+    """The distinction a consumer needs: nothing to read is not the same as
+    nothing being readable."""
+    _install(monkeypatch, _FakeScandir([]))
+    result = _discover(root, _policy(10, 5))
+    assert result.ordered == () and result.all_matching_unreadable is False
+
+
+# -- input normalisation, output type ----------------------------------------
+
+def test_a_string_and_a_path_directory_are_equivalent(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(3)))
+    from_path = _discover(root, _policy(100, 100))
+    _install(monkeypatch, _FakeScandir(_entries(3)))
+    from_str = _discover(str(root), _policy(100, 100))
+    assert ([p.name for p in from_path.ordered]
+            == [p.name for p in from_str.ordered])
+    assert all(isinstance(p, Path) for p in from_str.ordered)
+
+
+def test_every_candidate_is_a_path_under_the_requested_directory(root,
+                                                                  monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(3)))
+    result = _discover(str(root), _policy(100, 100))
+    for candidate in result.ordered:
+        assert isinstance(candidate, Path)
+        assert candidate.parent == Path(root)
+
+
+def test_the_ordered_candidates_are_immutable(root, monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(3)))
+    result = _discover(root, _policy(100, 100))
+    assert isinstance(result.ordered, tuple)
+
+
+# -- ordering parity with the existing rules ---------------------------------
+
+def test_ordering_matches_order_candidates_exactly(root, monkeypatch):
+    """Within policy the primitive must not change selection at all, so its
+    order is compared against the existing implementation over the same set."""
+    names = ["v070_gen999999_step000001_a.npz",
+             "v070_gen1000000_step000001_a.npz",
+             "v070_gen000007_step000011_a.npz",
+             "v070_gen000007_step000002_a.npz"]
+    for name in names:
+        _touch(root / name, 7000000000)
+    entries = [_ProxyEntry(name, mtime_ns=7000000000) for name in names]
+    _install(monkeypatch, _FakeScandir(entries))
+    discovered = _discover(root, _policy(100, 100))
+
+    monkeypatch.undo()
+    expected = guard.order_candidates([root / name for name in names]).ordered
+    assert ([p.name for p in discovered.ordered]
+            == [p.name for p in expected])
+
+
+def test_newer_modification_time_still_outranks_the_sequence(root, monkeypatch):
+    entries = [_ProxyEntry("v070_gen999999_step1_a.npz", mtime_ns=1000),
+               _ProxyEntry("v070_gen000001_step1_a.npz", mtime_ns=9000)]
+    _install(monkeypatch, _FakeScandir(entries))
+    result = _discover(root, _policy(100, 100))
+    assert result.ordered[0].name == "v070_gen000001_step1_a.npz"
+
+
+# -- metadata is requested without following symlinks ------------------------
+
+def test_metadata_is_requested_without_following_symlinks(root, monkeypatch):
+    """A link must not be able to borrow its target's modification time to
+    promote itself to "newest" -- ordering deciding admission's question before
+    admission is asked."""
+    fake = _install(monkeypatch, _FakeScandir(_entries(3)))
+    _discover(root, _policy(100, 100))
+    assert fake.stat_calls, "no metadata was read"
+    assert all(follow is False for _, follow in fake.stat_calls)
+
+
+# -- matching parity with the production glob pattern ------------------------
+
+@pytest.mark.parametrize("name,matches", [
+    ("v070_gen000001_step000001_x.npz", True),
+    ("v070_gen.npz", True),
+    ("v070_ge000001.npz", False),
+    ("xv070_gen000001.npz", False),
+    ("v070_gen000001.npz.bak", False),
+    ("v070_gen000001.np", False),
+    ("telemetry_000001.json", False),
+    ("acoustic_map_step000001.json", False),
+])
+def test_matching_agrees_with_the_production_glob_pattern(root, monkeypatch,
+                                                          name, matches):
+    """Parity with `v070_gen*.npz` as the consumers spell it, checked against
+    `Path.glob` itself rather than against an assumption."""
+    (root / name).write_bytes(b"x")
+    globbed = set(p.name for p in Path(root).glob("v070_gen*.npz"))
+    assert (name in globbed) is matches, "the fixture disagrees with Path.glob"
+
+    _install(monkeypatch, _FakeScandir([_ProxyEntry(name)]))
+    result = _discover(root, _policy(100, 100))
+    assert (len(result.ordered) == 1) is matches
+
+
+def test_matching_follows_the_platform_case_rule(root, monkeypatch):
+    """`Path.glob` is case-insensitive on Windows and case-sensitive on POSIX.
+    The primitive must agree with whichever platform it runs on rather than
+    inventing a third behaviour."""
+    upper = "V070_GEN000001_STEP1.NPZ"
+    (root / upper).write_bytes(b"x")
+    glob_matches = upper in set(p.name for p in Path(root).glob("v070_gen*.npz"))
+
+    _install(monkeypatch, _FakeScandir([_ProxyEntry(upper)]))
+    result = _discover(root, _policy(100, 100))
+    assert (len(result.ordered) == 1) is glob_matches
