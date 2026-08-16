@@ -62,6 +62,8 @@ from __future__ import annotations
 import ast
 import contextlib
 import dataclasses
+import enum
+import fnmatch
 import os
 import re
 import stat
@@ -69,7 +71,7 @@ import struct
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Tuple, Union
 
 __all__ = [
     "SnapshotArchiveRejected",
@@ -81,6 +83,12 @@ __all__ = [
     "newest_first",
     "order_candidates",
     "CandidateListing",
+    "CandidateDiscoveryPolicy",
+    "DiscoveryFailureReason",
+    "DiscoverySucceeded",
+    "DiscoveryFailed",
+    "DiscoveryResult",
+    "discover_snapshot_candidates",
     "first_admissible",
     "entry_fingerprint",
 ]
@@ -1034,6 +1042,190 @@ def entry_fingerprint(path):
     """
     info = os.lstat(path)
     return (os.fspath(path), info.st_size, info.st_mtime_ns)
+
+
+# ---------------------------------------------------------------------------
+# Bounded snapshot discovery (not wired to production consumers yet)
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_GLOB = "v070_gen*.npz"
+
+
+@dataclasses.dataclass(frozen=True)
+class CandidateDiscoveryPolicy:
+    """Explicit work limits for one directory discovery.
+
+    There is deliberately no production instance and no default on
+    :func:`discover_snapshot_candidates`: deployment limits need calibration
+    that is outside this primitive-only tranche.
+    """
+
+    max_directory_entries: int
+    max_candidates: int
+
+    def __post_init__(self) -> None:
+        for value in (self.max_directory_entries, self.max_candidates):
+            if type(value) is not int or value <= 0:
+                raise ValueError("discovery_policy_invalid")
+
+
+class DiscoveryFailureReason(enum.Enum):
+    """Fixed, path-free reasons why a discovery produced no usable result."""
+
+    ENTRY_LIMIT_EXCEEDED = "entry_limit_exceeded"
+    CANDIDATE_LIMIT_EXCEEDED = "candidate_limit_exceeded"
+    DIRECTORY_OPEN_FAILED = "directory_open_failed"
+    ITERATION_FAILED = "iteration_failed"
+
+
+def _validate_discovery_counter(value) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError("discovery_result_invalid")
+
+
+@dataclasses.dataclass(frozen=True)
+class DiscoverySucceeded:
+    """A complete, exact directory discovery.
+
+    ``matched`` is exact only because this type is constructed after the
+    iterator reaches its end. Every matching entry is represented exactly once
+    by either a path in ``ordered`` or the ``unreadable`` counter.
+    """
+
+    ordered: Tuple[Path, ...]
+    unreadable: int
+    processed: int
+    matched: int
+
+    def __post_init__(self) -> None:
+        if type(self.ordered) is not tuple:
+            raise ValueError("discovery_result_invalid")
+        if not all(isinstance(path, Path) for path in self.ordered):
+            raise ValueError("discovery_result_invalid")
+        for value in (self.unreadable, self.processed, self.matched):
+            _validate_discovery_counter(value)
+        if self.matched > self.processed:
+            raise ValueError("discovery_result_invalid")
+        if self.unreadable > self.matched:
+            raise ValueError("discovery_result_invalid")
+        if len(self.ordered) + self.unreadable != self.matched:
+            raise ValueError("discovery_result_invalid")
+
+    @property
+    def all_matching_unreadable(self) -> bool:
+        """Whether names matched but metadata failed for every one of them."""
+        return self.matched > 0 and self.unreadable == self.matched
+
+
+@dataclasses.dataclass(frozen=True)
+class DiscoveryFailed:
+    """A sanitized failure with counters only and no candidate prefix."""
+
+    reason: DiscoveryFailureReason
+    processed: int
+    matched_so_far: int
+    unreadable: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reason, DiscoveryFailureReason):
+            raise ValueError("discovery_result_invalid")
+        for value in (self.processed, self.matched_so_far, self.unreadable):
+            _validate_discovery_counter(value)
+        if self.matched_so_far > self.processed:
+            raise ValueError("discovery_result_invalid")
+        if self.unreadable > self.matched_so_far:
+            raise ValueError("discovery_result_invalid")
+
+
+DiscoveryResult = Union[DiscoverySucceeded, DiscoveryFailed]
+
+
+def discover_snapshot_candidates(
+    directory,
+    *,
+    policy: CandidateDiscoveryPolicy,
+) -> DiscoveryResult:
+    """Discover and order snapshot names with explicit, independent bounds.
+
+    The function owns ``os.scandir`` so directory work is bounded before any
+    list can be materialized. It processes at most ``max_directory_entries``
+    and performs metadata reads for at most ``max_candidates``. Exact-boundary
+    success requires fetching one additional ``DirEntry`` as a look-ahead; the
+    look-ahead is neither name-matched nor statted.
+
+    Individual metadata races are counted and skipped, matching
+    :func:`order_candidates`. A directory-level failure returns no candidate
+    field at all, so a partially observed, attacker-ordered prefix cannot be
+    consumed accidentally.
+    """
+    if not isinstance(policy, CandidateDiscoveryPolicy):
+        raise TypeError("explicit CandidateDiscoveryPolicy required")
+
+    directory_path = Path(os.fspath(directory))
+    try:
+        iterator = os.scandir(directory_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return DiscoverySucceeded((), 0, 0, 0)
+    except OSError:
+        return DiscoveryFailed(
+            DiscoveryFailureReason.DIRECTORY_OPEN_FAILED, 0, 0, 0)
+
+    described = []
+    processed = 0
+    matched = 0
+    unreadable = 0
+
+    try:
+        with iterator as entries:
+            for entry in entries:
+                # The iterator has yielded this entry, but it is deliberately
+                # not processed: that one look-ahead proves the exact boundary.
+                if processed >= policy.max_directory_entries:
+                    return DiscoveryFailed(
+                        DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED,
+                        processed,
+                        matched,
+                        unreadable,
+                    )
+                processed += 1
+
+                if not fnmatch.fnmatch(entry.name, _SNAPSHOT_GLOB):
+                    continue
+                if matched >= policy.max_candidates:
+                    return DiscoveryFailed(
+                        DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED,
+                        processed,
+                        matched,
+                        unreadable,
+                    )
+                matched += 1
+
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    unreadable += 1
+                    continue
+
+                candidate = directory_path / entry.name
+                generation, step = _sequence_of(candidate)
+                described.append((
+                    info.st_mtime_ns,
+                    generation,
+                    step,
+                    os.fspath(candidate),
+                    candidate,
+                ))
+    except OSError:
+        return DiscoveryFailed(
+            DiscoveryFailureReason.ITERATION_FAILED,
+            processed,
+            matched,
+            unreadable,
+        )
+
+    described.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    return DiscoverySucceeded(
+        tuple(row[4] for row in described), unreadable, processed, matched)
 
 
 # ---------------------------------------------------------------------------

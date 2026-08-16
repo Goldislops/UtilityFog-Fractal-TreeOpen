@@ -2265,8 +2265,8 @@ def test_the_guard_uses_no_numpy_and_no_private_numpy_parser():
         if isinstance(node, ast.ImportFrom) and node.module
     }
     assert imported <= {"__future__", "ast", "contextlib", "dataclasses",
-                        "os", "re", "stat", "struct", "zipfile", "zlib",
-                        "pathlib", "typing"}
+                        "enum", "fnmatch", "os", "re", "stat", "struct",
+                        "zipfile", "zlib", "pathlib", "typing"}
     # `ast` is imported for `ast.parse` only — a syntax gate, never an
     # evaluator. The bans on eval/exec/literal_eval are asserted separately.
 
@@ -2504,9 +2504,8 @@ def test_admitted_producer_shapes_match_what_the_engine_writes(root):
 # test below, which is what makes this work independent of calibration.
 #
 # Directory contents come from a deterministic fake `scandir` context manager
-# yielding proxy entries. Built-in `os.DirEntry.stat` is never patched -- it
-# cannot be, and a test that appeared to do so would be lying about what it
-# exercised.
+# yielding proxy entries. Built-in `os.DirEntry.stat` is deliberately not
+# patched: a proxy keeps the metadata-call count and failure point explicit.
 # ===========================================================================
 
 
@@ -2540,10 +2539,13 @@ class _FakeScandir:
     with its `follow_symlinks` argument, and whether the iterator was closed.
     """
 
-    def __init__(self, entries, open_error=None, iteration_error_after=None):
+    def __init__(self, entries, open_error=None, iteration_error_after=None,
+                 iteration_error=None):
         self.entries = list(entries)
         self.open_error = open_error
         self.iteration_error_after = iteration_error_after
+        self.iteration_error = iteration_error or OSError(
+            5, "Input/output error")
         self.yielded = []
         self.stat_calls = []
         self.closed = 0
@@ -2568,7 +2570,7 @@ class _FakeScandir:
         for index, entry in enumerate(self.entries):
             if (self.iteration_error_after is not None
                     and index == self.iteration_error_after):
-                raise OSError(5, "Input/output error")
+                raise self.iteration_error
             self.yielded.append(entry.name)
             yield entry
 
@@ -2605,7 +2607,7 @@ def test_an_invalid_discovery_cap_is_refused(field, value):
     happens to accept them."""
     kwargs = {"max_directory_entries": 10, "max_candidates": 5}
     kwargs[field] = value
-    with pytest.raises((ValueError, TypeError)):
+    with pytest.raises(ValueError):
         guard.CandidateDiscoveryPolicy(**kwargs)
 
 
@@ -2622,6 +2624,12 @@ def test_the_discovery_policy_is_separate_from_the_archive_policy():
     assert not hasattr(guard.PRODUCTION_POLICY, "max_directory_entries")
     assert not hasattr(guard.PRODUCTION_POLICY, "max_candidates")
     assert guard.CandidateDiscoveryPolicy is not guard.SnapshotArchivePolicy
+
+
+def test_discovery_requires_an_explicit_policy(root):
+    """Group 1 must not smuggle in an uncalibrated production default."""
+    with pytest.raises(TypeError):
+        guard.discover_snapshot_candidates(root)
 
 
 # -- caps: boundary and one beyond -------------------------------------------
@@ -2660,6 +2668,16 @@ def test_one_past_the_candidate_cap_fails_closed(root, monkeypatch):
     assert result.matched_so_far == 5
 
 
+def test_entry_limit_precedes_candidate_limit_when_both_are_exhausted(
+        root, monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(_entries(2)))
+    result = _discover(root, _policy(1, 1))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    assert result.processed == 1 and result.matched_so_far == 1
+    assert len(fake.yielded) == 2 and len(fake.stat_calls) == 1
+
+
 # -- processed versus yielded, and the unstatted overflow entry --------------
 
 def test_processed_is_bounded_and_yields_allow_one_look_ahead(root, monkeypatch):
@@ -2684,10 +2702,22 @@ def test_the_overflow_causing_entry_is_never_statted(root, monkeypatch):
     assert fake.yielded[5] not in statted
 
 
+def test_the_entry_limit_look_ahead_is_never_statted(root, monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(_entries(11)))
+    result = _discover(root, _policy(10, 100))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    assert len(fake.stat_calls) == 10
+    statted = set(name for name, _ in fake.stat_calls)
+    assert fake.yielded[10] not in statted
+
+
 def test_metadata_calls_are_bounded_by_the_candidate_cap(root, monkeypatch):
     fake = _install(monkeypatch, _FakeScandir(_entries(500)))
-    _discover(root, _policy(10000, 20))
-    assert len(fake.stat_calls) <= 20
+    result = _discover(root, _policy(10000, 20))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED
+    assert len(fake.stat_calls) == 20
 
 
 # -- floods -------------------------------------------------------------------
@@ -2751,6 +2781,20 @@ def test_an_error_after_iteration_begins_is_an_iteration_failure(root,
     assert result.processed == 4
 
 
+@pytest.mark.parametrize("error", [
+    FileNotFoundError(2, "gone during iteration"),
+    NotADirectoryError(20, "changed during iteration"),
+])
+def test_missing_or_changed_mid_iteration_is_not_successful_empty(
+        root, monkeypatch, error):
+    _install(monkeypatch, _FakeScandir(
+        _entries(5), iteration_error_after=2, iteration_error=error))
+    result = _discover(root, _policy(100, 100))
+    assert isinstance(result, guard.DiscoveryFailed)
+    assert result.reason is guard.DiscoveryFailureReason.ITERATION_FAILED
+    assert result.processed == 2
+
+
 def test_a_reason_carries_no_path_or_exception_text(root, monkeypatch):
     _install(monkeypatch, _FakeScandir([], open_error=PermissionError(
         13, "Permission denied", "/attacker/chosen/LEAKNAME")))
@@ -2759,10 +2803,46 @@ def test_a_reason_carries_no_path_or_exception_text(root, monkeypatch):
     assert "LEAKNAME" not in text and "Permission" not in text
 
 
+@pytest.mark.parametrize("lane", ["iteration", "metadata"])
+def test_iteration_and_metadata_oserrors_are_also_sanitized(root, monkeypatch,
+                                                             lane):
+    error = OSError(5, "LEAKNAME /attacker/chosen/path")
+    if lane == "iteration":
+        fake = _FakeScandir(
+            _entries(2), iteration_error_after=1, iteration_error=error)
+    else:
+        fake = _FakeScandir([_ProxyEntry(
+            "v070_gen000001_LEAKNAME.npz", stat_error=error)])
+    _install(monkeypatch, fake)
+    result = _discover(root, _policy(10, 5))
+    assert "LEAKNAME" not in repr(result)
+    assert "/attacker/chosen/path" not in repr(result)
+
+
+@pytest.mark.parametrize("error_type", [
+    MemoryError, KeyboardInterrupt, RuntimeError, TypeError,
+])
+@pytest.mark.parametrize("lane", ["open", "iteration", "metadata"])
+def test_non_oserrors_propagate_unchanged(root, monkeypatch, lane, error_type):
+    error = error_type("programmer-or-system-fault")
+    if lane == "open":
+        fake = _FakeScandir([], open_error=error)
+    elif lane == "iteration":
+        fake = _FakeScandir(
+            _entries(2), iteration_error_after=1, iteration_error=error)
+    else:
+        fake = _FakeScandir([_ProxyEntry(
+            "v070_gen000001_step1_x.npz", stat_error=error)])
+    _install(monkeypatch, fake)
+    with pytest.raises(error_type, match="programmer-or-system-fault"):
+        _discover(root, _policy(10, 5))
+
+
 # -- partial discard and closure ---------------------------------------------
 
 @pytest.mark.parametrize("build", [
-    lambda: _FakeScandir(_entries(11)),
+    lambda: _FakeScandir([
+        _ProxyEntry("noise-%d.txt" % i) for i in range(11)]),
     lambda: _FakeScandir(_entries(20)),
     lambda: _FakeScandir(_entries(10), iteration_error_after=6),
 ], ids=["entry_overflow", "candidate_overflow", "iteration_error"])
@@ -2774,6 +2854,51 @@ def test_every_failure_discards_the_partial_prefix(root, monkeypatch, build):
     retained = [v for v in dataclasses.asdict(result).values()
                 if isinstance(v, (list, tuple)) and v]
     assert retained == [], "a failure must not retain candidates in any field"
+
+
+def test_a_failure_has_only_fixed_reason_and_integer_counters(root,
+                                                              monkeypatch):
+    _install(monkeypatch, _FakeScandir(_entries(6)))
+    result = _discover(root, _policy(100, 5))
+    assert tuple(field.name for field in dataclasses.fields(result)) == (
+        "reason", "processed", "matched_so_far", "unreadable")
+    assert isinstance(result.reason, guard.DiscoveryFailureReason)
+    assert all(type(value) is int for value in (
+        result.processed, result.matched_so_far, result.unreadable))
+    assert not any(isinstance(value, (Path, list, tuple, set, dict, BaseException))
+                   for value in dataclasses.asdict(result).values())
+
+
+def test_impossible_success_results_are_refused(root):
+    valid = dict(ordered=(root / "v070_gen1.npz",), unreadable=0,
+                 processed=1, matched=1)
+    invalid = [
+        {**valid, "ordered": [root / "v070_gen1.npz"]},
+        {**valid, "ordered": (str(root / "v070_gen1.npz"),)},
+        {**valid, "unreadable": -1},
+        {**valid, "processed": 0},
+        {**valid, "matched": 2},
+        {**valid, "processed": True},
+    ]
+    for kwargs in invalid:
+        with pytest.raises(ValueError):
+            guard.DiscoverySucceeded(**kwargs)
+
+
+def test_impossible_failure_results_are_refused():
+    reason = guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    valid = dict(reason=reason, processed=2, matched_so_far=1,
+                 unreadable=0)
+    invalid = [
+        {**valid, "reason": "entry_limit_exceeded"},
+        {**valid, "processed": -1},
+        {**valid, "matched_so_far": 3},
+        {**valid, "unreadable": 2},
+        {**valid, "unreadable": False},
+    ]
+    for kwargs in invalid:
+        with pytest.raises(ValueError):
+            guard.DiscoveryFailed(**kwargs)
 
 
 @pytest.mark.parametrize("build", [
@@ -2843,6 +2968,27 @@ def test_the_ordered_candidates_are_immutable(root, monkeypatch):
     _install(monkeypatch, _FakeScandir(_entries(3)))
     result = _discover(root, _policy(100, 100))
     assert isinstance(result.ordered, tuple)
+
+
+def test_real_scandir_smoke_and_handle_closure(root):
+    data_dir = root / "real-scandir"
+    data_dir.mkdir()
+    first = data_dir / "v070_gen000001_step1_x.npz"
+    second = data_dir / "v070_gen000002_step1_x.npz"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    (data_dir / "noise.txt").write_bytes(b"noise")
+
+    result = _discover(data_dir, _policy(10, 5))
+    assert isinstance(result, guard.DiscoverySucceeded)
+    assert result.matched == 2 and result.processed == 3
+    assert all(isinstance(path, Path) for path in result.ordered)
+
+    # Windows refuses to rename a directory while its scandir handle remains
+    # open, so this also exercises real context-manager closure.
+    moved = root / "real-scandir-moved"
+    data_dir.rename(moved)
+    assert moved.is_dir()
 
 
 # -- ordering parity with the existing rules ---------------------------------
