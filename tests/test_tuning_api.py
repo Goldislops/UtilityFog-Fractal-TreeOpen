@@ -1305,9 +1305,13 @@ def test_replay_skips_legacy_wide_int_line_not_crash(tmp_path, limit):
 # run — so the fabrication was indistinguishable from the truth. Downstream it
 # is not a display field: `_last_commit_gen[name] = current_gen` and the
 # rate-limit arithmetic `(current_gen - last)` decide whether a parameter may
-# be mutated again. Writing 0 into that map while the real generation is
-# ~1.5M makes `(0 - 0) < MIN_GEN_BETWEEN_COMMITS_PER_PARAM` the comparison
-# forever after, and the ledger records `applied_at_gen: 0` for a commit that
+# be mutated again. Writing 0 into that map while the real generation is ~1.5M
+# stores a false BASELINE: once the true generation is readable again the
+# apparent gap `(current_gen - 0)` is the whole run length, so the next write
+# for that parameter clears a rate-limit interval it should have been held
+# for. That write then stores the true generation and the normal baseline is
+# restored — one bypassed interval per affected parameter, not a permanent
+# unlock. The ledger also records `applied_at_gen: 0` for a commit that
 # actually happened at an unknown generation.
 #
 # `int()` was the second defect. It is a conversion, not a check: it accepts
@@ -1387,7 +1391,7 @@ class _SwitchableGen:
 
     def __init__(self, failure=None, value=2_000_000):
         self._failure = failure if failure is not None else RuntimeError("engine unreachable")
-        self._value = value
+        self.value = value
         self.available = False
 
     def recover(self):
@@ -1396,7 +1400,7 @@ class _SwitchableGen:
     def __call__(self):
         if not self.available:
             raise self._failure
-        return self._value
+        return self.value
 
 
 def _gen_state(tmp_path, getter, bus=None):
@@ -1619,8 +1623,10 @@ def test_public_commit_returns_503_generation_unavailable(tmp_path):
 
 def test_rollback_refuses_with_fixed_503_and_writes_no_last_commit_gen(tmp_path):
     """The sharpest case: a rollback that "succeeded" wrote `_last_commit_gen`
-    back to 0 for every reverted parameter, permanently unlocking the rate
-    limit for those names."""
+    back to 0 for every reverted parameter, replacing a real baseline with a
+    false one for exactly the names a rollback touches. The next commit for
+    each of those names then cleared a rate-limit interval it should have been
+    held for, and only that commit restored the real baseline."""
     switch = _SwitchableGen()
     state, _ = _gen_state(tmp_path, switch)
     switch.recover()
@@ -1846,3 +1852,56 @@ def test_tuning_api_does_not_consume_the_bounded_discovery_primitive():
     source = Path(_mod.__file__).read_text(encoding="utf-8")
     assert "discover_snapshot_candidates" not in source
     assert "CandidateDiscoveryPolicy" not in source
+
+
+# -- the false baseline costs ONE interval, not a permanent unlock -----------
+#
+# Correcting this branch's earlier overstatement, which Jack's audit caught.
+# A fabricated 0 written into `_last_commit_gen` is a false BASELINE, and the
+# damage is bounded:
+#
+#   * while the generation is unreadable the gap `(0 - real_last)` is negative
+#     and the commit is spuriously RATE LIMITED, not let through;
+#   * the false 0 is only installed by a write that did succeed;
+#   * once the true generation is readable again the apparent gap
+#     `(current_gen - 0)` is the whole run length, so the NEXT write for that
+#     parameter clears an interval it should have been held for;
+#   * that write immediately stores the true current generation, so the
+#     normal baseline is restored and the interval is enforced again.
+#
+# One bypassed interval per affected parameter — not "forever after". The
+# control below pins the restoration half, so the corrected claim is executable
+# rather than a comment.
+
+
+def test_the_restored_baseline_enforces_the_rate_limit_again(tmp_path):
+    switch = _SwitchableGen(value=1_500_000)
+    state, _ = _gen_state(tmp_path, switch)
+
+    # Unavailable: refused outright, so no false baseline is installed at all.
+    first_id, approver = _seed_valid_proposal(state)
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=first_id, approver=approver)
+    assert ei.value.code == "generation_unavailable"
+    assert "signal_interval" not in state._last_commit_gen
+
+    # Recovered: the write succeeds and installs the TRUE generation.
+    switch.recover()
+    entry = state.commit(proposal_id=first_id, approver=approver)
+    assert entry["applied_at_gen"] == 1_500_000
+    assert state._last_commit_gen["signal_interval"] == 1_500_000
+
+    # Restored baseline: a second write inside the interval is refused again.
+    second = state.propose(params={"signal_interval": 25}, source="test",
+                           justification="inside the interval", mode="dry-run")
+    with pytest.raises(TuningError) as ei2:
+        state.commit(proposal_id=second["proposal_id"], approver=approver)
+    assert ei2.value.status_code == 429 and ei2.value.code == "rate_limited"
+
+    # And it clears only once the interval has genuinely elapsed.
+    switch.value = 1_500_000 + MIN_GEN_BETWEEN_COMMITS_PER_PARAM
+    third = state.propose(params={"signal_interval": 30}, source="test",
+                          justification="interval elapsed", mode="dry-run")
+    ok = state.commit(proposal_id=third["proposal_id"], approver=approver)
+    assert ok["applied_at_gen"] == 1_500_000 + MIN_GEN_BETWEEN_COMMITS_PER_PARAM
+    assert state._last_commit_gen["signal_interval"] == ok["applied_at_gen"]

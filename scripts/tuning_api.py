@@ -276,8 +276,12 @@ class TuningState:
         ``0`` was not a safe default — it is a legitimate generation, and
         downstream it is arithmetic: ``_last_commit_gen[name] = current_gen``
         and ``(current_gen - last)`` decide whether a parameter may be mutated
-        again, so a fabricated 0 against a real generation of ~1.5M unlocked
-        the per-parameter rate limit permanently.
+        again. A fabricated 0 is stored as a false BASELINE, and once the true
+        generation is readable again the apparent gap ``(current_gen - 0)`` is
+        the whole run length, so the next write for that parameter clears a
+        rate-limit interval it should have been held for. That write then
+        stores the true generation, restoring the normal baseline — one
+        bypassed interval per affected parameter, not a permanent unlock.
 
         *A check, not a conversion.* ``int()`` accepted ``"7"``, ``3.9``,
         ``True``, an ``int`` subclass, and any object offering ``__int__`` /
@@ -527,10 +531,12 @@ class TuningState:
             # Generation availability, after the malformed-shape proof in
             # rollback() and the unknown-snapshot lookup above, before any
             # mutation. A rollback that proceeded without a generation wrote
-            # `_last_commit_gen[name] = 0` for every reverted parameter —
-            # permanently unlocking the rate limit for exactly the names a
-            # rollback touches, which are the names most likely to be
-            # committed again next.
+            # `_last_commit_gen[name] = 0` for every reverted parameter,
+            # replacing a real baseline with a false one for exactly the names
+            # a rollback touches — the names most likely to be committed again
+            # next. Once the true generation returned, the next commit for
+            # each of those names cleared a rate-limit interval it should have
+            # been held for, and only that commit restored the real baseline.
             current_gen = self.current_gen()
             if current_gen is None:
                 raise TuningError(

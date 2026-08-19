@@ -519,14 +519,26 @@ from scripts.event_bus import EventPublisher as _EventPublisher
 from scripts.event_bus import StateWatcher as _StateWatcher
 
 
-#: The generation run as the producer writes it. ASCII digits only and width
-#: bounded, matching `snapshot_archive_guard._SNAPSHOT_NAME_RE`: `\d` in a str
-#: pattern also matches Unicode decimal digits, so `v070_gen١٢٣.npz` parsed as
-#: 123, and an unbounded run reaches CPython's integer-string conversion limit
-#: and raises out of the getter. The trailing non-digit assertion means an
-#: over-long run is NOT silently truncated to its first eighteen characters
-#: and trusted.
-_GEN_IN_NAME_RE = _re.compile(r"gen([0-9]{1,18})(?![0-9])")
+#: The generation exactly as the producer writes it, ANCHORED at the start of
+#: the basename so only the producer's own leading generation can be read.
+#:
+#: An unanchored search here was a real hole. `v070_genjunk` already satisfies
+#: the production discovery glob `v070_gen*.npz`, so a name like
+#: `v070_genjunkgen123.npz` is SELECTABLE by Medusa, Lucid and Geometry; a
+#: search would skip the unparseable prefix, find the later `gen123` and hand
+#: 123 to tuning as the engine's current generation — while
+#: `snapshot_archive_guard._SNAPSHOT_NAME_RE`, which is anchored, rejects that
+#: name's generation outright. Filenames in the data directory are
+#: attacker-influenceable, so a chosen name could supply the number the
+#: per-parameter rate limit is computed from.
+#:
+#: ASCII digits only and width bounded, matching the guard's contract: `\d` in
+#: a str pattern also matches Unicode decimal digits, so `v070_gen١٢٣.npz`
+#: parsed as 123, and an unbounded run reaches CPython's integer-string
+#: conversion limit and raises out of the getter. The trailing non-digit
+#: assertion means an over-long run is NOT silently truncated to its first
+#: eighteen characters and trusted — it is refused.
+_GEN_IN_NAME_RE = _re.compile(r"^v070_gen([0-9]{1,18})(?![0-9])")
 
 
 def _infer_current_gen_from_snapshot() -> _Optional[int]:
@@ -540,15 +552,21 @@ def _infer_current_gen_from_snapshot() -> _Optional[int]:
 
     Returning 0 for those cases was indistinguishable from a fresh run that is
     genuinely at generation 0, and 0 is not inert downstream: it is written
-    into `_last_commit_gen` and drives the per-parameter rate-limit
-    arithmetic, so a fabricated 0 against a real generation of ~1.5M unlocked
-    the rate limit permanently and recorded `applied_at_gen: 0` for a commit
-    that happened at an unknown generation.
+    into `_last_commit_gen` as a BASELINE and drives the per-parameter
+    rate-limit arithmetic. A fabricated 0 stored against a real generation of
+    ~1.5M makes the apparent gap the whole run length once the true generation
+    is readable again, so the next write for that parameter clears a
+    rate-limit interval it should have been held for; that write then stores
+    the true generation and the normal baseline is restored. One bypassed
+    interval per affected parameter — and `applied_at_gen: 0` recorded in the
+    ledger for a commit that happened at an unknown generation.
+
+    Only the ANCHORED leading generation is read; see `_GEN_IN_NAME_RE`.
     """
     snap = _find_latest_snapshot()
     if snap is None:
         return None
-    match = _GEN_IN_NAME_RE.search(snap.name)
+    match = _GEN_IN_NAME_RE.match(snap.name)
     if match is None:
         return None
     try:

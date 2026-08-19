@@ -1324,10 +1324,14 @@ def test_snapshot_route_answers_503_snapshot_rejected(
 # distinguishable from a fresh run genuinely sitting at generation 0.
 #
 # That answer is not cosmetic downstream: `TuningState` writes it into
-# `_last_commit_gen` and computes the per-parameter rate limit from it. A
-# fabricated 0 while the engine is at ~1.5M unlocks the rate limit
-# permanently and records `applied_at_gen: 0` for a commit that happened at an
-# unknown generation.
+# `_last_commit_gen` as a BASELINE and computes the per-parameter rate limit
+# from it. A fabricated 0 stored while the engine is at ~1.5M makes the
+# apparent gap the whole run length once the true generation is readable
+# again, so the next write for that parameter clears a rate-limit interval it
+# should have been held for; that write then stores the true generation and
+# the normal baseline is restored. One bypassed interval per affected
+# parameter, not a permanent unlock — and `applied_at_gen: 0` is recorded for
+# a commit that happened at an unknown generation.
 #
 # Two conversion hazards are closed at the same time, because both reach the
 # same fabricated answer. `\d` in a `str` pattern matches Unicode decimal
@@ -1454,3 +1458,83 @@ def test_snapshot_discovery_call_sites_are_unchanged_in_this_tranche():
     source = Path(medusa_api.__file__).read_text(encoding="utf-8")
     assert 'newest_first(DATA_DIR.glob("v070_gen*.npz"))' in source
     assert "first_admissible(" in source
+
+
+# -- the generation must come from the PRODUCER PREFIX, not any later token --
+#
+# Jack's audit, on the first version of this tranche: the extraction searched
+# for `gen([0-9]{1,18})(?![0-9])` anywhere in the basename. `v070_genjunk`
+# already satisfies the production discovery glob `v070_gen*.npz`, so a name
+# like `v070_genjunkgen123.npz` is SELECTABLE by Medusa, Lucid and Geometry,
+# and the unanchored search then trusted the later `gen123` and handed 123 to
+# tuning as the engine's current generation — while
+# `snapshot_archive_guard._SNAPSHOT_NAME_RE`, which is anchored, rejects that
+# name's generation outright. The filename is attacker-influenceable, so this
+# let a chosen name supply the number the rate limit is computed from.
+#
+# The expression is now anchored at `^v070_gen` and applied with `match`, so
+# only the producer's own leading generation is ever read.
+
+
+_HOSTILE_TRAILING_GEN_NAMES = [
+    "v070_genjunkgen123.npz",
+    "v070_genBAD_gen123.npz",
+    "prefix_v070_gen123.npz",
+    "v070_gen_gen456.npz",
+    "v070_gen" + "9" * 20 + "_gen42.npz",
+    "v070_genX_gen000001_step000001.npz",
+]
+
+
+@pytest.mark.parametrize("name", _HOSTILE_TRAILING_GEN_NAMES, ids=[
+    "junk_then_gen", "bad_underscore_then_gen", "prefixed_path_like",
+    "empty_then_gen", "overlong_run_then_gen", "letter_then_full_gen",
+])
+def test_infer_gen_ignores_a_later_gen_run_in_the_name(monkeypatch, tmp_path,
+                                                       name):
+    """None, not the trailing number: only the anchored prefix is a generation."""
+    assert _infer(monkeypatch, tmp_path / name) is None
+
+
+def test_the_hostile_names_are_reachable_through_the_production_glob(tmp_path):
+    """Why anchoring matters rather than being tidy: these names are SELECTED
+    by the discovery every consumer runs, so the extraction is what stands
+    between a chosen filename and the tuning rate limit."""
+    selectable = [n for n in _HOSTILE_TRAILING_GEN_NAMES
+                  if not n.startswith("prefix_")]
+    for name in selectable:
+        (tmp_path / name).write_bytes(b"x")
+    globbed = {p.name for p in Path(tmp_path).glob("v070_gen*.npz")}
+    assert globbed == set(selectable), globbed
+
+
+def test_infer_gen_reads_the_leading_generation_not_a_later_one(monkeypatch,
+                                                                 tmp_path):
+    """A VALID producer name that also contains a later `gen` run still
+    resolves to its own leading generation."""
+    name = "v070_gen000007_step000001_gen999999.npz"
+    assert _infer(monkeypatch, tmp_path / name) == 7
+
+
+def test_infer_gen_matches_the_guard_name_contract_exactly(monkeypatch,
+                                                            tmp_path):
+    """Parity with `snapshot_archive_guard._SNAPSHOT_NAME_RE`, the anchored
+    contract admission already uses, rather than a second private opinion
+    about what a generation is."""
+    probe = _HOSTILE_TRAILING_GEN_NAMES + [
+        "v070_gen000000_step000001_x.npz",
+        "v070_gen0.npz",
+        "v070_gen001234_step000007_x.npz",
+        "v070_gen999999999999999999.npz",
+        "v070_gen000007_step000001_gen999999.npz",
+        "v070_gen.npz",
+        "snapshot.npz",
+        "v070_gen" + "7" * 19 + ".npz",
+    ]
+    for name in probe:
+        match = snapshot_archive_guard._SNAPSHOT_NAME_RE.match(name)
+        expected = int(match.group("generation")) if match else None
+        got = _infer(monkeypatch, tmp_path / name)
+        assert got == expected, f"{name}: inference {got!r} vs guard {expected!r}"
+        if got is not None:
+            assert type(got) is int
