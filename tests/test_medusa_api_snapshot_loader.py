@@ -1312,3 +1312,145 @@ def test_snapshot_route_answers_503_snapshot_rejected(
     assert "v070_gen000003" not in body
     assert str(tmp_path) not in body
     assert "Traceback" not in body and ".npy" not in body
+
+
+# ===========================================================================
+# Generation inference: `None` for unavailable, never a fabricated 0
+#
+# `_infer_current_gen_from_snapshot` is the `gen_getter` Medusa hands to
+# `TuningState`. It returned `0` on two distinct "I don't know" paths — no
+# snapshot selected, and a filename that did not carry a parseable generation
+# — and generation 0 is a legitimate value, so neither answer was
+# distinguishable from a fresh run genuinely sitting at generation 0.
+#
+# That answer is not cosmetic downstream: `TuningState` writes it into
+# `_last_commit_gen` and computes the per-parameter rate limit from it. A
+# fabricated 0 while the engine is at ~1.5M unlocks the rate limit
+# permanently and records `applied_at_gen: 0` for a commit that happened at an
+# unknown generation.
+#
+# Two conversion hazards are closed at the same time, because both reach the
+# same fabricated answer. `\d` in a `str` pattern matches Unicode decimal
+# digits, so `v070_gen١٢٣.npz` parsed as 123; and an unbounded digit run hits
+# CPython's integer-string conversion limit, raising `ValueError` out of the
+# getter. The digit run is now ASCII-only and width-bounded, matching
+# `snapshot_archive_guard._SNAPSHOT_NAME_RE`, and an unconvertible run is
+# unavailable rather than 0.
+#
+# Deliberately NOT in this tranche: the bounded discovery primitive
+# (`discover_snapshot_candidates`) is not imported or consumed here, no
+# production candidate cap is chosen, and snapshot discovery itself is
+# unchanged.
+# ===========================================================================
+
+
+def _infer(monkeypatch, selected):
+    """Run the inference with `_find_latest_snapshot` pinned to `selected`."""
+    monkeypatch.setattr(medusa_api, "_find_latest_snapshot", lambda: selected)
+    return medusa_api._infer_current_gen_from_snapshot()
+
+
+def test_infer_gen_is_none_when_no_snapshot_is_selected(monkeypatch):
+    """"Nothing to read" must not be reported as "generation 0"."""
+    assert _infer(monkeypatch, None) is None
+
+
+@pytest.mark.parametrize("name", [
+    "v070_nogeneration.npz",
+    "snapshot.npz",
+    "v070_gen.npz",
+    "v070_genXYZ.npz",
+    "v070_gen_step000001.npz",
+    "v070_gen-12.npz",
+    "v070_gen+7.npz",
+    "v070_gen 12.npz",
+], ids=[
+    "no_gen_token", "bare_name", "gen_with_no_digits", "gen_with_letters",
+    "gen_then_underscore", "negative_looking", "plus_looking", "space_split",
+])
+def test_infer_gen_is_none_for_a_malformed_generation_name(monkeypatch, name,
+                                                            tmp_path):
+    assert _infer(monkeypatch, tmp_path / name) is None
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("v070_gen000000_step000001_x.npz", 0),
+    ("v070_gen0.npz", 0),
+    ("v070_gen000001_step000002_x.npz", 1),
+    ("v070_gen001234_step000007_x.npz", 1234),
+    ("v070_gen1500000_step000009_x.npz", 1500000),
+    ("v070_gen999999999999999999.npz", 999999999999999999),
+])
+def test_infer_gen_returns_the_exact_parsed_integer(monkeypatch, tmp_path,
+                                                     name, expected):
+    """Generation 0 from a REAL `gen000000` name stays 0 — it is legitimate."""
+    got = _infer(monkeypatch, tmp_path / name)
+    assert got == expected
+    assert type(got) is int, "must be an exact builtin int, not a subclass"
+
+
+@pytest.mark.parametrize("name", [
+    "v070_gen" + "9" * 19 + ".npz",
+    "v070_gen" + "1" * 200 + ".npz",
+    "v070_gen" + "7" * 5000 + ".npz",
+], ids=["nineteen_digits", "two_hundred_digits", "five_thousand_digits"])
+def test_infer_gen_is_none_when_the_digit_run_cannot_convert_safely(
+        monkeypatch, tmp_path, name):
+    """An unbounded run reached CPython's int-str conversion limit and raised
+    out of the getter; bounded parsing answers "unavailable" instead."""
+    assert _infer(monkeypatch, tmp_path / name) is None
+
+
+@pytest.mark.parametrize("name", [
+    "v070_gen١٢٣.npz",      # Arabic-Indic 123
+    "v070_gen१२३.npz",      # Devanagari 123
+    "v070_gen１２３.npz",      # fullwidth 123
+], ids=["arabic_indic", "devanagari", "fullwidth"])
+def test_infer_gen_is_none_for_non_ascii_digits(monkeypatch, tmp_path, name):
+    r"""`\d` in a str pattern matches these and `int()` converts them, so a
+    name the producer never writes could have set the generation."""
+    assert _infer(monkeypatch, tmp_path / name) is None
+
+
+def test_infer_gen_never_returns_zero_for_an_unavailable_reading(monkeypatch,
+                                                                  tmp_path):
+    """The regression itself, stated once: every unavailable path is None."""
+    unavailable = [None, tmp_path / "snapshot.npz", tmp_path / "v070_gen.npz",
+                   tmp_path / ("v070_gen" + "3" * 40 + ".npz")]
+    for selected in unavailable:
+        got = _infer(monkeypatch, selected)
+        assert got is None, f"{selected} inferred {got!r}"
+        assert got != 0
+
+
+def test_infer_gen_result_feeds_tuning_state_as_none(monkeypatch, tmp_path):
+    """End to end: an unavailable inference reaches `current_gen()` as None."""
+    pytest.importorskip("flask")
+    from scripts.tuning_api import TuningState
+
+    monkeypatch.setattr(medusa_api, "_find_latest_snapshot", lambda: None)
+    state = TuningState(
+        data_dir=tmp_path,
+        gen_getter=medusa_api._infer_current_gen_from_snapshot,
+    )
+    assert state.current_gen() is None
+
+
+def test_medusa_api_does_not_consume_the_bounded_discovery_primitive():
+    """Production discovery integration is a separately authorized tranche."""
+    source = Path(medusa_api.__file__).read_text(encoding="utf-8")
+    assert "discover_snapshot_candidates" not in source
+    assert "CandidateDiscoveryPolicy" not in source
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+    assert "discover_snapshot_candidates" not in imported
+
+
+def test_snapshot_discovery_call_sites_are_unchanged_in_this_tranche():
+    """Medusa still selects through the existing guard helpers."""
+    source = Path(medusa_api.__file__).read_text(encoding="utf-8")
+    assert 'newest_first(DATA_DIR.glob("v070_gen*.npz"))' in source
+    assert "first_admissible(" in source
