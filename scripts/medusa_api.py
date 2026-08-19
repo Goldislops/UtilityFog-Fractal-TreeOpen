@@ -511,6 +511,7 @@ def geometry_stl():
 
 import os as _os
 import re as _re
+from typing import Optional as _Optional
 
 from scripts.tuning_api import TuningState as _TuningState
 from scripts.tuning_api import create_blueprint as _create_tuning_blueprint
@@ -518,14 +519,63 @@ from scripts.event_bus import EventPublisher as _EventPublisher
 from scripts.event_bus import StateWatcher as _StateWatcher
 
 
-def _infer_current_gen_from_snapshot() -> int:
-    """Extract generation number from the latest snapshot's filename.
-    Returns 0 if no snapshot is found or the filename is unparseable."""
+#: The generation exactly as the producer writes it, ANCHORED at the start of
+#: the basename so only the producer's own leading generation can be read.
+#:
+#: An unanchored search here was a real hole. `v070_genjunk` already satisfies
+#: the production discovery glob `v070_gen*.npz`, so a name like
+#: `v070_genjunkgen123.npz` is SELECTABLE by Medusa, Lucid and Geometry; a
+#: search would skip the unparseable prefix, find the later `gen123` and hand
+#: 123 to tuning as the engine's current generation — while
+#: `snapshot_archive_guard._SNAPSHOT_NAME_RE`, which is anchored, rejects that
+#: name's generation outright. Filenames in the data directory are
+#: attacker-influenceable, so a chosen name could supply the number the
+#: per-parameter rate limit is computed from.
+#:
+#: ASCII digits only and width bounded, matching the guard's contract: `\d` in
+#: a str pattern also matches Unicode decimal digits, so `v070_gen١٢٣.npz`
+#: parsed as 123, and an unbounded run reaches CPython's integer-string
+#: conversion limit and raises out of the getter. The trailing non-digit
+#: assertion means an over-long run is NOT silently truncated to its first
+#: eighteen characters and trusted — it is refused.
+_GEN_IN_NAME_RE = _re.compile(r"^v070_gen([0-9]{1,18})(?![0-9])")
+
+
+def _infer_current_gen_from_snapshot() -> _Optional[int]:
+    """The engine's generation from the latest snapshot's filename, or None.
+
+    Returns ``None`` — never 0 — when no snapshot is selected, when the
+    filename carries no parseable generation, or when the digit run cannot be
+    converted safely. This is the `gen_getter` handed to `TuningState`, whose
+    `current_gen()` treats None as "unavailable" and whose commit and rollback
+    then refuse with a fixed 503.
+
+    Returning 0 for those cases was indistinguishable from a fresh run that is
+    genuinely at generation 0, and 0 is not inert downstream: it is written
+    into `_last_commit_gen` as a BASELINE and drives the per-parameter
+    rate-limit arithmetic. A fabricated 0 stored against a real generation of
+    ~1.5M makes the apparent gap the whole run length once the true generation
+    is readable again, so the next write for that parameter clears a
+    rate-limit interval it should have been held for; that write then stores
+    the true generation and the normal baseline is restored. One bypassed
+    interval per affected parameter — and `applied_at_gen: 0` recorded in the
+    ledger for a commit that happened at an unknown generation.
+
+    Only the ANCHORED leading generation is read; see `_GEN_IN_NAME_RE`.
+    """
     snap = _find_latest_snapshot()
     if snap is None:
-        return 0
-    m = _re.search(r"gen(\d+)", snap.name)
-    return int(m.group(1)) if m else 0
+        return None
+    match = _GEN_IN_NAME_RE.match(snap.name)
+    if match is None:
+        return None
+    try:
+        generation = int(match.group(1))
+    except ValueError:  # pragma: no cover - unreachable while the run is bounded
+        return None
+    if type(generation) is not int or generation < 0:  # pragma: no cover
+        return None
+    return generation
 
 
 # Event bus — PUB socket + telemetry file watcher. Disabled when running

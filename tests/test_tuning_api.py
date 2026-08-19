@@ -1290,3 +1290,618 @@ def test_replay_skips_legacy_wide_int_line_not_crash(tmp_path, limit):
         state = TuningState(data_dir=tmp_path, gen_getter=lambda: 0)
     assert "prop-ok" in state._proposals
     assert "prop-legacy" not in state._proposals
+
+
+# ---------------------------------------------------------------------------
+# Generation availability: fail closed instead of fabricating generation 0
+#
+# `current_gen()` used to answer `int(self._gen_getter())` inside a bare
+# `except Exception: return 0`, and a state built with no getter at all was
+# given `lambda: 0`. Three separate fabrications of the SAME wrong answer:
+# a broken getter, an unusable getter result, and an absent getter each
+# reported "the engine is at generation 0".
+#
+# Generation 0 is a legitimate value — it is the first generation of a fresh
+# run — so the fabrication was indistinguishable from the truth. Downstream it
+# is not a display field: `_last_commit_gen[name] = current_gen` and the
+# rate-limit arithmetic `(current_gen - last)` decide whether a parameter may
+# be mutated again. Writing 0 into that map while the real generation is ~1.5M
+# stores a false BASELINE: once the true generation is readable again the
+# apparent gap `(current_gen - 0)` is the whole run length, so the next write
+# for that parameter clears a rate-limit interval it should have been held
+# for. That write then stores the true generation and the normal baseline is
+# restored — one bypassed interval per affected parameter, not a permanent
+# unlock. The ledger also records `applied_at_gen: 0` for a commit that
+# actually happened at an unknown generation.
+#
+# `int()` was the second defect. It is a conversion, not a check: it accepts
+# `"7"`, `3.9`, `True`, an `int` subclass, and any object offering `__int__` /
+# `__index__` / `__trunc__` — so a supplied getter's code ran during a value
+# the caller believed to be a plain reading.
+#
+# The contract asserted below: an exact nonnegative builtin `int`, or `None`
+# for unavailable. Commit and rollback refuse with a fixed 503 before any
+# effective mutation, `_last_commit_gen` write, snapshot-cache write, ledger
+# append, pending write or success event.
+#
+# Out of scope here, deliberately: no production discovery integration, no
+# numeric cap calibration, no caching or single-flight, no change to ledger
+# replay or migration semantics.
+# ---------------------------------------------------------------------------
+
+def _generation_unavailable_message():
+    """The fixed refusal sentence, imported at call time.
+
+    Deliberately not a module-level import: until the constant exists this
+    file must still COLLECT, so the red run reports the specific controls that
+    fail rather than one collection error that hides all of them.
+    """
+    from scripts.tuning_api import GENERATION_UNAVAILABLE_MESSAGE
+    return GENERATION_UNAVAILABLE_MESSAGE
+
+
+class _HostileGen(_Recorder):
+    """A getter result that is not an int and records every conversion hook.
+
+    `int()` would call `__int__` / `__index__` / `__trunc__`; a repr-based
+    check would call `__repr__`. An exact-type check calls none of them.
+    """
+
+    def __int__(self):
+        self.calls.append("__int__")
+        return 1_500_000
+
+    def __index__(self):
+        self.calls.append("__index__")
+        return 1_500_000
+
+    def __trunc__(self):
+        self.calls.append("__trunc__")
+        return 1_500_000
+
+    def __float__(self):
+        self.calls.append("__float__")
+        return 1_500_000.0
+
+    def __str__(self):
+        self.calls.append("__str__")
+        return "1500000"
+
+    def __repr__(self):
+        self.calls.append("__repr__")
+        return "1500000"
+
+    def __eq__(self, other):
+        self.calls.append("__eq__")
+        return NotImplemented
+
+    __hash__ = None
+
+
+class _IntSub(int):
+    """An `int` subclass — an instance of `int`, but not exactly one.
+
+    Accepting it would let a supplied type's overridden arithmetic decide the
+    rate-limit comparison, so the boundary requires an exact builtin `int`.
+    """
+
+
+class _SwitchableGen:
+    """A getter that is unavailable until `recover()` is called."""
+
+    def __init__(self, failure=None, value=2_000_000):
+        self._failure = failure if failure is not None else RuntimeError("engine unreachable")
+        self.value = value
+        self.available = False
+
+    def recover(self):
+        self.available = True
+
+    def __call__(self):
+        if not self.available:
+            raise self._failure
+        return self.value
+
+
+def _gen_state(tmp_path, getter, bus=None):
+    """A TuningState/​client pair wired to one explicit generation getter."""
+    state = TuningState(data_dir=tmp_path, gen_getter=getter, event_publisher=bus)
+    app = Flask(__name__)
+    app.register_blueprint(create_blueprint(state))
+    return state, app.test_client()
+
+
+def _no_write_side_effects(tmp_path, state, effective_before, last_gen_before,
+                           ledger_before):
+    """Everything a refused write must never leave behind.
+
+    `ledger_before` is the ledger text captured immediately before the refused
+    call (``None`` when the file did not exist yet), so this proves the refusal
+    appended nothing — including the case where `propose()` had legitimately
+    created the file already.
+    """
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    if ledger_before is None:
+        assert not ledger.exists(), "ledger file was created by a refused write"
+    else:
+        assert ledger.read_text(encoding="utf-8") == ledger_before, "ledger grew"
+    assert '"type": "commit"' not in (ledger.read_text(encoding="utf-8")
+                                      if ledger.exists() else "")
+    assert '"type": "rollback"' not in (ledger.read_text(encoding="utf-8")
+                                        if ledger.exists() else "")
+    assert not (tmp_path / "tuning_pending.json").exists(), "pending file was written"
+    assert state.effective_params() == effective_before, "effective params mutated"
+    assert state._last_commit_gen == last_gen_before, "_last_commit_gen was written"
+
+
+def _seed_valid_proposal(state, approver="human:kevin"):
+    """A proposal that is valid, non-quarantined and human-approved."""
+    entry = state.propose(
+        params={"signal_interval": 15},
+        source="test",
+        justification="generation availability control",
+        mode="dry-run",
+    )
+    assert entry["validation"]["ok"], entry["validation"]["errors"]
+    return entry["proposal_id"], approver
+
+
+# -- the generation value itself ---------------------------------------------
+
+
+def test_current_gen_is_none_when_the_getter_raises(tmp_path):
+    """An ordinary getter exception means unavailable, not generation 0."""
+    def boom():
+        raise RuntimeError("engine socket closed")
+
+    state, _ = _gen_state(tmp_path, boom)
+    assert state.current_gen() is None
+
+
+@pytest.mark.parametrize("value", [
+    None, True, False, 1.5, 0.0, "7", "0", b"7", -1, -1_000_000,
+    [1], {"gen": 1},
+], ids=[
+    "none", "true", "false", "float", "float_zero", "str", "str_zero",
+    "bytes", "negative_one", "negative_large", "list", "dict",
+])
+def test_current_gen_is_none_for_every_non_exact_nonnegative_int(tmp_path, value):
+    """`int()` accepted most of these. An exact-type check accepts none."""
+    state, _ = _gen_state(tmp_path, lambda: value)
+    assert state.current_gen() is None
+
+
+def test_current_gen_rejects_an_int_subclass(tmp_path):
+    """`isinstance(x, int)` would accept this; the boundary must not."""
+    state, _ = _gen_state(tmp_path, lambda: _IntSub(1_500_000))
+    assert state.current_gen() is None
+
+
+def test_current_gen_never_invokes_a_supplied_conversion_hook(tmp_path):
+    """No `__int__` / `__index__` / `__trunc__` / `__repr__` call at all."""
+    hostile = _HostileGen()
+    state, _ = _gen_state(tmp_path, lambda: hostile)
+    assert state.current_gen() is None
+    assert hostile.calls == [], f"conversion hooks ran: {hostile.calls}"
+
+
+@pytest.mark.parametrize("value", [0, 1, 7, 1_500_000, 2 ** 62])
+def test_current_gen_accepts_exact_nonnegative_builtin_ints(tmp_path, value):
+    """Generation 0 is legitimate and must survive the fail-closed change."""
+    state, _ = _gen_state(tmp_path, lambda: value)
+    got = state.current_gen()
+    assert got == value and type(got) is int
+
+
+def test_no_supplied_getter_means_unavailable_not_fabricated_zero(tmp_path):
+    """The `gen_getter or (lambda: 0)` default was itself a fabrication."""
+    state = TuningState(data_dir=tmp_path)
+    assert state.current_gen() is None
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_base_exception_from_the_getter_is_not_turned_into_a_tuning_answer(
+        tmp_path, exc):
+    """Interpreter-level control flow must not become "generation unavailable"."""
+    def raiser():
+        raise exc("operator interrupt")
+
+    state, _ = _gen_state(tmp_path, raiser)
+    with pytest.raises(exc):
+        state.current_gen()
+
+
+# -- the read endpoint --------------------------------------------------------
+
+
+def test_params_endpoint_reports_json_null_when_generation_is_unavailable(tmp_path):
+    """Still HTTP 200 — a missing generation is not a broken read."""
+    _, client = _gen_state(tmp_path, lambda: None)
+    resp = client.get("/api/params")
+    assert resp.status_code == 200
+    assert resp.get_json()["current_gen"] is None
+    # The wire value itself, not just the decoded one: `null`, never `0`.
+    wire = resp.get_data(as_text=True).replace(" ", "").replace("\n", "")
+    assert '"current_gen":null' in wire
+    assert '"current_gen":0' not in wire
+
+
+def test_params_endpoint_still_distinguishes_a_real_generation_zero(tmp_path):
+    """The whole point: 0 and null must not be the same wire value."""
+    _, client = _gen_state(tmp_path, lambda: 0)
+    body = client.get("/api/params").get_json()
+    assert body["current_gen"] == 0 and body["current_gen"] is not None
+
+
+# -- commit fails closed ------------------------------------------------------
+
+
+def test_commit_refuses_with_fixed_503_when_generation_is_unavailable(tmp_path):
+    switch = _SwitchableGen()
+    state, _ = _gen_state(tmp_path, switch)
+    proposal_id, approver = _seed_valid_proposal(state)
+    effective_before = state.effective_params()
+    last_gen_before = dict(state._last_commit_gen)
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    ledger_before = ledger.read_text(encoding="utf-8") if ledger.exists() else None
+
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=proposal_id, approver=approver)
+
+    assert ei.value.status_code == 503
+    assert ei.value.code == "generation_unavailable"
+    assert ei.value.message == "Current generation is unavailable."
+    assert ei.value.message == _generation_unavailable_message()
+    _no_write_side_effects(tmp_path, state, effective_before, last_gen_before,
+                           ledger_before)
+    assert proposal_id not in state._snapshots_after_commit
+
+
+def test_commit_generation_refusal_emits_only_a_sanitized_rejected_event(tmp_path):
+    class _Bus:
+        def __init__(self):
+            self.events = []
+
+        def publish(self, topic, payload):
+            self.events.append((topic, payload))
+
+    bus = _Bus()
+
+    def boom():
+        raise RuntimeError("/srv/medusa/data/v070_gen001234_secret.npz unreadable")
+
+    state, _ = _gen_state(tmp_path, boom, bus=bus)
+    proposal_id, approver = _seed_valid_proposal(state)
+    bus.events.clear()
+
+    with pytest.raises(TuningError):
+        state.commit(proposal_id=proposal_id, approver=approver)
+
+    topics = [t for t, _ in bus.events]
+    assert topics == ["tuning.rejected"], topics
+    assert "tuning.committed" not in topics
+    payload = bus.events[0][1]
+    assert payload["error"] == "generation_unavailable"
+    assert payload["message"] == _generation_unavailable_message()
+    blob = repr(bus.events)
+    for leak in ("/srv/medusa", "v070_gen001234_secret", "RuntimeError", "Traceback"):
+        assert leak not in blob, f"{leak} leaked into the rejected event"
+
+
+def test_commit_refusal_appends_no_ledger_line_and_writes_no_pending(tmp_path):
+    """`propose()` already wrote the proposal's own ledger line, so the claim
+    is that the REFUSED COMMIT appends nothing to it and creates no pending
+    file — not that the ledger is absent."""
+    state, _ = _gen_state(tmp_path, lambda: None)
+    proposal_id, approver = _seed_valid_proposal(state)
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    before = ledger.read_text(encoding="utf-8")
+    assert '"type": "commit"' not in before
+
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=proposal_id, approver=approver)
+
+    assert ei.value.code == "generation_unavailable"
+    assert ledger.read_text(encoding="utf-8") == before
+    assert '"type": "commit"' not in ledger.read_text(encoding="utf-8")
+    assert not (tmp_path / "tuning_pending.json").exists()
+
+
+def test_public_commit_returns_503_generation_unavailable(tmp_path):
+    state, client = _gen_state(tmp_path, lambda: "not-a-generation")
+    proposal_id, approver = _seed_valid_proposal(state)
+    resp = client.post("/api/tuning/commit",
+                       json={"proposal_id": proposal_id, "approver": approver})
+    assert resp.status_code == 503
+    body = resp.get_json()
+    assert body["error"] == "generation_unavailable"
+    assert body["message"] == _generation_unavailable_message()
+
+
+# -- rollback fails closed ----------------------------------------------------
+
+
+def test_rollback_refuses_with_fixed_503_and_writes_no_last_commit_gen(tmp_path):
+    """The sharpest case: a rollback that "succeeded" wrote `_last_commit_gen`
+    back to 0 for every reverted parameter, replacing a real baseline with a
+    false one for exactly the names a rollback touches. The next commit for
+    each of those names then cleared a rate-limit interval it should have been
+    held for, and only that commit restored the real baseline."""
+    switch = _SwitchableGen()
+    state, _ = _gen_state(tmp_path, switch)
+    switch.recover()
+    proposal_id, approver = _seed_valid_proposal(state)
+    state.commit(proposal_id=proposal_id, approver=approver)
+    committed_gen = dict(state._last_commit_gen)
+    assert committed_gen and 0 not in committed_gen.values()
+
+    state.propose(params={"signal_interval": 20}, source="test",
+                  justification="move away", mode="dry-run")
+    effective_before = state.effective_params()
+    switch.available = False
+
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id=proposal_id)
+
+    assert ei.value.status_code == 503
+    assert ei.value.code == "generation_unavailable"
+    assert ei.value.message == _generation_unavailable_message()
+    assert state._last_commit_gen == committed_gen, "_last_commit_gen was rewritten"
+    assert 0 not in state._last_commit_gen.values(), "a generation 0 was fabricated"
+    assert state.effective_params() == effective_before
+
+
+def test_rollback_generation_refusal_writes_no_new_ledger_line(tmp_path):
+    switch = _SwitchableGen()
+    state, _ = _gen_state(tmp_path, switch)
+    switch.recover()
+    proposal_id, approver = _seed_valid_proposal(state)
+    state.commit(proposal_id=proposal_id, approver=approver)
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    before = ledger.read_text(encoding="utf-8")
+    pending_before = (tmp_path / "tuning_pending.json").read_text(encoding="utf-8")
+    switch.available = False
+
+    with pytest.raises(TuningError):
+        state.rollback(to_proposal_id=proposal_id)
+
+    assert ledger.read_text(encoding="utf-8") == before
+    assert (tmp_path / "tuning_pending.json").read_text(
+        encoding="utf-8") == pending_before
+
+
+def test_public_rollback_returns_503_generation_unavailable(tmp_path):
+    switch = _SwitchableGen()
+    state, client = _gen_state(tmp_path, switch)
+    switch.recover()
+    proposal_id, approver = _seed_valid_proposal(state)
+    state.commit(proposal_id=proposal_id, approver=approver)
+    switch.available = False
+
+    resp = client.post("/api/tuning/rollback", json={"to_proposal_id": proposal_id})
+    assert resp.status_code == 503
+    assert resp.get_json()["error"] == "generation_unavailable"
+
+
+# -- recovery -----------------------------------------------------------------
+
+
+def test_commit_succeeds_once_the_generation_getter_recovers(tmp_path):
+    switch = _SwitchableGen(value=2_000_123)
+    state, _ = _gen_state(tmp_path, switch)
+    proposal_id, approver = _seed_valid_proposal(state)
+
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=proposal_id, approver=approver)
+    assert ei.value.code == "generation_unavailable"
+
+    switch.recover()
+    entry = state.commit(proposal_id=proposal_id, approver=approver)
+    assert entry["applied_at_gen"] == 2_000_123
+    assert type(entry["applied_at_gen"]) is int
+    assert state._last_commit_gen["signal_interval"] == 2_000_123
+    assert (tmp_path / "tuning_ledger.jsonl").exists()
+
+
+def test_rollback_succeeds_once_the_generation_getter_recovers(tmp_path):
+    switch = _SwitchableGen(value=3_000_000)
+    state, _ = _gen_state(tmp_path, switch)
+    switch.recover()
+    proposal_id, approver = _seed_valid_proposal(state)
+    state.commit(proposal_id=proposal_id, approver=approver)
+
+    switch.available = False
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id=proposal_id)
+    assert ei.value.code == "generation_unavailable"
+
+    switch.recover()
+    entry = state.rollback(to_proposal_id=proposal_id)
+    assert entry["applied_at_gen"] == 3_000_000
+    assert type(entry["applied_at_gen"]) is int
+
+
+def test_a_real_generation_zero_still_commits(tmp_path):
+    """Fresh run, generation 0: available and legitimate, not a refusal."""
+    state, _ = _gen_state(tmp_path, lambda: 0)
+    proposal_id, approver = _seed_valid_proposal(state)
+    entry = state.commit(proposal_id=proposal_id, approver=approver)
+    assert entry["applied_at_gen"] == 0
+    assert state._last_commit_gen["signal_interval"] == 0
+
+
+# -- precedence: the existing gates still win ---------------------------------
+
+
+def test_malformed_commit_shape_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=[1, 2], approver="human:kevin")
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+
+
+def test_unknown_proposal_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id="prop-nope", approver="human:kevin")
+    assert ei.value.status_code == 404 and ei.value.code == "unknown_proposal"
+
+
+def test_invalid_proposal_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    entry = state.propose(params={"signal_interval": "twelve"}, source="test",
+                          justification="wrong value type", mode="dry-run")
+    assert not entry["validation"]["ok"]
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=entry["proposal_id"], approver="human:kevin")
+    assert ei.value.status_code == 409 and ei.value.code == "invalid_proposal"
+
+
+def test_auto_commit_quarantine_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    proposal_id, _ = _seed_valid_proposal(state)
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=proposal_id, approver="policy:auto")
+    assert ei.value.status_code == 403 and ei.value.code == "auto_commit_disabled"
+
+
+def test_human_approval_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    human_param = _first_param_in_category_for_test(Category.HUMAN_APPROVAL)
+    entry = state.propose(params={human_param: PARAMS[human_param].default},
+                          source="test", justification="needs a human",
+                          mode="dry-run")
+    assert entry["validation"]["ok"], entry["validation"]["errors"]
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=entry["proposal_id"], approver="agent:bot")
+    assert ei.value.status_code == 403 and ei.value.code == "human_approval_required"
+
+
+def test_malformed_rollback_shape_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id={"a": 1})
+    assert ei.value.status_code == 400 and ei.value.code == "bad_request"
+
+
+def test_unknown_rollback_target_still_wins_over_generation_unavailable(tmp_path):
+    state, _ = _gen_state(tmp_path, lambda: None)
+    with pytest.raises(TuningError) as ei:
+        state.rollback(to_proposal_id="prop-never-committed")
+    assert ei.value.status_code == 404 and ei.value.code == "unknown_proposal"
+
+
+def _first_param_in_category_for_test(category):
+    for name, param in PARAMS.items():
+        if param.category is category:
+            return name
+    pytest.skip(f"no parameter in category {category}")
+
+
+# -- sanitization -------------------------------------------------------------
+
+
+def test_generation_refusal_message_is_fixed_and_leaks_nothing(tmp_path):
+    """One fixed sentence for every unavailable cause, over both write paths."""
+    hostile = OSError(13, "Permission denied",
+                      "/srv/medusa/data/v070_gen000777_LEAKNAME.npz")
+    switch = _SwitchableGen(failure=hostile, value=500)
+    state, _ = _gen_state(tmp_path, switch)
+
+    switch.recover()
+    proposal_id, approver = _seed_valid_proposal(state)
+    state.commit(proposal_id=proposal_id, approver=approver)
+    second_id, _ = _seed_valid_proposal(state)
+
+    switch.available = False
+    messages = []
+    for call in (lambda: state.commit(proposal_id=second_id, approver=approver),
+                 lambda: state.rollback(to_proposal_id=proposal_id)):
+        with pytest.raises(TuningError) as ei:
+            call()
+        assert ei.value.code == "generation_unavailable"
+        messages.append(ei.value.message)
+
+    assert len(messages) == 2
+    for msg in messages:
+        assert msg == _generation_unavailable_message()
+        assert len(msg) < 120
+        for leak in ("LEAKNAME", "/srv/medusa", "Permission", "OSError"):
+            assert leak not in msg
+
+
+def test_generation_refusal_http_body_leaks_no_path_or_exception_text(tmp_path):
+    def boom():
+        raise OSError(13, "Permission denied", "/srv/medusa/LEAKNAME.npz")
+
+    state, client = _gen_state(tmp_path, boom)
+    proposal_id, approver = _seed_valid_proposal(state)
+    resp = client.post("/api/tuning/commit",
+                       json={"proposal_id": proposal_id, "approver": approver})
+    body = resp.get_data(as_text=True)
+    for leak in ("LEAKNAME", "/srv/medusa", "Permission denied", "Traceback", "OSError"):
+        assert leak not in body
+
+
+# -- the primitive from PR #470 stays unwired in this tranche -----------------
+
+
+def test_tuning_api_does_not_consume_the_bounded_discovery_primitive():
+    """Production discovery integration is a separately authorized tranche."""
+    import scripts.tuning_api as _mod
+    source = Path(_mod.__file__).read_text(encoding="utf-8")
+    assert "discover_snapshot_candidates" not in source
+    assert "CandidateDiscoveryPolicy" not in source
+
+
+# -- the false baseline costs ONE interval, not a permanent unlock -----------
+#
+# Correcting this branch's earlier overstatement, which Jack's audit caught.
+# A fabricated 0 written into `_last_commit_gen` is a false BASELINE, and the
+# damage is bounded:
+#
+#   * while the generation is unreadable the gap `(0 - real_last)` is negative
+#     and the commit is spuriously RATE LIMITED, not let through;
+#   * the false 0 is only installed by a write that did succeed;
+#   * once the true generation is readable again the apparent gap
+#     `(current_gen - 0)` is the whole run length, so the NEXT write for that
+#     parameter clears an interval it should have been held for;
+#   * that write immediately stores the true current generation, so the
+#     normal baseline is restored and the interval is enforced again.
+#
+# One bypassed interval per affected parameter — not "forever after". The
+# control below pins the restoration half, so the corrected claim is executable
+# rather than a comment.
+
+
+def test_the_restored_baseline_enforces_the_rate_limit_again(tmp_path):
+    switch = _SwitchableGen(value=1_500_000)
+    state, _ = _gen_state(tmp_path, switch)
+
+    # Unavailable: refused outright, so no false baseline is installed at all.
+    first_id, approver = _seed_valid_proposal(state)
+    with pytest.raises(TuningError) as ei:
+        state.commit(proposal_id=first_id, approver=approver)
+    assert ei.value.code == "generation_unavailable"
+    assert "signal_interval" not in state._last_commit_gen
+
+    # Recovered: the write succeeds and installs the TRUE generation.
+    switch.recover()
+    entry = state.commit(proposal_id=first_id, approver=approver)
+    assert entry["applied_at_gen"] == 1_500_000
+    assert state._last_commit_gen["signal_interval"] == 1_500_000
+
+    # Restored baseline: a second write inside the interval is refused again.
+    second = state.propose(params={"signal_interval": 25}, source="test",
+                           justification="inside the interval", mode="dry-run")
+    with pytest.raises(TuningError) as ei2:
+        state.commit(proposal_id=second["proposal_id"], approver=approver)
+    assert ei2.value.status_code == 429 and ei2.value.code == "rate_limited"
+
+    # And it clears only once the interval has genuinely elapsed.
+    switch.value = 1_500_000 + MIN_GEN_BETWEEN_COMMITS_PER_PARAM
+    third = state.propose(params={"signal_interval": 30}, source="test",
+                          justification="interval elapsed", mode="dry-run")
+    ok = state.commit(proposal_id=third["proposal_id"], approver=approver)
+    assert ok["applied_at_gen"] == 1_500_000 + MIN_GEN_BETWEEN_COMMITS_PER_PARAM
+    assert state._last_commit_gen["signal_interval"] == ok["applied_at_gen"]
