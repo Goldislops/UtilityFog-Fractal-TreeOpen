@@ -75,6 +75,15 @@ the supplied value nor its type name, so no proposed object's ``__str__`` /
 ``__repr__`` is executed and no attacker-chosen text enters a response, the
 ledger, or an event payload."""
 
+GENERATION_UNAVAILABLE_MESSAGE = "Current generation is unavailable."
+"""Fixed refusal for a write attempted while the current generation is unknown.
+
+One sentence for every cause — a missing getter, a getter that raised, a
+getter that answered with something other than an exact nonnegative ``int`` —
+so the refusal never carries an exception message, a snapshot name or a path.
+The distinction between those causes is a server-side concern; to the caller
+the only actionable fact is that the write did not happen and can be retried."""
+
 _MAX_REQUEST_VALUE_DEPTH = 64
 """Container-nesting depth accepted while proving a proposed parameter VALUE is
 a builtin JSON tree. This bounds the recursion so a cyclic DIRECT value cannot
@@ -218,13 +227,17 @@ class TuningState:
     def __init__(
         self,
         data_dir: Path,
-        gen_getter: Optional[Callable[[], int]] = None,
+        gen_getter: Optional[Callable[[], Optional[int]]] = None,
         event_publisher: Optional[Any] = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.ledger_path = self.data_dir / "tuning_ledger.jsonl"
         self.pending_path = self.data_dir / "tuning_pending.json"
-        self._gen_getter: Callable[[], int] = gen_getter or (lambda: 0)
+        # No `or (lambda: 0)` fallback. A state with no generation source does
+        # not know the generation, and generation 0 is a REAL value — the
+        # first generation of a fresh run — so substituting it made "I was
+        # never given a getter" indistinguishable from the truth.
+        self._gen_getter: Optional[Callable[[], Optional[int]]] = gen_getter
         # Duck-typed: anything with .publish(topic, payload). Kept optional so
         # unit tests can skip the event bus entirely.
         self._event_publisher = event_publisher
@@ -252,11 +265,42 @@ class TuningState:
         with self._lock:
             return dict(self._effective)
 
-    def current_gen(self) -> int:
+    def current_gen(self) -> Optional[int]:
+        """The engine's current generation, or ``None`` when it is unknown.
+
+        Three deliberate properties, each of which used to answer ``0``:
+
+        *No fabrication.* A missing getter, a getter that raised, and a getter
+        that answered with something unusable are all "unavailable". Callers
+        that WRITE refuse; the read endpoint reports JSON ``null``. Answering
+        ``0`` was not a safe default — it is a legitimate generation, and
+        downstream it is arithmetic: ``_last_commit_gen[name] = current_gen``
+        and ``(current_gen - last)`` decide whether a parameter may be mutated
+        again, so a fabricated 0 against a real generation of ~1.5M unlocked
+        the per-parameter rate limit permanently.
+
+        *A check, not a conversion.* ``int()`` accepted ``"7"``, ``3.9``,
+        ``True``, an ``int`` subclass, and any object offering ``__int__`` /
+        ``__index__`` / ``__trunc__`` — running a supplied getter's code
+        during what the caller believes is a plain reading, and letting a
+        subclass's overridden arithmetic decide the rate-limit comparison.
+        ``type(value) is int`` runs no hook and admits no subclass.
+
+        *``BaseException`` still propagates.* ``except Exception`` deliberately
+        does not catch ``KeyboardInterrupt`` / ``SystemExit`` /
+        ``GeneratorExit``: interpreter-level control flow must not be quietly
+        rewritten into a tuning answer.
+        """
+        getter = self._gen_getter
+        if getter is None:
+            return None
         try:
-            return int(self._gen_getter())
+            value = getter()
         except Exception:
-            return 0
+            return None
+        if type(value) is not int or value < 0:
+            return None
+        return value
 
     # ---- write: propose ----
 
@@ -388,8 +432,27 @@ class TuningState:
                     f"Proposal touches {offender} which requires approver='human:<name>'.",
                 )
 
-            # Rate limit.
+            # Generation availability. Placed AFTER the shape, registry,
+            # validation, quarantine and approver gates so their existing
+            # precedence and reason codes are unchanged, and BEFORE the rate
+            # limit because the rate limit is arithmetic on this value —
+            # there is no rate-limit answer to give without a generation.
+            #
+            # Everything that mutates state lives below this line: the
+            # effective-parameter update, the `_last_commit_gen` write, the
+            # committed-snapshot cache, the ledger append (which CREATES the
+            # ledger file) and the pending-file replacement. Refusing here is
+            # what makes the write atomic with respect to a missing
+            # generation. The raise unwinds through commit()'s `except
+            # TuningError`, which emits the fixed `tuning.rejected` event and
+            # re-raises, so no `tuning.committed` is ever published.
             current_gen = self.current_gen()
+            if current_gen is None:
+                raise TuningError(
+                    503, "generation_unavailable", GENERATION_UNAVAILABLE_MESSAGE,
+                )
+
+            # Rate limit.
             for name in params:
                 last = self._last_commit_gen.get(name)
                 if last is not None and (current_gen - last) < MIN_GEN_BETWEEN_COMMITS_PER_PARAM:
@@ -461,7 +524,19 @@ class TuningState:
                     404, "unknown_proposal",
                     f"No committed snapshot for proposal {to_proposal_id}; cannot rollback.",
                 )
+            # Generation availability, after the malformed-shape proof in
+            # rollback() and the unknown-snapshot lookup above, before any
+            # mutation. A rollback that proceeded without a generation wrote
+            # `_last_commit_gen[name] = 0` for every reverted parameter —
+            # permanently unlocking the rate limit for exactly the names a
+            # rollback touches, which are the names most likely to be
+            # committed again next.
             current_gen = self.current_gen()
+            if current_gen is None:
+                raise TuningError(
+                    503, "generation_unavailable", GENERATION_UNAVAILABLE_MESSAGE,
+                )
+
             changed = [k for k, v in snapshot.items() if self._effective.get(k) != v]
             self._effective = dict(snapshot)
             for name in changed:
@@ -675,6 +750,7 @@ __all__ = [
     "VALID_MODES",
     "AUTO_COMMIT_APPROVER",
     "BAD_REQUEST_MESSAGE",
+    "GENERATION_UNAVAILABLE_MESSAGE",
     "TuningError",
     "TuningState",
     "create_blueprint",

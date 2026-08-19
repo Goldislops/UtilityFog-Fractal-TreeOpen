@@ -1407,9 +1407,24 @@ def _gen_state(tmp_path, getter, bus=None):
     return state, app.test_client()
 
 
-def _no_write_side_effects(tmp_path, state, effective_before, last_gen_before):
-    """Nothing a refused write must never leave behind."""
-    assert not (tmp_path / "tuning_ledger.jsonl").exists(), "ledger file was created"
+def _no_write_side_effects(tmp_path, state, effective_before, last_gen_before,
+                           ledger_before):
+    """Everything a refused write must never leave behind.
+
+    `ledger_before` is the ledger text captured immediately before the refused
+    call (``None`` when the file did not exist yet), so this proves the refusal
+    appended nothing — including the case where `propose()` had legitimately
+    created the file already.
+    """
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    if ledger_before is None:
+        assert not ledger.exists(), "ledger file was created by a refused write"
+    else:
+        assert ledger.read_text(encoding="utf-8") == ledger_before, "ledger grew"
+    assert '"type": "commit"' not in (ledger.read_text(encoding="utf-8")
+                                      if ledger.exists() else "")
+    assert '"type": "rollback"' not in (ledger.read_text(encoding="utf-8")
+                                        if ledger.exists() else "")
     assert not (tmp_path / "tuning_pending.json").exists(), "pending file was written"
     assert state.effective_params() == effective_before, "effective params mutated"
     assert state._last_commit_gen == last_gen_before, "_last_commit_gen was written"
@@ -1501,7 +1516,10 @@ def test_params_endpoint_reports_json_null_when_generation_is_unavailable(tmp_pa
     resp = client.get("/api/params")
     assert resp.status_code == 200
     assert resp.get_json()["current_gen"] is None
-    assert '"current_gen": null' in resp.get_data(as_text=True).replace("\n", " ")
+    # The wire value itself, not just the decoded one: `null`, never `0`.
+    wire = resp.get_data(as_text=True).replace(" ", "").replace("\n", "")
+    assert '"current_gen":null' in wire
+    assert '"current_gen":0' not in wire
 
 
 def test_params_endpoint_still_distinguishes_a_real_generation_zero(tmp_path):
@@ -1520,8 +1538,8 @@ def test_commit_refuses_with_fixed_503_when_generation_is_unavailable(tmp_path):
     proposal_id, approver = _seed_valid_proposal(state)
     effective_before = state.effective_params()
     last_gen_before = dict(state._last_commit_gen)
-    (tmp_path / "tuning_ledger.jsonl").unlink(missing_ok=True)
-    (tmp_path / "tuning_pending.json").unlink(missing_ok=True)
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    ledger_before = ledger.read_text(encoding="utf-8") if ledger.exists() else None
 
     with pytest.raises(TuningError) as ei:
         state.commit(proposal_id=proposal_id, approver=approver)
@@ -1530,7 +1548,8 @@ def test_commit_refuses_with_fixed_503_when_generation_is_unavailable(tmp_path):
     assert ei.value.code == "generation_unavailable"
     assert ei.value.message == "Current generation is unavailable."
     assert ei.value.message == _generation_unavailable_message()
-    _no_write_side_effects(tmp_path, state, effective_before, last_gen_before)
+    _no_write_side_effects(tmp_path, state, effective_before, last_gen_before,
+                           ledger_before)
     assert proposal_id not in state._snapshots_after_commit
 
 
@@ -1565,17 +1584,22 @@ def test_commit_generation_refusal_emits_only_a_sanitized_rejected_event(tmp_pat
         assert leak not in blob, f"{leak} leaked into the rejected event"
 
 
-def test_commit_refusal_happens_before_any_ledger_file_is_created(tmp_path):
-    """The ledger file must not even come into existence."""
+def test_commit_refusal_appends_no_ledger_line_and_writes_no_pending(tmp_path):
+    """`propose()` already wrote the proposal's own ledger line, so the claim
+    is that the REFUSED COMMIT appends nothing to it and creates no pending
+    file — not that the ledger is absent."""
     state, _ = _gen_state(tmp_path, lambda: None)
     proposal_id, approver = _seed_valid_proposal(state)
-    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    ledger = tmp_path / "tuning_ledger.jsonl"
+    before = ledger.read_text(encoding="utf-8")
+    assert '"type": "commit"' not in before
 
     with pytest.raises(TuningError) as ei:
         state.commit(proposal_id=proposal_id, approver=approver)
 
     assert ei.value.code == "generation_unavailable"
-    assert not (tmp_path / "tuning_ledger.jsonl").exists()
+    assert ledger.read_text(encoding="utf-8") == before
+    assert '"type": "commit"' not in ledger.read_text(encoding="utf-8")
     assert not (tmp_path / "tuning_pending.json").exists()
 
 
