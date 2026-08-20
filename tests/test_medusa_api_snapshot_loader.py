@@ -1628,14 +1628,24 @@ class _MedusaClock:
         return self.now
 
 
-def _md_succeeded(count=1, *, unreadable=0):
-    ordered = tuple(
-        Path("data") / ("v070_gen%06d_step000001_x.npz" % index)
-        for index in range(count)
-    )
+def _md_listing(directory, count=1, *, unreadable=0):
+    """A completed listing over REAL files, newest first.
+
+    The paths in a `DiscoverySucceeded` are consumed for real -- selection
+    probes each one and `/api/status` fingerprints the chosen one -- so a
+    fabricated path would make every route answer 404 for a reason that has
+    nothing to do with the property under test.
+    """
+    ordered = []
+    for index in range(count):
+        path = Path(directory) / ("v070_gen%06d_step000001_x.npz" % index)
+        path.write_bytes(bytes(2048))
+        os.utime(path, (1_000_000 + index, 1_000_000 + index))
+        ordered.append(path)
+    ordered.reverse()
     matched = count + unreadable
     return snapshot_archive_guard.DiscoverySucceeded(
-        ordered, unreadable, matched, matched)
+        tuple(ordered), unreadable, matched, matched)
 
 
 def _md_failed(reason=None):
@@ -1704,15 +1714,26 @@ def test_no_unbounded_discovery_call_site_remains_in_medusa():
     tree = ast.parse(Path(medusa_api.__file__).read_text(encoding="utf-8"))
     # AST, not a substring sweep: the module still DISCUSSES the production
     # glob in prose, and prose is not a call site. Comments are invisible here,
-    # so a surviving literal is a real one.
+    # so a surviving literal is a real one -- and any snapshot glob needs that
+    # literal, which is what makes this precise rather than approximate.
+    #
+    # `glob` itself is NOT banned outright: `/api/telemetry` and `/api/acoustic`
+    # glob `telemetry_*.json` and `acoustic_map_step*.json`, which are neither
+    # snapshot discovery nor in this tranche's scope. Their unbounded listing
+    # is a real and separate concern, disclosed rather than quietly fixed here.
+    prose = {
+        id(node.value) for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in prose):
             assert "v070_gen*" not in node.value, node.value
         if isinstance(node, ast.Call):
             name = getattr(node.func, "id", None) or getattr(
                 node.func, "attr", None)
-            assert name not in ("newest_first", "order_candidates", "glob",
-                                "iglob"), name
+            assert name not in ("newest_first", "order_candidates"), name
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -1765,7 +1786,7 @@ def test_a_request_burst_performs_exactly_one_discovery(confined, monkeypatch):
     fixed bounded unavailable answer, and nobody queues."""
     import threading
 
-    scanner = _MedusaScanner([_md_succeeded(3)])
+    scanner = _MedusaScanner([_md_listing(confined, 3)])
     scanner.gate = threading.Event()
     scanner.entered = threading.Event()
     _install_cache(monkeypatch, confined, scanner)
@@ -1796,7 +1817,7 @@ def test_a_request_burst_performs_exactly_one_discovery(confined, monkeypatch):
 
 def test_a_second_request_inside_the_ttl_does_not_rescan(confined, monkeypatch):
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_succeeded(2), _md_succeeded(5)])
+    scanner = _MedusaScanner([_md_listing(confined, 2), _md_listing(confined, 5)])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
     client.get("/api/status")
@@ -1814,7 +1835,7 @@ def test_status_reports_the_cached_scans_exact_candidate_count(confined,
                                                                monkeypatch):
     """The independent `list(DATA_DIR.glob(...))` bypass is gone: the count is
     the candidate count of ONE completed bounded scan."""
-    scanner = _MedusaScanner([_md_succeeded(4)])
+    scanner = _MedusaScanner([_md_listing(confined, 4)])
     _install_cache(monkeypatch, confined, scanner)
     # A real file the fake scan does not know about: if the route still ran its
     # own glob, the count would be 1 rather than the scan's 4.
@@ -1829,7 +1850,7 @@ def test_status_reports_the_age_of_the_scan_it_counted(confined, monkeypatch):
     """As-of-completion, and honest about it: the count may be stale by the
     cache age plus the refresh duration, so the age is published with it."""
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_succeeded(4)])
+    scanner = _MedusaScanner([_md_listing(confined, 4)])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
     client.get("/api/status")
@@ -1843,7 +1864,7 @@ def test_status_answers_the_sanitized_503_after_a_known_failure(confined,
                                                                 monkeypatch):
     """V2.2: never a partial count, and never the FORMER count."""
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_succeeded(4), _md_failed()])
+    scanner = _MedusaScanner([_md_listing(confined, 4), _md_failed()])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
 
@@ -1861,7 +1882,7 @@ def test_status_answers_the_sanitized_503_after_a_known_failure(confined,
 
 @pytest.mark.parametrize("route", [
     "/api/status", "/api/census", "/api/equanimity", "/api/acoustic",
-    "/api/snapshot/latest", "/api/geometry/stl",
+    "/api/snapshot/latest",
 ])
 def test_every_snapshot_route_fails_closed_on_a_known_discovery_failure(
         confined, monkeypatch, route):
@@ -1870,6 +1891,20 @@ def test_every_snapshot_route_fails_closed_on_a_known_discovery_failure(
     response = medusa_api.app.test_client().get(route)
     assert response.status_code == 503
     assert response.get_json() == {"error": "snapshot_rejected"}
+
+
+def test_the_stl_route_fails_closed_before_any_mesh_work(confined, monkeypatch,
+                                                         trimesh_sentinel):
+    """The sixth route, separately: it imports `trimesh` before it reaches
+    discovery, and authoritative CI does not install trimesh -- so the
+    sentinel is what makes this run there at all, and it also proves no mesh
+    work is reached on the way to the refusal."""
+    scanner = _MedusaScanner([_md_failed()])
+    _install_cache(monkeypatch, confined, scanner)
+    response = medusa_api.app.test_client().get("/api/geometry/stl")
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "snapshot_rejected"}
+    assert trimesh_sentinel.touched == []
 
 
 @pytest.mark.parametrize("reason", [
@@ -1882,7 +1917,7 @@ def test_an_overflow_after_a_prior_success_makes_the_old_listing_unavailable(
     grew past a cap AFTER a good listing was cached. A stale-serving cache
     would keep answering from the old listing indefinitely."""
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_succeeded(3), _md_failed(reason)])
+    scanner = _MedusaScanner([_md_listing(confined, 3), _md_failed(reason)])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
     assert client.get("/api/status").status_code == 200
@@ -1893,7 +1928,7 @@ def test_an_overflow_after_a_prior_success_makes_the_old_listing_unavailable(
 
 def test_no_new_refresh_starts_inside_the_failure_ttl(confined, monkeypatch):
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_failed(), _md_succeeded(2)])
+    scanner = _MedusaScanner([_md_failed(), _md_listing(confined, 2)])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
     for _ in range(6):
@@ -1905,7 +1940,7 @@ def test_no_new_refresh_starts_inside_the_failure_ttl(confined, monkeypatch):
 def test_recovery_after_the_failure_ttl_restores_normal_service(confined,
                                                                 monkeypatch):
     clock = _MedusaClock()
-    scanner = _MedusaScanner([_md_failed(), _md_succeeded(6)])
+    scanner = _MedusaScanner([_md_failed(), _md_listing(confined, 6)])
     _install_cache(monkeypatch, confined, scanner, clock=clock)
     client = medusa_api.app.test_client()
     assert client.get("/api/status").status_code == 503
@@ -1933,7 +1968,7 @@ def test_the_unavailable_body_discloses_nothing(confined, monkeypatch):
 # -- the four states, through real route paths --------------------------------
 
 def test_clean_empty_is_a_404_not_a_discovery_failure(confined, monkeypatch):
-    scanner = _MedusaScanner([_md_succeeded(0)])
+    scanner = _MedusaScanner([_md_listing(confined, 0)])
     _install_cache(monkeypatch, confined, scanner)
     response = medusa_api.app.test_client().get("/api/status")
     assert response.status_code == 404
@@ -1945,7 +1980,7 @@ def test_all_matching_unreadable_is_a_404_not_a_discovery_failure(confined,
     """Names matched but no metadata could be read. Distinct from clean empty
     in the completed result, and distinct from a discovery failure: the scan
     itself completed."""
-    scanner = _MedusaScanner([_md_succeeded(0, unreadable=5)])
+    scanner = _MedusaScanner([_md_listing(confined, 0, unreadable=5)])
     _install_cache(monkeypatch, confined, scanner)
     response = medusa_api.app.test_client().get("/api/status")
     assert response.status_code == 404
@@ -1980,7 +2015,7 @@ def test_the_tuning_getter_fails_closed_on_a_discovery_failure(confined,
 
 def test_the_cache_never_holds_a_selected_path_or_descriptor(confined,
                                                              monkeypatch):
-    scanner = _MedusaScanner([_md_succeeded(2)])
+    scanner = _MedusaScanner([_md_listing(confined, 2)])
     cache = _install_cache(monkeypatch, confined, scanner)
     medusa_api.app.test_client().get("/api/status")
     state = cache.diagnostics()

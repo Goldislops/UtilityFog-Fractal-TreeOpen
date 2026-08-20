@@ -28,10 +28,10 @@ fails with ``ModuleNotFoundError: No module named 'scripts'``.
 
 from __future__ import annotations
 
-import glob
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from threading import Thread
@@ -41,11 +41,12 @@ from flask import Flask, jsonify, send_file, Response
 
 from scripts.snapshot_archive_guard import PRODUCTION_POLICY as SNAPSHOT_POLICY
 from scripts.snapshot_archive_guard import (
+    PRODUCTION_DISCOVERY_POLICY,
     SnapshotArchiveRejected,
+    SnapshotDiscoveryCache,
     admit_snapshot,
     entry_fingerprint,
     first_admissible,
-    newest_first,
 )
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,52 @@ app.config["API_PORT"] = API_PORT
 #: would itself be the denial of service. Bounded, so one poisoned batch costs
 #: a fixed amount of work and anything older is simply not considered.
 SNAPSHOT_SELECTION_DEPTH = 8
+
+
+class _DiscoveryUnavailable(Exception):
+    """No completed bounded discovery is visible right now.
+
+    Raised by `_find_latest_snapshot` rather than returned, so a route cannot
+    silently treat "the directory could not be discovered" as "there are no
+    snapshots" -- those are different facts and only one of them is the
+    service's own fault. The registered handler below turns it into the fixed
+    sanitized 503 for every route, including any added later.
+    """
+
+
+#: The one process-local bounded discovery every call site shares.
+#:
+#: Flask launches with `threaded=True` and binds 0.0.0.0, and seven call sites
+#: reach discovery. Without single-flight, N simultaneous unauthenticated GETs
+#: meant N simultaneous cap-level directory scans and N times the discovery
+#: heap -- so the calibrated caps are not survivable here on their own.
+#:
+#: Built lazily and keyed on `DATA_DIR`, because a cache is only coherent for
+#: one directory. In production `DATA_DIR` never changes, so this is built once
+#: and reused for the life of the process.
+_DISCOVERY_CACHE = None
+_DISCOVERY_CACHE_LOCK = threading.Lock()
+
+
+def _discovery_cache():
+    """The shared cache, built on first use.
+
+    The lock matters at cold start specifically: two simultaneous first
+    requests would otherwise each build a cache and each run a discovery,
+    which is the exact thing single-flight exists to prevent.
+    """
+    global _DISCOVERY_CACHE
+    directory = Path(os.fspath(DATA_DIR))
+    cache = _DISCOVERY_CACHE
+    if cache is not None and cache.directory == directory:
+        return cache
+    with _DISCOVERY_CACHE_LOCK:
+        cache = _DISCOVERY_CACHE
+        if cache is None or cache.directory != directory:
+            cache = SnapshotDiscoveryCache(
+                directory=directory, policy=PRODUCTION_DISCOVERY_POLICY)
+            _DISCOVERY_CACHE = cache
+        return cache
 
 
 def _find_latest_snapshot():
@@ -107,19 +154,38 @@ def _find_latest_snapshot():
     file that is actually there, exactly as before, while the four loading
     routes go on to answer 503.
 
-    Ordering comes from ``newest_first``, which reads non-following metadata
-    and silently drops entries that vanish mid-enumeration. Sorting on
+    Where the candidates come from
+    ------------------------------
+    Discovery used to be ``newest_first(DATA_DIR.glob("v070_gen*.npz"))``,
+    which is unbounded by construction: ``glob`` materialises the whole
+    directory before anything downstream can limit it, and at that point the
+    work is already done. It is now one bounded scan under
+    ``PRODUCTION_DISCOVERY_POLICY``, shared through the process-local cache, so
+    a directory over its caps refuses instead of being enumerated.
+
+    Ordering, non-following metadata and the silent dropping of entries that
+    vanish mid-enumeration are unchanged: the primitive does the same work
+    ``newest_first`` did, inside the bound rather than after it. Sorting on
     ``stat`` let a symlink borrow its target's modification time to promote
     itself to "newest" — followed during ORDERING, before admission had any
     say — and let a snapshot rotated during the scan turn a request into a 500
     whose message carried the attacker-chosen path.
+
+    The listing is borrowed for exactly this call. Selection and the admission
+    probes run while it is held and nothing is retained afterwards: no selected
+    path is cached, no admission verdict is cached, and the load re-admits its
+    own descriptor. A cache hit therefore never substitutes an earlier decision
+    for a current check.
     """
-    return first_admissible(
-        newest_first(DATA_DIR.glob("v070_gen*.npz")),
-        data_dir=DATA_DIR,
-        policy=SNAPSHOT_POLICY,
-        depth=SNAPSHOT_SELECTION_DEPTH,
-    )
+    with _discovery_cache().borrow() as listing:
+        if not listing.available:
+            raise _DiscoveryUnavailable
+        return first_admissible(
+            listing.ordered,
+            data_dir=DATA_DIR,
+            policy=SNAPSHOT_POLICY,
+            depth=SNAPSHOT_SELECTION_DEPTH,
+        )
 
 
 def _snapshot_rejected():
@@ -133,6 +199,22 @@ def _snapshot_rejected():
     caught it.
     """
     return jsonify({"error": "snapshot_rejected"}), 503
+
+
+@app.errorhandler(_DiscoveryUnavailable)
+def _discovery_unavailable(_error):
+    """A bounded discovery failure, answered exactly like an archive refusal.
+
+    Deliberately the SAME body and status. Distinguishing the two would tell an
+    unauthenticated caller whether the file they placed in the data directory
+    pushed the directory over a cap or merely failed admission — which is a
+    disclosure about the guard's own limits, from the one party who must not
+    learn them. There is no reason code, no count and no age in this response.
+
+    Registered as a handler rather than written out at each route so that fail
+    closed is structural: a route added later cannot forget it.
+    """
+    return _snapshot_rejected()
 
 
 def _load_snapshot(path):
@@ -254,8 +336,40 @@ def health():
 
 @app.route("/api/status")
 def status():
-    """Current engine status."""
-    snap_path = _find_latest_snapshot()
+    """Current engine status.
+
+    This route borrows the shared listing directly rather than going through
+    ``_find_latest_snapshot``, because it needs two things from ONE completed
+    scan: the selected snapshot and the candidate count. It used to take the
+    count from its own ``list(DATA_DIR.glob("v070_gen*.npz"))``, which was an
+    unbounded materialisation of the whole directory on every request — and it
+    bypassed bounded discovery entirely, so replacing the selection alone would
+    have left the route's real cost untouched.
+
+    The count is now the exact number of names that matched in one completed
+    bounded scan, which is precisely what that ``list`` used to count. It is an
+    AS-OF-COMPLETION figure: it may be stale by the cache age, and by the
+    refresh duration on top of that when a prior completed success is being
+    served while a refresh runs. ``snapshot_count_age_seconds`` publishes that
+    age rather than leaving the staleness to a comment, so a consumer can see
+    how old the number is instead of assuming it is instantaneous.
+
+    It is never a partial count, never a combination of two generations, and
+    never the FORMER count after a known discovery failure: at that point the
+    listing has been invalidated and this route answers the fixed sanitized 503
+    like every other, via the handler on ``_DiscoveryUnavailable``.
+    """
+    with _discovery_cache().borrow() as listing:
+        if not listing.available:
+            raise _DiscoveryUnavailable
+        total_snapshots = listing.matched
+        count_age = listing.age
+        snap_path = first_admissible(
+            listing.ordered,
+            data_dir=DATA_DIR,
+            policy=SNAPSHOT_POLICY,
+            depth=SNAPSHOT_SELECTION_DEPTH,
+        )
     if not snap_path:
         return jsonify({"error": "No snapshots found"}), 404
 
@@ -273,14 +387,15 @@ def status():
 
     snap_age = time.time() - snap_mtime_ns / 1_000_000_000
 
-    # Count total snapshots
-    all_snaps = list(DATA_DIR.glob("v070_gen*.npz"))
-
     return jsonify({
         "latest_snapshot": snap_path.name,
         "snapshot_age_seconds": round(snap_age, 1),
         "snapshot_size_mb": round(snap_size / 1024 / 1024, 1),
-        "total_snapshots": len(all_snaps),
+        "total_snapshots": total_snapshots,
+        # How old the count above is, in monotonic seconds since the scan that
+        # produced it completed. Not a wall-clock timestamp and not derived
+        # from one.
+        "snapshot_count_age_seconds": round(count_age, 1),
         "engine_alive": snap_age < 900,  # 15 min threshold
         # The configured launch port (set by the public CLI via
         # configure_runtime), falling back to the module default at import time.
@@ -561,9 +676,17 @@ def _infer_current_gen_from_snapshot() -> _Optional[int]:
     interval per affected parameter — and `applied_at_gen: 0` recorded in the
     ledger for a commit that happened at an unknown generation.
 
+    A bounded discovery failure is one more "unavailable": it returns None
+    here rather than escaping as a 503 out of a tuning route, so commit and
+    rollback refuse through the generation gate they already have instead of
+    the snapshot-refusal handler, and no fabricated generation is stored.
+
     Only the ANCHORED leading generation is read; see `_GEN_IN_NAME_RE`.
     """
-    snap = _find_latest_snapshot()
+    try:
+        snap = _find_latest_snapshot()
+    except _DiscoveryUnavailable:
+        return None
     if snap is None:
         return None
     match = _GEN_IN_NAME_RE.match(snap.name)

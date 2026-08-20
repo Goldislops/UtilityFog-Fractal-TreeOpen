@@ -2277,9 +2277,14 @@ def test_the_guard_uses_no_numpy_and_no_private_numpy_parser():
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module
     }
+    # `threading` and `time` are the shared discovery cache's lock and its
+    # monotonic clock. Both are standard library, neither pulls in NumPy, and
+    # the property this control exists for -- the guard runs before NumPy is
+    # involved at all -- is unchanged.
     assert imported <= {"__future__", "ast", "contextlib", "dataclasses",
                         "enum", "fnmatch", "os", "re", "stat", "struct",
-                        "zipfile", "zlib", "pathlib", "typing"}
+                        "threading", "time", "zipfile", "zlib", "pathlib",
+                        "typing"}
     # `ast` is imported for `ast.parse` only — a syntax gate, never an
     # evaluator. The bans on eval/exec/literal_eval are asserted separately.
 
@@ -3868,6 +3873,24 @@ class _BenchScandir:
             yield _BenchEntry(name, (index * 2654435761) % 2147483647)
 
 
+def _bench_policy(total, matching):
+    """The caps this population is measured against.
+
+    At either calibrated population it is the real shared production instance,
+    which is the whole point of the acceptance run. An INJECTED smaller
+    population gets a policy scaled to it, so the boundary cases stay boundary
+    cases: the tiny controls below would otherwise sit 196,000 entries below
+    the cap and prove nothing about overflow.
+    """
+    if (total, matching) in (BENCHMARK_PROJECTED_POPULATION,
+                             BENCHMARK_CAP_POPULATION):
+        return guard.PRODUCTION_DISCOVERY_POLICY
+    return guard.CandidateDiscoveryPolicy(
+        max_directory_entries=max(int(total), 1),
+        max_candidates=max(int(matching), 1),
+    )
+
+
 class _BenchPlan:
     """A scanner that runs the REAL primitive over successive populations.
 
@@ -3897,8 +3920,11 @@ def _bench_outcome(result):
 
 def _bench_record(case, total, matching, elapsed, peak, outcome, retained):
     import platform
+    policy = _bench_policy(total, matching)
     record = {
         "case": case,
+        "max_directory_entries": policy.max_directory_entries,
+        "max_candidates": policy.max_candidates,
         "interpreter": platform.python_implementation(),
         "python_version": "%d.%d.%d" % sys.version_info[:3],
         "optimize_level": sys.flags.optimize,
@@ -3943,10 +3969,12 @@ def _bench_timed(work):
 
 def _bench_single(case, total, matching):
     """One bounded discovery at the given population."""
+    policy = _bench_policy(total, matching)
+
     def work():
         with mock.patch.object(guard.os, "scandir", _BenchScandir(total, matching)):
-            return guard.discover_snapshot_candidates(
-                Path("bench"), policy=guard.PRODUCTION_DISCOVERY_POLICY)
+            return guard.discover_snapshot_candidates(Path("bench"),
+                                                      policy=policy)
 
     result, elapsed, peak = _bench_timed(work)
     return _bench_record(case, total, matching, elapsed, peak,
@@ -3963,7 +3991,7 @@ def _bench_overlap(total, matching):
         clock = _ManualClock()
         cache = guard.SnapshotDiscoveryCache(
             directory=Path("bench"),
-            policy=guard.PRODUCTION_DISCOVERY_POLICY,
+            policy=_bench_policy(total, matching),
             ttl=guard.DISCOVERY_CACHE_TTL_SECONDS,
             scanner=_BenchPlan([(total, matching)]),
             clock=clock,
@@ -4001,7 +4029,7 @@ def _bench_failure_recovery(total, matching):
         ])
         cache = guard.SnapshotDiscoveryCache(
             directory=Path("bench"),
-            policy=guard.PRODUCTION_DISCOVERY_POLICY,
+            policy=_bench_policy(total, matching),
             ttl=guard.DISCOVERY_CACHE_TTL_SECONDS,
             scanner=plan,
             clock=clock,
@@ -4092,6 +4120,8 @@ def test_the_benchmark_harness_runs_at_a_tiny_population():
         assert record["matching_entries"] == 30
         assert record["optimize_level"] == sys.flags.optimize
         assert record["heap_budget_bytes"] == 224 * 1024 * 1024
+        assert record["max_directory_entries"] == 90
+        assert record["max_candidates"] == 30
         assert record["incremental_peak_bytes"] > 0
         assert record["elapsed_seconds"] >= 0.0
         assert record["old_listing_retained"] is (
