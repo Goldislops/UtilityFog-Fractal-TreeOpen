@@ -3918,9 +3918,20 @@ def _bench_outcome(result):
     return {"refusal_code": None, "candidates": len(result.ordered)}
 
 
-def _bench_record(case, total, matching, elapsed, peak, outcome, retained):
+def _bench_record(case, total, matching, elapsed, peak, outcome, retained,
+                  scans):
+    """One record with fixed keys and no locator of any kind.
+
+    `scans` matters for honesty: the overlap and failure/recovery cases run
+    two and three discoveries respectively, so their total elapsed time is not
+    a refresh duration. The soft budget is a per-REFRESH threshold and is
+    therefore measured against `seconds_per_scan`, never against a total that
+    happens to include a retry.
+    """
     import platform
     policy = _bench_policy(total, matching)
+    scans = max(int(scans), 1)
+    per_scan = float(elapsed) / scans
     record = {
         "case": case,
         "max_directory_entries": policy.max_directory_entries,
@@ -3930,14 +3941,16 @@ def _bench_record(case, total, matching, elapsed, peak, outcome, retained):
         "optimize_level": sys.flags.optimize,
         "total_entries": int(total),
         "matching_entries": int(matching),
+        "scans": scans,
         "elapsed_seconds": round(float(elapsed), 6),
+        "seconds_per_scan": round(per_scan, 6),
         "incremental_peak_bytes": int(peak),
         "incremental_peak_mib": round(peak / 1024 / 1024, 3),
         "heap_budget_bytes": BENCHMARK_HEAP_BUDGET_BYTES,
         "within_heap_budget": bool(peak <= BENCHMARK_HEAP_BUDGET_BYTES),
         "soft_refresh_seconds": BENCHMARK_SOFT_REFRESH_SECONDS,
         "within_soft_refresh_budget": bool(
-            elapsed <= BENCHMARK_SOFT_REFRESH_SECONDS),
+            per_scan <= BENCHMARK_SOFT_REFRESH_SECONDS),
         "old_listing_retained": bool(retained),
     }
     record.update(outcome)
@@ -3978,7 +3991,7 @@ def _bench_single(case, total, matching):
 
     result, elapsed, peak = _bench_timed(work)
     return _bench_record(case, total, matching, elapsed, peak,
-                         _bench_outcome(result), retained=False)
+                         _bench_outcome(result), retained=False, scans=1)
 
 
 def _bench_overlap(total, matching):
@@ -4008,7 +4021,7 @@ def _bench_overlap(total, matching):
     counts, elapsed, peak = _bench_timed(work)
     outcome = {"refusal_code": None, "candidates": counts[1]}
     return _bench_record("overlap", total, matching, elapsed, peak, outcome,
-                         retained=True)
+                         retained=True, scans=2)
 
 
 def _bench_failure_recovery(total, matching):
@@ -4054,10 +4067,9 @@ def _bench_failure_recovery(total, matching):
         "refusal_code": refusal.value if refusal is not None else None,
         "candidates": recovered,
         "retired_borrowers_at_failure": retired,
-        "scans": calls,
     }
     return _bench_record("failure_recovery", total, matching, elapsed, peak,
-                         outcome, retained=True)
+                         outcome, retained=True, scans=calls)
 
 
 def run_benchmark_case(case, *, total=None, matching=None):
@@ -4126,10 +4138,14 @@ def test_the_benchmark_harness_runs_at_a_tiny_population():
         assert record["elapsed_seconds"] >= 0.0
         assert record["old_listing_retained"] is (
             case in ("overlap", "failure_recovery"))
+        assert record["scans"] == {"projected": 1, "cap": 1, "overlap": 2,
+                                   "failure_recovery": 3}[case]
+        # The soft budget is per REFRESH, so a case that runs a retry must not
+        # be judged on its total.
+        assert record["seconds_per_scan"] <= record["elapsed_seconds"] + 1e-9
         if case == "failure_recovery":
             assert record["refusal_code"] == "entry_limit_exceeded"
             assert record["retired_borrowers_at_failure"] == 1
-            assert record["scans"] == 3
         else:
             assert record["refusal_code"] is None
             assert record["candidates"] == 30

@@ -40,11 +40,13 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
     PRODUCTION_POLICY as SNAPSHOT_POLICY,
 )
 from scripts.snapshot_archive_guard import (  # noqa: E402
+    PRODUCTION_DISCOVERY_POLICY,
+    DiscoveryFailed,
     SnapshotArchiveRejected,
     admit_snapshot,
+    discover_snapshot_candidates,
     entry_fingerprint,
     first_admissible,
-    order_candidates,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -314,6 +316,9 @@ def run_daemon():
     last_export_time = 0
     last_snapshot = None
     last_rejected = None
+    # One line per FAILURE EPISODE, not one per poll, matching the suppression
+    # the archive-refusal lane already has. Re-armed by a successful discovery.
+    discovery_failing = False
 
     while True:
         try:
@@ -322,7 +327,28 @@ def run_daemon():
             # so a link could borrow its target's mtime to become "newest"
             # before admission had any say, and it raised OSError into the
             # broad handler below, whose message carries the path.
-            listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+            #
+            # Bounded, under the one calibrated production policy. The glob it
+            # replaces materialised the whole directory before anything could
+            # limit it -- this daemon is serial and needs no cache, but it does
+            # need the same caps and the same fail-closed refusals as the
+            # services, or a directory over its caps silently becomes "nothing
+            # to export".
+            listing = discover_snapshot_candidates(
+                DATA_DIR, policy=PRODUCTION_DISCOVERY_POLICY)
+
+            if isinstance(listing, DiscoveryFailed):
+                # A fixed reason code and nothing else. This daemon runs
+                # unattended over a directory anyone able to write there can
+                # fill, so no path, no filename and no exception text. No
+                # exporter runs, and the loop stays alive to try again.
+                if not discovery_failing:
+                    print("  [GEO] Snapshot discovery failed: %s"
+                          % listing.reason.value)
+                    discovery_failing = True
+                time.sleep(WATCH_INTERVAL)
+                continue
+            discovery_failing = False
 
             if not listing.ordered:
                 time.sleep(WATCH_INTERVAL)
@@ -429,8 +455,22 @@ def run_once():
     rejected archive prints exactly one bounded reason on stderr and exits
     nonzero, with no exporter having run. The body is otherwise the block that
     was here before, unchanged.
+
+    Discovery is the same bounded scan the daemon loop uses, under the same
+    explicit policy. Its refusal gets its own exit path below, distinct from
+    both "every candidate was unreadable" and "there is nothing here": a cron
+    or CI wrapper has to be able to tell a directory it could not discover from
+    a directory with nothing in it.
     """
-    listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+    listing = discover_snapshot_candidates(
+        DATA_DIR, policy=PRODUCTION_DISCOVERY_POLICY)
+
+    if isinstance(listing, DiscoveryFailed):
+        # A fixed code from a closed set, no path and no exception text, and a
+        # nonzero exit. Distinct from the two cases below on purpose.
+        print("Snapshot discovery failed: %s" % listing.reason.value,
+              file=sys.stderr)
+        sys.exit(1)
 
     if not listing.ordered:
         if listing.unreadable:
