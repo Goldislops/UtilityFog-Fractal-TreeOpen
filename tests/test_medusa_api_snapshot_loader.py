@@ -26,6 +26,7 @@ access or whole-server correctness.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import os
 import sys
 import types
@@ -575,8 +576,22 @@ def confined(tmp_path, monkeypatch):
     Admission confines the archive to the configured data directory, so a
     fixture written anywhere else is refused for CONTAINMENT before the
     property under test is reached.
+
+    The shared discovery cache is replaced with a zero-lifetime one over the
+    same directory, so every consumption in a test that is NOT about caching
+    performs its own fresh bounded scan -- the per-call behaviour those tests
+    were written against. Tests that ARE about the cache install their own with
+    an explicit lifetime and clock.
     """
     monkeypatch.setattr(medusa_api, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        medusa_api, "_DISCOVERY_CACHE",
+        snapshot_archive_guard.SnapshotDiscoveryCache(
+            directory=tmp_path,
+            policy=snapshot_archive_guard.PRODUCTION_DISCOVERY_POLICY,
+            ttl=0.0,
+        ),
+    )
     return tmp_path
 
 
@@ -884,20 +899,61 @@ def test_status_still_reports_a_real_snapshot(confined):
     assert payload["snapshot_age_seconds"] >= 0
 
 
+class _GhostScandir:
+    """Real directory entries, plus synthetic ones whose metadata read fails.
+
+    Bounded discovery owns its own `os.scandir` -- that is the whole point of
+    it, since by the time `Path.glob` hands anything back the directory has
+    already been materialised -- so a vanished candidate is injected here
+    rather than through the glob. The ghosts raise from `stat` exactly what an
+    entry rotated away between enumeration and the metadata read raises.
+    """
+
+    class _Ghost:
+        __slots__ = ("name",)
+
+        def __init__(self, name):
+            self.name = name
+
+        def stat(self, *, follow_symlinks=True):
+            raise FileNotFoundError(2, "No such file or directory")
+
+    def __init__(self, ghost_names, *, include_real=True):
+        self.ghost_names = list(ghost_names)
+        self.include_real = include_real
+        self.directory = None
+        self._real = os.scandir  # captured BEFORE the patch replaces it
+
+    def __call__(self, directory):
+        self.directory = directory
+        return self
+
+    def __enter__(self):
+        return self._iterate()
+
+    def __exit__(self, *exc):
+        return False
+
+    def _iterate(self):
+        if self.include_real:
+            with self._real(self.directory) as entries:
+                for entry in entries:
+                    yield entry
+        for name in self.ghost_names:
+            yield self._Ghost(name)
+
+
 def test_selection_survives_a_snapshot_that_disappears_mid_scan(confined,
                                                                 monkeypatch):
-    """The glob and the metadata read are separate syscalls, and the producer
-    rotates snapshots. A vanished entry must be skipped silently, not raise an
-    OSError whose message carries the attacker-chosen path."""
+    """Enumeration and the metadata read are separate syscalls, and the
+    producer rotates snapshots. A vanished entry must be counted and skipped
+    silently, not raise an OSError whose message carries the attacker-chosen
+    path."""
     good = Path(_write_snapshot_ma(confined / "v070_gen000030.npz",
                                    compressed=True))
-    ghost = confined / "v070_gen000031.npz"
-    real_glob = Path.glob
+    ghost = _GhostScandir(["v070_gen000031.npz"])
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir", ghost)
 
-    def _glob_with_a_ghost(self, pattern):
-        return list(real_glob(self, pattern)) + [ghost]
-
-    monkeypatch.setattr(Path, "glob", _glob_with_a_ghost)
     assert medusa_api._find_latest_snapshot() == good
 
     client = medusa_api.app.test_client()
@@ -907,8 +963,11 @@ def test_selection_survives_a_snapshot_that_disappears_mid_scan(confined,
 
 def test_selection_survives_a_directory_of_only_vanished_candidates(confined,
                                                                     monkeypatch):
-    ghosts = [confined / ("v070_gen0000%d.npz" % i) for i in range(40, 45)]
-    monkeypatch.setattr(Path, "glob", lambda self, pattern: list(ghosts))
+    """All matching, none readable. A completed SUCCESS with nothing usable --
+    not a discovery failure, and not an empty directory."""
+    ghosts = ["v070_gen0000%d.npz" % index for index in range(40, 45)]
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir",
+                        _GhostScandir(ghosts, include_real=False))
     assert medusa_api._find_latest_snapshot() is None
     client = medusa_api.app.test_client()
     assert client.get("/api/census").status_code == 404
@@ -1440,23 +1499,19 @@ def test_infer_gen_result_feeds_tuning_state_as_none(monkeypatch, tmp_path):
     assert state.current_gen() is None
 
 
-def test_medusa_api_does_not_consume_the_bounded_discovery_primitive():
-    """Production discovery integration is a separately authorized tranche."""
-    source = Path(medusa_api.__file__).read_text(encoding="utf-8")
-    assert "discover_snapshot_candidates" not in source
-    assert "CandidateDiscoveryPolicy" not in source
-    tree = ast.parse(source)
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            imported.update(alias.name for alias in node.names)
-    assert "discover_snapshot_candidates" not in imported
+# -- the two tranche-boundary pins that this tranche deliberately inverts -----
+#
+# Their predecessors asserted that Medusa did NOT consume the bounded
+# discovery primitive and still selected through `newest_first(DATA_DIR.glob(
+# ...))`. That was the correct pin while integration was a separately
+# authorized tranche; it is exactly what this one changes, so the controls are
+# inverted rather than deleted. `first_admissible` is unchanged and still the
+# bounded newest-first search -- it now runs over a completed cached listing
+# instead of over a fresh unbounded glob.
 
 
-def test_snapshot_discovery_call_sites_are_unchanged_in_this_tranche():
-    """Medusa still selects through the existing guard helpers."""
+def test_medusa_still_selects_through_the_bounded_admission_search():
     source = Path(medusa_api.__file__).read_text(encoding="utf-8")
-    assert 'newest_first(DATA_DIR.glob("v070_gen*.npz"))' in source
     assert "first_admissible(" in source
 
 
@@ -1538,3 +1593,416 @@ def test_infer_gen_matches_the_guard_name_contract_exactly(monkeypatch,
         assert got == expected, f"{name}: inference {got!r} vs guard {expected!r}"
         if got is not None:
             assert type(got) is int
+
+
+# ===========================================================================
+# Bounded discovery through the shared single-flight cache
+#
+# Medusa's Flask app launches with `threaded=True` and binds 0.0.0.0, and
+# seven call sites reached directory discovery. Uncached, the calibrated caps
+# are not survivable here: N simultaneous unauthenticated GETs meant N
+# simultaneous cap-level discoveries and N times the ~92 MB discovery heap.
+#
+# The integration is therefore a process-local single-flight cache holding ONE
+# completed immutable `DiscoveryResult`, shared by every call site, refreshed
+# at most once per 10 monotonic seconds measured from COMPLETION. Selection and
+# descriptor admission happen per consumption under a short-lived lease; the
+# load still re-admits its own descriptor immediately before NumPy sees a byte.
+#
+# Nothing here writes a cap-level directory. The cache takes its scanner and
+# its clock, so the state machine is driven exactly rather than by sleeping.
+# ===========================================================================
+
+
+class _MedusaClock:
+    """A monotonic clock that only moves when a test moves it."""
+
+    def __init__(self, now=0.0):
+        self.now = float(now)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+        return self.now
+
+
+def _md_succeeded(count=1, *, unreadable=0):
+    ordered = tuple(
+        Path("data") / ("v070_gen%06d_step000001_x.npz" % index)
+        for index in range(count)
+    )
+    matched = count + unreadable
+    return snapshot_archive_guard.DiscoverySucceeded(
+        ordered, unreadable, matched, matched)
+
+
+def _md_failed(reason=None):
+    reason = reason or snapshot_archive_guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    return snapshot_archive_guard.DiscoveryFailed(reason, 9, 4, 0)
+
+
+class _MedusaScanner:
+    """A scripted stand-in for `discover_snapshot_candidates`."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+        self.gate = None
+        self.entered = None
+
+    def __call__(self, directory, *, policy):
+        self.calls += 1
+        if self.entered is not None:
+            self.entered.set()
+        if self.gate is not None and not self.gate.wait(timeout=10):
+            raise AssertionError("scanner gate never opened")
+        return self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
+
+
+def _install_cache(monkeypatch, directory, scanner, *, clock=None, ttl=10.0):
+    """Replace the module's shared cache with one this test drives.
+
+    Bound to the SAME directory the module is pointed at, so the production
+    accessor keeps this instance instead of rebuilding one of its own.
+    """
+    cache = snapshot_archive_guard.SnapshotDiscoveryCache(
+        directory=directory,
+        policy=snapshot_archive_guard.PRODUCTION_DISCOVERY_POLICY,
+        ttl=ttl,
+        scanner=scanner,
+        clock=clock if clock is not None else _MedusaClock(),
+    )
+    monkeypatch.setattr(medusa_api, "_DISCOVERY_CACHE", cache)
+    return cache
+
+
+# -- the primitive is now consumed, and nothing unbounded survives ------------
+
+def test_medusa_api_consumes_the_bounded_discovery_primitive():
+    """The inverse of this tranche's predecessor, which pinned the primitive
+    as deliberately UNWIRED. It is wired now, through the one calibrated
+    policy -- and through the shared cache, never by calling the primitive
+    directly on a request path."""
+    source = Path(medusa_api.__file__).read_text(encoding="utf-8")
+    assert "PRODUCTION_DISCOVERY_POLICY" in source
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+    assert "PRODUCTION_DISCOVERY_POLICY" in imported
+    assert "SnapshotDiscoveryCache" in imported
+
+
+def test_no_unbounded_discovery_call_site_remains_in_medusa():
+    """`glob`, `newest_first` and `order_candidates` all materialise the whole
+    directory before anything can bound it: `glob.glob` is `list(iglob(...))`
+    and even `iglob` reaches `_listdir`, which is `return list(it)`. None of
+    them may survive on a production discovery path."""
+    tree = ast.parse(Path(medusa_api.__file__).read_text(encoding="utf-8"))
+    # AST, not a substring sweep: the module still DISCUSSES the production
+    # glob in prose, and prose is not a call site. Comments are invisible here,
+    # so a surviving literal is a real one.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert "v070_gen*" not in node.value, node.value
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(
+                node.func, "attr", None)
+            assert name not in ("newest_first", "order_candidates", "glob",
+                                "iglob"), name
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+    assert "newest_first" not in imported
+    assert "order_candidates" not in imported
+
+
+def test_every_discovery_call_site_shares_the_one_cache():
+    """All seven. A route that kept its own scan would reintroduce exactly the
+    unbounded concurrency this tranche exists to remove."""
+    tree = ast.parse(Path(medusa_api.__file__).read_text(encoding="utf-8"))
+    borrowers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(isinstance(sub, ast.Attribute) and sub.attr == "borrow"
+                for sub in ast.walk(node))
+    }
+    # Six routes plus the tuning generation getter reach discovery; five of
+    # them do it through the shared selector, and `status` borrows directly
+    # because it also needs the completed scan's candidate count.
+    assert "_find_latest_snapshot" in borrowers
+    assert "status" in borrowers
+
+    callers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and _calls_named(node, "_find_latest_snapshot")
+    }
+    assert callers == {
+        "census", "equanimity", "acoustic", "snapshot_latest",
+        "geometry_stl", "_infer_current_gen_from_snapshot",
+    }
+    assert len(callers) + 1 == 7  # the seventh is `status`, borrowing directly
+
+
+def test_the_module_holds_exactly_one_shared_cache():
+    cache = medusa_api._discovery_cache()
+    assert cache is medusa_api._discovery_cache()
+    assert isinstance(cache, snapshot_archive_guard.SnapshotDiscoveryCache)
+
+
+# -- one refresh under a burst ------------------------------------------------
+
+def test_a_request_burst_performs_exactly_one_discovery(confined, monkeypatch):
+    """The V2 gate: simultaneous requests must not each launch a cap-level
+    scan. One refresh; everybody else gets the same completed result or a
+    fixed bounded unavailable answer, and nobody queues."""
+    import threading
+
+    scanner = _MedusaScanner([_md_succeeded(3)])
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    _install_cache(monkeypatch, confined, scanner)
+
+    barrier = threading.Barrier(8)
+    seen = []
+
+    def caller():
+        barrier.wait(timeout=10)
+        try:
+            medusa_api._find_latest_snapshot()
+            seen.append("ok")
+        except medusa_api._DiscoveryUnavailable:
+            seen.append("unavailable")
+
+    threads = [threading.Thread(target=caller) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    assert scanner.entered.wait(timeout=10)
+    scanner.gate.set()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert scanner.calls == 1
+    assert len(seen) == 8
+
+
+def test_a_second_request_inside_the_ttl_does_not_rescan(confined, monkeypatch):
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_succeeded(2), _md_succeeded(5)])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+    client.get("/api/status")
+    clock.advance(9.0)
+    client.get("/api/status")
+    assert scanner.calls == 1
+    clock.advance(1.0)
+    client.get("/api/status")
+    assert scanner.calls == 2
+
+
+# -- /api/status reports the completed scan, never its own glob ---------------
+
+def test_status_reports_the_cached_scans_exact_candidate_count(confined,
+                                                               monkeypatch):
+    """The independent `list(DATA_DIR.glob(...))` bypass is gone: the count is
+    the candidate count of ONE completed bounded scan."""
+    scanner = _MedusaScanner([_md_succeeded(4)])
+    _install_cache(monkeypatch, confined, scanner)
+    # A real file the fake scan does not know about: if the route still ran its
+    # own glob, the count would be 1 rather than the scan's 4.
+    _write_snapshot_ma(confined / "v070_gen000999.npz", compressed=True)
+
+    body = medusa_api.app.test_client().get("/api/status").get_json()
+    assert body["total_snapshots"] == 4
+    assert scanner.calls == 1
+
+
+def test_status_reports_the_age_of_the_scan_it_counted(confined, monkeypatch):
+    """As-of-completion, and honest about it: the count may be stale by the
+    cache age plus the refresh duration, so the age is published with it."""
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_succeeded(4)])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+    client.get("/api/status")
+    clock.advance(6.0)
+    body = client.get("/api/status").get_json()
+    assert body["snapshot_count_age_seconds"] == 6.0
+    assert scanner.calls == 1
+
+
+def test_status_answers_the_sanitized_503_after_a_known_failure(confined,
+                                                                monkeypatch):
+    """V2.2: never a partial count, and never the FORMER count."""
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_succeeded(4), _md_failed()])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+
+    first = client.get("/api/status")
+    assert first.status_code == 200
+    assert first.get_json()["total_snapshots"] == 4
+
+    clock.advance(10.0)
+    second = client.get("/api/status")
+    assert second.status_code == 503
+    body = second.get_json()
+    assert body == {"error": "snapshot_rejected"}
+    assert "total_snapshots" not in body
+
+
+@pytest.mark.parametrize("route", [
+    "/api/status", "/api/census", "/api/equanimity", "/api/acoustic",
+    "/api/snapshot/latest", "/api/geometry/stl",
+])
+def test_every_snapshot_route_fails_closed_on_a_known_discovery_failure(
+        confined, monkeypatch, route):
+    scanner = _MedusaScanner([_md_failed()])
+    _install_cache(monkeypatch, confined, scanner)
+    response = medusa_api.app.test_client().get(route)
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "snapshot_rejected"}
+
+
+@pytest.mark.parametrize("reason", [
+    snapshot_archive_guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED,
+    snapshot_archive_guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED,
+], ids=["entry_overflow", "candidate_overflow"])
+def test_an_overflow_after_a_prior_success_makes_the_old_listing_unavailable(
+        confined, monkeypatch, reason):
+    """The case that decides whether the caps mean anything: the directory
+    grew past a cap AFTER a good listing was cached. A stale-serving cache
+    would keep answering from the old listing indefinitely."""
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_succeeded(3), _md_failed(reason)])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+    assert client.get("/api/status").status_code == 200
+    clock.advance(10.0)
+    assert client.get("/api/status").status_code == 503
+    assert client.get("/api/census").status_code == 503
+
+
+def test_no_new_refresh_starts_inside_the_failure_ttl(confined, monkeypatch):
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_failed(), _md_succeeded(2)])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+    for _ in range(6):
+        assert client.get("/api/status").status_code == 503
+        clock.advance(1.0)
+    assert scanner.calls == 1
+
+
+def test_recovery_after_the_failure_ttl_restores_normal_service(confined,
+                                                                monkeypatch):
+    clock = _MedusaClock()
+    scanner = _MedusaScanner([_md_failed(), _md_succeeded(6)])
+    _install_cache(monkeypatch, confined, scanner, clock=clock)
+    client = medusa_api.app.test_client()
+    assert client.get("/api/status").status_code == 503
+    clock.advance(10.0)
+    body = client.get("/api/status")
+    assert body.status_code in (200, 404)
+    assert scanner.calls == 2
+
+
+def test_the_unavailable_body_discloses_nothing(confined, monkeypatch):
+    """Deliberately the SAME sanitized body an archive refusal produces. These
+    are unauthenticated GETs on a process that binds 0.0.0.0; telling the
+    caller whether their planted file overflowed a cap or merely failed
+    admission is itself the disclosure."""
+    scanner = _MedusaScanner([_md_failed(
+        snapshot_archive_guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED)])
+    _install_cache(monkeypatch, confined, scanner)
+    response = medusa_api.app.test_client().get("/api/census")
+    text = response.get_data(as_text=True)
+    for leak in ("candidate_limit", "v070_gen", ".npz", "Traceback",
+                 "OSError", str(confined), "65536", "196608"):
+        assert leak not in text
+
+
+# -- the four states, through real route paths --------------------------------
+
+def test_clean_empty_is_a_404_not_a_discovery_failure(confined, monkeypatch):
+    scanner = _MedusaScanner([_md_succeeded(0)])
+    _install_cache(monkeypatch, confined, scanner)
+    response = medusa_api.app.test_client().get("/api/status")
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "No snapshots found"}
+
+
+def test_all_matching_unreadable_is_a_404_not_a_discovery_failure(confined,
+                                                                  monkeypatch):
+    """Names matched but no metadata could be read. Distinct from clean empty
+    in the completed result, and distinct from a discovery failure: the scan
+    itself completed."""
+    scanner = _MedusaScanner([_md_succeeded(0, unreadable=5)])
+    _install_cache(monkeypatch, confined, scanner)
+    response = medusa_api.app.test_client().get("/api/status")
+    assert response.status_code == 404
+    with medusa_api._discovery_cache().borrow() as lease:
+        assert lease.all_matching_unreadable is True
+        assert lease.available is True
+
+
+def test_an_archive_rejection_is_not_a_discovery_failure(confined):
+    """`SnapshotArchiveRejected` is downstream of a successful discovery, and
+    must not be cached, relabelled or counted as unreadability."""
+    _hostile_ma("missing_member", confined / "v070_gen000001.npz")
+    client = medusa_api.app.test_client()
+    assert client.get("/api/census").status_code == 503
+    with medusa_api._discovery_cache().borrow() as lease:
+        assert lease.available is True          # discovery SUCCEEDED
+        assert lease.reason is None
+        assert lease.unreadable == 0
+        assert len(lease.ordered) == 1
+
+
+def test_the_tuning_getter_fails_closed_on_a_discovery_failure(confined,
+                                                               monkeypatch):
+    """PR #471's contract survives: an unavailable generation is None, never a
+    fabricated 0, so commit and rollback refuse with their fixed 503."""
+    scanner = _MedusaScanner([_md_failed()])
+    _install_cache(monkeypatch, confined, scanner)
+    assert medusa_api._infer_current_gen_from_snapshot() is None
+
+
+# -- selection and admission stay per consumption -----------------------------
+
+def test_the_cache_never_holds_a_selected_path_or_descriptor(confined,
+                                                             monkeypatch):
+    scanner = _MedusaScanner([_md_succeeded(2)])
+    cache = _install_cache(monkeypatch, confined, scanner)
+    medusa_api.app.test_client().get("/api/status")
+    state = cache.diagnostics()
+    for field in dataclasses.fields(state):
+        assert not isinstance(getattr(state, field.name), (str, bytes, Path))
+
+
+def test_selection_and_admission_run_under_the_lease_not_from_the_cache(
+        confined, monkeypatch):
+    """Two consumptions of ONE cached listing must each re-run admission: a
+    file that became unusable between them has to be caught, not assumed good
+    from the earlier probe. The cache holds a listing, never a verdict."""
+    good = Path(_write_snapshot_ma(confined / "v070_gen000001.npz",
+                                   compressed=True))
+    cache = _install_cache(
+        monkeypatch, confined,
+        snapshot_archive_guard.discover_snapshot_candidates, ttl=10.0)
+
+    assert medusa_api._find_latest_snapshot() == good
+    _hostile_ma("missing_member", good)
+    client = medusa_api.app.test_client()
+    assert client.get("/api/census").status_code == 503
+    # One completed scan served both consumptions -- the refusal came from
+    # re-admission, not from a second directory read.
+    assert cache.diagnostics().generation == 1
