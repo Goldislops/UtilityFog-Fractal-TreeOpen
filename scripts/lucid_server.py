@@ -164,9 +164,13 @@ def find_latest_snapshot(data_dir, *, allow_refresh=False):
     initial frame until a refresh succeeds. Candidates that matched but could
     not be described also return None and note the lane -- the watcher is
     running blind, and reporting that as an empty directory would hide it. A
-    clean EMPTY directory is a completed success: no warning, no failure state,
-    and the lane is left exactly as it was. An archive refusal is downstream of
-    all of this and never reaches here at all.
+    clean EMPTY directory is a completed success with nothing to send: it
+    emits no warning, and on a watcher-owned call it CLEARS the discovery lane,
+    re-arming it exactly as a listing with readable candidates does. An archive
+    refusal is downstream of all of this and never reaches here at all.
+
+    Every one of those lane movements is watcher-owned. A client-facing call
+    reads the completed result and moves nothing.
     """
     with _discovery_cache(data_dir).borrow(allow_refresh=allow_refresh) as listing:
         if not listing.available:
@@ -182,21 +186,26 @@ def find_latest_snapshot(data_dir, *, allow_refresh=False):
         blind = not listing.ordered and bool(listing.unreadable)
 
         if allow_refresh:
-            # The lane records whether the WATCHER is running blind, so only
-            # the caller that actually performed a discovery may move it. A
-            # client connection did no directory work: it has nothing to
-            # report, and no standing to declare someone else's episode over.
-            # One poll is one lane event, however many clients connect in
-            # between.
+            # The lane records whether the WATCHER is running blind, so only a
+            # watcher-owned call may move it. `allow_refresh` is what marks
+            # ownership -- NOT evidence that a scan happened: a watcher-owned
+            # call landing on a fresh cache hit did no directory work either,
+            # and still speaks for the watcher, because it is reporting the
+            # watcher's current view. What matters is the invariant: a client
+            # connection has nothing to report and no standing to declare
+            # someone else's episode over, so one poll is one lane event
+            # however many clients connect in between.
             if blind:
                 _note_metadata_failure(DISCOVERY_LANE)
             else:
-                # A completed discovery ends the episode whatever it found. A
-                # clean EMPTY directory is a success -- the watcher can see the
-                # directory perfectly well, there is simply nothing in it -- so
-                # it re-arms exactly as an ordered listing does. Leaving the
-                # episode open here kept a later, genuinely new failure
-                # suppressed behind a rate limit armed minutes earlier.
+                # A NON-BLIND success ends the episode: a clean EMPTY directory
+                # or a listing with readable candidates. Both mean the watcher
+                # can see the directory, which is exactly what the lane is
+                # about -- and clean empty is the case that used to be missed,
+                # leaving a later genuinely new failure suppressed behind a
+                # rate limit armed minutes earlier. All-matching-unreadable is
+                # NOT one of these: it took the `blind` branch above and stays
+                # its own distinct warning state.
                 #
                 # Only the DISCOVERY lane. Clearing both here is what made the
                 # second read's rate limit ineffective: discovery succeeds on

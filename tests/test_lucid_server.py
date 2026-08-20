@@ -1817,12 +1817,13 @@ def test_lucid_retains_no_historical_listing_generation(confined, monkeypatch):
 # clear anyone else's episode: one poll must still produce at most one lane
 # event, however many clients happen to connect between polls.
 #
-# And a successful discovery ends an episode whatever it found. A clean empty
-# directory is a completed success -- the watcher can see the directory
-# perfectly well, there is simply nothing in it -- so it re-arms the lane
-# exactly as an ordered listing does. Leaving the episode open there kept a
+# And a watcher-observed NON-BLIND success ends an episode -- a clean empty
+# directory, or a listing with readable candidates. Both mean the watcher can
+# see the directory, which is what the lane is about, so clean empty re-arms it
+# exactly as an ordered listing does; leaving the episode open there kept a
 # later, genuinely new failure suppressed behind a rate limit armed minutes
-# earlier.
+# earlier. All-matching-unreadable is NOT one of these: it is the blind case
+# and stays its own distinct warning state.
 # ===========================================================================
 
 

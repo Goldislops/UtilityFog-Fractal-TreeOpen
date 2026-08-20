@@ -1858,8 +1858,10 @@ def test_the_daemon_unreadable_diagnostic_names_no_path(tmp_path, monkeypatch,
 def test_a_clean_empty_recovery_re_arms_the_unreadable_episode(tmp_path,
                                                                monkeypatch,
                                                                capsys):
-    """A successful discovery ends the episode whatever it found, so a later
-    blind spell is reported again instead of staying suppressed."""
+    """A successful NON-BLIND discovery -- clean empty here, or a listing with
+    readable candidates -- ends the episode, so a later blind spell is
+    reported again instead of staying suppressed. All-matching-unreadable does
+    not end it: that is the blind state itself."""
     ghosts = ["v070_gen000001.npz", "v070_gen000002.npz"]
     directory = _GeoScandir(ghosts, include_real=False)
 

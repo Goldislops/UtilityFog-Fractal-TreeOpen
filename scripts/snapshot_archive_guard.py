@@ -1446,8 +1446,16 @@ class SnapshotDiscoveryCache:
 
         `allow_refresh=False` never starts a scan under any circumstances. That
         is what Lucid's client connections use: whatever a connect burst does,
-        the directory is opened by the watcher and by nobody else. It defaults
-        to not refreshing so a caller that forgets cannot accidentally scan.
+        the directory is opened by the watcher and by nobody else.
+
+        The default here is `True`, because the callers that hold a cache
+        directly are the ones responsible for refreshing it -- Medusa's routes
+        and Lucid's watcher. The opposite default, which stops a caller that
+        forgets from ever starting a scan, belongs to the client-facing helper
+        rather than to this method: `lucid_server.find_latest_snapshot` takes
+        `allow_refresh` keyword-only and defaults it to `False`, so a client
+        connection is non-refreshing unless something explicitly asks
+        otherwise.
 
         A non-refreshing borrower is lent a completed success while it is
         fresh, and while one of the two authorized stale windows is open -- a
