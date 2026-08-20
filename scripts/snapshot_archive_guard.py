@@ -1365,8 +1365,15 @@ class SnapshotDiscoveryCache:
 
     Fail closed
     -----------
-    A prior success is served stale only while a refresh is in flight and its
-    outcome is still UNKNOWN. The moment a refresh is known to have failed, the
+    A prior success is served stale in exactly two windows, and no others:
+    while a refresh is in flight and its outcome is still UNKNOWN, and while a
+    refresh is being deliberately deferred to stop a third listing generation
+    existing. Both mean some refresh is responsible for replacing it. An
+    expired listing with neither window open is not served at all -- to any
+    caller, refreshing or not -- because that is a listing of unbounded age
+    with nobody replacing it.
+
+    The moment a refresh is known to have failed, the
     failure and the removal of the cache's reference to the old listing are one
     atomic transition: no new caller may borrow that listing, every affected
     route answers its fixed sanitized refusal, and a borrower that already held
@@ -1441,6 +1448,14 @@ class SnapshotDiscoveryCache:
         is what Lucid's client connections use: whatever a connect burst does,
         the directory is opened by the watcher and by nobody else. It defaults
         to not refreshing so a caller that forgets cannot accidentally scan.
+
+        A non-refreshing borrower is lent a completed success while it is
+        fresh, and while one of the two authorized stale windows is open -- a
+        refresh in flight whose outcome is unknown, or a refresh deferred to
+        keep a third listing generation from existing. Outside those it is told
+        nothing is available, because an expired listing with nobody
+        responsible for replacing it is exactly what the lifetime exists to
+        stop being served.
         """
         lease = self._acquire(allow_refresh)
         try:
@@ -1515,25 +1530,50 @@ class SnapshotDiscoveryCache:
             # immediately, with nothing to wait on.
             return self._lease_locked(stale=True)
 
-        if not allow_refresh:
-            return self._lease_locked(stale=True)
-
         if self._success is not None and self._retired_borrowers_locked():
             # A retired listing is still held and a live one is published;
             # starting a refresh now would make a third cap-level footprint.
             # Defer it -- the caller gets the live listing rather than a wait.
+            # This is the second and last authorized stale window, and it is
+            # checked BEFORE `allow_refresh` because it is a property of the
+            # cache, not of who is asking: while the refresh is deliberately
+            # held back, the live listing is the intended answer for everyone.
             return self._lease_locked(stale=True)
+
+        if not allow_refresh:
+            # Expired, nothing in flight, nothing deferred -- and this caller
+            # may not scan. There is no window here that V2.2 allows: a stale
+            # listing is only servable while some refresh is actually
+            # responsible for replacing it. Handing one over instead means an
+            # unbounded-age listing with nobody replacing it, which is the
+            # stale-forever mode the lifetime exists to prevent. The honest
+            # answer is "nothing usable", and still no directory work.
+            return self._unavailable_locked()
 
         return None
 
     def _lease_locked(self, *, stale: bool) -> DiscoveryLease:
-        age = (0.0 if self._completed_at is None
-               else self._clock() - self._completed_at)
         if self._success is None:
-            return DiscoveryLease(None, self._failure, 0, False, age)
+            return self._unavailable_locked()
         generation = self._live_generation
         self._leases[generation] = self._leases.get(generation, 0) + 1
-        return DiscoveryLease(self._success, None, generation, bool(stale), age)
+        return DiscoveryLease(self._success, None, generation, bool(stale),
+                              self._age_locked())
+
+    def _unavailable_locked(self) -> DiscoveryLease:
+        """Nothing usable is being lent, whether or not a success exists.
+
+        `reason` is the fixed sanitized failure code when one is published, and
+        `None` when the cache simply has nothing current to lend -- an expired
+        listing nobody is refreshing, or a cache that has not run yet. Those
+        are different facts and consumers treat them differently: Lucid warns
+        about the first and stays quiet about the second.
+        """
+        return DiscoveryLease(None, self._failure, 0, False, self._age_locked())
+
+    def _age_locked(self) -> float:
+        return (0.0 if self._completed_at is None
+                else self._clock() - self._completed_at)
 
     def _publish_locked(self, replacement) -> None:
         if not isinstance(replacement, (DiscoverySucceeded, DiscoveryFailed)):

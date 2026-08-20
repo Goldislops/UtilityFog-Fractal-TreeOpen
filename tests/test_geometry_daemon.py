@@ -1755,3 +1755,221 @@ def test_a_discovery_failure_is_not_an_archive_refusal(confined, capsys,
     assert captured.err.strip().startswith("Snapshot rejected:")
     assert "Snapshot discovery failed" not in captured.err
     assert "Snapshot candidates unreadable" not in captured.err
+
+
+# ===========================================================================
+# Watch mode keeps all-matching-unreadable apart from clean empty
+#
+# `--once` already distinguished them: an empty directory is "nothing to
+# export" and exits zero, while a directory whose every candidate failed its
+# metadata read is a FAULT and exits nonzero. Watch mode collapsed both into
+# the same silent sleep, so a daemon running blind over a directory it could
+# see but not describe was indistinguishable from a daemon with nothing to do.
+#
+# Watch mode now carries the same three-way distinction, with one fixed
+# path-free line per problem EPISODE and a transition between kinds treated as
+# a new episode -- because "the directory stopped opening" and "the entries
+# stopped describing" are different faults and the second must not hide behind
+# the first's rate limit.
+# ===========================================================================
+
+
+class _ScriptedClock(_FakeClock):
+    """A daemon clock that applies a scripted directory change at each sleep.
+
+    `script` maps a 1-based sleep index to a callable run just before that
+    sleep, which is how one test walks the daemon through several directory
+    states without any real waiting.
+    """
+
+    def __init__(self, script, stop_after_sleeps):
+        super().__init__(stop_after_sleeps=stop_after_sleeps)
+        self.script = dict(script)
+
+    def sleep(self, seconds):
+        action = self.script.get(len(self.sleeps) + 1)
+        if action is not None:
+            action()
+        return super().sleep(seconds)
+
+
+def _run_geo_daemon(monkeypatch, tmp_path, directory, clock):
+    """Drive the REAL `run_daemon()` over an injected directory."""
+    monkeypatch.setattr(geometry_daemon, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", tmp_path)
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir", directory)
+    monkeypatch.setattr(geometry_daemon, "time", clock)
+    exporters = []
+    _no_exporters(monkeypatch, exporters)
+    try:
+        geometry_daemon.run_daemon()
+    except KeyboardInterrupt:
+        pass
+    return exporters
+
+
+_UNREADABLE_LINE = "Snapshot candidates unreadable"
+_FAILED_LINE = "Snapshot discovery failed"
+
+
+def test_the_daemon_is_silent_for_a_clean_empty_directory(tmp_path,
+                                                          monkeypatch,
+                                                          capsys):
+    """Nothing to export is not a fault and must not become one."""
+    exporters = _run_geo_daemon(
+        monkeypatch, tmp_path, _GeoScandir(include_real=False),
+        _FakeClock(stop_after_sleeps=4))
+    output = capsys.readouterr().out
+    assert exporters == []
+    assert _UNREADABLE_LINE not in output
+    assert _FAILED_LINE not in output
+    assert "[GEO] Error:" not in output
+
+
+def test_the_daemon_reports_unreadable_candidates_once_per_episode(tmp_path,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """Names matched and none could be described: the daemon is running blind
+    over a directory it can see. One line, not one per poll, and the loop
+    stays alive."""
+    ghosts = ["v070_gen00000%d.npz" % index for index in range(4)]
+    exporters = _run_geo_daemon(
+        monkeypatch, tmp_path, _GeoScandir(ghosts, include_real=False),
+        _FakeClock(stop_after_sleeps=5))
+    output = capsys.readouterr().out
+    assert output.count(_UNREADABLE_LINE) == 1, output
+    assert _FAILED_LINE not in output, "an unreadable directory was relabelled"
+    assert exporters == []
+    assert "[GEO] Daemon shutting down" in output   # the loop survived
+
+
+def test_the_daemon_unreadable_diagnostic_names_no_path(tmp_path, monkeypatch,
+                                                        capsys):
+    ghosts = ["v070_gen_LEAKNAME_%d.npz" % index for index in range(3)]
+    _run_geo_daemon(monkeypatch, tmp_path, _GeoScandir(ghosts,
+                                                       include_real=False),
+                    _FakeClock(stop_after_sleeps=3))
+    captured = capsys.readouterr()
+    for leak in ("LEAKNAME", ".npz", "Errno", "No such file", "Traceback"):
+        assert leak not in captured.out and leak not in captured.err, leak
+    assert _UNREADABLE_LINE in captured.out
+
+
+def test_a_clean_empty_recovery_re_arms_the_unreadable_episode(tmp_path,
+                                                               monkeypatch,
+                                                               capsys):
+    """A successful discovery ends the episode whatever it found, so a later
+    blind spell is reported again instead of staying suppressed."""
+    ghosts = ["v070_gen000001.npz", "v070_gen000002.npz"]
+    directory = _GeoScandir(ghosts, include_real=False)
+
+    def recover():
+        directory.ghosts = []
+
+    def relapse():
+        directory.ghosts = list(ghosts)
+
+    clock = _ScriptedClock({2: recover, 4: relapse}, stop_after_sleeps=6)
+    exporters = _run_geo_daemon(monkeypatch, tmp_path, directory, clock)
+
+    output = capsys.readouterr().out
+    assert output.count(_UNREADABLE_LINE) == 2, output
+    assert exporters == []
+
+
+def test_the_daemon_distinguishes_unreadable_from_a_discovery_failure(
+        tmp_path, monkeypatch, capsys):
+    """Two different faults, two different fixed codes. Neither may hide
+    behind the other's suppression."""
+    ghosts = ["v070_gen000001.npz"]
+    directory = _GeoScandir(ghosts, include_real=False)
+
+    def to_failure():
+        directory.open_error = PermissionError(13, "Permission denied")
+
+    def to_unreadable():
+        directory.open_error = None
+
+    clock = _ScriptedClock({1: to_failure, 3: to_unreadable},
+                           stop_after_sleeps=4)
+    exporters = _run_geo_daemon(monkeypatch, tmp_path, directory, clock)
+
+    output = capsys.readouterr().out
+    assert output.count(_UNREADABLE_LINE) == 2, output
+    assert output.count(_FAILED_LINE) == 1, output
+    assert "directory_open_failed" in output
+    assert exporters == []
+
+
+def test_a_readable_snapshot_ends_a_discovery_failure_episode(tmp_path,
+                                                              monkeypatch,
+                                                              capsys):
+    """The other recovery direction: an ordered listing re-arms too."""
+    directory = _GeoScandir(include_real=False,
+                            open_error=PermissionError(13, "Permission denied"))
+
+    def recover():
+        directory.open_error = None
+
+    def relapse():
+        directory.open_error = PermissionError(13, "Permission denied")
+
+    clock = _ScriptedClock({2: recover, 4: relapse}, stop_after_sleeps=6)
+    _run_geo_daemon(monkeypatch, tmp_path, directory, clock)
+
+    output = capsys.readouterr().out
+    assert output.count(_FAILED_LINE) == 2, output
+
+
+def test_watch_mode_and_once_agree_on_the_three_states(tmp_path, monkeypatch,
+                                                       capsys):
+    """The adapter-level requirement, stated as one control: clean empty,
+    all-matching-unreadable and `DiscoveryFailed` are three outcomes in BOTH
+    entry points, not two in one and three in the other."""
+    monkeypatch.setattr(geometry_daemon, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(geometry_daemon, "GEO_DIR", tmp_path)
+    _no_exporters(monkeypatch, [])
+    directory = _GeoScandir(include_real=False)
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir", directory)
+
+    geometry_daemon.run_once()
+    empty_once = capsys.readouterr()
+
+    directory.ghosts = ["v070_gen000001.npz"]
+    with pytest.raises(SystemExit):
+        geometry_daemon.run_once()
+    unreadable_once = capsys.readouterr()
+
+    directory.ghosts = []
+    directory.open_error = PermissionError(13, "Permission denied")
+    with pytest.raises(SystemExit):
+        geometry_daemon.run_once()
+    failed_once = capsys.readouterr()
+
+    assert "No snapshots found!" in empty_once.out and empty_once.err == ""
+    assert unreadable_once.err.strip() == _UNREADABLE_LINE
+    assert failed_once.err.strip().startswith(_FAILED_LINE)
+
+    # And the same three, distinct, through the watch loop.
+    directory.open_error = None
+    directory.ghosts = []
+    empty_watch = capsys.readouterr()
+    _run_geo_daemon(monkeypatch, tmp_path, directory,
+                    _FakeClock(stop_after_sleeps=2))
+    empty_watch = capsys.readouterr().out
+    assert _UNREADABLE_LINE not in empty_watch and _FAILED_LINE not in empty_watch
+
+    directory.ghosts = ["v070_gen000001.npz"]
+    _run_geo_daemon(monkeypatch, tmp_path, directory,
+                    _FakeClock(stop_after_sleeps=2))
+    unreadable_watch = capsys.readouterr().out
+    assert _UNREADABLE_LINE in unreadable_watch
+    assert _FAILED_LINE not in unreadable_watch
+
+    directory.ghosts = []
+    directory.open_error = PermissionError(13, "Permission denied")
+    _run_geo_daemon(monkeypatch, tmp_path, directory,
+                    _FakeClock(stop_after_sleeps=2))
+    failed_watch = capsys.readouterr().out
+    assert _FAILED_LINE in failed_watch
+    assert _UNREADABLE_LINE not in failed_watch

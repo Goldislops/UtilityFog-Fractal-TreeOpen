@@ -1807,3 +1807,161 @@ def test_lucid_retains_no_historical_listing_generation(confined, monkeypatch):
     state = cache.diagnostics()
     assert state.live_borrowers == 0
     assert state.retired_borrowers == 0
+
+
+# ===========================================================================
+# The discovery-warning lane belongs to the watcher alone
+#
+# The lane records whether the WATCHER is running blind. A client connection
+# performs no discovery at all, so it has nothing to report and no standing to
+# clear anyone else's episode: one poll must still produce at most one lane
+# event, however many clients happen to connect between polls.
+#
+# And a successful discovery ends an episode whatever it found. A clean empty
+# directory is a completed success -- the watcher can see the directory
+# perfectly well, there is simply nothing in it -- so it re-arms the lane
+# exactly as an ordered listing does. Leaving the episode open there kept a
+# later, genuinely new failure suppressed behind a rate limit armed minutes
+# earlier.
+# ===========================================================================
+
+
+def test_a_client_burst_cannot_touch_the_watcher_warning_lane(confined,
+                                                              monkeypatch,
+                                                              capsys):
+    """One watcher observation of an all-unreadable directory is one lane
+    event. Six client connections afterwards are zero more."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(0, unreadable=4)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
+    watcher_state = dict(lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE])
+    assert watcher_state["failures"] == 1
+    assert watcher_state["warned_at"] is None      # a lone failure is silent
+    assert capsys.readouterr().out == ""
+
+    for _ in range(6):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+
+    assert scanner.calls == 1, "a client connection scanned the directory"
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == watcher_state, (
+        "a client mutated watcher-owned warning state")
+    assert capsys.readouterr().out == "", "a client emitted the watcher warning"
+
+
+def test_a_clean_empty_refresh_re_arms_the_discovery_warning_lane(confined,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """Two failures warn once; a clean-empty recovery ends the episode; a
+    later two-failure episode warns again rather than staying suppressed."""
+    scanner = _LucidScanner([
+        _ls_failed(), _ls_failed(), _ls_succeeded(0), _ls_failed(),
+        _ls_failed(),
+    ])
+    _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+
+    def poll():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    assert poll() is None
+    assert capsys.readouterr().out == ""
+    assert poll() is None
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    assert poll() is None                       # clean empty -- a SUCCESS
+    assert capsys.readouterr().out == "", "a clean empty directory warned"
+    assert lucid_server._metadata_state[lucid_server.DISCOVERY_LANE] == {
+        "failures": 0, "warned_at": None}, "the lane did not re-arm"
+
+    assert poll() is None
+    assert capsys.readouterr().out == ""
+    assert poll() is None
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out, (
+        "the later episode stayed suppressed behind the earlier rate limit")
+
+
+@requires_numpy
+def test_a_client_cannot_clear_a_watcher_owned_warning_episode(confined,
+                                                               monkeypatch,
+                                                               capsys):
+    """A client consuming an ordered listing is a passive read. It must not be
+    able to declare someone else's failure episode over."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    scanner = _LucidScanner([
+        snapshot_archive_guard.DiscoverySucceeded((valid,), 0, 1, 1)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=_LucidClock())
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) == valid
+
+    # An episode the watcher opened through its own observations.
+    lucid_server._note_metadata_failure(lucid_server.DISCOVERY_LANE)
+    lucid_server._note_metadata_failure(lucid_server.DISCOVERY_LANE)
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+    episode = dict(lucid_server._metadata_state[lucid_server.DISCOVERY_LANE])
+    assert episode["failures"] == 2 and episode["warned_at"] is not None
+
+    for _ in range(4):
+        assert lucid_server.find_latest_snapshot(str(confined)) == valid
+
+    assert scanner.calls == 1
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == episode, (
+        "a client cleared watcher-owned warning state")
+
+
+def test_a_client_cannot_open_an_episode_on_a_known_failure(confined,
+                                                            monkeypatch,
+                                                            capsys):
+    """The failure side of the same rule."""
+    scanner = _LucidScanner([_ls_failed()])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=_LucidClock())
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
+    watcher_state = dict(lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE])
+    capsys.readouterr()
+
+    for _ in range(6):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == watcher_state
+    assert capsys.readouterr().out == ""
+    assert scanner.calls == 1
+
+
+def test_the_fingerprint_lane_stays_independent_of_the_discovery_rule(confined,
+                                                                      monkeypatch):
+    """The two-lane separation is unchanged by any of the above: clearing the
+    discovery lane must still not re-arm the fingerprint lane."""
+    scanner = _LucidScanner([_ls_succeeded(0)])
+    _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    before = dict(lucid_server._metadata_state[lucid_server.FINGERPRINT_LANE])
+
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+
+    assert lucid_server._metadata_state[
+        lucid_server.FINGERPRINT_LANE] == before
+
+
+def test_an_expired_watcher_listing_gives_a_client_no_frame(confined,
+                                                            monkeypatch):
+    """The consumer half of the cache correction: with nothing in flight and
+    no deferral, an expired listing is not a frame -- and a client still
+    performs no directory work to find that out."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(2)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+
+    clock.advance(10.0)
+    for _ in range(4):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert scanner.calls == 1

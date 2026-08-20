@@ -179,14 +179,32 @@ def find_latest_snapshot(data_dir, *, allow_refresh=False):
         # Candidates matched but NONE could be described. That is not an
         # empty directory, and it must not be reported as one: it means the
         # watcher is running blind. Warned about once, rate-limited, path-free.
-        if not listing.ordered and listing.unreadable:
-            _note_metadata_failure(DISCOVERY_LANE)
+        blind = not listing.ordered and bool(listing.unreadable)
+
+        if allow_refresh:
+            # The lane records whether the WATCHER is running blind, so only
+            # the caller that actually performed a discovery may move it. A
+            # client connection did no directory work: it has nothing to
+            # report, and no standing to declare someone else's episode over.
+            # One poll is one lane event, however many clients connect in
+            # between.
+            if blind:
+                _note_metadata_failure(DISCOVERY_LANE)
+            else:
+                # A completed discovery ends the episode whatever it found. A
+                # clean EMPTY directory is a success -- the watcher can see the
+                # directory perfectly well, there is simply nothing in it -- so
+                # it re-arms exactly as an ordered listing does. Leaving the
+                # episode open here kept a later, genuinely new failure
+                # suppressed behind a rate limit armed minutes earlier.
+                #
+                # Only the DISCOVERY lane. Clearing both here is what made the
+                # second read's rate limit ineffective: discovery succeeds on
+                # every poll, so a shared state was re-armed on every poll.
+                _clear_metadata_failures(DISCOVERY_LANE)
+
+        if blind:
             return None
-        if listing.ordered:
-            # Only the DISCOVERY lane. Clearing both here is what made the
-            # second read's rate limit ineffective: discovery succeeds on every
-            # poll, so a shared state was re-armed on every poll.
-            _clear_metadata_failures(DISCOVERY_LANE)
 
         # Selection and admission run while the listing is held, and nothing is
         # retained afterwards: no selected path is cached and no admission
