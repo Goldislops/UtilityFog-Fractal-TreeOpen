@@ -1553,9 +1553,24 @@ def test_an_inode_replacement_with_identical_size_and_time_is_detected(
         path = Path(os.fspath(directory)) / victim
         info = os.lstat(path)
         payload = path.read_bytes()
-        path.unlink()
-        path.write_bytes(payload)  # same size
-        os.utime(path, ns=(info.st_mtime_ns, info.st_mtime_ns))  # same time
+
+        # Build the replacement under a different name FIRST, then move it
+        # over. Deleting and immediately recreating is not enough: ext4
+        # cheerfully reuses the just-freed inode number, so the fixture
+        # produced an identical identity and proved nothing. Allocating the
+        # new object while the old one still exists guarantees a distinct
+        # inode on both platforms.
+        swap = path.with_name(path.name + ".swap")
+        swap.write_bytes(payload)                                # same size
+        os.utime(swap, ns=(info.st_mtime_ns, info.st_mtime_ns))  # same time
+        os.replace(swap, path)
+
+        replaced = os.lstat(path)
+        assert replaced.st_ino != info.st_ino, (
+            "the fixture did not actually change identity")
+        assert (replaced.st_size, replaced.st_mtime_ns) == (
+            info.st_size, info.st_mtime_ns), (
+            "the fixture must preserve size and time, or it proves nothing")
         return observed
 
     monkeypatch.setattr(retention, "scan_retention_candidates",
