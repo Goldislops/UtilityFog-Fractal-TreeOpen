@@ -1354,3 +1354,481 @@ def test_the_merged_discovery_and_admission_behaviour_is_untouched():
     assert guard.PRODUCTION_DISCOVERY_POLICY.max_candidates == 65_536
     assert guard.PRODUCTION_POLICY.selection_depth == 8
     assert guard.DISCOVERY_CACHE_TTL_SECONDS == 10.0
+
+
+# ===========================================================================
+# Audit corrections -- six defects the green checks did not catch
+# ===========================================================================
+
+# -- 1. PLAN must not mutate the directory it is measuring -------------------
+
+def test_plan_via_the_cli_leaves_the_target_directory_unchanged(tmp_path,
+                                                                capsys):
+    """The default lock used to be created INSIDE the target, so an ordinary
+    dry run changed the very entry count it was reporting -- and would have
+    invalidated a zero-mutation acceptance run."""
+    _populate(tmp_path, snapshots=3)
+    before = sorted(path.name for path in tmp_path.iterdir())
+    retention.main([str(tmp_path)])
+    capsys.readouterr()
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
+def test_the_default_lock_lives_outside_the_target(tmp_path):
+    lock = Path(os.fspath(retention.default_lock_path(tmp_path)))
+    assert lock.parent != Path(os.fspath(tmp_path))
+    assert Path(os.fspath(tmp_path)) not in lock.parents
+
+
+def test_the_default_lock_name_is_opaque_and_carries_no_locator(tmp_path):
+    named = tmp_path / "medusa-operational-data"
+    named.mkdir()
+    lock = Path(os.fspath(retention.default_lock_path(named)))
+    assert named.name not in lock.name
+    assert re.fullmatch(r"[A-Za-z0-9._-]+", lock.name), lock.name
+
+
+def test_the_same_normalized_target_maps_to_one_lock(tmp_path):
+    first = retention.default_lock_path(tmp_path)
+    second = retention.default_lock_path(Path(os.fspath(tmp_path)) / ".")
+    assert Path(os.fspath(first)) == Path(os.fspath(second))
+
+
+def test_different_targets_do_not_share_a_lock(tmp_path):
+    one = tmp_path / "one"
+    two = tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    assert (Path(os.fspath(retention.default_lock_path(one)))
+            != Path(os.fspath(retention.default_lock_path(two))))
+
+
+def test_an_explicit_lock_override_is_preserved(tmp_path, capsys):
+    _populate(tmp_path, snapshots=2)
+    override = tmp_path.parent / "explicit.lock"
+    retention.main([str(tmp_path), "--lock", str(override)])
+    capsys.readouterr()
+    assert override.exists()
+
+
+def test_a_lock_open_failure_is_a_fixed_code_without_disclosure(tmp_path,
+                                                                monkeypatch,
+                                                                capsys):
+    def _denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(retention.os, "open", _denied)
+    status = retention.main([str(tmp_path)])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert retention.RetentionFailureReason.LOCK_UNAVAILABLE.value in printed.out
+    for leak in ("Traceback", "permission denied", str(tmp_path), "Errno"):
+        assert leak not in printed.out and leak not in printed.err
+
+
+# -- 2. a pass identifier must never function as a path ----------------------
+
+_HOSTILE_PASS_IDS = [
+    "..", ".", "", "../escape", "p20260101T000000/..",
+    "p20260101T000000\\..", "sub/p20260101T000000",
+    "p20260101T000000\n", "p20260101T000000\r\n", " p20260101T000000",
+    "p20260101T000000 ", "xp20260101T000000", "p20260101T000000x",
+    "p2026010T000000", "p20260101T00000", "p20260101t000000",
+    "P20260101T000000", "p2026٠١٠١T000000",
+    os.path.join(os.sep, "abs", "p20260101T000000"),
+]
+
+
+@pytest.mark.parametrize("pass_id", _HOSTILE_PASS_IDS)
+def test_a_malformed_pass_id_refuses_with_zero_mutation(tmp_path, pass_id):
+    """An absolute value or a `..` component joined beneath the quarantine
+    root escapes it entirely. The identifier is validated by full match before
+    anything at all is created."""
+    _populate(tmp_path, snapshots=3)
+    before = sorted(path.name for path in tmp_path.iterdir())
+    report = _run(tmp_path, pass_id=pass_id)
+    assert report.refused is retention.RetentionFailureReason.PASS_ID_INVALID
+    assert report.moved == 0
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+    assert not _quarantine_root(tmp_path).exists()
+
+
+@pytest.mark.parametrize("pass_id", [123, b"p20260101T000000", ["p"], 1.5])
+def test_a_wrongly_typed_pass_id_refuses(tmp_path, pass_id):
+    _populate(tmp_path, snapshots=3)
+    report = _run(tmp_path, pass_id=pass_id)
+    assert report.refused is retention.RetentionFailureReason.PASS_ID_INVALID
+    assert report.moved == 0
+
+
+def test_the_generated_pass_id_satisfies_its_own_grammar():
+    assert re.fullmatch(r"p[0-9]{8}T[0-9]{6}", retention._default_pass_id())
+
+
+# -- 3. the allowlists must be truly anchored --------------------------------
+
+_TRAILING = [
+    "v070_gen000001_step000001_20260101T000000.npz\n",
+    "v070_gen000001_step000001_20260101T000000.npz\r\n",
+    "v070_gen000001_step000001_20260101T000000.npz\r",
+    "telemetry_20260101T000000.json\n",
+    "telemetry_20260101T000000.json\r\n",
+    "telemetry_20260101T000000.json\r",
+    "\nv070_gen000001_step000001_20260101T000000.npz",
+    "\ntelemetry_20260101T000000.json",
+]
+
+
+@pytest.mark.parametrize("name", _TRAILING,
+                         ids=[repr(name) for name in _TRAILING])
+def test_a_name_with_surrounding_material_is_not_a_producer_name(name):
+    """Python's `$` matches immediately before a trailing newline, so `match`
+    with `$` accepted `...npz\\n`. Full matching is what actually anchors."""
+    assert retention.classify_name(name) is None
+
+
+@pytest.mark.parametrize("name", _TRAILING[:6],
+                         ids=[repr(name) for name in _TRAILING[:6]])
+def test_a_name_with_a_trailing_newline_receives_no_metadata_read(monkeypatch,
+                                                                  name):
+    fake = _install(monkeypatch, _FakeScandir([_Entry(name)]))
+    result = _scan()
+    assert isinstance(result, retention.ScanSucceeded)
+    assert result.snapshots == () and result.telemetry == ()
+    assert fake.statted == []
+
+
+# -- 4. the plan must carry the full stable identity -------------------------
+
+def test_an_inode_replacement_with_identical_size_and_time_is_detected(
+        tmp_path, monkeypatch):
+    """Size and time alone are not identity. A replacement that preserves both
+    evaded detection entirely, because `(st_dev, st_ino)` was first read at
+    revalidation and so had nothing from the scan to disagree with."""
+    _populate(tmp_path, snapshots=3)
+    victim = sorted(path.name for path in tmp_path.iterdir())[-1]
+    real_scan = retention.scan_retention_candidates
+
+    def _scan_then_replace(directory, *, policy):
+        observed = real_scan(directory, policy=policy)
+        path = Path(os.fspath(directory)) / victim
+        info = os.lstat(path)
+        payload = path.read_bytes()
+        path.unlink()
+        path.write_bytes(payload)  # same size
+        os.utime(path, ns=(info.st_mtime_ns, info.st_mtime_ns))  # same time
+        return observed
+
+    monkeypatch.setattr(retention, "scan_retention_candidates",
+                        _scan_then_replace)
+    report = _run(tmp_path)
+    assert (tmp_path / victim).exists(), "a replaced object was moved"
+    assert report.skipped >= 1
+
+
+def test_the_scan_captures_the_full_stable_identity(monkeypatch, tmp_path):
+    _populate(tmp_path, snapshots=2)
+    result = retention.scan_retention_candidates(
+        tmp_path, policy=_quarantine_policy())
+    for entry in result.snapshots:
+        assert entry.dev != 0 and entry.ino != 0
+        real = os.lstat(tmp_path / entry.basename)
+        assert (entry.dev, entry.ino) == (real.st_dev, real.st_ino)
+
+
+def test_a_planned_action_carries_the_identity_it_was_planned_on(tmp_path):
+    _populate(tmp_path, snapshots=3)
+    report = _run(tmp_path, mode=retention.RetentionMode.PLAN)
+    for action in report.planned_actions:
+        real = os.lstat(tmp_path / action.basename)
+        assert (action.dev, action.ino) == (real.st_dev, real.st_ino)
+
+
+def test_quarantine_refuses_before_creating_anything_without_identity(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=3)
+    real_lstat = os.lstat
+
+    def _identityless(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return _Stat(mode=info.st_mode, size=info.st_size,
+                     mtime_ns=info.st_mtime_ns, nlink=1, dev=0, ino=0)
+
+    monkeypatch.setattr(retention.os, "lstat", _identityless)
+    report = _run(tmp_path)
+    assert report.refused is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
+    assert report.moved == 0
+    assert not _quarantine_root(tmp_path).exists()
+
+
+# -- 5. journal writing and reconciliation must be bounded and strict --------
+
+def _pass_dir(tmp_path, records=(), extra_files=(), name="p20260101T000000"):
+    """Build a quarantine pass directory by hand, for survey controls."""
+    root = tmp_path / retention.QUARANTINE_DIRNAME
+    root.mkdir()
+    directory = root / name
+    directory.mkdir()
+    for filename in extra_files:
+        (directory / filename).write_bytes(b"\x00" * 8)
+    if records:
+        payload = b"".join(records)
+        (directory / retention.MANIFEST_NAME).write_bytes(payload)
+    return directory
+
+
+def _record_bytes(basename, klass=None, **overrides):
+    body = {
+        "basename": basename,
+        "class": klass or retention.SNAPSHOT_CLASS,
+        "size": 8,
+        "mtime_ns": 1,
+        "quarantined_at": 2,
+    }
+    body.update(overrides)
+    return (json.dumps(body, sort_keys=True, separators=(",", ":"))
+            + "\n").encode("utf-8")
+
+
+def _survey(directory, policy=None):
+    return retention.survey_quarantine(
+        directory, policy=policy or _quarantine_policy())
+
+
+def test_the_survey_validates_its_directory(tmp_path):
+    root = tmp_path / retention.QUARANTINE_DIRNAME
+    root.mkdir()
+    impostor = root / "p20260101T000000"
+    impostor.write_bytes(b"not a directory")
+    survey = _survey(impostor)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+def test_the_survey_bounds_the_number_of_entries(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[
+        _snap_name(index, index) for index in range(6)])
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=2)
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+    assert name is not None
+
+
+def test_the_survey_bounds_the_manifest_size(tmp_path):
+    directory = _pass_dir(
+        tmp_path,
+        records=[_record_bytes(_snap_name(index, index)) for index in range(6)],
+        extra_files=[_snap_name(index, index) for index in range(6)])
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=1)
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+
+
+def test_the_survey_rejects_an_extra_key(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(name, extra="unexpected")],
+                          extra_files=[name])
+    survey = _survey(directory)
+    assert survey.malformed_records == 1
+    assert survey.unmanifested == 1
+
+
+@pytest.mark.parametrize("overrides", [
+    {"size": True}, {"mtime_ns": False}, {"quarantined_at": "2"},
+    {"size": 1.5}, {"basename": 7}, {"class": 3},
+], ids=["size_true", "mtime_false", "quarantined_str", "size_float",
+        "basename_int", "class_int"])
+def test_the_survey_enforces_exact_types(tmp_path, overrides):
+    """`True` is an `int` to Python; a schema that accepted it would not be
+    the closed schema this claims to be."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name, **overrides)],
+                          extra_files=[name])
+    survey = _survey(directory)
+    assert survey.malformed_records == 1
+
+
+def test_the_survey_validates_class_and_basename_consistency(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(
+        tmp_path,
+        records=[_record_bytes(name, klass=retention.TELEMETRY_CLASS)],
+        extra_files=[name])
+    survey = _survey(directory)
+    assert survey.malformed_records == 1
+
+
+def test_the_survey_counts_duplicate_records(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(name), _record_bytes(name)],
+                          extra_files=[name])
+    survey = _survey(directory)
+    assert survey.duplicates == 1
+
+
+def test_the_survey_counts_invalid_utf8(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path,
+                          records=[b"\xff\xfe not utf-8\n"],
+                          extra_files=[name])
+    survey = _survey(directory)
+    assert survey.malformed_records >= 1
+    assert survey.unmanifested == 1
+
+
+def test_the_survey_counts_an_overlong_record(tmp_path):
+    name = _snap_name(1, 1)
+    padded = _record_bytes(name, basename="v" * 600)
+    directory = _pass_dir(tmp_path, records=[padded], extra_files=[name])
+    survey = _survey(directory)
+    assert survey.malformed_records >= 1
+
+
+def test_the_survey_never_repairs_or_removes_anything(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)[:-4]],
+                          extra_files=[name])
+    manifest = directory / retention.MANIFEST_NAME
+    before = manifest.read_bytes()
+    survey = _survey(directory)
+    assert survey.malformed_records >= 1
+    assert manifest.read_bytes() == before
+    assert (directory / name).exists()
+
+
+def test_the_survey_emits_no_name(tmp_path, capsys):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    survey = _survey(directory)
+    printed = capsys.readouterr()
+    assert "v070_gen" not in printed.out and "v070_gen" not in printed.err
+    for field in dataclasses.fields(survey):
+        value = getattr(survey, field.name)
+        assert not isinstance(value, (str, bytes, Path)), field.name
+
+
+def test_a_short_journal_write_is_a_fixed_failure(tmp_path, monkeypatch):
+    """`os.write` may write fewer bytes than asked. A half-written record
+    would be a silently corrupt journal, so the write loops and a write that
+    cannot complete is a fixed refusal."""
+    _populate(tmp_path, snapshots=3)
+    real_write = os.write
+    calls = {"n": 0}
+
+    def _short(fd, data):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 0  # a zero-length write that will never progress
+        return real_write(fd, data)
+
+    monkeypatch.setattr(retention.os, "write", _short)
+    report = _run(tmp_path)
+    assert report.refused is retention.RetentionFailureReason.MANIFEST_RECORD_FAILED
+    assert report.halted is True
+    assert report.unmanifested >= 1
+
+
+def test_the_journal_write_loops_until_complete(tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=3)
+    real_write = os.write
+    partial = {"n": 0}
+
+    def _partial(fd, data):
+        partial["n"] += 1
+        if len(data) > 1 and partial["n"] % 2 == 1:
+            return real_write(fd, data[:1])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(retention.os, "write", _partial)
+    report = _run(tmp_path)
+    assert report.refused is None
+    manifest = (_quarantine_root(tmp_path) / "p20260101T000000"
+                / retention.MANIFEST_NAME)
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        assert set(record) == {"basename", "class", "size", "mtime_ns",
+                               "quarantined_at"}
+
+
+def test_a_manifest_validation_failure_closes_its_descriptor(tmp_path,
+                                                             monkeypatch):
+    _populate(tmp_path, snapshots=3)
+    real_fstat = os.fstat
+
+    def _not_regular(fd):
+        info = real_fstat(fd)
+        return _Stat(mode=stat_module.S_IFIFO | 0o600, size=0, mtime_ns=0,
+                     nlink=1, dev=info.st_dev, ino=info.st_ino)
+
+    monkeypatch.setattr(retention.os, "fstat", _not_regular)
+    closed = []
+    real_close = os.close
+    monkeypatch.setattr(retention.os, "close",
+                        lambda fd: (closed.append(fd), real_close(fd))[1])
+    report = _run(tmp_path)
+    assert report.refused is retention.RetentionFailureReason.MANIFEST_CREATE_FAILED
+    assert closed, "the manifest descriptor was leaked on the failure path"
+
+
+# -- 6. the destination must never be silently replaced ----------------------
+
+def test_the_platform_move_refuses_an_existing_destination(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.write_bytes(b"source")
+    destination.write_bytes(b"destination")
+    with pytest.raises(OSError):
+        retention.platform_move(source, destination)
+    assert destination.read_bytes() == b"destination"
+
+
+def test_a_plain_rename_would_silently_replace_on_posix(tmp_path):
+    """Non-vacuity for the control above: this is exactly the hazard, and it
+    is why a plain `os.rename` is not the movement primitive here."""
+    source = tmp_path / "plain_source"
+    destination = tmp_path / "plain_destination"
+    source.write_bytes(b"source")
+    destination.write_bytes(b"destination")
+    if os.name == "nt":
+        with pytest.raises(OSError):
+            os.rename(source, destination)
+        assert destination.read_bytes() == b"destination"
+    else:
+        os.rename(source, destination)
+        assert destination.read_bytes() == b"source"
+
+
+def test_real_quarantine_is_windows_only(tmp_path):
+    """Stage one provides a proven no-replace move on Windows, which is the
+    operational target. Elsewhere it refuses rather than pretending that
+    check-then-rename is atomic."""
+    _populate(tmp_path, snapshots=3)
+    report = retention.run_pass(
+        tmp_path, policy=_quarantine_policy(),
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id="p20260101T000000", admit=_Admit({0, 1, 2}))
+    if os.name == "nt":
+        assert report.refused is not (
+            retention.RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
+    else:
+        assert report.refused is (
+            retention.RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
+        assert report.moved == 0
+        assert not _quarantine_root(tmp_path).exists()
+
+
+def test_plan_remains_portable_on_every_platform(tmp_path):
+    _populate(tmp_path, snapshots=3)
+    report = _run(tmp_path, mode=retention.RetentionMode.PLAN)
+    assert report.refused is None
+    assert report.planned_actions
+
+
+def test_the_module_does_not_call_check_then_rename_atomic():
+    source = Path(retention.__file__).read_text(encoding="utf-8")
+    lowered = source.lower()
+    assert "atomic" not in lowered or "rename" not in lowered.split(
+        "atomic", 1)[1][:200]
