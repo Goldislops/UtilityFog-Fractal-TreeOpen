@@ -24,12 +24,14 @@ totality.
 
 from __future__ import annotations
 
+import ast
 import asyncio
-import glob
+import dataclasses
 import json
 import os
 import sys
 import types
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -73,6 +75,12 @@ with mock.patch.dict(sys.modules, _optional_dependency_stubs()):
 
 # `lucid_server` holds its own references to whatever was bound above, so the
 # handler stays callable after `patch.dict` restores `sys.modules`.
+
+# The bounded discovery primitive, its one calibrated production policy and the
+# shared cache all live in the guard, so a test that drives the cache or counts
+# directory openings has to reach them there rather than through the
+# consumer's imported names.
+from scripts import snapshot_archive_guard  # noqa: E402
 
 
 PING = json.dumps({"type": "ping"})
@@ -120,7 +128,7 @@ def _drive(messages, monkeypatch) -> FakeWebSocket:
     directory or on external snapshots; that path is exercised separately by
     `test_initial_snapshot_frame_still_sent`.
     """
-    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir: None)
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir, **kwargs: None)
     websocket = FakeWebSocket(messages)
     asyncio.run(lucid_server.handle_client(websocket))
     return websocket
@@ -318,7 +326,7 @@ def test_client_removed_even_when_stream_is_empty(monkeypatch):
 
 
 def test_initial_snapshot_frame_still_sent(monkeypatch):
-    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir: "snap")
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir, **kwargs: "snap")
     monkeypatch.setattr(lucid_server, "extract_render_data", lambda path: {"cells": []})
     websocket = FakeWebSocket([PING])
     asyncio.run(lucid_server.handle_client(websocket))
@@ -334,7 +342,7 @@ def test_initial_snapshot_failure_does_not_block_message_handling(monkeypatch):
     def _boom(path):
         raise RuntimeError("snapshot unavailable")
 
-    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir: "snap")
+    monkeypatch.setattr(lucid_server, "find_latest_snapshot", lambda data_dir, **kwargs: "snap")
     monkeypatch.setattr(lucid_server, "extract_render_data", _boom)
     websocket = FakeWebSocket(["null", PING])
     asyncio.run(lucid_server.handle_client(websocket))
@@ -431,9 +439,74 @@ def confined(tmp_path, monkeypatch):
     Admission confines the archive to the configured data directory, so a
     fixture written anywhere else is refused for CONTAINMENT before the
     property under test is reached.
+
+    The watcher's discovery cache is replaced with a zero-lifetime one over the
+    same directory, so every refreshing call performs its own fresh bounded
+    scan -- the per-poll behaviour the tests below were written against. Tests
+    that are ABOUT the 10-second refresh budget install their own with an
+    explicit lifetime and clock.
     """
     monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        lucid_server, "_WATCHER_CACHE",
+        snapshot_archive_guard.SnapshotDiscoveryCache(
+            directory=tmp_path,
+            policy=snapshot_archive_guard.PRODUCTION_DISCOVERY_POLICY,
+            ttl=0.0,
+        ),
+    )
     return tmp_path
+
+
+class _LucidScandir:
+    """Synthetic directory entries for the bounded discovery path.
+
+    Discovery owns its own `os.scandir` -- that is what makes the work of
+    LOOKING bounded, since by the time `glob.glob` returns, the whole directory
+    has already been materialised. Candidates that vanish between enumeration
+    and the metadata read are therefore injected here rather than through the
+    glob, and they raise from `stat` exactly what a rotated-away entry raises.
+
+    `include_real` and `ghosts` are both mutable so one test can move the
+    directory between states without reinstalling the patch, and `scans`
+    counts openings -- which is how "zero client-triggered directory scans"
+    becomes an assertion rather than a claim.
+    """
+
+    class _Ghost:
+        __slots__ = ("name",)
+
+        def __init__(self, name):
+            self.name = name
+
+        def stat(self, *, follow_symlinks=True):
+            raise FileNotFoundError(2, "No such file or directory")
+
+    def __init__(self, ghosts=(), *, include_real=True):
+        self.ghosts = [os.path.basename(name) for name in ghosts]
+        self.include_real = include_real
+        self.directory = None
+        self.scans = 0
+        self._real = os.scandir  # captured BEFORE the patch replaces it
+
+    def __call__(self, directory):
+        self.directory = directory
+        self.scans += 1
+        return self
+
+    def __enter__(self):
+        return self._iterate()
+
+    def __exit__(self, *exc):
+        return False
+
+    def _iterate(self):
+        if self.include_real:
+            with self._real(self.directory) as entries:
+                for entry in entries:
+                    yield entry
+        for name in self.ghosts:
+            yield self._Ghost(name)
 
 
 @requires_numpy
@@ -795,17 +868,12 @@ def test_the_watcher_survives_candidates_that_disappear_mid_scan(
     confined, monkeypatch, capsys, _fresh_watcher_state
 ):
     """Discovery and the watcher's own second metadata read are separate
-    syscalls from the glob, and the producer rotates snapshots. Neither may
-    raise into the loop's broad handler, whose message carries the path."""
+    syscalls, and the producer rotates snapshots. Neither may raise into the
+    loop's broad handler, whose message carries the path."""
     valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
                                     compressed=True))
-    ghost = str(confined / "v070_gen_GHOSTNAME_0002.npz")
-    real_glob = glob.glob
-
-    def _glob_with_a_ghost(pattern):
-        return list(real_glob(pattern)) + [ghost]
-
-    monkeypatch.setattr(lucid_server.glob, "glob", _glob_with_a_ghost)
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir",
+                        _LucidScandir(["v070_gen_GHOSTNAME_0002.npz"]))
 
     broadcasts, polls = _run_watcher(monkeypatch, polls=2)
     output = capsys.readouterr().out
@@ -825,7 +893,7 @@ def test_the_watcher_survives_the_chosen_snapshot_vanishing_after_selection(
     chosen = confined / "v070_gen000003.npz"
     _write_snapshot_ls(chosen, compressed=True)
     monkeypatch.setattr(lucid_server, "find_latest_snapshot",
-                        lambda data_dir: str(chosen))
+                        lambda data_dir, **kwargs: chosen)
 
     real_fingerprint = lucid_server.entry_fingerprint
 
@@ -948,9 +1016,11 @@ def test_a_recovered_second_read_re_arms_its_own_lane(confined, monkeypatch,
 
 def test_a_lone_transient_failure_stays_silent(confined, monkeypatch, capsys):
     """A single rotated file is ordinary and must not produce a line."""
-    ghosts = [str(confined / "v070_gen_ghost.npz")]
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
-    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir",
+                        _LucidScandir(["v070_gen_ghost.npz"],
+                                      include_real=False))
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
     assert capsys.readouterr().out == "", "a lone failure was reported"
 
 
@@ -975,7 +1045,8 @@ def test_selection_falls_back_past_an_unusable_newest_snapshot(confined):
     poison = Path(_hostile_ls("missing_member", confined / "v070_gen000002.npz"))
     os.utime(good, (1_000_000, 1_000_000))
     os.utime(poison, (2_000_000, 2_000_000))
-    assert lucid_server.find_latest_snapshot(str(confined)) == str(good)
+    assert lucid_server.find_latest_snapshot(
+        str(confined), allow_refresh=True) == good
 
 
 @requires_numpy
@@ -986,23 +1057,29 @@ def test_selection_returns_the_newest_when_none_is_admissible(confined):
     second = Path(_hostile_ls("missing_member", confined / "v070_gen000001.npz"))
     os.utime(second, (1_000_000, 1_000_000))
     os.utime(first, (2_000_000, 2_000_000))
-    assert lucid_server.find_latest_snapshot(str(confined)) == str(first)
+    assert lucid_server.find_latest_snapshot(
+        str(confined), allow_refresh=True) == first
 
 
 def test_a_directory_of_unreadable_candidates_warns_once(confined, monkeypatch,
                                                           capsys):
-    """Candidates matched the glob and none could be described. That is not an
-    empty directory — it means the watcher is running blind, and silence there
-    would hide it."""
-    ghosts = [str(confined / ("v070_gen_LEAKNAME_%d.npz" % i)) for i in range(4)]
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    """Candidates matched and none could be described. That is not an empty
+    directory — it means the watcher is running blind, and silence there would
+    hide it."""
+    ghosts = ["v070_gen_LEAKNAME_%d.npz" % index for index in range(4)]
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir",
+                        _LucidScandir(ghosts, include_real=False))
+
+    def _look():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
 
     # The FIRST failure is deliberately silent: a lone one is an ordinary
     # rotation. The condition has to persist before it is worth a line.
-    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert _look() is None
     assert capsys.readouterr().out == ""
 
-    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert _look() is None
     first = capsys.readouterr().out
     assert "Snapshot metadata unreadable" in first
     assert "LEAKNAME" not in first
@@ -1010,7 +1087,7 @@ def test_a_directory_of_unreadable_candidates_warns_once(confined, monkeypatch,
 
     # Suppressed while the condition persists: one line, not one per poll.
     for _ in range(5):
-        lucid_server.find_latest_snapshot(str(confined))
+        _look()
     assert capsys.readouterr().out == ""
 
 
@@ -1019,22 +1096,27 @@ def test_the_metadata_warning_is_rate_limited_on_a_monotonic_clock(confined,
                                                                    capsys):
     """A monotonic clock, so a system-clock step can neither suppress the
     warning for ever nor make it repeat every poll."""
-    ghosts = [str(confined / "v070_gen_ghost.npz")]
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir",
+                        _LucidScandir(["v070_gen_ghost.npz"],
+                                      include_real=False))
 
     now = [1000.0]
     monkeypatch.setattr(lucid_server.time, "monotonic", lambda: now[0])
 
-    lucid_server.find_latest_snapshot(str(confined))   # first: silent
-    lucid_server.find_latest_snapshot(str(confined))   # second: warns
+    def _look():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    _look()   # first: silent
+    _look()   # second: warns
     assert "Snapshot metadata unreadable" in capsys.readouterr().out
 
     now[0] += lucid_server.METADATA_WARNING_INTERVAL - 1
-    lucid_server.find_latest_snapshot(str(confined))
+    _look()
     assert capsys.readouterr().out == "", "warned again inside the interval"
 
     now[0] += 2
-    lucid_server.find_latest_snapshot(str(confined))
+    _look()
     assert "Snapshot metadata unreadable" in capsys.readouterr().out
 
 
@@ -1043,20 +1125,27 @@ def test_a_successful_read_clears_the_warning_state(confined, monkeypatch,
                                                     capsys):
     """Recovery: once metadata reads work again, a later failure run warns
     again rather than staying suppressed for ever."""
-    ghosts = [str(confined / "v070_gen_ghost.npz")]
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
-    lucid_server.find_latest_snapshot(str(confined))
-    lucid_server.find_latest_snapshot(str(confined))
+    directory = _LucidScandir(["v070_gen_ghost.npz"], include_real=False)
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir", directory)
+
+    def _look():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    _look()
+    _look()
     capsys.readouterr()
 
     real = Path(_write_snapshot_ls(confined / "v070_gen000009.npz",
                                    compressed=True))
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: [str(real)])
-    assert lucid_server.find_latest_snapshot(str(confined)) == str(real)
+    directory.ghosts = []
+    directory.include_real = True
+    assert _look() == real
 
-    monkeypatch.setattr(lucid_server.glob, "glob", lambda pattern: list(ghosts))
-    lucid_server.find_latest_snapshot(str(confined))
-    lucid_server.find_latest_snapshot(str(confined))
+    directory.ghosts = ["v070_gen_ghost.npz"]
+    directory.include_real = False
+    _look()
+    _look()
     assert "Snapshot metadata unreadable" in capsys.readouterr().out
 
 
@@ -1069,7 +1158,7 @@ def test_the_second_fingerprint_read_failure_also_warns(confined, monkeypatch,
     chosen = Path(_write_snapshot_ls(confined / "v070_gen000003.npz",
                                      compressed=True))
     monkeypatch.setattr(lucid_server, "find_latest_snapshot",
-                        lambda data_dir: str(chosen))
+                        lambda data_dir, **kwargs: chosen)
 
     def _vanishing(path):
         raise FileNotFoundError(2, "No such file or directory", str(path))
@@ -1363,7 +1452,7 @@ def test_a_rejected_initial_snapshot_sends_no_frame_and_serves_the_client(
     archive = _hostile_ls(kind, tmp_path / "v070_gen000003.npz")
     monkeypatch.setattr(lucid_server, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(lucid_server, "find_latest_snapshot",
-                        lambda data_dir: archive)
+                        lambda data_dir, **kwargs: archive)
 
     websocket = FakeWebSocket([PING])
     asyncio.run(lucid_server.handle_client(websocket))
@@ -1378,3 +1467,502 @@ def test_a_rejected_initial_snapshot_sends_no_frame_and_serves_the_client(
         "the refusal fell through to the broad handler")
     assert "v070_gen000003" not in output
     assert websocket not in lucid_server.connected_clients
+
+
+# ===========================================================================
+# Bounded discovery: the watcher owns it, clients only borrow
+#
+# Discovery here is synchronous on ONE asyncio event loop. The watcher polled
+# every two seconds and every client connection scanned the directory again
+# before its initial frame -- so at the calibrated caps a connect burst was a
+# burst of cap-level directory work on the loop that also serves every frame.
+#
+# The watcher is now the sole discovery owner and refreshes at most once per
+# 10 monotonic seconds, which is generous against a 600-second producer
+# cadence. Clients consume the watcher's completed immutable listing and never
+# scan. Selection and admission still happen per consumption.
+#
+# This tranche deliberately does NOT add `asyncio.to_thread` or any other
+# concurrency redesign; that is a separate question about a synchronous load
+# on the event loop, and it is out of scope here.
+# ===========================================================================
+
+
+class _LucidClock:
+    """A monotonic clock that only moves when a test moves it."""
+
+    def __init__(self, now=0.0):
+        self.now = float(now)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+        return self.now
+
+
+def _ls_succeeded(count=1, *, unreadable=0, directory=None):
+    base = Path(directory) if directory is not None else Path("data")
+    ordered = tuple(
+        base / ("v070_gen%06d_step000001_x.npz" % index)
+        for index in range(count)
+    )
+    matched = count + unreadable
+    return snapshot_archive_guard.DiscoverySucceeded(
+        ordered, unreadable, matched, matched)
+
+
+def _ls_failed(reason=None):
+    reason = reason or snapshot_archive_guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    return snapshot_archive_guard.DiscoveryFailed(reason, 9, 4, 0)
+
+
+class _LucidScanner:
+    """A scripted stand-in for `discover_snapshot_candidates`."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, directory, *, policy):
+        self.calls += 1
+        return self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
+
+
+def _install_watcher_cache(monkeypatch, directory, scanner, *, clock=None,
+                           ttl=10.0):
+    cache = snapshot_archive_guard.SnapshotDiscoveryCache(
+        directory=directory,
+        policy=snapshot_archive_guard.PRODUCTION_DISCOVERY_POLICY,
+        ttl=ttl,
+        scanner=scanner,
+        clock=clock if clock is not None else _LucidClock(),
+    )
+    monkeypatch.setattr(lucid_server, "_WATCHER_CACHE", cache)
+    return cache
+
+
+# -- nothing unbounded survives ----------------------------------------------
+
+def test_lucid_consumes_the_bounded_discovery_primitive():
+    source = Path(lucid_server.__file__).read_text(encoding="utf-8")
+    assert "PRODUCTION_DISCOVERY_POLICY" in source
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+    assert "PRODUCTION_DISCOVERY_POLICY" in imported
+    assert "SnapshotDiscoveryCache" in imported
+    assert "order_candidates" not in imported
+
+
+def test_no_unbounded_discovery_call_site_remains_in_lucid():
+    tree = ast.parse(Path(lucid_server.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert "v070_gen*" not in node.value, node.value
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(
+                node.func, "attr", None)
+            assert name not in ("glob", "iglob", "order_candidates",
+                                "newest_first"), name
+
+
+def test_this_tranche_adds_no_concurrency_redesign():
+    """Explicitly out of scope: `asyncio.to_thread` and friends. The
+    synchronous load on the event loop is a separate, disclosed problem."""
+    source = Path(lucid_server.__file__).read_text(encoding="utf-8")
+    for banned in ("to_thread", "run_in_executor", "ThreadPoolExecutor",
+                   "ProcessPoolExecutor"):
+        assert banned not in source, banned
+
+
+def test_the_watcher_is_the_only_refreshing_caller():
+    """`snapshot_watcher` asks for a refresh; `handle_client` does not, and
+    the parameter defaults to not refreshing so a future caller that forgets
+    cannot accidentally scan."""
+    import inspect
+    signature = inspect.signature(lucid_server.find_latest_snapshot)
+    assert signature.parameters["allow_refresh"].default is False
+    assert signature.parameters["allow_refresh"].kind is (
+        inspect.Parameter.KEYWORD_ONLY)
+
+    tree = ast.parse(Path(lucid_server.__file__).read_text(encoding="utf-8"))
+    refreshing = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Call)
+                    and getattr(sub.func, "id", None) == "find_latest_snapshot"
+                    and any(kw.arg == "allow_refresh" for kw in sub.keywords)):
+                refreshing.add(node.name)
+    assert refreshing == {"snapshot_watcher"}
+
+
+# -- clients never scan --------------------------------------------------------
+
+@requires_numpy
+def test_a_client_burst_triggers_zero_directory_scans(confined, monkeypatch):
+    """The V2 gate for Lucid. Whatever the clients do, the directory is opened
+    by the watcher and nobody else."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    clock = _LucidClock()
+    _install_watcher_cache(
+        monkeypatch, confined,
+        snapshot_archive_guard.discover_snapshot_candidates, clock=clock)
+
+    # One watcher refresh populates the cache.
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) == valid
+
+    counter = _LucidScandir()
+    monkeypatch.setattr(snapshot_archive_guard.os, "scandir", counter)
+
+    for _ in range(5):
+        assert lucid_server.find_latest_snapshot(str(confined)) == valid
+    assert counter.scans == 0, "a client connection scanned the directory"
+
+    websocket = FakeWebSocket([PING])
+    asyncio.run(lucid_server.handle_client(websocket))
+    assert counter.scans == 0, "the initial-frame path scanned the directory"
+    assert any(json.loads(sent).get("type") == "frame"
+               for sent in websocket.sent)
+
+
+def test_a_client_gets_nothing_when_the_watcher_has_not_run(confined,
+                                                            monkeypatch):
+    """No completed result yet is a fixed no-frame outcome, not a scan and not
+    a wait."""
+    scanner = _LucidScanner([_ls_succeeded(1)])
+    _install_watcher_cache(monkeypatch, confined, scanner)
+    assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert scanner.calls == 0
+
+
+def test_the_watcher_refreshes_at_most_once_per_ten_seconds(confined,
+                                                            monkeypatch):
+    """A 2-second poll against a 600-second producer cadence does not need a
+    2-second rescan; the refresh budget is the 10-second one."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(1)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+
+    for _ in range(5):
+        lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+        clock.advance(2.0)
+    assert scanner.calls == 1
+
+    clock.advance(2.0)   # now 12s past completion
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+    assert scanner.calls == 2
+
+
+# -- fail closed, then recover ------------------------------------------------
+
+@requires_numpy
+def test_a_known_discovery_failure_sends_no_new_frame(confined, monkeypatch,
+                                                      capsys,
+                                                      _fresh_watcher_state):
+    _write_snapshot_ls(confined / "v070_gen000001.npz", compressed=True)
+    scanner = _LucidScanner([_ls_failed()])
+    _install_watcher_cache(monkeypatch, confined, scanner)
+
+    broadcasts, _ = _run_watcher(monkeypatch, polls=3)
+    assert broadcasts == [], "a frame was sent despite a known discovery failure"
+    capsys.readouterr()
+
+
+@requires_numpy
+def test_a_known_failure_invalidates_the_usable_watcher_cache(confined,
+                                                             monkeypatch,
+                                                             capsys,
+                                                             _fresh_watcher_state):
+    """The old completed listing must stop being usable the moment the refresh
+    is known to have failed -- for existing clients and for new ones."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    clock = _LucidClock()
+    scanner = _LucidScanner([
+        snapshot_archive_guard.DiscoverySucceeded((valid,), 0, 1, 1),
+        _ls_failed(),
+    ])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) == valid
+    clock.advance(10.0)
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
+
+    # A NEW client gets no stale initial frame.
+    websocket = FakeWebSocket([PING])
+    asyncio.run(lucid_server.handle_client(websocket))
+    assert not any(json.loads(sent).get("type") == "frame"
+                   for sent in websocket.sent)
+    capsys.readouterr()
+
+
+def test_a_known_discovery_failure_uses_the_rate_limited_warning_lane(
+        confined, monkeypatch, capsys):
+    """The existing lane, unchanged: the first failure is silent, the second
+    warns once, and the rest are suppressed. Path-free throughout."""
+    monkeypatch.setattr(lucid_server, "_metadata_state", {
+        lucid_server.DISCOVERY_LANE: {"failures": 0, "warned_at": None},
+        lucid_server.FINGERPRINT_LANE: {"failures": 0, "warned_at": None},
+    })
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_failed()])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock, ttl=0.0)
+
+    def _poll():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    assert _poll() is None
+    assert capsys.readouterr().out == ""
+
+    assert _poll() is None
+    warned = capsys.readouterr().out
+    assert "Snapshot metadata unreadable" in warned
+    assert "entry_limit" not in warned and ".npz" not in warned
+    assert str(confined) not in warned
+
+    for _ in range(4):
+        _poll()
+    assert capsys.readouterr().out == ""
+
+
+@requires_numpy
+def test_successful_recovery_restores_frames_and_re_arms_the_lane(
+        confined, monkeypatch, capsys, _fresh_watcher_state):
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    monkeypatch.setattr(lucid_server, "_metadata_state", {
+        lucid_server.DISCOVERY_LANE: {"failures": 0, "warned_at": None},
+        lucid_server.FINGERPRINT_LANE: {"failures": 0, "warned_at": None},
+    })
+    scanner = _LucidScanner([
+        _ls_failed(), _ls_failed(),
+        snapshot_archive_guard.DiscoverySucceeded((valid,), 0, 1, 1),
+    ])
+    _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+
+    def _poll():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    _poll()
+    _poll()
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    assert _poll() == valid
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE]["failures"] == 0, "the lane did not re-arm"
+
+
+def test_clean_empty_produces_no_frame_without_becoming_a_failure(
+        confined, monkeypatch, capsys):
+    """An empty directory is a completed SUCCESS. It must not warn, must not
+    be cached as a failure, and must not stop the next poll from refreshing."""
+    monkeypatch.setattr(lucid_server, "_metadata_state", {
+        lucid_server.DISCOVERY_LANE: {"failures": 0, "warned_at": None},
+        lucid_server.FINGERPRINT_LANE: {"failures": 0, "warned_at": None},
+    })
+    scanner = _LucidScanner([_ls_succeeded(0)])
+    cache = _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+
+    for _ in range(4):
+        assert lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True) is None
+    assert capsys.readouterr().out == ""
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE]["failures"] == 0
+    assert cache.diagnostics().failure_reason is None
+    assert cache.diagnostics().has_success is True
+
+
+def test_the_watcher_cache_state_carries_no_path(confined, monkeypatch):
+    scanner = _LucidScanner([_ls_succeeded(2)])
+    cache = _install_watcher_cache(monkeypatch, confined, scanner)
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+    state = cache.diagnostics()
+    for field in dataclasses.fields(state):
+        assert not isinstance(getattr(state, field.name), (str, bytes, Path))
+
+
+def test_lucid_retains_no_historical_listing_generation(confined, monkeypatch):
+    """Consumers may not keep old listings alive; the cache holds exactly one
+    completed generation and borrowers release theirs synchronously."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(2), _ls_succeeded(3)])
+    cache = _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+    assert cache.diagnostics().live_borrowers == 0
+    clock.advance(10.0)
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+    state = cache.diagnostics()
+    assert state.live_borrowers == 0
+    assert state.retired_borrowers == 0
+
+
+# ===========================================================================
+# The discovery-warning lane belongs to the watcher alone
+#
+# The lane records whether the WATCHER is running blind. A client connection
+# performs no discovery at all, so it has nothing to report and no standing to
+# clear anyone else's episode: one poll must still produce at most one lane
+# event, however many clients happen to connect between polls.
+#
+# And a watcher-observed NON-BLIND success ends an episode -- a clean empty
+# directory, or a listing with readable candidates. Both mean the watcher can
+# see the directory, which is what the lane is about, so clean empty re-arms it
+# exactly as an ordered listing does; leaving the episode open there kept a
+# later, genuinely new failure suppressed behind a rate limit armed minutes
+# earlier. All-matching-unreadable is NOT one of these: it is the blind case
+# and stays its own distinct warning state.
+# ===========================================================================
+
+
+def test_a_client_burst_cannot_touch_the_watcher_warning_lane(confined,
+                                                              monkeypatch,
+                                                              capsys):
+    """One watcher observation of an all-unreadable directory is one lane
+    event. Six client connections afterwards are zero more."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(0, unreadable=4)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
+    watcher_state = dict(lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE])
+    assert watcher_state["failures"] == 1
+    assert watcher_state["warned_at"] is None      # a lone failure is silent
+    assert capsys.readouterr().out == ""
+
+    for _ in range(6):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+
+    assert scanner.calls == 1, "a client connection scanned the directory"
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == watcher_state, (
+        "a client mutated watcher-owned warning state")
+    assert capsys.readouterr().out == "", "a client emitted the watcher warning"
+
+
+def test_a_clean_empty_refresh_re_arms_the_discovery_warning_lane(confined,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """Two failures warn once; a clean-empty recovery ends the episode; a
+    later two-failure episode warns again rather than staying suppressed."""
+    scanner = _LucidScanner([
+        _ls_failed(), _ls_failed(), _ls_succeeded(0), _ls_failed(),
+        _ls_failed(),
+    ])
+    _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+
+    def poll():
+        return lucid_server.find_latest_snapshot(str(confined),
+                                                 allow_refresh=True)
+
+    assert poll() is None
+    assert capsys.readouterr().out == ""
+    assert poll() is None
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+
+    assert poll() is None                       # clean empty -- a SUCCESS
+    assert capsys.readouterr().out == "", "a clean empty directory warned"
+    assert lucid_server._metadata_state[lucid_server.DISCOVERY_LANE] == {
+        "failures": 0, "warned_at": None}, "the lane did not re-arm"
+
+    assert poll() is None
+    assert capsys.readouterr().out == ""
+    assert poll() is None
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out, (
+        "the later episode stayed suppressed behind the earlier rate limit")
+
+
+@requires_numpy
+def test_a_client_cannot_clear_a_watcher_owned_warning_episode(confined,
+                                                               monkeypatch,
+                                                               capsys):
+    """A client consuming an ordered listing is a passive read. It must not be
+    able to declare someone else's failure episode over."""
+    valid = Path(_write_snapshot_ls(confined / "v070_gen000001.npz",
+                                    compressed=True))
+    scanner = _LucidScanner([
+        snapshot_archive_guard.DiscoverySucceeded((valid,), 0, 1, 1)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=_LucidClock())
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) == valid
+
+    # An episode the watcher opened through its own observations.
+    lucid_server._note_metadata_failure(lucid_server.DISCOVERY_LANE)
+    lucid_server._note_metadata_failure(lucid_server.DISCOVERY_LANE)
+    assert "Snapshot metadata unreadable" in capsys.readouterr().out
+    episode = dict(lucid_server._metadata_state[lucid_server.DISCOVERY_LANE])
+    assert episode["failures"] == 2 and episode["warned_at"] is not None
+
+    for _ in range(4):
+        assert lucid_server.find_latest_snapshot(str(confined)) == valid
+
+    assert scanner.calls == 1
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == episode, (
+        "a client cleared watcher-owned warning state")
+
+
+def test_a_client_cannot_open_an_episode_on_a_known_failure(confined,
+                                                            monkeypatch,
+                                                            capsys):
+    """The failure side of the same rule."""
+    scanner = _LucidScanner([_ls_failed()])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=_LucidClock())
+    assert lucid_server.find_latest_snapshot(str(confined),
+                                             allow_refresh=True) is None
+    watcher_state = dict(lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE])
+    capsys.readouterr()
+
+    for _ in range(6):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert lucid_server._metadata_state[
+        lucid_server.DISCOVERY_LANE] == watcher_state
+    assert capsys.readouterr().out == ""
+    assert scanner.calls == 1
+
+
+def test_the_fingerprint_lane_stays_independent_of_the_discovery_rule(confined,
+                                                                      monkeypatch):
+    """The two-lane separation is unchanged by any of the above: clearing the
+    discovery lane must still not re-arm the fingerprint lane."""
+    scanner = _LucidScanner([_ls_succeeded(0)])
+    _install_watcher_cache(monkeypatch, confined, scanner, ttl=0.0)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    lucid_server._note_metadata_failure(lucid_server.FINGERPRINT_LANE)
+    before = dict(lucid_server._metadata_state[lucid_server.FINGERPRINT_LANE])
+
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+
+    assert lucid_server._metadata_state[
+        lucid_server.FINGERPRINT_LANE] == before
+
+
+def test_an_expired_watcher_listing_gives_a_client_no_frame(confined,
+                                                            monkeypatch):
+    """The consumer half of the cache correction: with nothing in flight and
+    no deferral, an expired listing is not a frame -- and a client still
+    performs no directory work to find that out."""
+    clock = _LucidClock()
+    scanner = _LucidScanner([_ls_succeeded(2)])
+    _install_watcher_cache(monkeypatch, confined, scanner, clock=clock)
+    lucid_server.find_latest_snapshot(str(confined), allow_refresh=True)
+
+    clock.advance(10.0)
+    for _ in range(4):
+        assert lucid_server.find_latest_snapshot(str(confined)) is None
+    assert scanner.calls == 1

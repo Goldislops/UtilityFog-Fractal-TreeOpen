@@ -15,7 +15,6 @@ The server:
 
 import asyncio
 import json
-import glob
 import time
 import os
 import sys
@@ -38,11 +37,13 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
     PRODUCTION_POLICY as SNAPSHOT_POLICY,
 )
 from scripts.snapshot_archive_guard import (  # noqa: E402
+    DISCOVERY_CACHE_TTL_SECONDS,
+    PRODUCTION_DISCOVERY_POLICY,
     SnapshotArchiveRejected,
+    SnapshotDiscoveryCache,
     admit_snapshot,
     entry_fingerprint,
     first_admissible,
-    order_candidates,
 )
 
 #: A metadata failure is usually one rotated file and says nothing worth
@@ -85,8 +86,41 @@ last_snapshot_mtime = 0
 connected_clients = set()
 
 
-def find_latest_snapshot(data_dir):
-    """Find the most recent .npz snapshot.
+#: The watcher's bounded discovery, shared with every client connection.
+#:
+#: Discovery here is synchronous on ONE asyncio event loop. The watcher polled
+#: every two seconds and every client connection scanned the directory AGAIN
+#: before its initial frame, so at the calibrated caps a connect burst was a
+#: burst of cap-level directory work on the loop that also serves every frame.
+#:
+#: The watcher is now the sole owner. Clients consume its completed immutable
+#: listing and never scan -- see `find_latest_snapshot`. There is no lock
+#: around construction because there is no concurrency to guard: one event
+#: loop, and discovery is synchronous within it.
+#:
+#: Keyed on the data directory, because a cache is coherent for exactly one
+#: directory. `DATA_DIR` is rebound once from `--data-dir` before the loop
+#: starts, so in production this is built once and reused.
+_WATCHER_CACHE = None
+
+
+def _discovery_cache(data_dir):
+    """The shared bounded discovery for `data_dir`, built on first use."""
+    global _WATCHER_CACHE
+    directory = Path(os.fspath(data_dir))
+    cache = _WATCHER_CACHE
+    if cache is None or cache.directory != directory:
+        cache = SnapshotDiscoveryCache(
+            directory=directory,
+            policy=PRODUCTION_DISCOVERY_POLICY,
+            ttl=DISCOVERY_CACHE_TTL_SECONDS,
+        )
+        _WATCHER_CACHE = cache
+    return cache
+
+
+def find_latest_snapshot(data_dir, *, allow_refresh=False):
+    """Find the most recent .npz snapshot from the watcher's completed listing.
 
     Ordering uses non-following metadata and skips entries that vanish during
     enumeration. `os.path.getmtime` follows symlinks, so a link could borrow
@@ -107,27 +141,90 @@ def find_latest_snapshot(data_dir):
     admissible the newest candidate is returned anyway, so the existing typed
     refusal runs and is logged rather than being silently reported as "no
     snapshots".
+
+    Who may scan
+    ------------
+    Discovery used to be `order_candidates(glob.glob(pattern))`, run afresh by
+    the watcher AND by every client connection. `glob` is unbounded by
+    construction -- `glob.glob` is `list(iglob(...))`, and even `iglob` reaches
+    `_listdir`, which is `return list(it)` -- so nothing downstream could bound
+    it, and the per-connection copy multiplied the whole cost by the number of
+    clients.
+
+    `allow_refresh` is now the only way a scan happens, and it defaults to
+    False so a caller that forgets cannot start one by accident. The watcher
+    passes True; client connections do not, and therefore perform zero
+    directory work no matter how many arrive or how fast. The 10-second refresh
+    budget is generous against a 600-second producer cadence.
+
+    The four states, kept apart
+    --------------------------
+    A known bounded discovery FAILURE returns None and notes the discovery
+    lane: no frame is sent, no stale listing is served, and new clients get no
+    initial frame until a refresh succeeds. Candidates that matched but could
+    not be described also return None and note the lane -- the watcher is
+    running blind, and reporting that as an empty directory would hide it. A
+    clean EMPTY directory is a completed success with nothing to send: it
+    emits no warning, and on a watcher-owned call it CLEARS the discovery lane,
+    re-arming it exactly as a listing with readable candidates does. An archive
+    refusal is downstream of all of this and never reaches here at all.
+
+    Every one of those lane movements is watcher-owned. A client-facing call
+    reads the completed result and moves nothing.
     """
-    pattern = os.path.join(data_dir, "v070_gen*.npz")
-    listing = order_candidates(glob.glob(pattern))
+    with _discovery_cache(data_dir).borrow(allow_refresh=allow_refresh) as listing:
+        if not listing.available:
+            # A known failure is worth the lane; "the watcher has not run yet"
+            # is not, and a client must never be the one to report it.
+            if allow_refresh and listing.failed:
+                _note_metadata_failure(DISCOVERY_LANE)
+            return None
 
-    # Candidates matched the glob but NONE could be described. That is not an
-    # empty directory, and it must not be reported as one: it means the
-    # watcher is running blind. Warned about once, rate-limited, path-free.
-    if not listing.ordered and listing.unreadable:
-        _note_metadata_failure(DISCOVERY_LANE)
-        return None
-    if listing.ordered:
-        # Only the DISCOVERY lane. Clearing both here is what made the second
-        # read's rate limit ineffective: discovery succeeds on every poll, so a
-        # shared state was re-armed on every poll.
-        _clear_metadata_failures(DISCOVERY_LANE)
+        # Candidates matched but NONE could be described. That is not an
+        # empty directory, and it must not be reported as one: it means the
+        # watcher is running blind. Warned about once, rate-limited, path-free.
+        blind = not listing.ordered and bool(listing.unreadable)
 
-    return first_admissible(
-        listing.ordered,
-        data_dir=data_dir,
-        policy=SNAPSHOT_POLICY,
-    )
+        if allow_refresh:
+            # The lane records whether the WATCHER is running blind, so only a
+            # watcher-owned call may move it. `allow_refresh` is what marks
+            # ownership -- NOT evidence that a scan happened: a watcher-owned
+            # call landing on a fresh cache hit did no directory work either,
+            # and still speaks for the watcher, because it is reporting the
+            # watcher's current view. What matters is the invariant: a client
+            # connection has nothing to report and no standing to declare
+            # someone else's episode over, so one poll is one lane event
+            # however many clients connect in between.
+            if blind:
+                _note_metadata_failure(DISCOVERY_LANE)
+            else:
+                # A NON-BLIND success ends the episode: a clean EMPTY directory
+                # or a listing with readable candidates. Both mean the watcher
+                # can see the directory, which is exactly what the lane is
+                # about -- and clean empty is the case that used to be missed,
+                # leaving a later genuinely new failure suppressed behind a
+                # rate limit armed minutes earlier. All-matching-unreadable is
+                # NOT one of these: it took the `blind` branch above and stays
+                # its own distinct warning state.
+                #
+                # Only the DISCOVERY lane. Clearing both here is what made the
+                # second read's rate limit ineffective: discovery succeeds on
+                # every poll, so a shared state was re-armed on every poll.
+                _clear_metadata_failures(DISCOVERY_LANE)
+
+        if blind:
+            return None
+
+        # Selection and admission run while the listing is held, and nothing is
+        # retained afterwards: no selected path is cached and no admission
+        # verdict is cached, so the caller's own load re-admits its descriptor.
+        # A clean empty listing falls through here and returns None, which is
+        # the established no-frame outcome and is NOT a failure.
+        return first_admissible(
+            listing.ordered,
+            data_dir=data_dir,
+            policy=SNAPSHOT_POLICY,
+        )
 
 
 def extract_render_data(snap_path):
@@ -294,7 +391,9 @@ async def snapshot_watcher():
 
     while True:
         try:
-            latest = find_latest_snapshot(DATA_DIR)
+            # The watcher is the SOLE directory-discovery owner: this is
+            # the only call in the module that may start a scan.
+            latest = find_latest_snapshot(DATA_DIR, allow_refresh=True)
             if latest:
                 # The SECOND metadata read, and it needs the same protection as
                 # the first: selection and this line are separate syscalls, so
@@ -348,6 +447,8 @@ async def handle_client(websocket):
     # its opening frame and nothing else: one bounded reason code is logged,
     # the connection stays open and its messages are handled as usual.
     try:
+        # No refresh: a connect burst must cost zero directory work. This
+        # client either gets the watcher's completed listing or no frame.
         latest = find_latest_snapshot(DATA_DIR)
         if latest:
             data = extract_render_data(latest)

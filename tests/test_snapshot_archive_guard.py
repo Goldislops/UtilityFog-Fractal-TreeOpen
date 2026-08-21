@@ -28,6 +28,8 @@ import io
 import os
 import re
 import struct
+import sys
+import time
 import warnings
 import zipfile
 import zlib
@@ -36,7 +38,18 @@ from unittest import mock
 
 import pytest
 
-from scripts import snapshot_archive_guard as guard
+# The opt-in benchmark at the end of this file is documented as
+# `python tests/test_snapshot_archive_guard.py --case all`, which leaves the
+# repository root off `sys.path` and would break the guard import below.
+# Appended, not prepended, for the same reason the three consumers append:
+# this must not be able to shadow a standard library module with a repository
+# file of the same name. Under pytest the root is already present and this is
+# a no-op.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.append(_PROJECT_ROOT)
+
+from scripts import snapshot_archive_guard as guard  # noqa: E402
 
 try:
     import numpy as np
@@ -2264,9 +2277,14 @@ def test_the_guard_uses_no_numpy_and_no_private_numpy_parser():
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module
     }
+    # `threading` and `time` are the shared discovery cache's lock and its
+    # monotonic clock. Both are standard library, neither pulls in NumPy, and
+    # the property this control exists for -- the guard runs before NumPy is
+    # involved at all -- is unchanged.
     assert imported <= {"__future__", "ast", "contextlib", "dataclasses",
                         "enum", "fnmatch", "os", "re", "stat", "struct",
-                        "zipfile", "zlib", "pathlib", "typing"}
+                        "threading", "time", "zipfile", "zlib", "pathlib",
+                        "typing"}
     # `ast` is imported for `ast.parse` only — a syntax gate, never an
     # evaluator. The bans on eval/exec/literal_eval are asserted separately.
 
@@ -2498,10 +2516,14 @@ def test_admitted_producer_shapes_match_what_the_engine_writes(root):
 # been materialised -- `glob.glob` is `list(iglob(...))`, and even `iglob`
 # reaches `_listdir`, which is `return list(it)`.
 #
-# The primitive is UNUSED by production in this tranche. No consumer imports
-# it, no production cap is chosen, and `SnapshotArchivePolicy` /
-# `PRODUCTION_POLICY` are untouched. Limits are injected explicitly by every
-# test below, which is what makes this work independent of calibration.
+# The primitive itself stays calibration-free: it has no policy default, and
+# every test in THIS section injects tiny explicit limits, which is what makes
+# the boundary work independent of whatever production later chooses.
+# `SnapshotArchivePolicy` / `PRODUCTION_POLICY` remain untouched by it.
+#
+# Production now consumes it through the one calibrated
+# `PRODUCTION_DISCOVERY_POLICY` and the shared single-flight cache; both are
+# pinned in their own section further down.
 #
 # Directory contents come from a deterministic fake `scandir` context manager
 # yielding proxy entries. Built-in `os.DirEntry.stat` is deliberately not
@@ -3068,3 +3090,1386 @@ def test_matching_follows_the_platform_case_rule(root, monkeypatch):
     _install(monkeypatch, _FakeScandir([_ProxyEntry(upper)]))
     result = _discover(root, _policy(100, 100))
     assert (len(result.ordered) == 1) is glob_matches
+
+
+# ===========================================================================
+# The calibrated production policy and the shared single-flight cache
+#
+# The primitive above is deliberately caller-agnostic: it takes an explicit
+# policy and has no default. This section pins the ONE production instance the
+# three consumers share, and the process-local cache that makes those caps
+# survivable in Medusa's threaded request topology -- where, without
+# single-flight, N simultaneous requests meant N simultaneous cap-level
+# discoveries and N times the discovery heap.
+#
+# Nothing here touches the filesystem. Populations are injected: the cache
+# takes its scanner and its clock, so the state machine is exercised exactly
+# and deterministically rather than by sleeping. The one cap-level population
+# that DOES need real allocation lives in the opt-in benchmark at the end of
+# this file, which pytest never runs.
+# ===========================================================================
+
+
+class _ManualClock:
+    """A monotonic clock that only moves when a test moves it."""
+
+    def __init__(self, now=0.0):
+        self.now = float(now)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+        return self.now
+
+
+def _succeeded(count=1, *, unreadable=0, start=0, extra_processed=0):
+    """A complete listing, built the way the primitive builds one."""
+    ordered = tuple(
+        Path("data") / ("v070_gen%06d_step000001_x.npz" % (start + index))
+        for index in range(count)
+    )
+    matched = count + unreadable
+    return guard.DiscoverySucceeded(ordered, unreadable,
+                                    matched + extra_processed, matched)
+
+
+def _failed(reason=None, processed=7, matched=3, unreadable=0):
+    reason = reason or guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+    return guard.DiscoveryFailed(reason, processed, matched, unreadable)
+
+
+class _RecordingScanner:
+    """A deterministic stand-in for `discover_snapshot_candidates`.
+
+    Returns (or raises) the next outcome, repeating the last one forever, and
+    records every call. `gate` holds a refresh IN FLIGHT so a second caller's
+    behaviour while the outcome is unknown is observable without any sleep.
+    """
+
+    def __init__(self, outcomes, clock=None, elapsed=0.0):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+        self.policies = []
+        self.gate = None
+        self.entered = None
+        self._clock = clock
+        self._elapsed = elapsed
+
+    def __call__(self, directory, *, policy):
+        self.calls += 1
+        self.policies.append(policy)
+        if self.entered is not None:
+            self.entered.set()
+        if self.gate is not None and not self.gate.wait(timeout=10):
+            raise AssertionError("scanner gate never opened")
+        if self._clock is not None and self._elapsed:
+            # A slow refresh. The TTL is measured from COMPLETION, so this
+            # must not be able to publish an already-expired result.
+            self._clock.advance(self._elapsed)
+        index = min(self.calls - 1, len(self.outcomes) - 1)
+        outcome = self.outcomes[index]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _cache(scanner, *, clock=None, ttl=10.0, directory="data", policy=None):
+    clock = clock if clock is not None else _ManualClock()
+    return guard.SnapshotDiscoveryCache(
+        directory=directory,
+        policy=policy or guard.PRODUCTION_DISCOVERY_POLICY,
+        ttl=ttl,
+        scanner=scanner,
+        clock=clock,
+    )
+
+
+# -- the one production policy ------------------------------------------------
+
+def test_the_production_discovery_policy_is_the_calibrated_pair():
+    """The audited caps, exactly. 196,608 total entries and 65,536 candidates
+    are the V2 calibration; a drift here is a silent capacity change."""
+    policy = guard.PRODUCTION_DISCOVERY_POLICY
+    assert isinstance(policy, guard.CandidateDiscoveryPolicy)
+    assert policy.max_directory_entries == 196_608
+    assert policy.max_candidates == 65_536
+
+
+def test_the_production_discovery_policy_is_frozen_and_shared():
+    """One instance, not a factory: every consumer must import the same object
+    so there is no mixed bounded/unbounded or mixed-cap production state."""
+    policy = guard.PRODUCTION_DISCOVERY_POLICY
+    assert policy is guard.PRODUCTION_DISCOVERY_POLICY
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        policy.max_candidates = 1
+
+
+def test_the_primitive_still_has_no_policy_default():
+    """Calibration lives in ONE named constant, never hidden in the callee's
+    signature where a caller cannot see which caps it got."""
+    import inspect
+    parameter = inspect.signature(
+        guard.discover_snapshot_candidates).parameters["policy"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_the_production_policy_is_not_the_archive_policy():
+    assert guard.PRODUCTION_DISCOVERY_POLICY is not guard.PRODUCTION_POLICY
+    assert not hasattr(guard.PRODUCTION_DISCOVERY_POLICY, "selection_depth")
+
+
+@pytest.mark.parametrize("name", [
+    "PRODUCTION_DISCOVERY_POLICY",
+    "SnapshotDiscoveryCache",
+    "DiscoveryLease",
+    "DISCOVERY_CACHE_TTL_SECONDS",
+])
+def test_the_new_shared_names_are_exported(name):
+    assert name in guard.__all__
+    assert hasattr(guard, name)
+
+
+def test_the_refresh_budget_is_ten_seconds():
+    """A soft observed threshold, not an interruptible filesystem deadline."""
+    assert guard.DISCOVERY_CACHE_TTL_SECONDS == 10.0
+
+
+# -- the cache serves one completed immutable result --------------------------
+
+def test_a_completed_success_is_borrowed_without_rescanning():
+    scanner = _RecordingScanner([_succeeded(3)])
+    cache = _cache(scanner)
+    with cache.borrow() as first:
+        assert first.available is True
+        assert len(first.ordered) == 3
+        held = first.result
+    with cache.borrow() as second:
+        assert second.result is held  # the same immutable object
+    assert scanner.calls == 1
+
+
+def test_the_borrowed_listing_is_an_immutable_tuple_of_paths():
+    scanner = _RecordingScanner([_succeeded(2)])
+    with _cache(scanner).borrow() as lease:
+        assert type(lease.ordered) is tuple
+        assert all(isinstance(entry, Path) for entry in lease.ordered)
+        with pytest.raises(TypeError):
+            lease.ordered[0] = Path("x")
+
+
+def test_the_cache_passes_the_production_policy_to_the_scanner():
+    scanner = _RecordingScanner([_succeeded(1)])
+    with _cache(scanner).borrow():
+        pass
+    assert scanner.policies == [guard.PRODUCTION_DISCOVERY_POLICY]
+
+
+def test_an_expired_success_is_refreshed_exactly_once():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(1), _succeeded(2)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+    clock.advance(10.0)  # age == ttl is EXPIRED, not fresh
+    with cache.borrow() as lease:
+        assert len(lease.ordered) == 2
+    assert scanner.calls == 2
+
+
+def test_a_success_one_tick_inside_the_ttl_is_not_refreshed():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(1), _succeeded(2)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+    clock.advance(9.999)
+    with cache.borrow() as lease:
+        assert len(lease.ordered) == 1
+    assert scanner.calls == 1
+
+
+def test_the_ttl_is_measured_from_completion_not_from_refresh_start():
+    """A slow refresh must not publish an already-expired result: a 30-second
+    scan followed by a 5-second-later borrow is a CACHE HIT, not a rescan."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(1), _succeeded(2)],
+                                clock=clock, elapsed=30.0)
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+    assert scanner.calls == 1
+    clock.advance(5.0)
+    with cache.borrow() as lease:
+        assert len(lease.ordered) == 1
+    assert scanner.calls == 1
+
+
+# -- single flight ------------------------------------------------------------
+
+def test_a_concurrent_burst_performs_exactly_one_refresh():
+    import threading
+    scanner = _RecordingScanner([_succeeded(4)])
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    cache = _cache(scanner)
+
+    outcomes = []
+    barrier = threading.Barrier(8)
+
+    def caller():
+        barrier.wait(timeout=10)
+        with cache.borrow() as lease:
+            outcomes.append(bool(lease.available))
+
+    threads = [threading.Thread(target=caller) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    assert scanner.entered.wait(timeout=10)
+    scanner.gate.set()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert scanner.calls == 1
+    assert len(outcomes) == 8
+
+
+def test_callers_without_a_prior_success_do_not_wait_for_the_refresh():
+    """The expensive scan is outside the state lock and nobody queues on it."""
+    import threading
+    scanner = _RecordingScanner([_succeeded(1)])
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    cache = _cache(scanner)
+
+    owner = threading.Thread(target=lambda: cache.borrow().__enter__())
+    owner.start()
+    assert scanner.entered.wait(timeout=10)
+
+    # The refresh is still in flight and its outcome is unknown.
+    with cache.borrow() as lease:
+        assert lease.available is False
+        assert lease.reason is None
+    assert scanner.calls == 1
+
+    scanner.gate.set()
+    owner.join(timeout=10)
+
+
+def test_a_prior_success_is_served_stale_while_the_outcome_is_unknown():
+    import threading
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(1), _succeeded(9)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    clock.advance(10.0)
+
+    owner = threading.Thread(target=lambda: cache.borrow().__enter__())
+    owner.start()
+    assert scanner.entered.wait(timeout=10)
+
+    with cache.borrow() as lease:
+        assert lease.available is True
+        assert lease.stale is True
+        assert len(lease.ordered) == 1  # the PRIOR completed listing
+    assert scanner.calls == 2  # still just the owner's
+
+    scanner.gate.set()
+    owner.join(timeout=10)
+
+
+def test_the_scan_runs_outside_the_state_lock():
+    """If the lock were held across the scan, this borrow would deadlock."""
+    import threading
+    scanner = _RecordingScanner([_succeeded(1)])
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    cache = _cache(scanner)
+
+    owner = threading.Thread(target=lambda: cache.borrow().__enter__())
+    owner.start()
+    assert scanner.entered.wait(timeout=10)
+
+    finished = threading.Event()
+
+    def probe():
+        with cache.borrow():
+            pass
+        finished.set()
+
+    threading.Thread(target=probe).start()
+    assert finished.wait(timeout=5), "state lock was held across the scan"
+    scanner.gate.set()
+    owner.join(timeout=10)
+
+
+# -- fail closed --------------------------------------------------------------
+
+@pytest.mark.parametrize("reason", [
+    guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED,
+    guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED,
+    guard.DiscoveryFailureReason.DIRECTORY_OPEN_FAILED,
+    guard.DiscoveryFailureReason.ITERATION_FAILED,
+], ids=lambda reason: reason.value)
+def test_a_known_failure_atomically_invalidates_a_prior_success(reason):
+    """V2.2: no bounded failure may coexist with a visible completed success
+    once the outcome is known. Overflow AFTER a good listing is the case that
+    matters -- the old listing is exactly what a stale-serving cache would
+    keep handing out while the directory is over its cap."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3), _failed(reason)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow() as good:
+        assert good.available is True
+
+    clock.advance(10.0)
+    with cache.borrow() as lease:
+        assert lease.available is False
+        assert lease.reason is reason
+
+    # And no new caller may borrow the retired listing.
+    with cache.borrow() as later:
+        assert later.available is False
+        assert later.reason is reason
+    assert cache.diagnostics().has_success is False
+
+
+def test_the_failure_ttl_blocks_every_new_refresh_until_expiry():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_failed(), _succeeded(2)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow() as lease:
+        assert lease.available is False
+    assert scanner.calls == 1
+
+    for _ in range(5):
+        clock.advance(1.0)
+        with cache.borrow() as lease:
+            assert lease.available is False
+    assert scanner.calls == 1, "a new refresh started inside the failure TTL"
+
+
+def test_at_failure_ttl_expiry_exactly_one_retry_starts():
+    import threading
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_failed(), _succeeded(2)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    clock.advance(10.0)
+
+    owner = threading.Thread(target=lambda: cache.borrow().__enter__())
+    owner.start()
+    assert scanner.entered.wait(timeout=10)
+
+    # Everyone else stays immediately unavailable -- no second retry, no wait.
+    with cache.borrow() as lease:
+        assert lease.available is False
+    assert scanner.calls == 2
+
+    scanner.gate.set()
+    owner.join(timeout=10)
+
+
+def test_a_successful_retry_atomically_restores_a_completed_success():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(1), _failed(), _succeeded(5)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow():
+        pass
+    clock.advance(10.0)
+    with cache.borrow() as lease:
+        assert lease.available is False
+    clock.advance(10.0)
+    with cache.borrow() as lease:
+        assert lease.available is True
+        assert len(lease.ordered) == 5
+    assert cache.diagnostics().failure_reason is None
+
+
+# -- ownership is always released ---------------------------------------------
+
+class _ScannerBoom(Exception):
+    """Distinct so its propagation can be asserted exactly."""
+
+
+@pytest.mark.parametrize("raised", [
+    _ScannerBoom("scan failed"),
+    KeyboardInterrupt(),
+    MemoryError(),
+], ids=["exception", "keyboard_interrupt", "memory_error"])
+def test_every_exit_path_releases_refresh_ownership(raised):
+    """A wedged ownership token is a permanent outage: nobody could ever
+    refresh again. Release is `finally`-equivalent for BaseException too."""
+    scanner = _RecordingScanner([raised, _succeeded(2)])
+    cache = _cache(scanner)
+
+    with pytest.raises(type(raised)):
+        with cache.borrow():
+            pass
+
+    assert cache.diagnostics().refresh_in_flight is False
+    with cache.borrow() as lease:
+        assert lease.available is True
+    assert scanner.calls == 2
+
+
+def test_a_failed_refresh_publishes_nothing_from_the_exception():
+    scanner = _RecordingScanner([_ScannerBoom("boom"), _succeeded(1)])
+    cache = _cache(scanner)
+    with pytest.raises(_ScannerBoom):
+        with cache.borrow():
+            pass
+    state = cache.diagnostics()
+    assert state.has_success is False and state.failure_reason is None
+
+
+def test_a_lease_is_released_when_the_consumer_body_raises():
+    scanner = _RecordingScanner([_succeeded(1)])
+    cache = _cache(scanner)
+    with pytest.raises(_ScannerBoom):
+        with cache.borrow():
+            raise _ScannerBoom("consumer failed")
+    assert cache.diagnostics().live_borrowers == 0
+
+
+# -- what the cache may never store -------------------------------------------
+
+def _generator_result():
+    yield Path("data/v070_gen000001_step1_x.npz")
+
+
+class _NotAResult:
+    ordered = [Path("data/v070_gen000001_step1_x.npz")]
+    unreadable = 0
+
+
+@pytest.mark.parametrize("payload", [
+    [Path("data/v070_gen000001_step1_x.npz")],
+    (Path("data/v070_gen000001_step1_x.npz"),),
+    _generator_result(),
+    _NotAResult(),
+    None,
+    "v070_gen000001_step1_x.npz",
+], ids=["list", "bare_tuple", "generator", "duck_type", "none", "str"])
+def test_the_cache_refuses_to_publish_anything_but_a_completed_result(payload):
+    """A mutable collection, a generator, a partial prefix or a look-alike is
+    refused rather than published: a borrower must never be able to mutate,
+    exhaust or half-consume what the cache handed it."""
+    scanner = _RecordingScanner([payload])
+    cache = _cache(scanner)
+    with pytest.raises(ValueError):
+        with cache.borrow():
+            pass
+    state = cache.diagnostics()
+    assert state.has_success is False
+    assert state.refresh_in_flight is False
+
+
+def test_the_cache_stores_no_selected_path_or_descriptor():
+    """The cache's whole visible state is counters, flags and clocks. Anything
+    path-shaped in it is a leak of exactly the kind the closed diagnostic
+    vocabulary forbids."""
+    scanner = _RecordingScanner([_succeeded(2)])
+    cache = _cache(scanner)
+    with cache.borrow():
+        pass
+    state = cache.diagnostics()
+    for field in dataclasses.fields(state):
+        value = getattr(state, field.name)
+        assert not isinstance(value, (str, bytes, Path)), field.name
+
+
+def test_the_diagnostics_repr_carries_no_path_or_filename():
+    scanner = _RecordingScanner([_succeeded(2)])
+    cache = _cache(scanner)
+    with cache.borrow():
+        pass
+    text = repr(cache.diagnostics())
+    for leak in ("v070_gen", ".npz", "/", "\\"):
+        assert leak not in text
+
+
+def test_the_failure_diagnostic_is_a_fixed_code_only():
+    scanner = _RecordingScanner([_failed(
+        guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED)])
+    cache = _cache(scanner)
+    with cache.borrow():
+        pass
+    state = cache.diagnostics()
+    assert state.failure_reason is guard.DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED
+    assert state.failure_reason.value == "candidate_limit_exceeded"
+
+
+# -- borrower accounting and the third generation -----------------------------
+
+def test_a_non_refreshing_borrower_never_starts_a_scan():
+    """Lucid's clients. Zero client-triggered directory work, by construction."""
+    scanner = _RecordingScanner([_succeeded(1)])
+    cache = _cache(scanner)
+    for _ in range(10):
+        with cache.borrow(allow_refresh=False) as lease:
+            assert lease.available is False
+    assert scanner.calls == 0
+
+
+def test_a_non_refreshing_borrower_uses_a_fresh_completed_result():
+    """A client may consume the watcher's listing while it is FRESH."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow(allow_refresh=True):
+        pass
+    clock.advance(9.999)
+    with cache.borrow(allow_refresh=False) as lease:
+        assert lease.available is True
+        assert lease.stale is False
+        assert len(lease.ordered) == 3
+    assert scanner.calls == 1
+
+
+def test_an_expired_listing_is_not_served_when_nothing_is_refreshing():
+    """The predecessor of this control asserted the opposite, and was wrong.
+
+    V2.2 is explicit: a prior completed success may be served stale ONLY while
+    exactly one refresh is actively in flight and that refresh's outcome is
+    still unknown. Handing an expired listing to a non-refreshing borrower
+    satisfies none of that -- nothing is in flight, no outcome is unknown, and
+    no third-generation deferral is holding a refresh back. It is simply an
+    unbounded-age listing with nobody responsible for replacing it, which is
+    exactly the stale-forever failure mode the lifetime exists to prevent.
+
+    The correct answer is immediate unavailability, and still no scan: a
+    non-refreshing borrower never starts directory work under any condition.
+    """
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow(allow_refresh=True):
+        pass
+    clock.advance(10.0)
+
+    state = cache.diagnostics()
+    assert state.refresh_in_flight is False
+    assert state.retired_borrowers == 0
+
+    with cache.borrow(allow_refresh=False) as lease:
+        assert lease.available is False
+        assert lease.stale is False
+        assert lease.reason is None       # not a failure -- just nothing usable
+    assert scanner.calls == 1, "a non-refreshing borrower started a scan"
+
+
+def test_a_long_expired_listing_is_never_resurrected_for_a_client():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow(allow_refresh=True):
+        pass
+    clock.advance(1000.0)
+    for _ in range(5):
+        with cache.borrow(allow_refresh=False) as lease:
+            assert lease.available is False
+    assert scanner.calls == 1
+
+
+def test_a_non_refreshing_borrower_may_use_a_success_while_a_refresh_is_unknown():
+    """The one authorized stale window: a refresh IS in flight and its outcome
+    is not yet known."""
+    import threading
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3), _succeeded(4)])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow(allow_refresh=True):
+        pass
+
+    scanner.gate = threading.Event()
+    scanner.entered = threading.Event()
+    clock.advance(10.0)
+
+    owner = threading.Thread(target=lambda: cache.borrow().__enter__())
+    owner.start()
+    assert scanner.entered.wait(timeout=10)
+
+    with cache.borrow(allow_refresh=False) as lease:
+        assert lease.available is True
+        assert lease.stale is True
+        assert len(lease.ordered) == 3
+    assert scanner.calls == 2
+
+    scanner.gate.set()
+    owner.join(timeout=10)
+
+
+def test_a_non_refreshing_borrower_may_use_a_deferred_listing():
+    """The other authorized stale window: a refresh is being held back to stop
+    a third cap-level generation existing. The listing is deliberately kept
+    live for that reason, so a client may still consume it."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3), _failed(), _succeeded(5)])
+    cache = _cache(scanner, clock=clock)
+
+    holder = cache.borrow(allow_refresh=True)
+    holder.__enter__()
+    clock.advance(10.0)
+    with cache.borrow(allow_refresh=True) as lease:
+        assert lease.available is False        # failure published, gen retired
+    clock.advance(10.0)
+    with cache.borrow(allow_refresh=True) as lease:
+        assert len(lease.ordered) == 5         # recovery published
+    clock.advance(10.0)                        # a refresh WOULD be a third gen
+
+    state = cache.diagnostics()
+    assert state.retired_borrowers == 1
+    assert state.refresh_in_flight is False
+
+    with cache.borrow(allow_refresh=False) as lease:
+        assert lease.available is True
+        assert lease.stale is True
+        assert len(lease.ordered) == 5
+    assert scanner.calls == 3
+
+    holder.__exit__(None, None, None)
+
+
+def test_a_known_failure_stays_unavailable_for_a_non_refreshing_borrower():
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_failed()])
+    cache = _cache(scanner, clock=clock)
+    with cache.borrow(allow_refresh=True) as lease:
+        assert lease.available is False
+    for advance in (1.0, 10.0, 1000.0):
+        clock.advance(advance)
+        with cache.borrow(allow_refresh=False) as lease:
+            assert lease.available is False
+            assert lease.stale is False
+    assert scanner.calls == 1
+
+
+def test_a_held_borrower_finishes_after_its_listing_is_retired():
+    """V2.2: a synchronous borrower that already holds the old immutable
+    listing may finish its selection; the CACHE keeps no reference to it."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([_succeeded(3), _failed()])
+    cache = _cache(scanner, clock=clock)
+
+    holder = cache.borrow()
+    held = holder.__enter__()
+    assert len(held.ordered) == 3
+
+    clock.advance(10.0)
+    with cache.borrow() as lease:
+        assert lease.available is False
+
+    state = cache.diagnostics()
+    assert state.has_success is False
+    assert state.retired_borrowers == 1
+    assert len(held.ordered) == 3  # the borrower's own object is intact
+
+    holder.__exit__(None, None, None)
+    assert cache.diagnostics().retired_borrowers == 0
+
+
+def test_a_third_listing_generation_is_deferred_until_borrowers_release():
+    """At most two cap-level footprints: one retired listing still held, and
+    one in-flight or newly published replacement. A refresh that would make a
+    third is deferred rather than run."""
+    clock = _ManualClock()
+    scanner = _RecordingScanner([
+        _succeeded(3), _failed(), _succeeded(5), _succeeded(7)])
+    cache = _cache(scanner, clock=clock)
+
+    holder = cache.borrow()
+    holder.__enter__()
+
+    clock.advance(10.0)                      # -> failure published, gen 1 retired
+    with cache.borrow() as lease:
+        assert lease.available is False
+    clock.advance(10.0)                      # -> retry succeeds, a new listing
+    with cache.borrow() as lease:
+        assert lease.available is True
+        assert len(lease.ordered) == 5
+    assert scanner.calls == 3
+
+    state = cache.diagnostics()
+    assert state.retired_borrowers == 1
+
+    clock.advance(10.0)                      # a fourth scan WOULD be a third listing
+    with cache.borrow() as lease:
+        assert lease.available is True
+        assert lease.stale is True
+        assert len(lease.ordered) == 5       # still the live generation
+    assert scanner.calls == 3, "a third listing generation was allowed"
+
+    holder.__exit__(None, None, None)
+    assert cache.diagnostics().retired_borrowers == 0
+
+    clock.advance(10.0)
+    with cache.borrow() as lease:
+        assert len(lease.ordered) == 7
+    assert scanner.calls == 4
+
+
+def test_borrower_accounting_is_aggregate_counts_only():
+    scanner = _RecordingScanner([_succeeded(2)])
+    cache = _cache(scanner)
+    first = cache.borrow()
+    first.__enter__()
+    second = cache.borrow()
+    second.__enter__()
+    state = cache.diagnostics()
+    assert state.live_borrowers == 2
+    assert type(state.live_borrowers) is int
+    first.__exit__(None, None, None)
+    second.__exit__(None, None, None)
+    assert cache.diagnostics().live_borrowers == 0
+
+
+# -- the four states stay distinct --------------------------------------------
+
+def test_clean_empty_is_a_success_not_a_failure():
+    scanner = _RecordingScanner([_succeeded(0)])
+    with _cache(scanner).borrow() as lease:
+        assert lease.available is True
+        assert lease.ordered == ()
+        assert lease.matched == 0
+        assert lease.all_matching_unreadable is False
+        assert lease.reason is None
+
+
+def test_all_matching_unreadable_is_a_success_with_its_own_flag():
+    scanner = _RecordingScanner([_succeeded(0, unreadable=4)])
+    with _cache(scanner).borrow() as lease:
+        assert lease.available is True
+        assert lease.ordered == ()
+        assert lease.matched == 4
+        assert lease.unreadable == 4
+        assert lease.all_matching_unreadable is True
+        assert lease.reason is None
+
+
+def test_discovery_failure_is_neither_empty_nor_unreadable():
+    scanner = _RecordingScanner([_failed()])
+    with _cache(scanner).borrow() as lease:
+        assert lease.available is False
+        assert lease.all_matching_unreadable is False
+        assert lease.reason is guard.DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+
+
+def test_an_archive_refusal_never_reaches_the_discovery_cache():
+    """`SnapshotArchiveRejected` is downstream of a SUCCESSFUL discovery. It
+    must not poison, invalidate or relabel the completed listing."""
+    scanner = _RecordingScanner([_succeeded(2)])
+    cache = _cache(scanner)
+    with pytest.raises(guard.SnapshotArchiveRejected):
+        with cache.borrow() as lease:
+            assert lease.available is True
+            raise guard.SnapshotArchiveRejected("path_not_confined")
+    state = cache.diagnostics()
+    assert state.has_success is True
+    assert state.failure_reason is None
+    assert state.live_borrowers == 0
+    with cache.borrow() as lease:
+        assert lease.available is True
+    assert scanner.calls == 1
+
+
+# ===========================================================================
+# Opt-in cap-level benchmark -- NOT part of the pytest suite
+#
+# The acceptance gate for the 224 MiB incremental overlap budget and the
+# 10-second soft refresh budget needs REAL cap-level allocation: 196,608
+# synthetic directory entries and 65,536 retained candidate rows, sorted and
+# frozen into a tuple, with a prior cap-level listing still held. That is far
+# too much work for the ordinary suite, so it lives behind an explicit
+# entrypoint that pytest never runs.
+#
+# It is opt-in, not skipped. `pytest` collects nothing from this section
+# except the two tiny controls at the bottom, which prove the harness itself
+# still works -- so it cannot rot silently while reporting a green suite.
+#
+# Run it, from the repository root:
+#
+#     python  tests/test_snapshot_archive_guard.py --case all
+#     python -O tests/test_snapshot_archive_guard.py --case all
+#
+# Every record is one JSON object on stdout with fixed keys: interpreter,
+# optimization mode, population, elapsed seconds, incremental peak, result
+# count or fixed refusal code, and whether an old completed listing was held
+# across the refresh. No path, filename, drive, environment value or
+# exception text is emitted, by construction: the synthetic names are
+# generated here and never printed.
+#
+# The FINAL target-host execution on Area 51 is deliberately pending and
+# needs separate authority. Nothing below reaches a real directory.
+# ===========================================================================
+
+#: The V2 one-year projection and the calibrated caps.
+BENCHMARK_PROJECTED_POPULATION = (168_631, 56_147)
+BENCHMARK_CAP_POPULATION = (196_608, 65_536)
+
+#: V2.1 section 4: an incremental discovery/cache OVERLAP budget, per process.
+#: Not a whole-process RSS budget and not a NumPy-load budget.
+BENCHMARK_HEAP_BUDGET_BYTES = 224 * 1024 * 1024
+
+#: V2 section "Sort and latency": a soft OBSERVED acceptance threshold. A
+#: blocking directory call cannot be interrupted by an elapsed-time check, so
+#: this is never a deadline and is never enforced at runtime.
+BENCHMARK_SOFT_REFRESH_SECONDS = 10.0
+
+BENCHMARK_CASES = ("projected", "cap", "overlap", "failure_recovery")
+
+
+class _BenchStat:
+    __slots__ = ("st_mtime_ns", "st_size")
+
+    def __init__(self, mtime_ns):
+        self.st_mtime_ns = mtime_ns
+        self.st_size = 64
+
+
+class _BenchEntry:
+    __slots__ = ("name", "_mtime_ns")
+
+    def __init__(self, name, mtime_ns):
+        self.name = name
+        self._mtime_ns = mtime_ns
+
+    def stat(self, *, follow_symlinks=True):
+        return _BenchStat(self._mtime_ns)
+
+
+class _BenchScandir:
+    """A synthetic directory of `total` entries, `matching` of them snapshots.
+
+    Entries are generated lazily and never retained by the fixture, so the
+    measured incremental peak is the DISCOVERY footprint -- the retained rows,
+    the `Path` objects, the sort and the final tuple -- rather than the cost of
+    holding a fake directory in memory.
+
+    Matching entries are distributed evenly across the whole enumeration
+    rather than bunched at the front, so the candidate counter and the entry
+    counter advance together the way they do in a real mixed directory. The
+    modification times are a fixed multiplicative sequence: deterministic, and
+    deliberately NOT already sorted, so the production sort does real work.
+    """
+
+    def __init__(self, total, matching):
+        if matching > total:
+            raise ValueError("benchmark_population_invalid")
+        self.total = int(total)
+        self.matching = int(matching)
+
+    def __call__(self, directory):
+        return self
+
+    def __enter__(self):
+        return self._iterate()
+
+    def __exit__(self, *exc):
+        return False
+
+    def _iterate(self):
+        total = self.total
+        matching = self.matching
+        emitted = 0
+        for index in range(total):
+            wanted = ((index + 1) * matching) // total
+            if wanted > emitted:
+                emitted += 1
+                name = "v070_gen%06d_step%06d_bench.npz" % (emitted, emitted * 10)
+            else:
+                name = "telemetry_%06d.json" % index
+            yield _BenchEntry(name, (index * 2654435761) % 2147483647)
+
+
+def _bench_policy(total, matching):
+    """The caps this population is measured against.
+
+    At either calibrated population it is the real shared production instance,
+    which is the whole point of the acceptance run. An INJECTED smaller
+    population gets a policy scaled to it, so the boundary cases stay boundary
+    cases: the tiny controls below would otherwise sit 196,000 entries below
+    the cap and prove nothing about overflow.
+    """
+    if (total, matching) in (BENCHMARK_PROJECTED_POPULATION,
+                             BENCHMARK_CAP_POPULATION):
+        return guard.PRODUCTION_DISCOVERY_POLICY
+    return guard.CandidateDiscoveryPolicy(
+        max_directory_entries=max(int(total), 1),
+        max_candidates=max(int(matching), 1),
+    )
+
+
+class _BenchPlan:
+    """A scanner that runs the REAL primitive over successive populations.
+
+    Each step is one `(total, matching)` pair; the last step repeats. A step
+    whose `total` exceeds the policy's entry cap produces a genuine
+    `entry_limit_exceeded`, so the failure lifecycle is exercised by the
+    production refusal rather than by a fabricated one.
+
+    Each call is timed individually and recorded in `durations`. That is what
+    the soft budget is actually about -- one refresh being survivable -- and it
+    cannot be recovered from a total afterwards.
+    """
+
+    def __init__(self, steps):
+        self.steps = list(steps)
+        self.calls = 0
+        self.durations = []
+
+    def __call__(self, directory, *, policy):
+        step = self.steps[min(self.calls, len(self.steps) - 1)]
+        self.calls += 1
+        started = time.perf_counter()
+        with mock.patch.object(guard.os, "scandir", _BenchScandir(*step)):
+            result = guard.discover_snapshot_candidates(directory,
+                                                        policy=policy)
+        self.durations.append(time.perf_counter() - started)
+        return result
+
+
+def _bench_outcome(result):
+    """A result count, or a fixed refusal code. Never a path."""
+    if isinstance(result, guard.DiscoveryFailed):
+        return {"refusal_code": result.reason.value, "candidates": None}
+    return {"refusal_code": None, "candidates": len(result.ordered)}
+
+
+def _bench_record(case, total, matching, elapsed, peak, outcome, retained,
+                  durations):
+    """One record with fixed keys and no locator of any kind.
+
+    The soft budget is a per-REFRESH threshold, so it is measured against the
+    WORST individual refresh, never against a mean. Dividing a total by the
+    scan count let a fast retry pay for a slow one: a 15-second refresh beside
+    a 1-second refresh averages to 8 seconds and would have passed a 10-second
+    threshold it plainly breached. `max_refresh_seconds` is the figure the
+    threshold applies to; `elapsed_seconds`, `refresh_seconds_total` and
+    `scans` are retained beside it so the shape of a multi-refresh case stays
+    readable rather than being reduced to one number.
+    """
+    import platform
+    policy = _bench_policy(total, matching)
+    durations = [float(value) for value in durations] or [float(elapsed)]
+    worst = max(durations)
+    record = {
+        "case": case,
+        "max_directory_entries": policy.max_directory_entries,
+        "max_candidates": policy.max_candidates,
+        "interpreter": platform.python_implementation(),
+        "python_version": "%d.%d.%d" % sys.version_info[:3],
+        "optimize_level": sys.flags.optimize,
+        "total_entries": int(total),
+        "matching_entries": int(matching),
+        "scans": len(durations),
+        "elapsed_seconds": round(float(elapsed), 6),
+        "refresh_seconds_total": round(sum(durations), 6),
+        "max_refresh_seconds": round(worst, 6),
+        "incremental_peak_bytes": int(peak),
+        "incremental_peak_mib": round(peak / 1024 / 1024, 3),
+        "heap_budget_bytes": BENCHMARK_HEAP_BUDGET_BYTES,
+        "within_heap_budget": bool(peak <= BENCHMARK_HEAP_BUDGET_BYTES),
+        "soft_refresh_seconds": BENCHMARK_SOFT_REFRESH_SECONDS,
+        "within_soft_refresh_budget": bool(
+            worst <= BENCHMARK_SOFT_REFRESH_SECONDS),
+        "old_listing_retained": bool(retained),
+    }
+    record.update(outcome)
+    return record
+
+
+def _bench_timed(work):
+    """Timing WITHOUT tracemalloc, then the peak WITH it, in two passes.
+
+    `tracemalloc` perturbs allocation-heavy timing badly enough that a single
+    instrumented pass would report a duration the production path never has, so
+    every duration reported -- the total AND each individual refresh -- comes
+    from the first, uninstrumented pass. The V2 calibration separated the two
+    passes for the same reason.
+
+    `work` returns ``(payload, durations)``. The payload is a small summary,
+    never a listing, so nothing cap-sized survives into the allocation pass and
+    inflates its peak.
+    """
+    import tracemalloc
+    started = time.perf_counter()
+    payload, durations = work()
+    elapsed = time.perf_counter() - started
+    durations = list(durations)
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        traced = work()
+        peak = tracemalloc.get_traced_memory()[1]
+        del traced
+    finally:
+        tracemalloc.stop()
+    return payload, durations, elapsed, peak
+
+
+def _bench_single(case, total, matching):
+    """One bounded discovery at the given population."""
+    policy = _bench_policy(total, matching)
+
+    def work():
+        scandir = _BenchScandir(total, matching)
+        started = time.perf_counter()
+        with mock.patch.object(guard.os, "scandir", scandir):
+            result = guard.discover_snapshot_candidates(Path("bench"),
+                                                        policy=policy)
+        duration = time.perf_counter() - started
+        return _bench_outcome(result), [duration]
+
+    outcome, durations, elapsed, peak = _bench_timed(work)
+    return _bench_record(case, total, matching, elapsed, peak, outcome,
+                         retained=False, durations=durations)
+
+
+def _bench_overlap(total, matching):
+    """One cap-level listing held while its replacement is built and published.
+
+    This is the V2.1 section 4 overlap case: the combined incremental peak must
+    cover the retained old listing AND the in-flight replacement.
+    """
+    def work():
+        clock = _ManualClock()
+        plan = _BenchPlan([(total, matching)])
+        cache = guard.SnapshotDiscoveryCache(
+            directory=Path("bench"),
+            policy=_bench_policy(total, matching),
+            ttl=guard.DISCOVERY_CACHE_TTL_SECONDS,
+            scanner=plan,
+            clock=clock,
+        )
+        holder = cache.borrow()
+        held = holder.__enter__()
+        try:
+            clock.advance(guard.DISCOVERY_CACHE_TTL_SECONDS)
+            with cache.borrow() as replacement:
+                summary = {"refusal_code": None,
+                           "candidates": len(replacement.ordered),
+                           "held": len(held.ordered)}
+            return summary, plan.durations
+        finally:
+            holder.__exit__(None, None, None)
+
+    summary, durations, elapsed, peak = _bench_timed(work)
+    outcome = {"refusal_code": None, "candidates": summary["candidates"]}
+    return _bench_record("overlap", total, matching, elapsed, peak, outcome,
+                         retained=True, durations=durations)
+
+
+def _bench_failure_recovery(total, matching):
+    """The V2.2 fail-closed lifecycle with the old borrower deliberately held.
+
+    One cap-level success is borrowed and HELD; the next refresh overflows the
+    entry cap and publishes the sanitized failure, dropping the cache's own
+    reference to the old listing; the borrower finishes; the failure TTL
+    expires and one retry publishes a new cap-level success. At no point may a
+    third cap-level listing exist.
+    """
+    def work():
+        clock = _ManualClock()
+        plan = _BenchPlan([
+            (total, matching),           # first success
+            (total + 1, matching),       # entry_limit_exceeded
+            (total, matching),           # recovery
+        ])
+        cache = guard.SnapshotDiscoveryCache(
+            directory=Path("bench"),
+            policy=_bench_policy(total, matching),
+            ttl=guard.DISCOVERY_CACHE_TTL_SECONDS,
+            scanner=plan,
+            clock=clock,
+        )
+        holder = cache.borrow()
+        held = holder.__enter__()
+        try:
+            clock.advance(guard.DISCOVERY_CACHE_TTL_SECONDS)
+            with cache.borrow() as failed:
+                refusal = failed.reason
+            retired = cache.diagnostics().retired_borrowers
+            clock.advance(guard.DISCOVERY_CACHE_TTL_SECONDS)
+            with cache.borrow() as recovered:
+                summary = {
+                    "refusal_code": (refusal.value if refusal is not None
+                                     else None),
+                    "candidates": len(recovered.ordered),
+                    "retired_borrowers_at_failure": retired,
+                    "held": len(held.ordered),
+                }
+            return summary, plan.durations
+        finally:
+            holder.__exit__(None, None, None)
+
+    summary, durations, elapsed, peak = _bench_timed(work)
+    outcome = {
+        "refusal_code": summary["refusal_code"],
+        "candidates": summary["candidates"],
+        "retired_borrowers_at_failure": summary["retired_borrowers_at_failure"],
+    }
+    return _bench_record("failure_recovery", total, matching, elapsed, peak,
+                         outcome, retained=True, durations=durations)
+
+
+def run_benchmark_case(case, *, total=None, matching=None):
+    """One benchmark record. `total`/`matching` override the population."""
+    if case not in BENCHMARK_CASES:
+        raise ValueError("benchmark_case_unknown")
+    if case == "projected":
+        population = BENCHMARK_PROJECTED_POPULATION
+    else:
+        population = BENCHMARK_CAP_POPULATION
+    total = population[0] if total is None else int(total)
+    matching = population[1] if matching is None else int(matching)
+
+    if case in ("projected", "cap"):
+        return _bench_single(case, total, matching)
+    if case == "overlap":
+        return _bench_overlap(total, matching)
+    return _bench_failure_recovery(total, matching)
+
+
+def _benchmark_status(records):
+    """The entrypoint's exit status: nonzero if EITHER budget was breached.
+
+    It used to consider only the heap. A latency breach printed
+    `"within_soft_refresh_budget": false` into the record and then exited zero,
+    so an acceptance run whose refreshes were over the threshold looked like a
+    pass to anything reading the status -- a CI step, a wrapper, or a person
+    skimming. Both budgets are gates, so both decide the status.
+    """
+    for record in records:
+        if not record["within_heap_budget"]:
+            return 1
+        if not record["within_soft_refresh_budget"]:
+            return 1
+    return 0
+
+
+def _benchmark_main(argv=None):
+    """The opt-in entrypoint. Returns a process exit status."""
+    import argparse
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        description=("Cap-level bounded-discovery benchmark. Deterministic, "
+                     "filesystem-free and path-free; prints one JSON record "
+                     "per case."))
+    parser.add_argument("--case", required=True,
+                        choices=BENCHMARK_CASES + ("all",),
+                        help="which acceptance case to run")
+    parser.add_argument("--total", type=int, default=None,
+                        help="override the synthetic total-entry population")
+    parser.add_argument("--matching", type=int, default=None,
+                        help="override the synthetic matching population")
+    args = parser.parse_args(argv)
+
+    cases = BENCHMARK_CASES if args.case == "all" else (args.case,)
+    records = []
+    for case in cases:
+        record = run_benchmark_case(case, total=args.total,
+                                    matching=args.matching)
+        print(_json.dumps(record, sort_keys=True))
+        records.append(record)
+    return _benchmark_status(records)
+
+
+# -- the two controls that keep the benchmark from rotting silently ----------
+
+def test_the_benchmark_harness_runs_at_a_tiny_population():
+    """Not the cap-level run -- that is the Area 51 gate. This proves the
+    harness, the record schema and all four cases still execute, so the
+    entrypoint cannot rot behind a green suite."""
+    for case in BENCHMARK_CASES:
+        record = run_benchmark_case(case, total=90, matching=30)
+        assert record["case"] == case
+        assert record["total_entries"] == 90
+        assert record["matching_entries"] == 30
+        assert record["optimize_level"] == sys.flags.optimize
+        assert record["heap_budget_bytes"] == 224 * 1024 * 1024
+        assert record["max_directory_entries"] == 90
+        assert record["max_candidates"] == 30
+        assert record["incremental_peak_bytes"] > 0
+        assert record["elapsed_seconds"] >= 0.0
+        assert record["old_listing_retained"] is (
+            case in ("overlap", "failure_recovery"))
+        assert record["scans"] == {"projected": 1, "cap": 1, "overlap": 2,
+                                   "failure_recovery": 3}[case]
+        # The soft budget is per REFRESH, measured on the WORST one, so a case
+        # that runs a retry can neither be judged on its total nor let a fast
+        # refresh pay for a slow one.
+        assert record["max_refresh_seconds"] > 0.0
+        assert record["max_refresh_seconds"] <= record["refresh_seconds_total"]
+        assert record["refresh_seconds_total"] <= record["elapsed_seconds"] + 1e-6
+        assert record["within_soft_refresh_budget"] is True
+        if case == "failure_recovery":
+            assert record["refusal_code"] == "entry_limit_exceeded"
+            assert record["retired_borrowers_at_failure"] == 1
+        else:
+            assert record["refusal_code"] is None
+            assert record["candidates"] == 30
+
+
+def test_the_benchmark_population_is_exact_and_deterministic():
+    """`matching` entries, not approximately that many: the acceptance run
+    claims an exact cap-level population and must actually produce one."""
+    for total, matching in ((90, 30), (168_631 % 997, 7), (1000, 999)):
+        names = [entry.name for entry in _BenchScandir(total, matching)._iterate()]
+        assert len(names) == total
+        assert sum(name.startswith("v070_gen") for name in names) == matching
+        again = [entry.name for entry in _BenchScandir(total, matching)._iterate()]
+        assert names == again
+
+
+def test_the_benchmark_record_carries_no_locator():
+    record = run_benchmark_case("cap", total=60, matching=20)
+    text = repr(sorted(record.items()))
+    for leak in ("v070_gen", ".npz", "bench/", "Traceback", "Users", "tmp"):
+        assert leak not in text
+
+
+def test_the_benchmark_entrypoint_is_not_collected_by_pytest():
+    """It must be run deliberately, never swept into the ordinary suite and
+    never silently skipped away."""
+    assert not _benchmark_main.__name__.startswith("test")
+    assert not run_benchmark_case.__name__.startswith("test")
+    with pytest.raises(SystemExit):
+        _benchmark_main(["--case", "nonsense"])
+
+
+
+# -- the soft budget is a MAXIMUM, never an average ---------------------------
+#
+# Averaging was a real hole in the acceptance harness. The overlap and
+# failure/recovery cases run two and three refreshes, and dividing the total by
+# the count reports a mean -- so a 15-second refresh beside a 1-second refresh
+# became 8 seconds and passed a 10-second per-refresh threshold that it plainly
+# breached. The threshold is about ONE refresh being survivable; a fast retry
+# must never be able to pay for a slow one.
+
+
+def test_the_soft_budget_is_measured_on_the_worst_refresh_not_the_mean():
+    """15 s + 1 s must FAIL, and the same durations must pass as a mean --
+    otherwise this control would not distinguish the two rules at all."""
+    record = _bench_record("overlap", 90, 30, elapsed=0.5, peak=1024,
+                           outcome={"refusal_code": None, "candidates": 30},
+                           retained=True, durations=[15.0, 1.0])
+    assert record["scans"] == 2
+    assert record["max_refresh_seconds"] == 15.0
+    assert record["within_soft_refresh_budget"] is False
+
+    mean = record["refresh_seconds_total"] / record["scans"]
+    assert mean == 8.0
+    assert mean <= record["soft_refresh_seconds"], (
+        "the fixture must be one the DISCARDED averaging rule would pass, or "
+        "this control proves nothing")
+
+
+def test_a_single_slow_refresh_fails_the_soft_budget():
+    record = _bench_record("cap", 90, 30, elapsed=11.0, peak=1024,
+                           outcome={"refusal_code": None, "candidates": 30},
+                           retained=False, durations=[11.0])
+    assert record["max_refresh_seconds"] == 11.0
+    assert record["within_soft_refresh_budget"] is False
+
+
+def test_every_refresh_inside_the_budget_passes():
+    record = _bench_record("failure_recovery", 90, 30, elapsed=9.0, peak=1024,
+                           outcome={"refusal_code": "entry_limit_exceeded",
+                                    "candidates": 30},
+                           retained=True, durations=[3.0, 3.0, 3.0])
+    assert record["max_refresh_seconds"] == 3.0
+    assert record["refresh_seconds_total"] == 9.0
+    assert record["within_soft_refresh_budget"] is True
+
+
+def test_the_record_reports_individual_refresh_accounting():
+    """Total elapsed and scan count are retained honestly beside the maximum;
+    the discarded per-scan average is gone rather than left to be misread."""
+    record = run_benchmark_case("overlap", total=90, matching=30)
+    assert "seconds_per_scan" not in record
+    assert record["scans"] == 2
+    assert record["max_refresh_seconds"] > 0.0
+    assert record["max_refresh_seconds"] <= record["refresh_seconds_total"]
+    assert record["refresh_seconds_total"] <= record["elapsed_seconds"] + 1e-6
+
+
+def test_the_refresh_durations_come_from_the_uninstrumented_pass():
+    """`tracemalloc` perturbs allocation-heavy timing badly. A duration taken
+    from the traced pass would report a latency the production path never
+    has, so the timing pass runs first and alone."""
+    record = run_benchmark_case("cap", total=90, matching=30)
+    assert record["scans"] == 1
+    assert record["max_refresh_seconds"] <= record["elapsed_seconds"] + 1e-6
+
+
+# -- the entrypoint must fail on EITHER budget --------------------------------
+
+def test_the_entrypoint_status_fails_on_a_latency_breach():
+    passing = _bench_record("cap", 90, 30, 1.0, 1024,
+                            {"refusal_code": None, "candidates": 30},
+                            False, [1.0])
+    slow = _bench_record("cap", 90, 30, 11.0, 1024,
+                         {"refusal_code": None, "candidates": 30},
+                         False, [11.0])
+    fat = _bench_record("cap", 90, 30, 1.0, BENCHMARK_HEAP_BUDGET_BYTES + 1,
+                        {"refusal_code": None, "candidates": 30},
+                        False, [1.0])
+    assert _benchmark_status([passing]) == 0
+    assert _benchmark_status([slow]) == 1
+    assert _benchmark_status([fat]) == 1
+    assert _benchmark_status([passing, slow]) == 1
+
+
+def test_the_entrypoint_returns_nonzero_when_a_refresh_breaches_the_budget(
+        monkeypatch, capsys):
+    """End to end through the real entrypoint. The threshold is lowered rather
+    than the work slowed, so this is deterministic and instant."""
+    monkeypatch.setitem(globals(), "BENCHMARK_SOFT_REFRESH_SECONDS", 0.0)
+    status = _benchmark_main(["--case", "cap", "--total", "90",
+                              "--matching", "30"])
+    assert status == 1
+    printed = capsys.readouterr().out.strip().splitlines()
+    assert len(printed) == 1
+    import json as _json
+    record = _json.loads(printed[0])
+    assert record["within_soft_refresh_budget"] is False
+    assert record["soft_refresh_seconds"] == 0.0
+
+
+def test_the_entrypoint_returns_zero_when_every_budget_holds(capsys):
+    status = _benchmark_main(["--case", "all", "--total", "90",
+                              "--matching", "30"])
+    assert status == 0
+    printed = capsys.readouterr().out.strip().splitlines()
+    assert len(printed) == len(BENCHMARK_CASES)
+    import json as _json
+    for line in printed:
+        record = _json.loads(line)
+        assert record["within_heap_budget"] is True
+        assert record["within_soft_refresh_budget"] is True
+
+
+def test_the_benchmark_record_still_carries_no_locator_after_the_correction():
+    record = run_benchmark_case("failure_recovery", total=60, matching=20)
+    text = repr(sorted(record.items()))
+    for leak in ("v070_gen", ".npz", "bench/", "Traceback", "Users", "tmp"):
+        assert leak not in text
+
+
+if __name__ == "__main__":  # pragma: no cover - opt-in entrypoint only
+    raise SystemExit(_benchmark_main())

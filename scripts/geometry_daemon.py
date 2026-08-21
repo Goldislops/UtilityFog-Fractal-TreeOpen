@@ -40,11 +40,13 @@ from scripts.snapshot_archive_guard import (  # noqa: E402
     PRODUCTION_POLICY as SNAPSHOT_POLICY,
 )
 from scripts.snapshot_archive_guard import (  # noqa: E402
+    PRODUCTION_DISCOVERY_POLICY,
+    DiscoveryFailed,
     SnapshotArchiveRejected,
     admit_snapshot,
+    discover_snapshot_candidates,
     entry_fingerprint,
     first_admissible,
-    order_candidates,
 )
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -302,6 +304,29 @@ def export_voxel_summary(state, memory_grid, gen, output_dir):
 # Daemon Loop
 # ---------------------------------------------------------------------------
 
+#: Episode key for "names matched, none could be described". Deliberately
+#: distinct from every `DiscoveryFailureReason` value, so a transition between
+#: the two kinds of fault opens a new episode instead of being swallowed by the
+#: previous one's suppression.
+_UNREADABLE_EPISODE = "all_matching_unreadable"
+
+
+def _report_discovery_problem(episode, key, message):
+    """Print `message` once per episode; return the episode key to carry on.
+
+    Suppression is per KIND, not per poll. A persistent fault is one line, and
+    a CHANGE of fault -- the directory ceasing to open, or its entries ceasing
+    to describe -- is a new episode and is reported, because the second must
+    not hide behind the first's rate limit.
+
+    Every message is a fixed string or a fixed code from a closed set: no path,
+    no filename, no exception text, no environment value.
+    """
+    if episode != key:
+        print("  [GEO] %s" % message)
+    return key
+
+
 def run_daemon():
     """Watch for new snapshots and auto-export geometry."""
     print("=" * 60)
@@ -314,6 +339,10 @@ def run_daemon():
     last_export_time = 0
     last_snapshot = None
     last_rejected = None
+    # The fixed code of the discovery problem currently being suppressed, or
+    # None while discovery is healthy. One line per EPISODE, not one per poll,
+    # matching the suppression the archive-refusal lane already has.
+    problem_episode = None
 
     while True:
         try:
@@ -322,7 +351,46 @@ def run_daemon():
             # so a link could borrow its target's mtime to become "newest"
             # before admission had any say, and it raised OSError into the
             # broad handler below, whose message carries the path.
-            listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+            #
+            # Bounded, under the one calibrated production policy. The glob it
+            # replaces materialised the whole directory before anything could
+            # limit it -- this daemon is serial and needs no cache, but it does
+            # need the same caps and the same fail-closed refusals as the
+            # services, or a directory over its caps silently becomes "nothing
+            # to export".
+            listing = discover_snapshot_candidates(
+                DATA_DIR, policy=PRODUCTION_DISCOVERY_POLICY)
+
+            if isinstance(listing, DiscoveryFailed):
+                # A fixed reason code and nothing else. This daemon runs
+                # unattended over a directory anyone able to write there can
+                # fill, so no path, no filename and no exception text. No
+                # exporter runs, and the loop stays alive to try again.
+                problem_episode = _report_discovery_problem(
+                    problem_episode, listing.reason.value,
+                    "Snapshot discovery failed: %s" % listing.reason.value)
+                time.sleep(WATCH_INTERVAL)
+                continue
+
+            if listing.all_matching_unreadable:
+                # Names matched and NOT ONE of them could be described. That is
+                # not an empty directory and must not be reported as one: the
+                # daemon can see the directory but is blind to its contents,
+                # which is a fault, and `--once` has always exited nonzero for
+                # it. Watch mode treated it as "nothing to export" and slept in
+                # silence, so a daemon running blind looked exactly like a
+                # daemon with nothing to do.
+                problem_episode = _report_discovery_problem(
+                    problem_episode, _UNREADABLE_EPISODE,
+                    "Snapshot candidates unreadable")
+                time.sleep(WATCH_INTERVAL)
+                continue
+
+            # A completed discovery with something describable in it -- or
+            # nothing at all -- ends the episode. Clean empty is a SUCCESS: the
+            # directory is readable and simply has no snapshots yet, so a later
+            # genuinely new fault is reported rather than staying suppressed.
+            problem_episode = None
 
             if not listing.ordered:
                 time.sleep(WATCH_INTERVAL)
@@ -429,8 +497,22 @@ def run_once():
     rejected archive prints exactly one bounded reason on stderr and exits
     nonzero, with no exporter having run. The body is otherwise the block that
     was here before, unchanged.
+
+    Discovery is the same bounded scan the daemon loop uses, under the same
+    explicit policy. Its refusal gets its own exit path below, distinct from
+    both "every candidate was unreadable" and "there is nothing here": a cron
+    or CI wrapper has to be able to tell a directory it could not discover from
+    a directory with nothing in it.
     """
-    listing = order_candidates(DATA_DIR.glob("v070_gen*.npz"))
+    listing = discover_snapshot_candidates(
+        DATA_DIR, policy=PRODUCTION_DISCOVERY_POLICY)
+
+    if isinstance(listing, DiscoveryFailed):
+        # A fixed code from a closed set, no path and no exception text, and a
+        # nonzero exit. Distinct from the two cases below on purpose.
+        print("Snapshot discovery failed: %s" % listing.reason.value,
+              file=sys.stderr)
+        sys.exit(1)
 
     if not listing.ordered:
         if listing.unreadable:

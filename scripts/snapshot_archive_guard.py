@@ -68,10 +68,12 @@ import os
 import re
 import stat
 import struct
+import threading
+import time
 import zipfile
 import zlib
 from pathlib import Path
-from typing import Dict, Iterator, Tuple, Union
+from typing import Dict, Iterator, Optional, Tuple, Union
 
 __all__ = [
     "SnapshotArchiveRejected",
@@ -89,6 +91,11 @@ __all__ = [
     "DiscoveryFailed",
     "DiscoveryResult",
     "discover_snapshot_candidates",
+    "PRODUCTION_DISCOVERY_POLICY",
+    "DISCOVERY_CACHE_TTL_SECONDS",
+    "DiscoveryLease",
+    "DiscoveryCacheState",
+    "SnapshotDiscoveryCache",
     "first_admissible",
     "entry_fingerprint",
 ]
@@ -1045,7 +1052,7 @@ def entry_fingerprint(path):
 
 
 # ---------------------------------------------------------------------------
-# Bounded snapshot discovery (not wired to production consumers yet)
+# Bounded snapshot discovery
 # ---------------------------------------------------------------------------
 
 _SNAPSHOT_GLOB = "v070_gen*.npz"
@@ -1055,9 +1062,11 @@ _SNAPSHOT_GLOB = "v070_gen*.npz"
 class CandidateDiscoveryPolicy:
     """Explicit work limits for one directory discovery.
 
-    There is deliberately no production instance and no default on
-    :func:`discover_snapshot_candidates`: deployment limits need calibration
-    that is outside this primitive-only tranche.
+    There is deliberately no default on
+    :func:`discover_snapshot_candidates`. The calibrated production instance is
+    :data:`PRODUCTION_DISCOVERY_POLICY`, named once and imported by every
+    consumer, so a call site shows which caps it got instead of inheriting them
+    invisibly from a signature.
     """
 
     max_directory_entries: int
@@ -1226,6 +1235,406 @@ def discover_snapshot_candidates(
     described.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
     return DiscoverySucceeded(
         tuple(row[4] for row in described), unreadable, processed, matched)
+
+
+
+# ---------------------------------------------------------------------------
+# The one production discovery policy, and the cache that makes it survivable
+# ---------------------------------------------------------------------------
+
+#: The calibrated caps. Two thirds of the total-entry envelope is deliberately
+#: allocated to non-matching operational artifacts (the engine writes one
+#: telemetry JSON every 300s and nothing removes it) and one third to
+#: snapshots, against a one-year projection of 168,631 total / 56,147 matching.
+#: That leaves roughly 16.6% headroom on both counters.
+#:
+#: ONE instance, imported by every consumer. A per-consumer instance would be
+#: a mixed-cap production state that no test could see, and a default hidden in
+#: `discover_snapshot_candidates` would put the calibration somewhere the call
+#: site cannot show it -- so the primitive still has no default.
+#:
+#: With no retention or rotation the directory grows without bound, so this is
+#: a survivable ceiling, not a capacity plan. Something must remove files
+#: before either counter approaches its cap.
+PRODUCTION_DISCOVERY_POLICY = CandidateDiscoveryPolicy(
+    max_directory_entries=196_608,
+    max_candidates=65_536,
+)
+
+#: How long one completed discovery outcome stays fresh, measured from
+#: COMPLETION on a monotonic clock.
+#:
+#: A soft observed budget, never a deadline: an operating-system directory call
+#: is not interruptible by an elapsed-time check, so nothing here can abort a
+#: slow scan. What it bounds is how often one is STARTED -- generous against a
+#: 600-second producer cadence, and enough that a cap-level scan measured at
+#: well under a second has more than ten times its own duration in slack.
+DISCOVERY_CACHE_TTL_SECONDS = 10.0
+
+
+@dataclasses.dataclass(frozen=True)
+class DiscoveryLease:
+    """One short-lived borrow of a completed discovery outcome.
+
+    Either a completed immutable success or a fixed sanitized failure reason --
+    never both, and never anything partially built. Selection and descriptor
+    admission happen while this is held; the payload load afterwards re-admits
+    its own descriptor, so a cache hit never substitutes an earlier verdict for
+    a current check.
+
+    `stale` marks a success served past its lifetime because a refresh is in
+    flight (or was deferred to keep a third listing generation from existing).
+    An unavailable lease is never stale: there is nothing to be stale about.
+    """
+
+    result: Optional[DiscoverySucceeded]
+    reason: Optional[DiscoveryFailureReason]
+    generation: int
+    stale: bool
+    age: float
+
+    @property
+    def available(self) -> bool:
+        """Whether a completed successful listing is being lent."""
+        return self.result is not None
+
+    @property
+    def failed(self) -> bool:
+        """Whether a known bounded discovery failure is being reported."""
+        return self.reason is not None
+
+    @property
+    def ordered(self) -> Tuple[Path, ...]:
+        return () if self.result is None else self.result.ordered
+
+    @property
+    def matched(self) -> int:
+        """Every name that matched, whether or not its metadata was readable.
+
+        This is the count `/api/status` reports, and it is exactly what the
+        removed `list(DATA_DIR.glob("v070_gen*.npz"))` used to count.
+        """
+        return 0 if self.result is None else self.result.matched
+
+    @property
+    def unreadable(self) -> int:
+        return 0 if self.result is None else self.result.unreadable
+
+    @property
+    def all_matching_unreadable(self) -> bool:
+        return (self.result is not None
+                and self.result.all_matching_unreadable)
+
+
+@dataclasses.dataclass(frozen=True)
+class DiscoveryCacheState:
+    """A path-free snapshot of the cache, for diagnostics and tests.
+
+    Fixed identifiers, booleans, bounded aggregate counts, a monotonic age and
+    the non-secret local generation counter. Deliberately no path, filename,
+    candidate, descriptor, exception text or anything derived from one: this is
+    the type a metric or a log line would be built from, and it must not be
+    able to carry an attacker-chosen name out of the data directory.
+    """
+
+    has_success: bool
+    failure_reason: Optional[DiscoveryFailureReason]
+    refresh_in_flight: bool
+    generation: int
+    live_borrowers: int
+    retired_borrowers: int
+    age: Optional[float]
+    candidates: Optional[int]
+    matched: Optional[int]
+
+
+class SnapshotDiscoveryCache:
+    """One process-local, single-flight bounded discovery.
+
+    The caps above are not survivable on their own in a threaded request
+    topology: N simultaneous callers meant N simultaneous cap-level
+    discoveries, and the discovery heap scales linearly with that. This holds
+    exactly one completed immutable result and lets exactly one refresh run at
+    a time, which is the condition the 224 MiB incremental overlap budget is
+    calculated against.
+
+    What is stored is a completed `DiscoverySucceeded`, or a fixed sanitized
+    failure reason, and nothing else. Never a selected path, never an admitted
+    or open descriptor, never a mutable collection, never a generator, never a
+    partial prefix, and never a result still being built or sorted.
+
+    Fail closed
+    -----------
+    A prior success is served stale in exactly two windows, and no others:
+    while a refresh is in flight and its outcome is still UNKNOWN, and while a
+    refresh is being deliberately deferred to stop a third listing generation
+    existing. Both mean some refresh is responsible for replacing it. An
+    expired listing with neither window open is not served at all -- to any
+    caller, refreshing or not -- because that is a listing of unbounded age
+    with nobody replacing it.
+
+    The moment a refresh is known to have failed, the
+    failure and the removal of the cache's reference to the old listing are one
+    atomic transition: no new caller may borrow that listing, every affected
+    route answers its fixed sanitized refusal, and a borrower that already held
+    the old immutable object may finish its synchronous selection -- the
+    object stays intact in its hands, and the cache simply no longer knows
+    about it.
+
+    Two listing footprints, never three
+    -----------------------------------
+    One retired listing may still be held by borrowers while one replacement is
+    in flight or newly published. A refresh that would create a THIRD is
+    deferred until the retired generation's borrower count reaches zero;
+    deferred callers are served the current success rather than made to wait.
+    Borrower accounting is aggregate counts by generation and holds no
+    candidate data.
+
+    Nobody waits
+    ------------
+    The scan runs outside the state lock, and no lock is held across selection,
+    descriptor admission, payload loading or response work. A caller arriving
+    while a refresh is in flight either borrows a prior completed success or is
+    told immediately that nothing is available. There is no queue to join and
+    no timeout to tune.
+    """
+
+    def __init__(self, *, directory, policy: CandidateDiscoveryPolicy,
+                 ttl: float = DISCOVERY_CACHE_TTL_SECONDS,
+                 scanner=None, clock=None):
+        if not isinstance(policy, CandidateDiscoveryPolicy):
+            raise TypeError("explicit CandidateDiscoveryPolicy required")
+        ttl = float(ttl)
+        # `nan < 0.0` is False and `age < nan` is always False, so a NaN
+        # lifetime would silently mean "never fresh, refresh on every call".
+        if ttl < 0.0 or ttl != ttl:
+            raise ValueError("discovery_cache_ttl_invalid")
+
+        self._directory = Path(os.fspath(directory))
+        self._policy = policy
+        self._ttl = ttl
+        self._scan = (discover_snapshot_candidates if scanner is None
+                      else scanner)
+        self._clock = time.monotonic if clock is None else clock
+
+        self._lock = threading.Lock()
+        self._success: Optional[DiscoverySucceeded] = None
+        self._failure: Optional[DiscoveryFailureReason] = None
+        self._completed_at: Optional[float] = None
+        self._generation = 0
+        self._live_generation: Optional[int] = None
+        self._refresh_in_flight = False
+        self._leases: Dict[int, int] = {}
+        self._retired = set()
+
+    @property
+    def directory(self) -> Path:
+        """The one directory this cache is coherent for."""
+        return self._directory
+
+    @property
+    def policy(self) -> CandidateDiscoveryPolicy:
+        return self._policy
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl
+
+    @contextlib.contextmanager
+    def borrow(self, *, allow_refresh: bool = True) -> Iterator[DiscoveryLease]:
+        """Lend one completed outcome for the duration of one consumption.
+
+        `allow_refresh=False` never starts a scan under any circumstances. That
+        is what Lucid's client connections use: whatever a connect burst does,
+        the directory is opened by the watcher and by nobody else.
+
+        The default here is `True`, because the callers that hold a cache
+        directly are the ones responsible for refreshing it -- Medusa's routes
+        and Lucid's watcher. The opposite default, which stops a caller that
+        forgets from ever starting a scan, belongs to the client-facing helper
+        rather than to this method: `lucid_server.find_latest_snapshot` takes
+        `allow_refresh` keyword-only and defaults it to `False`, so a client
+        connection is non-refreshing unless something explicitly asks
+        otherwise.
+
+        A non-refreshing borrower is lent a completed success while it is
+        fresh, and while one of the two authorized stale windows is open -- a
+        refresh in flight whose outcome is unknown, or a refresh deferred to
+        keep a third listing generation from existing. Outside those it is told
+        nothing is available, because an expired listing with nobody
+        responsible for replacing it is exactly what the lifetime exists to
+        stop being served.
+        """
+        lease = self._acquire(allow_refresh)
+        try:
+            yield lease
+        finally:
+            self._release(lease)
+
+    def diagnostics(self) -> DiscoveryCacheState:
+        """The path-free state summary. Safe to log, meter or assert on."""
+        with self._lock:
+            live = (0 if self._live_generation is None
+                    else self._leases.get(self._live_generation, 0))
+            age = (None if self._completed_at is None
+                   else self._clock() - self._completed_at)
+            return DiscoveryCacheState(
+                has_success=self._success is not None,
+                failure_reason=self._failure,
+                refresh_in_flight=self._refresh_in_flight,
+                generation=self._generation,
+                live_borrowers=live,
+                retired_borrowers=self._retired_borrowers_locked(),
+                age=age,
+                candidates=(None if self._success is None
+                            else len(self._success.ordered)),
+                matched=None if self._success is None else self._success.matched,
+            )
+
+    # -- internals ----------------------------------------------------------
+
+    def _acquire(self, allow_refresh: bool) -> DiscoveryLease:
+        with self._lock:
+            planned = self._plan_locked(allow_refresh)
+            if planned is not None:
+                return planned
+            self._refresh_in_flight = True
+
+        # Outside the lock, deliberately and load-bearingly: this is the
+        # expensive call, and holding the state lock across it would turn every
+        # concurrent caller into a queue behind one directory read.
+        try:
+            replacement = self._scan(self._directory, policy=self._policy)
+        except BaseException:
+            # `finally`-equivalent for BaseException too. A wedged ownership
+            # token is a permanent outage -- nobody could ever refresh again --
+            # so cancellation and KeyboardInterrupt release it exactly like an
+            # ordinary exception. Nothing is published: an unexpected failure
+            # is a programmer error, not a bounded discovery refusal, and
+            # relabelling it as one would be a lie in a fixed reason code.
+            with self._lock:
+                self._refresh_in_flight = False
+            raise
+
+        with self._lock:
+            try:
+                self._publish_locked(replacement)
+            finally:
+                self._refresh_in_flight = False
+            return self._lease_locked(stale=False)
+
+    def _plan_locked(self, allow_refresh: bool) -> Optional[DiscoveryLease]:
+        """A lease to hand back, or None meaning "you own the next refresh"."""
+        if self._completed_at is not None:
+            # Measured from COMPLETION, never from refresh start: a scan slower
+            # than the lifetime would otherwise publish an already-expired
+            # result and every caller would immediately rescan.
+            if self._clock() - self._completed_at < self._ttl:
+                return self._lease_locked(stale=False)
+
+        if self._refresh_in_flight:
+            # The outcome is unknown, so a prior completed success is still the
+            # best true answer. Without one, the answer is "not available" --
+            # immediately, with nothing to wait on.
+            return self._lease_locked(stale=True)
+
+        if self._success is not None and self._retired_borrowers_locked():
+            # A retired listing is still held and a live one is published;
+            # starting a refresh now would make a third cap-level footprint.
+            # Defer it -- the caller gets the live listing rather than a wait.
+            # This is the second and last authorized stale window, and it is
+            # checked BEFORE `allow_refresh` because it is a property of the
+            # cache, not of who is asking: while the refresh is deliberately
+            # held back, the live listing is the intended answer for everyone.
+            return self._lease_locked(stale=True)
+
+        if not allow_refresh:
+            # Expired, nothing in flight, nothing deferred -- and this caller
+            # may not scan. There is no window here that V2.2 allows: a stale
+            # listing is only servable while some refresh is actually
+            # responsible for replacing it. Handing one over instead means an
+            # unbounded-age listing with nobody replacing it, which is the
+            # stale-forever mode the lifetime exists to prevent. The honest
+            # answer is "nothing usable", and still no directory work.
+            return self._unavailable_locked()
+
+        return None
+
+    def _lease_locked(self, *, stale: bool) -> DiscoveryLease:
+        if self._success is None:
+            return self._unavailable_locked()
+        generation = self._live_generation
+        self._leases[generation] = self._leases.get(generation, 0) + 1
+        return DiscoveryLease(self._success, None, generation, bool(stale),
+                              self._age_locked())
+
+    def _unavailable_locked(self) -> DiscoveryLease:
+        """Nothing usable is being lent, whether or not a success exists.
+
+        `reason` is the fixed sanitized failure code when one is published, and
+        `None` when the cache simply has nothing current to lend -- an expired
+        listing nobody is refreshing, or a cache that has not run yet. Those
+        are different facts and consumers treat them differently: Lucid warns
+        about the first and stays quiet about the second.
+        """
+        return DiscoveryLease(None, self._failure, 0, False, self._age_locked())
+
+    def _age_locked(self) -> float:
+        return (0.0 if self._completed_at is None
+                else self._clock() - self._completed_at)
+
+    def _publish_locked(self, replacement) -> None:
+        if not isinstance(replacement, (DiscoverySucceeded, DiscoveryFailed)):
+            # A list, a generator, a bare tuple, a builder mid-sort or a
+            # look-alike must never become the payload: a borrower could mutate
+            # it, exhaust it, or consume an attacker-ordered partial prefix.
+            # Both accepted types validate themselves on construction, so
+            # reaching here at all means the scanner broke its contract.
+            raise ValueError("discovery_cache_payload_invalid")
+
+        self._retire_locked()
+        self._generation += 1
+        self._completed_at = self._clock()
+        if isinstance(replacement, DiscoveryFailed):
+            self._success = None
+            self._failure = replacement.reason
+            return
+        self._success = replacement
+        self._failure = None
+        self._live_generation = self._generation
+
+    def _retire_locked(self) -> None:
+        """Drop the cache's reference to the current listing, atomically.
+
+        If borrowers still hold it, its generation is remembered only as a
+        COUNT so the third-generation rule can see it. The listing object
+        itself is reachable from the borrowers and from nowhere else, so it is
+        collected as soon as the last of them releases.
+        """
+        generation = self._live_generation
+        if generation is None:
+            return
+        if self._leases.get(generation, 0) > 0:
+            self._retired.add(generation)
+        else:
+            self._leases.pop(generation, None)
+        self._live_generation = None
+
+    def _retired_borrowers_locked(self) -> int:
+        return sum(self._leases.get(generation, 0)
+                   for generation in self._retired)
+
+    def _release(self, lease: DiscoveryLease) -> None:
+        if lease.result is None:
+            return
+        with self._lock:
+            generation = lease.generation
+            remaining = self._leases.get(generation, 0) - 1
+            if remaining > 0:
+                self._leases[generation] = remaining
+                return
+            self._leases.pop(generation, None)
+            self._retired.discard(generation)
 
 
 # ---------------------------------------------------------------------------
