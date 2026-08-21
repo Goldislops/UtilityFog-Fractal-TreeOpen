@@ -95,6 +95,7 @@ __all__ = [
     "PassReport",
     "QuarantineSurvey",
     "classify_name",
+    "directory_state",
     "valid_pass_id",
     "default_lock_path",
     "platform_move",
@@ -241,8 +242,12 @@ class ClassRetentionPolicy:
     * ``recovery_floor`` -- the newest N entries are never eligible, whatever
       their age. This is what survives an outage longer than the horizon.
     * ``max_age_seconds`` -- the ordinary eligibility trigger.
-    * ``absolute_ceiling`` -- a hard count cap that fires even inside the
-      horizon, so an accelerated cadence cannot outrun the policy.
+    * ``absolute_ceiling`` -- an ELIGIBILITY ceiling that fires even inside
+      the horizon, so rank alone can make an entry eligible. It is not a
+      guarantee that the directory holds no more than this at any instant:
+      each pass performs at most ``max_actions_per_pass`` actions, so a
+      producer fast enough to outpace that leaves a temporary backlog which
+      drains over successive passes.
 
     ``max_inspected`` is a SCANNER refusal limit and is not a retention
     control. It must sit far above ``absolute_ceiling``: a scan that refused
@@ -692,10 +697,12 @@ def default_lock_path(directory):
     reported and disqualifying any zero-mutation acceptance run.
 
     The name is an opaque digest of the normalized absolute target, so it is
-    deterministic (two callers for one target contend on one lock), collision
-    free across targets, and carries no locator: nothing about the operational
-    path is recoverable from a filename sitting in a shared temporary
-    directory.
+    deterministic -- two callers for one target contend on one lock -- and
+    collision-resistant across targets. A truncated SHA-256 makes a collision
+    cryptographically implausible, which is not the same as impossible, and
+    this does not claim otherwise. It carries no locator: nothing about the
+    operational path is recoverable from a filename sitting in a shared
+    temporary directory.
     """
     normalized = os.path.normcase(os.path.abspath(os.fspath(directory)))
     digest = hashlib.sha256(normalized.encode("utf-8", "surrogatepass"))
@@ -853,39 +860,57 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
         raise TypeError("explicit RetentionPolicy required")
 
     root = Path(os.fspath(pass_directory))
-    try:
-        info = os.lstat(root)
-    except OSError:
-        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
-    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+    if directory_state(root) is None:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
 
-    entry_budget = policy.max_actions_per_pass + 1
+    # PAYLOAD entries are capped on their own, and the manifest is allowed as
+    # at most one ADDITIONAL entry. Charging them to one shared budget would
+    # let a missing manifest hand back a spare payload slot, which is not what
+    # "one batch" means.
     present = []
-    seen = 0
+    manifest_entries = 0
     try:
         with os.scandir(root) as entries:
             for entry in entries:
-                seen += 1
-                if seen > entry_budget:
-                    return _survey_refusal(
-                        RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
                 if entry.name == MANIFEST_NAME:
+                    manifest_entries += 1
+                    if manifest_entries > 1:  # pragma: no cover - one name
+                        return _survey_refusal(
+                            RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
                     continue
                 present.append(entry.name)
+                if len(present) > policy.max_actions_per_pass:
+                    return _survey_refusal(
+                        RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
     except OSError:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
 
-    byte_budget = policy.max_actions_per_pass * MAX_MANIFEST_RECORD_BYTES + 1
+    # Exactly one batch of maximum-length records, plus a single look-ahead
+    # byte whose arrival is itself the refusal.
+    byte_budget = policy.max_actions_per_pass * MAX_MANIFEST_RECORD_BYTES
     manifest = root / MANIFEST_NAME
     raw = b""
+    handle = None
     try:
-        with open(manifest, "rb") as handle:
-            raw = handle.read(byte_budget + 1)
+        handle = os.open(manifest, os.O_RDONLY)
     except FileNotFoundError:
-        raw = b""
+        handle = None
     except OSError:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    if handle is not None:
+        try:
+            # Proved by HANDLE, so a manifest replaced between the directory
+            # read and this open cannot be read as though it were regular.
+            info = os.fstat(handle)
+            if not stat_module.S_ISREG(info.st_mode) or _is_reparse_point(info):
+                return _survey_refusal(
+                    RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+            raw = os.read(handle, byte_budget + 1)
+        except OSError:
+            return _survey_refusal(
+                RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+        finally:
+            os.close(handle)
     if len(raw) > byte_budget:
         return _survey_refusal(RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
 
@@ -901,6 +926,11 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
             # written. Unresolved, never absent, and never repaired.
             malformed += 1
             chunks.pop()
+        # However short the records are, at most one batch of them is parsed:
+        # a corrupt journal of one-byte lines must not turn reconciliation
+        # into unbounded work just because each line is tiny.
+        if len(chunks) > policy.max_actions_per_pass:
+            return _survey_refusal(RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
         for chunk in chunks:
             if len(chunk) + 1 > MAX_MANIFEST_RECORD_BYTES:
                 malformed += 1
@@ -977,15 +1007,30 @@ def _stable_identity(info):
     return (dev, ino, int(info.st_size), int(info.st_mtime_ns))
 
 
-def _directory_identity(info):
-    """`(dev, ino)` for a directory, or None when identity is unavailable.
+def directory_state(path):
+    """`(dev, ino)` for a real directory at `path`, or None.
+
+    Proved from ONE fresh non-following read, and it proves three things
+    together: that the object is a directory, that it is not a reparse point,
+    and that it has a stable nonzero identity. `(dev, ino)` alone says WHICH
+    object a path is, never what KIND -- so a pass path replaced by a symlink
+    or a plain file kept an identity comparison passing while no longer being
+    anywhere it is safe to move files into.
 
     Deliberately NOT the file 4-tuple. A directory's size and modification
     time change whenever its contents do -- writing the journal into the pass
     directory changes both -- so including them would make every legitimate
-    move look like a swapped destination. What must not change is which
-    directory object this is, and that is exactly `(dev, ino)`.
+    move look like a swapped destination.
+
+    This detects path replacement. It is not, and is not claimed to be, an
+    atomic Windows defence against every hostile swap.
     """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+        return None
     identity = _stable_identity(info)
     if identity is None:
         return None
@@ -1116,21 +1161,13 @@ def format_report(report: PassReport) -> str:
 def _validated_quarantine_root(data_root):
     """The quarantine root as a real, non-reparse directory on this volume."""
     root = Path(data_root) / QUARANTINE_DIRNAME
-    try:
-        info = os.lstat(root)
-    except FileNotFoundError:
+    if directory_state(root) is None:
         try:
             os.mkdir(root)
         except OSError:
             return None
-        try:
-            info = os.lstat(root)
-        except OSError:
+        if directory_state(root) is None:
             return None
-    except OSError:
-        return None
-    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
-        return None
     return root
 
 
@@ -1157,20 +1194,28 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
-    # Platform capability first, before anything is created or moved, so an
-    # environment that cannot supply stable identity does exactly nothing.
-    try:
-        if _stable_identity(os.lstat(data_root)) is None:
-            return _report(mode, refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
-                           scan=scan, plan=plan, actions=plan_actions,
-                           reserve_ok=reserve_ok, blocked=blocked)
-    except OSError:
+    # The data root itself first, before anything is created or moved: it must
+    # be a real directory with a stable identity, or an environment that cannot
+    # support any of this does exactly nothing.
+    data_state = directory_state(data_root)
+    if data_state is None:
+        return _report(mode, refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                       scan=scan, plan=plan, actions=plan_actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
+    device = data_state[0]
+
+    root = _validated_quarantine_root(data_root)
+    if root is None:
         return _report(mode, refused=RetentionFailureReason.QUARANTINE_ROOT_INVALID,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
-    root = _validated_quarantine_root(data_root)
-    if root is None:
+    # The quarantine tree must live on the data root's device: a same-volume
+    # rename is the entire basis for the move being a directory-entry
+    # operation, and a root that has become a mount point elsewhere silently
+    # turns it into a copy.
+    root_before = directory_state(root)
+    if root_before is None or root_before[0] != device:
         return _report(mode, refused=RetentionFailureReason.QUARANTINE_ROOT_INVALID,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
@@ -1187,15 +1232,13 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
-    try:
-        pass_identity = _directory_identity(os.lstat(pass_directory))
-        root_identity = _directory_identity(os.lstat(root))
-    except OSError:
+    # Re-proved AFTER the exclusive creation: the window between `mkdir` and
+    # this read is exactly where a replacement would land.
+    pass_identity = directory_state(pass_directory)
+    root_identity = directory_state(root)
+    if (pass_identity is None or root_identity is None
+            or pass_identity[0] != device or root_identity != root_before):
         return _report(mode, refused=RetentionFailureReason.QUARANTINE_ROOT_INVALID,
-                       scan=scan, plan=plan, actions=plan_actions,
-                       reserve_ok=reserve_ok, blocked=blocked)
-    if pass_identity is None or root_identity is None:
-        return _report(mode, refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
@@ -1249,13 +1292,8 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                 continue
 
             # -- the quarantine destination is still what it was ------------
-            try:
-                if (_directory_identity(os.lstat(pass_directory)) != pass_identity
-                        or _directory_identity(os.lstat(root)) != root_identity):
-                    refused = RetentionFailureReason.QUARANTINE_ROOT_INVALID
-                    halted = True
-                    break
-            except OSError:
+            if (directory_state(pass_directory) != pass_identity
+                    or directory_state(root) != root_identity):
                 refused = RetentionFailureReason.QUARANTINE_ROOT_INVALID
                 halted = True
                 break
@@ -1280,14 +1318,8 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                 halted = True
                 unmanifested += 1
                 break
-            try:
-                if (_directory_identity(os.lstat(pass_directory)) != pass_identity
-                        or _directory_identity(os.lstat(root)) != root_identity):
-                    refused = RetentionFailureReason.QUARANTINE_ROOT_INVALID
-                    halted = True
-                    unmanifested += 1
-                    break
-            except OSError:
+            if (directory_state(pass_directory) != pass_identity
+                    or directory_state(root) != root_identity):
                 refused = RetentionFailureReason.QUARANTINE_ROOT_INVALID
                 halted = True
                 unmanifested += 1
