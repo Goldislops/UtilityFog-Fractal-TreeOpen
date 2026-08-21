@@ -1889,3 +1889,332 @@ def test_the_module_does_not_call_check_then_rename_atomic():
     lowered = source.lower()
     assert "atomic" not in lowered or "rename" not in lowered.split(
         "atomic", 1)[1][:200]
+
+
+# ===========================================================================
+# Final audit corrections
+# ===========================================================================
+
+# -- 1. a directory must still BE a directory, on the expected device --------
+
+def test_directory_state_requires_a_real_directory(tmp_path):
+    """`(dev, ino)` alone says which object this is, not what kind it is. A
+    pass path replaced by a symlink or a file keeps neither property by
+    accident, so the type is proved from the same fresh read."""
+    real = tmp_path / "real"
+    real.mkdir()
+    assert retention.directory_state(real) is not None
+
+    plain = tmp_path / "plain"
+    plain.write_bytes(b"x")
+    assert retention.directory_state(plain) is None
+
+    missing = tmp_path / "missing"
+    assert retention.directory_state(missing) is None
+
+
+def test_directory_state_rejects_a_reparse_point(tmp_path, monkeypatch):
+    real = tmp_path / "reparse"
+    real.mkdir()
+    genuine = os.lstat(real)
+
+    def _reparse(path, *args, **kwargs):
+        info = _Stat(mode=genuine.st_mode, size=genuine.st_size,
+                     mtime_ns=genuine.st_mtime_ns, nlink=1,
+                     dev=genuine.st_dev, ino=genuine.st_ino,
+                     file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _reparse)
+    assert retention.directory_state(real) is None
+
+
+def test_directory_state_requires_stable_identity(tmp_path, monkeypatch):
+    real = tmp_path / "identityless"
+    real.mkdir()
+    genuine = os.lstat(real)
+    monkeypatch.setattr(
+        retention.os, "lstat",
+        lambda path, *a, **k: _Stat(mode=genuine.st_mode, size=0, mtime_ns=0,
+                                    nlink=1, dev=0, ino=0))
+    assert retention.directory_state(real) is None
+
+
+def _swap_pass_path_for(tmp_path, monkeypatch, replacement_mode, when):
+    """Make the pass directory present as `replacement_mode` from call `when`."""
+    real_lstat = os.lstat
+    seen = {"n": 0}
+
+    def _mutating(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        text = os.fspath(path)
+        if (retention.QUARANTINE_DIRNAME in text
+                and os.path.basename(text).startswith("p2026")):
+            seen["n"] += 1
+            if seen["n"] >= when:
+                return _Stat(mode=replacement_mode, size=info.st_size,
+                             mtime_ns=info.st_mtime_ns, nlink=1,
+                             dev=info.st_dev, ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _mutating)
+    return seen
+
+
+@pytest.mark.parametrize("mode_name,mode", [
+    ("symlink", stat_module.S_IFLNK | 0o777),
+    ("regular_file", stat_module.S_IFREG | 0o644),
+], ids=["symlink", "regular_file"])
+def test_a_pass_path_replaced_at_capture_refuses(tmp_path, monkeypatch,
+                                                 mode_name, mode):
+    """Replaced between exclusive creation and the initial identity capture."""
+    _populate(tmp_path, snapshots=3)
+    _swap_pass_path_for(tmp_path, monkeypatch, mode, when=1)
+    report = _run(tmp_path)
+    assert report.moved == 0
+    assert report.refused in (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID,
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+
+
+@pytest.mark.parametrize("mode_name,mode", [
+    ("symlink", stat_module.S_IFLNK | 0o777),
+    ("regular_file", stat_module.S_IFREG | 0o644),
+], ids=["symlink", "regular_file"])
+def test_a_pass_path_replaced_during_revalidation_halts(tmp_path, monkeypatch,
+                                                        mode_name, mode):
+    """Replaced later, once moves are already under way."""
+    _populate(tmp_path, snapshots=4)
+    _swap_pass_path_for(tmp_path, monkeypatch, mode, when=3)
+    report = _run(tmp_path)
+    assert report.halted is True
+    assert report.refused is retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID
+
+
+def test_a_quarantine_root_replaced_by_a_symlink_refuses(tmp_path,
+                                                         monkeypatch):
+    _populate(tmp_path, snapshots=3)
+    real_lstat = os.lstat
+
+    def _rooted(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.path.basename(os.fspath(path)) == retention.QUARANTINE_DIRNAME:
+            return _Stat(mode=stat_module.S_IFLNK | 0o777, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1,
+                         dev=info.st_dev, ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _rooted)
+    report = _run(tmp_path)
+    assert report.moved == 0
+    assert report.refused is retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID
+
+
+def test_the_quarantine_tree_must_share_the_data_root_device(tmp_path,
+                                                             monkeypatch):
+    """A same-volume rename is the whole basis for the move being a
+    directory-entry operation. A quarantine root that has become a mount point
+    elsewhere breaks that, and is refused."""
+    _populate(tmp_path, snapshots=3)
+    real_lstat = os.lstat
+
+    def _other_device(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if retention.QUARANTINE_DIRNAME in os.fspath(path):
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1,
+                         dev=info.st_dev + 1, ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _other_device)
+    report = _run(tmp_path)
+    assert report.moved == 0
+    assert report.refused is retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID
+
+
+def test_the_data_root_is_proved_a_directory_before_quarantine(tmp_path):
+    plain = tmp_path / "not_a_directory"
+    plain.write_bytes(b"x")
+    report = _run(plain)
+    assert report.moved == 0
+    assert report.refused is not None
+
+
+# -- 2. the survey's remaining boundaries ------------------------------------
+
+def _many(count):
+    return [_snap_name(index, index) for index in range(count)]
+
+
+def test_payload_entries_are_capped_independently_of_the_manifest(tmp_path):
+    """Exactly one batch of payload entries succeeds."""
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=4)
+    names = _many(4)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(name) for name in names],
+                          extra_files=names)
+    survey = _survey(directory, policy)
+    assert survey.refused is None
+    assert survey.present == 4
+    assert survey.manifested == 4
+
+
+def test_one_payload_past_the_cap_refuses(tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=4)
+    names = _many(5)
+    directory = _pass_dir(tmp_path, extra_files=names)
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+
+
+def test_a_missing_manifest_does_not_buy_an_extra_payload_slot(tmp_path):
+    """The manifest is allowed as ONE additional entry, not as a spare payload
+    slot that its absence hands back."""
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=4)
+    directory = _pass_dir(tmp_path, extra_files=_many(5))
+    assert not (directory / retention.MANIFEST_NAME).exists()
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+
+
+def test_the_manifest_byte_budget_is_exact(tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=2)
+    budget = 2 * retention.MAX_MANIFEST_RECORD_BYTES
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = directory / retention.MANIFEST_NAME
+    manifest.write_bytes(b"x" * (budget - 1) + b"\n")
+    survey = _survey(directory, policy)
+    assert survey.refused is None
+
+
+def test_one_byte_past_the_manifest_budget_refuses(tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=2)
+    budget = 2 * retention.MAX_MANIFEST_RECORD_BYTES
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = directory / retention.MANIFEST_NAME
+    manifest.write_bytes(b"x" * budget + b"\n")
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+
+
+def test_the_record_count_is_capped_however_short_the_records(tmp_path):
+    """A corrupt journal of one-byte lines must not turn parsing into
+    unbounded work just because each record is tiny."""
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=4)
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = directory / retention.MANIFEST_NAME
+    manifest.write_bytes(b"x\n" * 200)
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+
+
+def test_exactly_the_record_cap_parses(tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=4)
+    names = _many(4)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(name) for name in names],
+                          extra_files=names)
+    survey = _survey(directory, policy)
+    assert survey.refused is None
+    assert survey.manifested == 4
+
+
+@pytest.mark.parametrize("mode_name,mode", [
+    ("symlink", stat_module.S_IFLNK | 0o777),
+    ("directory", stat_module.S_IFDIR | 0o755),
+    ("fifo", stat_module.S_IFIFO | 0o644),
+], ids=["symlink", "directory", "fifo"])
+def test_a_manifest_of_the_wrong_type_is_a_sanitized_refusal(tmp_path,
+                                                             monkeypatch,
+                                                             mode_name, mode):
+    """The manifest is opened through a descriptor and `fstat`ed, so a
+    replaced or linked manifest is refused before a byte is read."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_fstat = os.fstat
+
+    def _wrong_type(fd):
+        info = real_fstat(fd)
+        if stat_module.S_ISREG(info.st_mode):
+            return _Stat(mode=mode, size=info.st_size, mtime_ns=0, nlink=1,
+                         dev=info.st_dev, ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(retention.os, "fstat", _wrong_type)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert survey.present == 0
+
+
+def test_a_reparse_manifest_is_a_sanitized_refusal(tmp_path, monkeypatch):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_fstat = os.fstat
+
+    def _reparse(fd):
+        info = real_fstat(fd)
+        return _Stat(mode=info.st_mode, size=info.st_size, mtime_ns=0,
+                     nlink=1, dev=info.st_dev, ino=info.st_ino,
+                     file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+
+    monkeypatch.setattr(retention.os, "fstat", _reparse)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+def test_the_survey_closes_its_manifest_handle(tmp_path, monkeypatch):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    opened = []
+    closed = []
+    real_open = os.open
+    real_close = os.close
+    monkeypatch.setattr(retention.os, "open",
+                        lambda *a, **k: (lambda fd: (opened.append(fd), fd)[1])(
+                            real_open(*a, **k)))
+    monkeypatch.setattr(retention.os, "close",
+                        lambda fd: (closed.append(fd), real_close(fd))[1])
+    _survey(directory)
+    assert opened, "the manifest was not opened through a descriptor"
+    assert set(opened) <= set(closed), "a manifest handle was leaked"
+
+
+def test_a_survey_refusal_still_repairs_and_removes_nothing(tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=1)
+    names = _many(3)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(name) for name in names],
+                          extra_files=names)
+    manifest = directory / retention.MANIFEST_NAME
+    before = manifest.read_bytes()
+    survey = _survey(directory, policy)
+    assert survey.refused is not None
+    assert manifest.read_bytes() == before
+    assert all((directory / name).exists() for name in names)
+
+
+# -- 3. prose that must not overclaim ----------------------------------------
+
+def test_the_ceiling_is_not_described_as_an_unconditional_cap():
+    """It is an eligibility trigger. Each pass performs at most 512 actions,
+    so a fast enough producer leaves a temporary backlog that drains over
+    several passes."""
+    source = Path(retention.__file__).read_text(encoding="utf-8").lower()
+    for overclaim in ("cannot outrun", "hard count cap",
+                      "unconditional cap"):
+        assert overclaim not in source, overclaim
+    assert "backlog" in source
+
+
+def test_the_hashed_lock_is_not_claimed_collision_free():
+    source = Path(retention.__file__).read_text(encoding="utf-8").lower()
+    for overclaim in ("collision free", "collision-free", "never collide",
+                      "cannot collide"):
+        assert overclaim not in source, overclaim
+    assert "collision-resistant" in source
