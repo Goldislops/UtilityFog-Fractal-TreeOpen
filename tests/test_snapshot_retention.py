@@ -1094,7 +1094,9 @@ def test_size_and_time_alone_are_not_identity():
 def test_a_fingerprint_change_between_plan_and_act_skips_the_entry(tmp_path,
                                                                    monkeypatch):
     _populate(tmp_path, snapshots=3)
-    victim = sorted(tmp_path.iterdir())[0].name
+    # The OLDEST entry: the newest is inside the recovery floor and is never
+    # actioned, so tampering with it would prove nothing.
+    victim = sorted(path.name for path in tmp_path.iterdir())[-1]
     real_lstat = os.lstat
     tampered = {"done": False}
 
