@@ -66,14 +66,14 @@ def _telem_name(stamp="20260101T000000"):
 class _Stat:
     """A stand-in for `os.stat_result` with only the fields retention reads.
 
-    `st_dev`/`st_ino`/`st_nlink` default to 0 because that is exactly what
-    `os.DirEntry.stat(follow_symlinks=False)` returns on Windows -- measured on
-    the deployed platform, not assumed. Stable identity therefore cannot come
-    from the scan pass, which is why it is established at revalidation instead.
+    This models `os.lstat`, which is what the scanner reads: a `DirEntry`
+    cache reports `st_dev`, `st_ino` and `st_nlink` as 0 on Windows -- measured
+    on the deployed platform -- so it cannot supply the stable identity the
+    plan must carry, and one authoritative non-following read is used instead.
     """
 
     def __init__(self, *, mode=stat_module.S_IFREG | 0o644, size=64,
-                 mtime_ns=NOW - _ns(60 * DAY), nlink=0, dev=0, ino=0,
+                 mtime_ns=NOW - _ns(60 * DAY), nlink=1, dev=41, ino=0,
                  file_attributes=None):
         self.st_mode = mode
         self.st_size = size
@@ -85,27 +85,25 @@ class _Stat:
             self.st_file_attributes = file_attributes
 
 
+_INO = [0]
+
+
 class _Entry:
-    """One directory entry, recording whether its metadata was read."""
+    """One directory entry. Its metadata is served through the fake `lstat`."""
 
-    __slots__ = ("name", "_stat", "_error", "_symlink", "recorder")
+    __slots__ = ("name", "stat_result", "error", "recorder")
 
-    def __init__(self, name, stat_result=None, error=None, symlink=False):
+    def __init__(self, name, stat_result=None, error=None):
         self.name = name
-        self._stat = stat_result if stat_result is not None else _Stat()
-        self._error = error
-        self._symlink = symlink
+        if stat_result is None:
+            _INO[0] += 1
+            stat_result = _Stat(ino=_INO[0])
+        elif getattr(stat_result, "st_ino", 0) == 0:
+            _INO[0] += 1
+            stat_result.st_ino = _INO[0]
+        self.stat_result = stat_result
+        self.error = error
         self.recorder = None
-
-    def is_symlink(self):
-        return self._symlink
-
-    def stat(self, *, follow_symlinks=True):
-        if self.recorder is not None:
-            self.recorder.statted.append((self.name, follow_symlinks))
-        if self._error is not None:
-            raise self._error
-        return self._stat
 
 
 class _FakeScandir:
@@ -118,8 +116,21 @@ class _FakeScandir:
         self.yielded = []
         self.statted = []
         self.closed = 0
+        self.by_name = {}
         for entry in self.entries:
             entry.recorder = self
+            self.by_name[entry.name] = entry
+
+    def lstat(self, path, *args, **kwargs):
+        """The scanner's one authoritative non-following read."""
+        name = os.path.basename(os.fspath(path))
+        entry = self.by_name.get(name)
+        if entry is None:
+            raise FileNotFoundError(errno.ENOENT, "no such file")
+        self.statted.append((name, False))
+        if entry.error is not None:
+            raise entry.error
+        return entry.stat_result
 
     def __call__(self, directory):
         if self.open_error is not None:
@@ -144,6 +155,7 @@ class _FakeScandir:
 
 def _install(monkeypatch, fake):
     monkeypatch.setattr(retention.os, "scandir", fake)
+    monkeypatch.setattr(retention.os, "lstat", fake.lstat)
     return fake
 
 
@@ -512,11 +524,12 @@ def test_a_metadata_failure_on_an_allowlisted_name_aborts_the_whole_pass(
 
 
 _EXCLUDED_TYPES = [
-    ("symlink", dict(symlink=True)),
+    ("symlink", dict(stat_result=_Stat(mode=stat_module.S_IFLNK | 0o777))),
     ("reparse_point", dict(stat_result=_Stat(
         file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT))),
     ("directory", dict(stat_result=_Stat(mode=stat_module.S_IFDIR | 0o755))),
     ("fifo", dict(stat_result=_Stat(mode=stat_module.S_IFIFO | 0o644))),
+    ("hardlinked", dict(stat_result=_Stat(nlink=2))),
 ]
 
 
@@ -542,13 +555,15 @@ def test_type_exclusion_shifts_survivors_conservatively(monkeypatch):
     Both directions are conservative -- which is exactly why exclusion may
     continue where an unknown position may not."""
     entries = _snapshots(6)
-    entries.insert(2, _Entry(_snap_name(777, 777), symlink=True))
+    excluded = _Entry(_snap_name(777, 777),
+                      _Stat(mode=stat_module.S_IFLNK | 0o777))
+    entries.insert(2, excluded)
     _install(monkeypatch, _FakeScandir(entries))
     result = _scan()
     ranked = retention.rank(result.snapshots)
     assert len(ranked) == 6
     assert [entry.basename for entry in ranked] == [
-        entry.name for entry in entries if not entry.is_symlink()]
+        entry.name for entry in entries if entry is not excluded]
 
 
 def test_a_hardlinked_entry_is_excluded_when_the_platform_reports_it(monkeypatch):
@@ -576,10 +591,15 @@ def test_scan_results_are_immutable_tuples(monkeypatch):
 # The pure planner
 # ===========================================================================
 
+_PLANNER_INO = [0]
+
+
 def _entry(name, klass, mtime_ns, generation=-1, step=-1, size=64):
+    _PLANNER_INO[0] += 1
     return retention.CandidateEntry(basename=name, klass=klass, size=size,
-                                    mtime_ns=mtime_ns, generation=generation,
-                                    step=step)
+                                    mtime_ns=mtime_ns, dev=41,
+                                    ino=_PLANNER_INO[0],
+                                    generation=generation, step=step)
 
 
 def _built_scan(snapshots=(), telemetry=()):
@@ -902,14 +922,35 @@ def _quarantine_policy(**kwargs):
     return _tiny(**base)
 
 
+def _injected_mover(source, destination):
+    """The movement abstraction, injected so CI exercises the lifecycle.
+
+    On Windows this IS the production path: `os.rename` there is no-replace at
+    the operating-system level. On POSIX it uses `os.link` followed by
+    `os.unlink`, which is genuinely no-replace -- `link` fails with EEXIST
+    rather than clobbering -- and preserves the inode, so identity
+    verification is exercised exactly as it would be on the real target.
+
+    It is a TEST DOUBLE. `platform_move`, the production primitive, still
+    refuses on POSIX rather than shipping a substitute, and a separate control
+    proves it.
+    """
+    if os.name == "nt":
+        os.rename(source, destination)
+        return
+    os.link(source, destination)
+    os.unlink(source)
+
+
 def _run(directory, mode=None, policy=None, pass_id="p20260101T000000",
-         admit=None, now_ns=NOW):
+         admit=None, now_ns=NOW, mover=None):
     return retention.run_pass(
         directory,
         policy=policy or _quarantine_policy(),
         mode=mode or retention.RetentionMode.QUARANTINE,
         now_ns=now_ns, pass_id=pass_id,
-        admit=admit if admit is not None else _Admit({0, 1, 2}))
+        admit=admit if admit is not None else _Admit({0, 1, 2}),
+        mover=mover if mover is not None else _injected_mover)
 
 
 def _quarantine_root(directory):
@@ -1025,7 +1066,7 @@ def test_directory_contents_are_restoration_ground_truth(tmp_path):
     manifest = pass_dir / retention.MANIFEST_NAME
     lines = manifest.read_text(encoding="utf-8").splitlines()
     manifest.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
-    survey = retention.survey_quarantine(pass_dir)
+    survey = retention.survey_quarantine(pass_dir, policy=_quarantine_policy())
     assert survey.unmanifested == 1
     assert survey.present == len(lines)
 
@@ -1037,7 +1078,7 @@ def test_a_truncated_final_record_is_unresolved_and_never_repaired(tmp_path):
     manifest = pass_dir / retention.MANIFEST_NAME
     original = manifest.read_bytes()
     manifest.write_bytes(original[:-12])
-    survey = retention.survey_quarantine(pass_dir)
+    survey = retention.survey_quarantine(pass_dir, policy=_quarantine_policy())
     assert survey.malformed_records >= 1
     assert manifest.read_bytes() == original[:-12], "the manifest was repaired"
 
@@ -1115,21 +1156,19 @@ def test_a_fingerprint_change_between_plan_and_act_skips_the_entry(tmp_path,
     assert (tmp_path / victim).exists()
 
 
-def test_a_sharing_violation_is_skipped_and_counted(tmp_path, monkeypatch):
+def test_a_sharing_violation_is_skipped_and_counted(tmp_path):
     """An open reader handle makes the rename fail on Windows. That is a
     safety property, not a fault: the pass skips and carries on."""
     _populate(tmp_path, snapshots=3)
-    real_rename = os.rename
     blocked = {"n": 0}
 
-    def _blocking(src, dst, *args, **kwargs):
+    def _blocking(source, destination):
         if blocked["n"] == 0:
             blocked["n"] += 1
             raise PermissionError(errno.EACCES, "sharing violation")
-        return real_rename(src, dst, *args, **kwargs)
+        return _injected_mover(source, destination)
 
-    monkeypatch.setattr(retention.os, "rename", _blocking)
-    report = _run(tmp_path)
+    report = _run(tmp_path, mover=_blocking)
     assert report.skipped >= 1
     assert report.moved >= 1
     assert report.halted is False
@@ -1577,9 +1616,9 @@ def _pass_dir(tmp_path, records=(), extra_files=(), name="p20260101T000000"):
     return directory
 
 
-def _record_bytes(basename, klass=None, **overrides):
+def _record_bytes(name, klass=None, **overrides):
     body = {
-        "basename": basename,
+        "basename": name,
         "class": klass or retention.SNAPSHOT_CLASS,
         "size": 8,
         "mtime_ns": 1,
@@ -1719,8 +1758,10 @@ def test_a_short_journal_write_is_a_fixed_failure(tmp_path, monkeypatch):
     calls = {"n": 0}
 
     def _short(fd, data):
-        calls["n"] += 1
-        if calls["n"] == 1:
+        # Targeted at journal records only: patching every `os.write` would
+        # also catch whatever the runner uses for its own output.
+        if data.startswith(b'{"basename"') and calls["n"] == 0:
+            calls["n"] += 1
             return 0  # a zero-length write that will never progress
         return real_write(fd, data)
 
@@ -1737,9 +1778,10 @@ def test_the_journal_write_loops_until_complete(tmp_path, monkeypatch):
     partial = {"n": 0}
 
     def _partial(fd, data):
-        partial["n"] += 1
-        if len(data) > 1 and partial["n"] % 2 == 1:
-            return real_write(fd, data[:1])
+        if data.startswith(b'{"basename"') and len(data) > 1:
+            partial["n"] += 1
+            if partial["n"] % 2 == 1:
+                return real_write(fd, data[:1])
         return real_write(fd, data)
 
     monkeypatch.setattr(retention.os, "write", _partial)

@@ -51,9 +51,11 @@ from __future__ import annotations
 import dataclasses
 import enum
 import errno
+import hashlib
 import json
 import os
 import re
+import tempfile
 import stat as stat_module
 import sys
 from pathlib import Path
@@ -93,6 +95,10 @@ __all__ = [
     "PassReport",
     "QuarantineSurvey",
     "classify_name",
+    "valid_pass_id",
+    "default_lock_path",
+    "platform_move",
+    "PlatformUnsupported",
     "rank",
     "scan_retention_candidates",
     "plan_retention",
@@ -127,12 +133,16 @@ _NANOSECONDS = 1_000_000_000
 #: classes only -- never ``\d``, which in a str pattern also matches Unicode
 #: decimal digits -- and every run width-bounded so a pathological name cannot
 #: turn matching into arbitrary-precision work.
+#: Applied with `fullmatch`, never `match` plus a trailing anchor: in Python
+#: the end anchor also matches immediately before a final newline, so the
+#: previous form accepted a producer name with a newline appended to it.
+#: `fullmatch` is what actually anchors, at both ends.
 _SNAPSHOT_NAME = re.compile(
-    r"^v070_gen([0-9]{1,18})_step([0-9]{1,18})_[0-9]{8}T[0-9]{6}\.npz$")
+    r"v070_gen([0-9]{1,18})_step([0-9]{1,18})_[0-9]{8}T[0-9]{6}\.npz")
 
 #: Exactly what the engine's status path writes:
 #: ``f"telemetry_{ts}.json"`` with the same timestamp grammar.
-_TELEMETRY_NAME = re.compile(r"^telemetry_[0-9]{8}T[0-9]{6}\.json$")
+_TELEMETRY_NAME = re.compile(r"telemetry_[0-9]{8}T[0-9]{6}\.json")
 
 
 def classify_name(basename):
@@ -146,22 +156,36 @@ def classify_name(basename):
     """
     if type(basename) is not str:
         return None
-    if _SNAPSHOT_NAME.match(basename) is not None:
+    if _SNAPSHOT_NAME.fullmatch(basename) is not None:
         return SNAPSHOT_CLASS
-    if _TELEMETRY_NAME.match(basename) is not None:
+    if _TELEMETRY_NAME.fullmatch(basename) is not None:
         return TELEMETRY_CLASS
     return None
 
 
 def _sequence_of(basename):
     """`(generation, step)` for a snapshot name, else the sentinel."""
-    match = _SNAPSHOT_NAME.match(basename)
+    match = _SNAPSHOT_NAME.fullmatch(basename)
     if match is None:
         return NO_SEQUENCE
     try:
         return (int(match.group(1)), int(match.group(2)))
     except ValueError:  # pragma: no cover - the widths make this unreachable
         return NO_SEQUENCE
+
+
+#: A pass identifier is a bounded timestamp and nothing else. It is validated
+#: by FULL match before anything is created, because it is joined beneath the
+#: quarantine root: an absolute value replaces that root outright and a `..`
+#: component escapes it, so an unvalidated identifier is a path traversal.
+_PASS_ID = re.compile(r"p[0-9]{8}T[0-9]{6}")
+
+
+def valid_pass_id(pass_id) -> bool:
+    """Whether `pass_id` is a well-formed identifier and not a path."""
+    if type(pass_id) is not str:
+        return False
+    return _PASS_ID.fullmatch(pass_id) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +218,10 @@ class RetentionFailureReason(enum.Enum):
     MANIFEST_CREATE_FAILED = "manifest_create_failed"
     MANIFEST_RECORD_FAILED = "manifest_record_failed"
     LOCK_UNAVAILABLE = "lock_unavailable"
+    PASS_ID_INVALID = "pass_id_invalid"
+    QUARANTINE_PLATFORM_UNSUPPORTED = "quarantine_platform_unsupported"
+    SURVEY_DIRECTORY_INVALID = "survey_directory_invalid"
+    SURVEY_LIMIT_EXCEEDED = "survey_limit_exceeded"
 
 
 def _validate_positive_int(value) -> None:
@@ -299,16 +327,23 @@ PRODUCTION_RETENTION_POLICY = RetentionPolicy(
 class CandidateEntry:
     """One allowlisted, regular, single-linked entry as the scan saw it.
 
-    Carries no `st_dev`/`st_ino`: `os.DirEntry.stat(follow_symlinks=False)`
-    reports both as 0 on Windows -- measured on the deployed platform -- so
-    stable identity cannot come from the scan pass and is established at the
-    revalidation `lstat` instead.
+    Carries the FULL stable identity. `os.DirEntry.stat(follow_symlinks=False)`
+    reports `st_dev`, `st_ino` and `st_nlink` as 0 on Windows -- measured on
+    the deployed platform -- so the scan uses one non-following
+    `os.lstat(root / name)` per allowlisted match instead. That single
+    authoritative read supplies type, reparse status, link count, size, time,
+    device and inode together.
+
+    Size and time alone are not identity: a replacement preserving both would
+    otherwise have nothing from the scan to disagree with at revalidation.
     """
 
     basename: str
     klass: str
     size: int
     mtime_ns: int
+    dev: int
+    ino: int
     generation: int
     step: int
 
@@ -348,7 +383,7 @@ def _is_reparse_point(info) -> bool:
     return bool(attributes & reparse)
 
 
-def _excluded_type(entry, info) -> bool:
+def _excluded_type(info) -> bool:
     """Whether a SUCCESSFULLY read entry is a kind retention never touches.
 
     This is not a failure. Identifying a symlink, junction/reparse point,
@@ -364,16 +399,14 @@ def _excluded_type(entry, info) -> bool:
     A failed read leaves the position unknown, so no such argument exists and
     the pass aborts instead.
     """
-    if entry.is_symlink():
-        return True
+    # `os.lstat` does not follow, so a symlink presents as a link on POSIX and
+    # as a reparse point on Windows. Both are excluded here, and neither is
+    # ever followed, opened or moved.
     if not stat_module.S_ISREG(info.st_mode):
         return True
     if _is_reparse_point(info):
         return True
-    # Windows reports 0 here from a DirEntry, so a positive count is the only
-    # actionable signal at scan time; the authoritative link check happens at
-    # revalidation, where `os.lstat` populates it.
-    if int(getattr(info, "st_nlink", 0)) > 1:
+    if int(getattr(info, "st_nlink", 1) or 1) != 1:
         return True
     return False
 
@@ -453,7 +486,10 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
                 collected[klass] += 1
 
                 try:
-                    info = entry.stat(follow_symlinks=False)
+                    # ONE non-following read per allowlisted match, and the
+                    # authoritative one: a `DirEntry` cache cannot supply
+                    # device, inode or link count on Windows.
+                    info = os.lstat(root / entry.name)
                 except OSError:
                     # The position of this entry in the newest-first order is
                     # now unknown, so every later rank is unknown too and an
@@ -464,7 +500,7 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
                         RetentionFailureReason.METADATA_READ_FAILED,
                         processed, inspected)
 
-                if _excluded_type(entry, info):
+                if _excluded_type(info):
                     excluded += 1
                     continue
 
@@ -474,6 +510,8 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
                     klass=klass,
                     size=int(info.st_size),
                     mtime_ns=int(info.st_mtime_ns),
+                    dev=int(getattr(info, "st_dev", 0) or 0),
+                    ino=int(getattr(info, "st_ino", 0) or 0),
                     generation=generation,
                     step=step,
                 )
@@ -508,12 +546,23 @@ def rank(entries):
 
 @dataclasses.dataclass(frozen=True)
 class PlannedAction:
-    """One entry the pass would move, with the fingerprint it was planned on."""
+    """One entry the pass would move, with the identity it was planned on.
+
+    The identity is the complete `(dev, ino, size, mtime_ns)` captured by the
+    scan, so a replacement between scan and action is detectable even when it
+    preserves size and time.
+    """
 
     basename: str
     klass: str
     size: int
     mtime_ns: int
+    dev: int
+    ino: int
+
+    @property
+    def identity(self):
+        return (self.dev, self.ino, self.size, self.mtime_ns)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -578,7 +627,8 @@ def plan_retention(scan: ScanResult, *, policy: RetentionPolicy,
     merged = sorted(snapshot_eligible + telemetry_eligible,
                     key=lambda entry: (entry.mtime_ns, entry.basename))
     actions = tuple(
-        PlannedAction(entry.basename, entry.klass, entry.size, entry.mtime_ns)
+        PlannedAction(entry.basename, entry.klass, entry.size, entry.mtime_ns,
+                      entry.dev, entry.ino)
         for entry in merged[:policy.max_actions_per_pass]
     )
     return RetentionPlan(
@@ -634,6 +684,25 @@ def snapshot_reserve_available(scan: ScanResult, *, policy: RetentionPolicy,
 # The single-instance lock
 # ---------------------------------------------------------------------------
 
+def default_lock_path(directory):
+    """The lock for `directory`, OUTSIDE it.
+
+    The lock used to live inside the target, so an ordinary `PLAN` created a
+    file in the very directory it was measuring -- changing the entry count it
+    reported and disqualifying any zero-mutation acceptance run.
+
+    The name is an opaque digest of the normalized absolute target, so it is
+    deterministic (two callers for one target contend on one lock), collision
+    free across targets, and carries no locator: nothing about the operational
+    path is recoverable from a filename sitting in a shared temporary
+    directory.
+    """
+    normalized = os.path.normcase(os.path.abspath(os.fspath(directory)))
+    digest = hashlib.sha256(normalized.encode("utf-8", "surrogatepass"))
+    return Path(tempfile.gettempdir()) / (
+        "uft-retention-%s.lock" % digest.hexdigest()[:32])
+
+
 class _LockHandle:
     """An operating-system-held exclusive lock on one file.
 
@@ -649,7 +718,13 @@ class _LockHandle:
         self._fd = None
 
     def acquire(self) -> bool:
-        self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            # Cannot even open the lock: report the fixed code and do nothing.
+            # No path, no errno text, no traceback reaches the caller.
+            self._fd = None
+            return False
         try:
             if os.name == "nt":
                 import msvcrt
@@ -712,64 +787,179 @@ class QuarantineSurvey:
     quarantine time and pre-move metadata; a crash between a rename and its
     journal record leaves a file that is still fully restorable by name and
     merely lacks recorded metadata, which is counted rather than repaired.
+
+    Counts only. No name ever appears in this object or in anything emitted
+    from it.
     """
 
     present: int
     manifested: int
     unmanifested: int
     malformed_records: int
+    duplicates: int
+    refused: Optional[RetentionFailureReason]
 
 
-def survey_quarantine(pass_directory) -> QuarantineSurvey:
-    """Read-only reconciliation of one pass directory against its journal.
+_MANIFEST_KEYS = ("basename", "class", "size", "mtime_ns", "quarantined_at")
+
+
+def _exact_int(value) -> bool:
+    # `True` is an `int` to Python. A schema that accepted it would not be the
+    # closed schema this claims to be.
+    return type(value) is int
+
+
+def _valid_record(record) -> Optional[str]:
+    """The basename a well-formed record names, or None if it is malformed."""
+    if type(record) is not dict:
+        return None
+    if set(record) != set(_MANIFEST_KEYS):
+        return None
+    basename = record["basename"]
+    klass = record["class"]
+    if type(basename) is not str or type(klass) is not str:
+        return None
+    if not _exact_int(record["size"]) or record["size"] < 0:
+        return None
+    if not _exact_int(record["mtime_ns"]) or not _exact_int(
+            record["quarantined_at"]):
+        return None
+    if classify_name(basename) != klass:
+        return None
+    return basename
+
+
+def _survey_refusal(reason) -> QuarantineSurvey:
+    return QuarantineSurvey(0, 0, 0, 0, 0, reason)
+
+
+def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineSurvey:
+    """Read-only, BOUNDED reconciliation of one pass directory.
 
     Nothing is restored, removed, rewritten or repaired here, in any
     circumstance. A truncated final record stays truncated: repairing a
     journal would destroy the evidence of how the pass ended.
+
+    Every dimension is bounded, because this reads a directory an operator may
+    have added to and a journal that may be corrupt: at most one batch of
+    entries plus the manifest, and at most one batch of maximum-length records
+    in bytes. Overflow is a sanitized refusal, never a partial answer.
+
+    The schema is closed and exact -- the five named keys, no others, no
+    booleans standing in for integers, and a class that agrees with the
+    basename's own grammar.
     """
+    if not isinstance(policy, RetentionPolicy):
+        raise TypeError("explicit RetentionPolicy required")
+
     root = Path(os.fspath(pass_directory))
+    try:
+        info = os.lstat(root)
+    except OSError:
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
+    entry_budget = policy.max_actions_per_pass + 1
     present = []
-    with os.scandir(root) as entries:
-        for entry in entries:
-            if entry.name == MANIFEST_NAME:
-                continue
-            present.append(entry.name)
+    seen = 0
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                seen += 1
+                if seen > entry_budget:
+                    return _survey_refusal(
+                        RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
+                if entry.name == MANIFEST_NAME:
+                    continue
+                present.append(entry.name)
+    except OSError:
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
+    byte_budget = policy.max_actions_per_pass * MAX_MANIFEST_RECORD_BYTES + 1
+    manifest = root / MANIFEST_NAME
+    raw = b""
+    try:
+        with open(manifest, "rb") as handle:
+            raw = handle.read(byte_budget + 1)
+    except FileNotFoundError:
+        raw = b""
+    except OSError:
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    if len(raw) > byte_budget:
+        return _survey_refusal(RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
 
     manifested = set()
     malformed = 0
-    manifest = root / MANIFEST_NAME
-    try:
-        raw = manifest.read_bytes()
-    except OSError:
-        raw = b""
+    duplicates = 0
     if raw:
-        # A crash can leave the final record without its newline, or half
-        # written. Both are "unresolved", never "absent" and never repaired.
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.split("\n")
-        if lines and lines[-1] == "":
-            lines.pop()
-        elif lines:
+        chunks = raw.split(b"\n")
+        if chunks and chunks[-1] == b"":
+            chunks.pop()
+        elif chunks:
+            # A crash can leave the final record without its newline, or half
+            # written. Unresolved, never absent, and never repaired.
             malformed += 1
-            lines.pop()
-        for line in lines:
+            chunks.pop()
+        for chunk in chunks:
+            if len(chunk) + 1 > MAX_MANIFEST_RECORD_BYTES:
+                malformed += 1
+                continue
             try:
-                record = json.loads(line)
+                text = chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                malformed += 1
+                continue
+            try:
+                record = json.loads(text)
             except ValueError:
                 malformed += 1
                 continue
-            name = record.get("basename") if isinstance(record, dict) else None
-            if type(name) is str:
-                manifested.add(name)
-            else:
+            basename = _valid_record(record)
+            if basename is None:
                 malformed += 1
+                continue
+            if basename in manifested:
+                duplicates += 1
+                continue
+            manifested.add(basename)
 
     return QuarantineSurvey(
         present=len(present),
         manifested=len([name for name in present if name in manifested]),
         unmanifested=len([name for name in present if name not in manifested]),
         malformed_records=malformed,
+        duplicates=duplicates,
+        refused=None,
     )
+
+
+class PlatformUnsupported(OSError):
+    """This platform has no no-replace move that stage one is willing to use."""
+
+
+def platform_move(source, destination) -> None:
+    """Move `source` onto `destination`, refusing if the destination exists.
+
+    Windows is the operational target and `os.rename` there is no-replace at
+    the operating-system level: it raises when the destination exists rather
+    than clobbering it. That is the property this tranche needs, because a
+    silent replacement would be a deletion inside a change that promises none.
+
+    POSIX `os.rename` REPLACES an existing destination silently, and the
+    obvious workaround -- test for the destination, then rename -- is a race,
+    not an atomic operation, and this module will not describe it as one.
+    Rather than ship a check-then-move dressed up as safe, stage one refuses
+    to quarantine on POSIX at all. `PLAN` remains fully portable, and the
+    movement step is injectable so the lifecycle is still exercised in CI.
+
+    A proven no-replace primitive per platform (`renameat2`/`RENAME_NOREPLACE`
+    on Linux, `renamex_np` on macOS) is a later tranche.
+    """
+    if os.name != "nt":
+        raise PlatformUnsupported(errno.ENOTSUP,
+                                  "quarantine_platform_unsupported")
+    os.rename(source, destination)
 
 
 def _stable_identity(info):
@@ -809,9 +999,12 @@ def _open_manifest(pass_directory):
     try:
         info = os.fstat(fd)
         if not stat_module.S_ISREG(info.st_mode) or _is_reparse_point(info):
-            os.close(fd)
             raise OSError(errno.EINVAL, "manifest_not_regular")
-    except OSError:
+    except BaseException:
+        # Every validation exit closes the descriptor, including one raised by
+        # `fstat` itself. A leaked handle here would keep the journal open for
+        # the life of the process.
+        os.close(fd)
         raise
     return fd
 
@@ -834,7 +1027,16 @@ def _record(fd, action, quarantined_at) -> None:
             + "\n").encode("utf-8")
     if len(line) > MAX_MANIFEST_RECORD_BYTES:
         raise OSError(errno.ENAMETOOLONG, "manifest_record_too_long")
-    os.write(fd, line)
+    # `os.write` may write fewer bytes than asked. A half-written record is a
+    # silently corrupt journal, so this loops -- and a write that cannot make
+    # progress is a refusal rather than an infinite loop.
+    written = 0
+    while written < len(line):
+        count = os.write(fd, line[written:])
+        if count <= 0:
+            raise OSError(errno.EIO, "manifest_record_incomplete")
+        written += count
+    # Synchronised only once the record is whole.
     os.fsync(fd)
 
 
@@ -933,7 +1135,7 @@ def _validated_quarantine_root(data_root):
 
 
 def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
-                plan, reserve_ok, blocked):
+                plan, reserve_ok, blocked, mover):
     """Move at most one bounded batch into a fresh, exclusively created pass
     directory, journalling each completed move.
 
@@ -946,6 +1148,14 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
     blind move to put it back.
     """
     mode = RetentionMode.QUARANTINE
+
+    # The identifier is validated before ANYTHING is created, because it is
+    # joined beneath the quarantine root: an absolute value would replace that
+    # root outright and a `..` component would escape it.
+    if not valid_pass_id(pass_id):
+        return _report(mode, refused=RetentionFailureReason.PASS_ID_INVALID,
+                       scan=scan, plan=plan, actions=plan_actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
 
     # Platform capability first, before anything is created or moved, so an
     # environment that cannot supply stable identity does exactly nothing.
@@ -1029,7 +1239,9 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                 refused = RetentionFailureReason.IDENTITY_UNAVAILABLE
                 halted = True
                 break
-            if identity[2] != action.size or identity[3] != action.mtime_ns:
+            if identity != action.identity:
+                # The complete identity, not merely size and time: a swapped
+                # object can carry both of those unchanged.
                 skipped += 1
                 continue
             if (now_ns - identity[3]) < quiescence_ns:
@@ -1050,7 +1262,7 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
 
             destination = pass_directory / action.basename
             try:
-                os.rename(source, destination)
+                mover(source, destination)
             except OSError:
                 # A reader's open handle makes this fail on Windows. That is a
                 # safety property, not a fault: skip and carry on.
@@ -1100,7 +1312,8 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
 
 
 def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
-             now_ns=None, pass_id=None, admit=None, scan=None) -> PassReport:
+             now_ns=None, pass_id=None, admit=None, scan=None,
+             mover=None) -> PassReport:
     """One retention pass. `PLAN` inspects and reports; `QUARANTINE` moves.
 
     There is no parameter by which a caller can supply a plan: a live pass
@@ -1117,6 +1330,17 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         raise TypeError("explicit RetentionMode required")
     if scan is not None and mode is not RetentionMode.PLAN:
         raise ValueError("retention_scan_injection_plan_only")
+    if mode is RetentionMode.QUARANTINE:
+        # Both gates are checked before any work: an invalid identifier or an
+        # unsupported platform must cost nothing at all.
+        if not valid_pass_id(pass_id if pass_id is not None
+                             else _default_pass_id()):
+            return _report(mode,
+                           refused=RetentionFailureReason.PASS_ID_INVALID)
+        if mover is None and os.name != "nt":
+            return _report(
+                mode,
+                refused=RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
 
     captured_now = int(now_ns) if now_ns is not None else int(_wall_clock_ns())
     observed = scan if scan is not None else scan_retention_candidates(
@@ -1162,9 +1386,11 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
                        reserve_ok=reserve_ok, blocked=blocked)
 
     return _quarantine(directory, actions, policy=policy, now_ns=captured_now,
-                       pass_id=pass_id or _default_pass_id(),
+                       pass_id=pass_id if pass_id is not None
+                       else _default_pass_id(),
                        scan=observed, plan=plan, reserve_ok=reserve_ok,
-                       blocked=blocked)
+                       blocked=blocked,
+                       mover=mover if mover is not None else platform_move)
 
 
 def _wall_clock_ns() -> int:
@@ -1194,12 +1420,15 @@ def main(argv=None) -> int:
     parser.add_argument("--quarantine", action="store_true",
                         help="move one bounded batch into quarantine")
     parser.add_argument("--lock", default=None,
-                        help="path to the single-instance lock file")
+                        help=("path to the single-instance lock file; by "
+                              "default an opaque per-target name in the "
+                              "system temporary directory, deliberately "
+                              "OUTSIDE the directory being maintained"))
     args = parser.parse_args(argv)
 
     mode = (RetentionMode.QUARANTINE if args.quarantine
             else RetentionMode.PLAN)
-    lock_path = args.lock or (Path(args.directory) / ".retention.lock")
+    lock_path = args.lock or default_lock_path(args.directory)
     with single_instance_lock(lock_path) as acquired:
         if not acquired:
             print("retention refused=%s"
