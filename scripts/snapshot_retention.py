@@ -875,22 +875,35 @@ def _read_manifest_bytes(manifest, byte_budget):
     Returns `b""` when there is simply no manifest -- an unjournalled pass
     directory is a state to report, not a fault.
 
-    The PATH is proved before the open and the HANDLE after it, and the two
-    identities must agree. Proving only the handle cannot reject a symlinked
-    manifest at all: `fstat` reports the target, which is a perfectly ordinary
-    regular file, and never the link that led to it.
+    Three checks, not two. The PATH is proved before the open, the HANDLE
+    after it, and the PATH AGAIN after that, with all three stable identities
+    required to agree.
 
-    As everywhere else here, this detects replacement. It is not an atomic
-    Windows defence against every hostile swap, and does not claim to be.
+    The third is not redundant. Windows has no `O_NOFOLLOW`, so an attacker can
+    move the real manifest aside and leave a symlink at its path pointing back
+    at that same object. The open follows the link, so the handle carries
+    exactly the identity the pre-open check recorded and `fstat` agrees --
+    while the path is now a reparse point. Only re-reading the path can see
+    that, and it is read before a single byte is consumed.
+
+    Proving only the handle is weaker still: `fstat` reports the target, a
+    perfectly ordinary regular file, and never the link that led to it.
+
+    Every acquired handle receives exactly one close attempt, and a close that
+    fails is a refusal rather than a footnote: bytes are returned only once
+    the descriptor has actually been released. Reporting a normal result over
+    a failed close would be a quiet lie about whether the read completed.
+
+    As everywhere here, this detects replacement. It is not an atomic Windows
+    defence against every hostile swap, and does not claim to be.
     """
     try:
-        path_info = os.lstat(manifest)
+        before = _regular_file_identity(os.lstat(manifest))
     except FileNotFoundError:
         return b""
     except OSError:
         return None
-    path_identity = _regular_file_identity(path_info)
-    if path_identity is None:
+    if before is None:
         return None
 
     try:
@@ -900,34 +913,41 @@ def _read_manifest_bytes(manifest, byte_budget):
     except OSError:
         return None
 
+    collected = None
     try:
-        if _regular_file_identity(os.fstat(handle)) != path_identity:
-            # Either the opened object is not what the path described, or it
-            # was replaced between the two reads.
-            return None
+        if _regular_file_identity(os.fstat(handle)) != before:
+            # The opened object is not what the path described.
+            collected = None
+        elif _regular_file_identity(os.lstat(manifest)) != before:
+            # The path is no longer that object -- including the alias case,
+            # where the identity still matches but the path is now a link.
+            collected = None
+        else:
+            # A bounded read LOOP. One `os.read` may legitimately return fewer
+            # bytes than asked for, and treating that as end-of-file would
+            # accept a partial prefix as the whole journal -- silently
+            # reporting every record beyond it as unmanifested. The loop never
+            # accumulates more than one look-ahead byte past the budget, stops
+            # at a genuine end-of-file, and cannot spin, because each turn
+            # either grows the buffer or breaks.
+            limit = byte_budget + 1
+            buffer = bytearray()
+            while len(buffer) < limit:
+                chunk = os.read(handle, limit - len(buffer))
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+            collected = bytes(buffer)
+    except OSError:
+        collected = None
 
-        # A bounded read LOOP. One `os.read` may legitimately return fewer
-        # bytes than asked for, and treating that as end-of-file would accept
-        # a partial prefix as the whole journal -- silently reporting every
-        # record beyond it as unmanifested. The loop never accumulates more
-        # than one look-ahead byte past the budget, stops at a genuine
-        # end-of-file, and cannot spin, because each turn either grows the
-        # buffer or breaks.
-        limit = byte_budget + 1
-        collected = bytearray()
-        while len(collected) < limit:
-            chunk = os.read(handle, limit - len(collected))
-            if not chunk:
-                break
-            collected.extend(chunk)
-        return bytes(collected)
+    # Exactly one close attempt, outside the block above so it happens on
+    # every path, and its failure decides the outcome.
+    try:
+        os.close(handle)
     except OSError:
         return None
-    finally:
-        try:
-            os.close(handle)
-        except OSError:
-            pass
+    return collected
 
 
 def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineSurvey:
