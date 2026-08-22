@@ -152,7 +152,7 @@ entry is classified into the *more* restrictive class.
 | Model | Class | Licence | Weights | Vendor-claimed runtimes | First-party quantisation | Material restriction |
 |---|---|---|---|---|---|---|
 | [IBM Granite 4.1 (3B/8B/30B)](https://huggingface.co/ibm-granite/granite-4.1-8b) | **(a)** | Apache-2.0 | ungated | llama.cpp, Ollama, vLLM, SGLang, Transformers | **GGUF (first-party)**, FP8 | None attached to the weights. |
-| [Google Gemma 4 (E2B…31B)](https://huggingface.co/google/gemma-4-12B-it) | **(a)** | Apache-2.0 | ungated (changed from prior Gemma generations) | llama.cpp, Ollama, vLLM, SGLang, LM Studio, MLX, NIM | **QAT q4_0 GGUF (first-party)**, w4a16 | Prohibited-Use Policy still referenced from the card; its status under Apache-2.0 is unresolved. |
+| [Google Gemma 4 (E2B…31B)](https://huggingface.co/google/gemma-4-12B-it) | **(a)** | Apache-2.0 | ungated (changed from prior Gemma generations) | llama.cpp, Ollama, vLLM, SGLang, LM Studio, MLX, NIM | **QAT q4_0 GGUF (first-party)**, w4a16 | Card at `707f0a3b` declares `license: apache-2.0` and references **no** prohibited-use policy; a separate general Gemma policy exists in Google docs and its status is unresolved. See §6. |
 | [Mistral Small 4 / Large 3 / Ministral 3](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603) | **(a)** | Apache-2.0 | ungated | vLLM (recommended), llama.cpp, SGLang, TensorRT-LLM | NVFP4 | None — but see the family split below. |
 | [Mistral Devstral 2 · Medium 3.5](https://help.mistral.ai/en/articles/347393-under-which-license-are-mistral-s-open-models-available) | **(b)** | Modified MIT | ungated | vLLM, SGLang | FP8 | Companies above **$20M monthly revenue** need a commercial licence or must use Mistral Studio. |
 | [Mistral Voxtral TTS](https://docs.mistral.ai/models/overview) | **(c)** | CC BY-NC 4.0 | ungated | — | — | **Non-commercial only.** |
@@ -161,9 +161,9 @@ entry is classified into the *more* restrictive class.
 | [Hermes 4-70B / 4-405B](https://huggingface.co/NousResearch/Hermes-4-70B) | **(b)** | **Llama 3.1 Community License (inherited)** | ungated | vLLM, SGLang | FP8 | 700M MAU trigger; derivative names must begin with "Llama"; "Built with Llama" display duty; Meta AUP by reference. |
 | [NVIDIA Nemotron 3 Nano / Super](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF) | **(b)** | NVIDIA Nemotron Open Model License | ungated | vLLM, SGLang, TensorRT-LLM, Transformers | BF16, FP8, NVFP4; **GGUF for Nano-4B** | Commercial use permitted; notice retention + NOTICE line; litigation-triggered termination. Not OSI-approved. |
 | [NVIDIA Nemotron 3 Ultra · 3.5 Lightning](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) | **(b)** | [OpenMDW-1.1](https://openmdw.ai/license/1-1/) | ungated | vLLM, TensorRT-LLM, SGLang, Ollama, llama.cpp (versions pinned per card) | BF16, NVFP4; GGUF hosted **outside** the vendor org | Near-permissive (no output restrictions), but **no OSI claim on the licence page** → classified conservatively. |
-| [Z.ai GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) | **(a)** | MIT (weights; code repo is Apache-2.0) | ungated | vLLM ≥0.23, SGLang ≥0.5.13, Transformers | FP8 | None contractual. Operational/jurisdictional caveat in §6. |
+| [Z.ai GLM-5.2-FP8](https://huggingface.co/zai-org/GLM-5.2-FP8/tree/ba978f7d347eaf65d22f1a86833408afdb953541) | **(a)** | MIT (weights; code repo is Apache-2.0) | ungated | vLLM, SGLang, Transformers | FP8 | Bound to the **FP8 repository** at `ba978f7d347eaf65d22f1a86833408afdb953541`, not to the BF16 repo. None contractual. Operational caveat in §6. |
 | [DeepSeek V4 Pro / Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | **(a)** | MIT | ungated | vLLM, SGLang, Transformers | FP8, FP4+FP8 mixed | None contractual. Operational/jurisdictional caveat in §6. |
-| [Meta Llama 4 Scout / Maverick](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct) | **(b)** | [Llama 4 Community License](https://developer.meta.com/ai/llama4/license/) | **GATED — requires legal name, DOB, organisation** | vLLM, SGLang, Transformers ≥4.51 | FP8 (Maverick), INT4 on-the-fly | 700M MAU trigger; "Llama" name-prefix + "Built with Llama" duties; AUP bars military, nuclear, espionage, ITAR-controlled and critical-infrastructure use. |
+| [Meta Llama 4 Scout / Maverick](https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct) | **(b)** | [Llama 4 Community License](https://developer.meta.com/ai/llama4/license/) | **`gated: "manual"`** — human approval per request; requires legal name, DOB, organisation | vLLM, SGLang, Transformers ≥4.51 | FP8 (Maverick), INT4 on-the-fly | 700M MAU trigger; "Llama" name-prefix + "Built with Llama" duties; AUP bars military, nuclear, espionage, ITAR-controlled and critical-infrastructure use. |
 
 **Structured output is a runtime property, not a model property.** No vendor
 in this table guarantees JSON-Schema-constrained decoding from the weights
@@ -206,7 +206,8 @@ Two pin shapes are used, chosen by what the artifact actually is:
 Per-repository licence declarations at the pinned revision corroborate every
 classification in §4 — including the two that matter most: `Hermes-4-70B`
 declares `llama3`, not `apache-2.0` like its siblings, and
-`Llama-4-Scout-17B-16E-Instruct` reports `gated: true`.
+`Llama-4-Scout-17B-16E-Instruct` reports `gated: "manual"` — the literal
+API value, meaning a human approves each request, not merely `true`.
 
 **A pin says which bytes, never that you may run them.** Every entry remains
 `availability="unknown"` and `locality="unknown"`, both blocking, so the
@@ -227,7 +228,7 @@ fabricated fact wearing the costume of a measured one.
 | [Ollama](https://github.com/ollama/ollama) | v0.32.15 | MIT | `/v1/chat/completions`, `/v1/models`, `/v1/responses` | native `format` on `/api/chat` (`"json"` or a schema); `response_format` on `/v1` | yes, no server flag — but **`tool_choice` is not supported on `/v1`** | `/api/tags`, `/v1/models` | `GET /` (source-verified only) | **yes** (native app, Win10 22H2+) |
 | [vLLM](https://github.com/vllm-project/vllm) | v0.27.1 | Apache-2.0 | `/v1/chat/completions`, `/v1/responses`, `/v1/models` | `extra_body={"structured_outputs":{…}}` — **`guided_*` was removed in v0.12.0** — or `response_format.json_schema.schema` | yes, **requires `--enable-auto-tool-choice` + `--tool-call-parser`** | `/v1/models` | `/health` | **no** — WSL only |
 | [SGLang](https://github.com/sgl-project/sglang) | v0.5.18 | Apache-2.0 | `/v1/chat/completions`, `/v1/models`, plus Ollama-shaped `/api/chat` | `response_format.json_schema.schema`, or `extra_body={"ebnf"` \| `"regex"}`; native puts them in `sampling_params` — **exactly one** constraint per request | yes, **requires `--tool-call-parser`**; `required`/named fully supported only on the xgrammar backend | `/v1/models` | `/health`, `/health_generate` | **unverified — assume unsupported** |
-| [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) | 1.3.0 RC line | Apache-2.0 | via its own runtimes | — | — | — | — | Linux primary; Windows supported; NVIDIA GPUs only |
+| [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1) | `v1.2.1` (stable release) | Apache-2.0 | via its own runtimes | — | — | — | — | Linux primary; Windows supported; NVIDIA GPUs only |
 | [NVIDIA NIM](https://developer.nvidia.com/nim) | — | **proprietary** | OpenAI-compatible | — | — | — | — | self-hostable container |
 
 **Every runtime claim above is pinned to a source and a version.** A runtime's
@@ -235,22 +236,39 @@ parameter names, required launch flags and endpoint set all move between
 releases, so an unpinned runtime claim decays into folklore. The claims in
 this table were read on **2026-08-22** from:
 
-| Runtime | Tag | **Immutable commit** (from the official git ref API) | Source read |
-|---|---|---|---|
-| llama.cpp | `b10569` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` (commit) | `tools/server/README.md` |
-| Ollama | `v0.32.15` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` (commit) | `docs/api/openai-compatibility.mdx` |
-| vLLM | `v0.27.1` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` (commit) | `features/structured_outputs/`, `features/tool_calling/` |
-| SGLang | `v0.5.18` | `ff4c6e641d9f9bb174d34ff651c01c114aea8e40` (annotated **tag object**) | `advanced_features/structured_outputs`, `.../tool_parser` |
-| TensorRT-LLM | `v1.2.1` | `376f7e1bd8ed543f75014309e3fd4b237e9b0e73` (commit) | repository `LICENSE` |
-| NVIDIA NIM | n/a — proprietary, per-container | n/a | `nvidia.com` enterprise agreements |
+| Runtime | Tag | **Immutable object** | Revision-pinned official URL | Doc read at that revision? |
+|---|---|---|---|---|
+| llama.cpp | `b10569` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` (commit) | `https://github.com/ggml-org/llama.cpp/tree/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | **No** — `tools/server/README.md` was read at `master` |
+| Ollama | `v0.32.15` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` (commit) | `https://raw.githubusercontent.com/ollama/ollama/b7871fc0d1d82fe109536efa3e0e8e411c766c75/docs/api/openai-compatibility.mdx` | **Yes** — re-read at the pinned commit |
+| vLLM | `v0.27.1` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` (commit) | `https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | **No** — docs site read at `latest` |
+| SGLang | `v0.5.18` | tag object `ff4c6e641d9f9bb174d34ff651c01c114aea8e40` → **peeled commit `71de97b264b04dcd514cf904003028aefe9775c8`** | `https://github.com/sgl-project/sglang/tree/71de97b264b04dcd514cf904003028aefe9775c8` | **No** — docs site read at current |
+| TensorRT-LLM | `v1.2.1` (stable) | `376f7e1bd8ed543f75014309e3fd4b237e9b0e73` (commit) | `https://github.com/NVIDIA/TensorRT-LLM/tree/376f7e1bd8ed543f75014309e3fd4b237e9b0e73` | **No** — `LICENSE` read at default branch |
+| NVIDIA NIM | — | **UNRESOLVED** | — | **UNRESOLVED** |
 
 A tag can be moved; a commit id cannot, which is why both are recorded and
-the commit is the one that binds. The SGLang row resolves to an *annotated
-tag object* rather than directly to a commit — that is still immutable, and
-it is labelled rather than silently presented as a commit.
+the commit is the one that binds. The SGLang tag is an *annotated tag object*,
+so both it and the commit it peels to are recorded — labelled, rather than a
+tag object silently presented as a commit.
+
+🔵 **Two honest limits on this table, corrected after audit.**
+
+**NIM is not pinned, and is now labelled so.** It ships as proprietary
+per-container images under enterprise agreements with no public git ref to
+bind to. An earlier revision implied every runtime row was immutably pinned;
+that was not true of this one, and inventing a pin for it would be worse than
+admitting the gap.
+
+**"Version pinned" is not the same as "document read at that version."** The
+commits above are immutable and verified from the official git-ref API. Only
+the **Ollama** row had its documentation re-read *at* its pinned commit — the
+`tool_choice` checklist was confirmed unchanged there, which is what makes
+that specific claim revision-pinned end to end. The other rows were read from
+each project's current documentation, so their *version* is pinned while the
+*prose* was read at a moving ref. The column above states which is which
+rather than letting the stronger case stand in for the weaker ones.
 
 🔵 **TensorRT-LLM correction.** An earlier revision of this document recorded
-"1.3.0 RC line" from a repository badge. The official releases API reports
+a moving RC line from a repository badge. The official releases API reports
 the latest release as **`v1.2.1`, published 2026-04-20**; 1.3.0 tags exist as
 pre-releases. The stable tag is pinned here instead, since a claim pinned to
 a moving RC line is not pinned at all.
@@ -321,9 +339,19 @@ Several are counsel questions, not engineering ones.
    OpenMDW-1.1. "Nemotron is licensed X" is false as a family statement.
 3. **OpenMDW-1.1 makes no OSI claim** on its licence page. Do not describe
    Nemotron Ultra or 3.5 Lightning as OSI open source in user-facing copy.
-4. **Gemma's Prohibited Use Policy vs Apache-2.0.** The Gemma 4 card still
-   references the PUP while the licence is Apache-2.0. Whether the PUP binds
-   the weights is unresolved.
+4. **Gemma prohibited-use policy - claim corrected, then narrowed.** An
+   earlier revision of this document stated that the Gemma 4 model card still
+   references a Prohibited Use Policy. **That was checked against the pinned
+   card and is false.** The card at
+   `google/gemma-4-12B-it@707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7`
+   declares `license: apache-2.0` in its front matter and contains **no**
+   reference to a Prohibited Use Policy or to the Gemma Terms of Use; it
+   refers to Google safety principles only in general terms. What remains is
+   a genuine but *separate* ambiguity: Google publishes a general Gemma
+   policy elsewhere in its documentation, and its relationship to
+   Apache-2.0-licensed Gemma 4 weights is unresolved. That ambiguity is worth
+   a counsel question - but **the pinned card does not link it**, and this
+   document no longer claims it does.
 5. **Gemma 3 relicensing is unverified.** A Google releases page renders
    Gemma 3 as Apache-2.0, contradicting its original Gemma Terms of Use. Do
    not rely on that for Gemma 3 weights already in a supply chain.
@@ -513,8 +541,36 @@ hardware changes.** Test evidence in this repository remains **same-author**:
 it is written by the same agent that wrote the code, and corroborates
 internal consistency rather than constituting independent acceptance.
 
-Two things this correction round did **not** do. It did not make locality a
-structural guarantee; that is not achievable while factories are arbitrary
-code, and claiming it was the original error. And it did not populate
-provenance for the catalogue, because that requires retrieving artifacts,
-which is outside this work's authority.
+## 11. Post-audit corrections, round three (2026-08-22)
+
+A third independent audit cleared R1, R2, R3, the general artifact-pinning
+rule, the catalogue's GLM FP8 binding, R6, R7 and the Ollama row, and held
+five further gates. All five were corrected.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | **`_exact_artifact_path` was defined but never called.** An absolute, secret-shaped, wrong-type or hostile `artifact_path` was stored verbatim — and a hostile `__bool__` made `evaluate()` **non-total** the moment it truth-tested the field. | Normalization is now applied in `__post_init__`. Root cause was a patch whose search string was a substring of the intended line, so the replacement that added the call silently did nothing; the file still compiled and every test still passed, because no test covered this field. It does now, in both directions. |
+| 2 | Provenance and licence evidence could be missing, symbolic, or mutable and still route. | Artifact-bearing descriptors must now carry an immutable commit revision, a `provenance_url` binding **this repository at this revision**, and a licence URL doing the same with a non-mutable `licence_revision`. New reasons: `repository-revision-not-immutable`, `provenance-unpinned`, plus a widened `licence-source-unpinned`. |
+| 3 | A plural compatibility list satisfied a narrowed runtime requirement. | `runtimes` is what a vendor *claims*; `bound_runtime` is what the factory actually constructs. A narrowed `allowed_runtimes` is now judged only on `bound_runtime`, which must additionally be declared among `runtimes` and carry an immutable version bound into its source URL. New reasons: `bound-runtime-unspecified`, `bound-runtime-not-allowed`, `bound-runtime-not-declared`, `bound-runtime-unpinned`. |
+| 4 | Negative controls required for each of the six named cases. | `tests/test_open_model_audit_round3.py`, run under normal, `-O` and `-OO`. |
+| 5 | Several documented facts were stale or unsubstantiated. | GLM FP8 human row bound to the FP8 repo at `ba978f7d…`; TensorRT-LLM RC line replaced with stable `v1.2.1`; SGLang tag object **and** peeled commit `71de97b2…` recorded; revision-pinned URLs given per runtime; Llama gated state recorded as the literal `"manual"`; stale "provenance not populated" statements superseded; the Gemma prohibited-use claim **checked and retracted**; NIM labelled **UNRESOLVED** rather than counted as pinned. |
+
+**The stub exception, stated once.** Every provenance and runtime-binding
+requirement above applies to *artifact-bearing* descriptors only, and
+`is_artifact_bearing()` is the single line that draws that boundary: a
+descriptor is exempt exactly when its only runtime is `in-process-stub`. The
+repository-local double has no upstream repository, no licence page and no
+serving runtime to pin, because it is this repository's own code. Adding any
+real runtime to it immediately makes the full requirement apply — which
+`tests/test_open_model_audit_round3.py` asserts directly, so the exception
+cannot quietly widen.
+
+One thing that round did **not** do: it did not make locality a structural
+guarantee. That is not achievable while factories are arbitrary code, and
+claiming it was the original error.
+
+It also stated that catalogue provenance could not be populated without
+retrieving artifacts. **That was wrong, and round two superseded it**:
+revisions and LFS digests are published as *metadata* and were retrieved
+without downloading any model bytes. The catalogue is now fully pinned - see
+§4 and §10.
