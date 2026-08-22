@@ -15,6 +15,7 @@ import pytest
 from scripts.agent_backends import structured_request as sr
 from scripts.agent_backends.structured_request import (
     DIALECT_WIRE_SHAPES,
+    STRUCTURED_WIRE_NAME,
     SUPPORTED_DIALECTS,
     StructuredOutputRequest,
     build_response_format,
@@ -32,10 +33,8 @@ cannot double as the helper's "use the default" marker without silently
 substituting a valid schema and making that case pass vacuously."""
 
 
-def _request(name: str = "Reply", schema=_UNSET) -> StructuredOutputRequest:
-    return StructuredOutputRequest(
-        name=name, schema=_SCHEMA if schema is _UNSET else schema
-    )
+def _request(schema=_UNSET) -> StructuredOutputRequest:
+    return StructuredOutputRequest(schema=_SCHEMA if schema is _UNSET else schema)
 
 
 @pytest.fixture
@@ -143,11 +142,11 @@ def test_ollama_carries_the_schema_nested_and_sends_no_name():
 @pytest.mark.parametrize("dialect", ["vllm", "sglang"])
 def test_vllm_and_sglang_carry_the_documented_openai_nesting(dialect):
     """vLLM @ 6e448d0e and SGLang @ 71de97b2 both document name + schema."""
-    plan = plan_structured_request(dialect, _request(name="Reply"))
+    plan = plan_structured_request(dialect, _request())
     assert plan.ok
     assert plan.response_format == {
         "type": "json_schema",
-        "json_schema": {"name": "Reply", "schema": _SCHEMA},
+        "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": _SCHEMA},
     }
 
 
@@ -240,7 +239,7 @@ def test_a_request_subclass_is_refused_by_exact_type():
     class Sub(StructuredOutputRequest):
         pass
 
-    assert plan_structured_request("vllm", Sub(name="R", schema=_SCHEMA)).refusal == (
+    assert plan_structured_request("vllm", Sub(schema=_SCHEMA)).refusal == (
         "request-not-exact-type"
     )
 
@@ -248,52 +247,91 @@ def test_a_request_subclass_is_refused_by_exact_type():
 def test_the_carrier_normalises_nothing():
     """A dumb carrier is the point: silent repair would send an empty schema."""
     hostile = object()
-    carried = StructuredOutputRequest(name=hostile, schema=hostile)  # type: ignore[arg-type]
-    assert carried.name is hostile
+    carried = StructuredOutputRequest(schema=hostile)  # type: ignore[arg-type]
     assert carried.schema is hostile
     # ...and the gate, not the carrier, is what refuses it.
-    assert plan_structured_request("vllm", carried).refusal == "name-not-safe"
+    assert plan_structured_request("vllm", carried).refusal == "schema-not-exact-dict"
 
 
-# == name controls ===========================================================
+# == gate 3: the transmitted name is not caller data =========================
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "",
-        "A" * 65,
-        "has space",
-        "has.dot",
-        "has/slash",
-        "has:colon",
-        "sk-secretlooking!",
-        "naïve",
-        chr(32) + "leading",
-        "trailing" + chr(32),
-        "tab" + chr(9) + "bed",
-        "new" + chr(10) + "line",
-    ],
-)
-def test_unsafe_names_refuse(name):
-    assert plan_structured_request("vllm", _request(name=name)).refusal == "name-not-safe"
+_AUDIT_SECRET_NAME = "sk-" + "OMIV2SECRET123456789"
+"""The exact string the independent audit used. Assembled from two pieces so
+a naive scan of this file for a credential prefix does not flag the control
+that exists to prove credentials cannot travel."""
 
 
-@pytest.mark.parametrize("name", [None, 1, b"Reply", ["Reply"], object()])
-def test_non_string_names_refuse(name):
-    assert plan_structured_request("vllm", _request(name=name)).refusal == "name-not-safe"
+def test_the_request_carrier_has_no_name_field():
+    """The leak channel is removed, not merely guarded."""
+    assert "name" not in StructuredOutputRequest.__dataclass_fields__
+    with pytest.raises(TypeError):
+        StructuredOutputRequest(name="Reply", schema=_SCHEMA)  # type: ignore[call-arg]
 
 
-@pytest.mark.parametrize("name", ["A", "Reply", "reply_v2", "a-b_c", "A" * 64, "0"])
-def test_safe_names_are_accepted(name):
-    assert plan_structured_request("vllm", _request(name=name)).ok
+@pytest.mark.parametrize("dialect", ["vllm", "sglang"])
+def test_the_transmitted_name_is_the_fixed_constant(dialect):
+    wire = plan_structured_request(dialect, _request()).response_format
+    assert wire["json_schema"]["name"] == STRUCTURED_WIRE_NAME
+    assert STRUCTURED_WIRE_NAME == "structured_output"
 
 
-def test_the_name_boundary_is_exact():
-    assert plan_structured_request("vllm", _request(name="A" * 64)).ok
-    assert plan_structured_request("vllm", _request(name="A" * 65)).refusal == (
-        "name-not-safe"
+@pytest.mark.parametrize("dialect", ["llama-cpp", "ollama"])
+def test_the_dialects_without_a_name_field_still_send_none(dialect):
+    wire = plan_structured_request(dialect, _request()).response_format
+    assert "name" not in wire["json_schema"]
+    assert "name" not in wire
+
+
+def test_the_superseded_alphabet_admitted_the_audit_secret():
+    """Negative control reproducing the defect this gate corrected.
+
+    The removed check was: exact str, 1..64 chars, drawn from [A-Za-z0-9_-].
+    Transcribed here, it accepts the audit's credential-shaped string. The
+    hardened primitive in scripts/open_model/redaction.py rejects the same
+    string, which is why a private copy of a secret rule is the wrong repair
+    and a fixed constant is the right one.
+    """
+    superseded_alphabet = frozenset(
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "_-"
     )
+
+    def superseded_check_accepts(value):
+        if type(value) is not str:
+            return False
+        if not value or len(value) > 64:
+            return False
+        return all(character in superseded_alphabet for character in value)
+
+    assert superseded_check_accepts(_AUDIT_SECRET_NAME) is True
+
+    from scripts.open_model.redaction import is_safe_token
+
+    assert is_safe_token(_AUDIT_SECRET_NAME) is False
+
+
+def test_no_caller_value_can_reach_the_transmitted_name():
+    """There is no argument, field, or schema content that moves the name."""
+    hostile_schemas = [
+        {"title": _AUDIT_SECRET_NAME},
+        {"name": _AUDIT_SECRET_NAME},
+        {"type": "object", "properties": {_AUDIT_SECRET_NAME: {"type": "string"}}},
+    ]
+    for schema in hostile_schemas:
+        for dialect in ("vllm", "sglang"):
+            wire = plan_structured_request(dialect, _request(schema=schema))
+            assert wire.ok
+            assert wire.response_format["json_schema"]["name"] == STRUCTURED_WIRE_NAME
+
+
+def test_the_name_refusal_token_is_gone_from_the_vocabulary():
+    """The vocabulary shrank deliberately; nothing still emits the old token."""
+    from typing import get_args
+
+    assert "name-not-safe" not in set(get_args(sr.StructuredRefusal))
 
 
 # == schema controls =========================================================
@@ -413,13 +451,13 @@ def test_a_non_bool_tools_flag_refuses_rather_than_being_truth_tested(has_tools)
 # == refusal diagnostics disclose nothing ====================================
 
 
-def test_no_refusal_carries_schema_or_name_content():
+def test_no_refusal_carries_schema_or_dialect_content():
     secret_name = "SUPERSECRETNAME"
     secret_value = "SUPERSECRETVALUE"
     cases = [
-        ("vllm", _request(name=secret_name + "!", schema=_SCHEMA)),
-        ("vllm", _request(name="R", schema={secret_value: object()})),
-        ("vllm", _request(name="R", schema={"k": secret_value * 6000})),
+        ("vllm", _request(schema={secret_value: object()})),
+        ("vllm", _request(schema={"k": secret_value * 6000})),
+        ("vllm", _request(schema={secret_name: float("nan")})),
         ("nonsense-" + secret_value, _request()),
     ]
     for dialect, request_obj in cases:
@@ -443,7 +481,6 @@ def test_every_refusal_token_is_in_the_declared_vocabulary():
             ("nope", _request(), False),
             ("vllm", None, False),
             ("vllm", _request(), True),
-            ("vllm", _request(name=""), False),
             ("vllm", _request(schema=None), False),
             ("vllm", _request(schema={}), False),
             ("vllm", _request(schema={"a": object()}), False),
@@ -454,7 +491,7 @@ def test_every_refusal_token_is_in_the_declared_vocabulary():
     assert seen <= declared
     # Guard: the sweep must actually reach most of the vocabulary, or this
     # containment check would pass trivially on a single token.
-    assert len(seen) >= 9
+    assert len(seen) >= 10
 
 
 # == the trust path resolves no rebindable name ==============================
@@ -477,7 +514,7 @@ def test_rebinding_the_mirrors_changes_no_shape(restore_module_names):
     assert plan_structured_request("evil", _request()).refusal == "dialect-unsupported"
     assert plan_structured_request("vllm", _request()).response_format == {
         "type": "json_schema",
-        "json_schema": {"name": "Reply", "schema": _SCHEMA},
+        "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": _SCHEMA},
     }
 
 

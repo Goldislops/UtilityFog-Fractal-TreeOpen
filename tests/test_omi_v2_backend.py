@@ -34,7 +34,7 @@ from scripts.agent_backends.structured_request import (
 
 
 _SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
-_REQUEST = StructuredOutputRequest(name="Reply", schema=_SCHEMA)
+_REQUEST = StructuredOutputRequest(schema=_SCHEMA)
 _MESSAGES = [Message(role="user", content="hello")]
 _TOOL = ToolSpec(name="t", description="d", input_schema={"type": "object"})
 _SECRET = "sk-omi-v2-secret-key-value"
@@ -158,32 +158,26 @@ def test_the_dialect_is_never_inferred_from_the_base_url():
         ("vllm", _REQUEST, [_TOOL], "tools-with-structured-unsupported"),
         (
             "vllm",
-            StructuredOutputRequest(name="bad name", schema=_SCHEMA),
-            [],
-            "name-not-safe",
-        ),
-        (
-            "vllm",
-            StructuredOutputRequest(name="R", schema=None),
+            StructuredOutputRequest(schema=None),
             [],
             "schema-not-exact-dict",
         ),
-        ("vllm", StructuredOutputRequest(name="R", schema={}), [], "schema-empty"),
+        ("vllm", StructuredOutputRequest(schema={}), [], "schema-empty"),
         (
             "vllm",
-            StructuredOutputRequest(name="R", schema={"a": object()}),
+            StructuredOutputRequest(schema={"a": object()}),
             [],
             "schema-not-serializable",
         ),
         (
             "vllm",
-            StructuredOutputRequest(name="R", schema={"a": float("inf")}),
+            StructuredOutputRequest(schema={"a": float("inf")}),
             [],
             "schema-non-finite-number",
         ),
         (
             "vllm",
-            StructuredOutputRequest(name="R", schema={"a": "A" * 70000}),
+            StructuredOutputRequest(schema={"a": "A" * 70000}),
             [],
             "schema-too-large",
         ),
@@ -273,14 +267,14 @@ def test_structured_adds_exactly_one_key_to_the_legacy_request():
             "vllm",
             {
                 "type": "json_schema",
-                "json_schema": {"name": "Reply", "schema": _SCHEMA},
+                "json_schema": {"name": "structured_output", "schema": _SCHEMA},
             },
         ),
         (
             "sglang",
             {
                 "type": "json_schema",
-                "json_schema": {"name": "Reply", "schema": _SCHEMA},
+                "json_schema": {"name": "structured_output", "schema": _SCHEMA},
             },
         ),
     ],
@@ -349,7 +343,7 @@ def test_a_refusal_carries_no_schema_prompt_or_key_content():
     result = backend.complete_structured(
         [Message(role="user", content=secret_prompt)],
         [],
-        structured=StructuredOutputRequest(name="R", schema={secret_key: object()}),
+        structured=StructuredOutputRequest(schema={secret_key: object()}),
     )
     assert result.refusal == "schema-not-serializable"
     text = repr(result)

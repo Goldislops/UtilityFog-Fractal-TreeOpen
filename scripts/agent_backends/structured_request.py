@@ -65,11 +65,14 @@ environment variable, or a probe.
 ``vllm`` - vLLM @ ``6e448d0ea9bf3d88d898b65449ca6dc2aec170ac``
 ``sglang`` - SGLang @ ``71de97b264b04dcd514cf904003028aefe9775c8``
 
-    {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}}}
+    {"type": "json_schema",
+     "json_schema": {"name": "structured_output", "schema": {...}}}
 
-  Both document the OpenAI nesting including ``name``. The two shapes are
-  byte-identical today and are still built by separate branches, so a future
-  divergence in one cannot be masked by the other.
+  Both document the OpenAI nesting including ``name``. That ``name`` is the
+  fixed constant :data:`STRUCTURED_WIRE_NAME`, not caller data - see "The
+  wire name is not caller data" below. The two shapes are byte-identical
+  today and are still built by separate branches, so a future divergence in
+  one cannot be masked by the other.
 
 ## What this module refuses to be
 
@@ -79,6 +82,29 @@ cost worth naming: vLLM's ``structured_outputs`` route (which replaced the
 removed ``guided_json``) is reachable *only* through ``extra_body``, so it is
 not reachable from here at all. ``response_format`` is the supported path for
 all four runtimes, and it is the only path this module builds.
+
+## The wire name is not caller data
+
+``json_schema.name`` is transmitted to vLLM and SGLang, so whatever it holds
+leaves this process. An earlier revision let the caller supply it and guarded
+it with a local character-class check: exact ``str``, 1..64 characters, drawn
+from ``[A-Za-z0-9_-]``. That alphabet admits ``sk-OMIV2SECRET123456789``. A
+caller who named a schema after a credential, or interpolated one by mistake,
+had it placed on the wire by the very function meant to prevent that.
+
+Two repairs were available and both were rejected before a third was taken.
+Reusing the hardened primitive in ``scripts/open_model/redaction.py`` - which
+does reject that string, because it cross-checks every candidate against the
+secret matcher - is not reachable from here: ``scripts.open_model`` imports
+this package, so importing it back is a genuine import cycle rather than a
+layering preference. Copying its rules into this module would create a second
+secret detector free to drift from the first, which is precisely the failure
+a shared primitive exists to prevent.
+
+So the field stopped being caller data. :data:`STRUCTURED_WIRE_NAME` is a
+fixed constant, ``StructuredOutputRequest`` has no ``name``, and no path
+carries caller-controlled text into ``json_schema.name``. The detector that
+cannot drift is the one that does not need to exist.
 
 ## What sending a request does and does not establish
 
@@ -159,7 +185,6 @@ StructuredRefusal = Literal[
     "dialect-not-exact-str",
     "dialect-unsupported",
     "request-not-exact-type",
-    "name-not-safe",
     "schema-not-exact-dict",
     "schema-empty",
     "schema-not-serializable",
@@ -170,13 +195,15 @@ StructuredRefusal = Literal[
 ]
 """Why a structured request was refused. Complete; safe to log verbatim."""
 
-_NAME_MAX_LEN: Final[int] = 64
-_NAME_ALPHABET: Final[frozenset[str]] = frozenset(
-    "abcdefghijklmnopqrstuvwxyz"
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "0123456789"
-    "_-"
-)
+STRUCTURED_WIRE_NAME: Final[str] = "structured_output"
+"""The exact ``json_schema.name`` sent to vLLM and SGLang. Never caller data.
+
+vLLM and SGLang both require the key, so something must occupy it. A fixed
+constant occupies it with a value that is identical on every call, carries no
+caller text, and therefore cannot leak one. It satisfies the alphabet and
+length both runtimes document for the field.
+"""
+
 _SCHEMA_MAX_CHARS: Final[int] = 65536
 _SCHEMA_MAX_DEPTH: Final[int] = 32
 _SCHEMA_MAX_NODES: Final[int] = 4096
@@ -193,12 +220,13 @@ class StructuredOutputRequest:
     Every check lives in :func:`plan_structured_request`, which refuses
     rather than repairs.
 
-    ``name`` is required for the contract even though only two of the four
-    dialects transmit it; see the recorded decisions in the module docstring
-    of ``scripts/agent_backends/openai_compat_backend.py``.
+    There is deliberately no ``name`` field. vLLM and SGLang transmit a
+    ``json_schema.name``, and a transmitted value that a caller can set is a
+    value a caller can leak a secret through - the module docstring records
+    the case that forced this. The wire name is the fixed constant
+    :data:`STRUCTURED_WIRE_NAME`.
     """
 
-    name: str
     schema: dict[str, Any] = field(default_factory=dict)
 
 
@@ -243,25 +271,6 @@ def is_supported_dialect(value: Any) -> bool:
         or value == "vllm"
         or value == "sglang"
     )
-
-
-def _name_refusal(value: Any) -> Optional[StructuredRefusal]:
-    """Refuse any schema name that is not a short, safe, opaque token.
-
-    Exact ``str`` only, 1..64 characters, drawn from ``[A-Za-z0-9_-]``. The
-    ceiling and alphabet match the constraint OpenAI-compatible servers
-    document for ``json_schema.name``; the point here is that a name is
-    transmitted, so it must not be able to carry a path, a prompt fragment,
-    or a secret.
-    """
-    if type(value) is not str:
-        return "name-not-safe"
-    if not value or len(value) > _NAME_MAX_LEN:
-        return "name-not-safe"
-    for character in value:
-        if character not in _NAME_ALPHABET:
-            return "name-not-safe"
-    return None
 
 
 def _schema_refusal(schema: Any) -> Optional[StructuredRefusal]:
@@ -354,14 +363,14 @@ def build_response_format(
     if dialect == "vllm":
         return {
             "type": "json_schema",
-            "json_schema": {"name": request.name, "schema": schema},
+            "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": schema},
         }
     if dialect == "sglang":
         # Byte-identical to vLLM today; kept as its own branch so a future
         # divergence cannot be hidden behind a shared one.
         return {
             "type": "json_schema",
-            "json_schema": {"name": request.name, "schema": schema},
+            "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": schema},
         }
     return None
 
@@ -384,8 +393,10 @@ def plan_structured_request(
     4. ``request-not-exact-type``   - not exactly a
        :class:`StructuredOutputRequest`.
     5. ``tools-with-structured-unsupported`` - see below.
-    6. ``name-not-safe``            - see :func:`_name_refusal`.
-    7. ``schema-*``                 - see :func:`_schema_refusal`.
+    6. ``schema-*``                 - see :func:`_schema_refusal`.
+
+    There is no name check because there is no caller-supplied name; see
+    "The wire name is not caller data" in the module docstring.
 
     On the tool refusal: the interaction between a tool declaration and a
     ``response_format`` constraint was **not** verified at the pinned
@@ -407,10 +418,6 @@ def plan_structured_request(
         return StructuredRequestPlan(
             ok=False, refusal="tools-with-structured-unsupported"
         )
-
-    name_refusal = _name_refusal(request.name)
-    if name_refusal is not None:
-        return StructuredRequestPlan(ok=False, refusal=name_refusal)
 
     schema_refusal = _schema_refusal(request.schema)
     if schema_refusal is not None:
@@ -440,6 +447,7 @@ by side, and so a drift test can assert the mirror still matches the code.
 
 __all__ = [
     "DIALECT_WIRE_SHAPES",
+    "STRUCTURED_WIRE_NAME",
     "SUPPORTED_DIALECTS",
     "StructuredDialect",
     "StructuredOutputRequest",

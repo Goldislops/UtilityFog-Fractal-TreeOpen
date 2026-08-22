@@ -34,7 +34,7 @@ from scripts.open_model.structured_exchange import (
 
 
 _SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
-_REQUEST = StructuredOutputRequest(name="Reply", schema=_SCHEMA)
+_REQUEST = StructuredOutputRequest(schema=_SCHEMA)
 _MESSAGES = [Message(role="user", content="hello")]
 _TOOL = ToolSpec(name="t", description="d", input_schema={"type": "object"})
 
@@ -201,9 +201,7 @@ def test_no_request_is_sent_when_the_exchange_refuses():
     client = RecordingClient()
     backend = OpenAICompatBackend(model="m", client=client, dialect="vllm")
     result = request_structured_json(
-        backend, _MESSAGES, [], structured=StructuredOutputRequest(
-            name="R", schema={}
-        )
+        backend, _MESSAGES, [], structured=StructuredOutputRequest(schema={})
     )
     assert result.request_refusal == "schema-empty"
     assert client.requests == []
@@ -355,7 +353,7 @@ def test_a_wrong_typed_extra_keyed_response_still_validates():
     because it checks JSON-object syntax and required-key presence and
     nothing else. Recorded as a control so the limit cannot be forgotten.
     """
-    request = StructuredOutputRequest(name="Reply", schema=_STRICT_SCHEMA)
+    request = StructuredOutputRequest(schema=_STRICT_SCHEMA)
     result = request_structured_json(
         _backend(text='{"ok": "wrong type", "extra": 123}'),
         _MESSAGES,
