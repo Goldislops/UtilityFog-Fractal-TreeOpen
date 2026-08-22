@@ -22,6 +22,10 @@ What this package adds, because none of it existed:
     no-eligible-backend outcome, explicit escalation reasons, and no silent
     fallback to a remote or cloud service
   - ``structured``   - total, non-disclosing validation of structured output
+  - ``structured_exchange`` - OMI-V2. Asks a runtime for schema-constrained
+    JSON through the backend's closed request contract, then checks what came
+    back with ``structured`` above. It lives here, not in the backend package,
+    because the validator lives here and the imports run one way only.
   - ``redaction``    - secret scrubbing for operator notes, plus the
     diagnostic record shape that structurally has nowhere to put a prompt
   - ``evaluation``   - a hermetic harness driven entirely by in-process
@@ -92,6 +96,11 @@ from scripts.open_model.structured import (
     StructuredOutcome,
     validate_structured_output,
 )
+from scripts.open_model.structured_exchange import (
+    ExchangeRefusal,
+    StructuredExchange,
+    request_structured_json,
+)
 
 __all__ = [
     "AvailabilityState",
@@ -106,6 +115,7 @@ __all__ = [
     "EscalationReason",
     "EvaluationCase",
     "EvaluationRecord",
+    "ExchangeRefusal",
     "ExecutionLocality",
     "HermeticViolation",
     "LicenceClass",
@@ -116,6 +126,7 @@ __all__ = [
     "ResourceClass",
     "RoutingDecision",
     "RuntimeKind",
+    "StructuredExchange",
     "StructuredFailure",
     "StructuredOutcome",
     "SupportState",
@@ -128,6 +139,7 @@ __all__ = [
     "is_safe_token",
     "redact",
     "register_stub",
+    "request_structured_json",
     "route",
     "run_case",
     "run_suite",

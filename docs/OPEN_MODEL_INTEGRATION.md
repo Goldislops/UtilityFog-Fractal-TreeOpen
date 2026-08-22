@@ -1,20 +1,29 @@
-# OPEN_MODEL_INTEGRATION.md — OMI-V1
+# OPEN_MODEL_INTEGRATION.md — OMI-V1 and OMI-V2
 
-> **Status**: implemented foundation + dated source matrix. Package
-> [`scripts/open_model/`](../scripts/open_model/).
+> **Status**: implemented foundation + dated source matrix (OMI-V1, §§1–15),
+> plus a closed structured-output request contract (OMI-V2, §16). Packages
+> [`scripts/open_model/`](../scripts/open_model/) and, for OMI-V2 only,
+> [`scripts/agent_backends/structured_request.py`](../scripts/agent_backends/structured_request.py).
 >
 > **What this is NOT.** No model has been downloaded, installed, served,
 > benchmarked, or run in producing this document or the code it describes. No
 > endpoint was contacted. No package was installed. Nothing here is a
 > performance result or a recommendation to deploy a particular model. The
 > matrix below is *metadata read off vendors' own pages on 2026-08-22*, and
-> metadata is not approval.
+> metadata is not approval. The OMI-V2 wire shapes in §16 are read from each
+> runtime's own repository at a pinned revision — also metadata, also not a
+> claim that any of it was executed.
 >
-> This package sits **above** the merged agent-backend seam in
-> [`scripts/agent_backends/`](../scripts/agent_backends/) and does not modify
-> it, per the standing boundary in
-> [`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](LOCAL_MODEL_DEPLOYMENT_INCEPTION.md):
-> *reuse, don't reinvent; no second transport stack.*
+> **On modifying the backend seam.** OMI-V1 sat entirely **above** the merged
+> agent-backend seam in [`scripts/agent_backends/`](../scripts/agent_backends/)
+> and modified nothing in it. That is no longer true of the repository as a
+> whole: **OMI-V2 deliberately modified `OpenAICompatBackend`** — see §16 for
+> what changed and why, and §8 for the superseded statement it replaces. The
+> standing boundary in
+> [`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](LOCAL_MODEL_DEPLOYMENT_INCEPTION.md)
+> — *reuse, don't reinvent; no second transport stack* — is unaffected and
+> still holds: OMI-V2 adds one request field to the existing seam and invents
+> no transport, no client, and no parallel backend.
 
 ## 1. Why this exists
 
@@ -508,11 +517,18 @@ will escalate rather than try its luck.
   tool calling is enabled would require contacting it, which is outside this
   work's authority — and, per §5, `/v1/models` cannot answer the question
   anyway because tool support is a launch-flag property.
-- **No changes to `OpenAICompatBackend`.** It still has no
-  `response_format`, `json_schema`, or `seed` support. Adding a normalised
+- **No changes to `OpenAICompatBackend`.** ~~It still has no
+  `response_format`, `json_schema`, or `seed` support.~~ Adding a normalised
   structured-output parameter across the four runtime dialects in §5 is the
   obvious next package; it is not this one, and doing it here would have
   meant editing a merged, tested backend outside the stated scope.
+
+  > **Superseded by OMI-V2 (§16), 2026-08-23.** This bullet describes OMI-V1
+  > accurately and is kept as written rather than rewritten. It is no longer
+  > true of the repository: `OpenAICompatBackend` now has a closed
+  > `response_format` path across exactly the four dialects named above,
+  > added as its own authorised package. `seed` remains unsupported and
+  > explicitly out of scope.
 - **No async, streaming, or batching.** Out of scope.
 - **No cost, latency, or quality model.** `resource_class` is a *declared*
   band authored by a human, not a measurement. This package benchmarks
@@ -691,3 +707,176 @@ of trust data, and no amount of care inside this module prevents them.
 
 The distinction is the whole point: a reader should be able to tell which
 attacks this design stops and which it merely does not pretend to.
+
+## 16. OMI-V2 — the structured-output request contract (2026-08-23)
+
+OMI-V1 stopped at §8's third bullet: `OpenAICompatBackend` could not ask a
+runtime for schema-constrained decoding. OMI-V2 adds exactly that, for
+exactly four runtimes, through exactly one request field.
+
+### 16.1 Why an adapter is needed at all
+
+The four self-hosted runtimes in §5 all speak the OpenAI
+`/v1/chat/completions` shape and all four accept a `response_format`. They do
+not agree on where the schema goes. That disagreement is the whole reason
+this is a package rather than a one-line change.
+
+| Dialect | Schema path | `name` sent | Evidence strength |
+|---|---|---|---|
+| `llama-cpp` | `response_format.schema` (**flat**) | no — no such key exists | **Documented** |
+| `ollama` | `response_format.json_schema.schema` | no — no such field exists | **Source only** |
+| `vllm` | `response_format.json_schema.{name,schema}` | yes | **Documented** |
+| `sglang` | `response_format.json_schema.{name,schema}` | yes | **Documented** |
+
+Pinned revisions, each read directly:
+
+- llama.cpp `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` — `tools/server/README.md`
+  documents the schema flat under `response_format`, for both the
+  `json_object` and `json_schema` types. No `name` key appears.
+- Ollama `b7871fc0d1d82fe109536efa3e0e8e411c766c75` — `openai/openai.go`.
+- vLLM `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac`.
+- SGLang `71de97b264b04dcd514cf904003028aefe9775c8` — which additionally
+  documents that only one constraint parameter (`json_schema`, `regex`, or
+  `ebnf`) may be sent per request. This package sends only `json_schema`.
+
+### 16.2 The Ollama shape is source-derived, and that is a real difference
+
+At the pinned revision Ollama's documentation contains **only** a checklist
+line stating that `response_format` is supported. It specifies no shape. The
+mapping used here therefore comes from the source, not from documentation:
+
+```go
+type ResponseFormat struct {
+    Type       string      `json:"type"`
+    JsonSchema *JsonSchema `json:"json_schema,omitempty"`
+}
+type JsonSchema struct {
+    Schema json.RawMessage `json:"schema"`
+}
+```
+
+A flat `schema` is silently ignored; there is no `name` field to populate.
+This is weaker evidence than the other three rows and is labelled as such
+everywhere it is relied upon. It is not a claim about any other revision.
+
+### 16.3 Two divergences, and how each was decided
+
+**llama.cpp is emitted flat only.** Its server source also reads the nested
+`json_schema.schema` path, with the flat form taking precedence, so emitting
+the schema at *both* paths would be maximally compatible. That was rejected.
+The pinned README documents the flat form, and shotgunning both paths would
+mean sending a key the documentation for that runtime does not define, in
+order to hedge a question the documentation already answers. Each dialect
+commits to one path; a test asserts no dialect emits a schema at both.
+
+**`name` is validated always, transmitted twice.** The request contract
+requires a `name` for every dialect so the caller-facing shape is uniform,
+but only vLLM and SGLang have a field to receive it. llama.cpp and Ollama
+have no such key and are sent none. Validating a field that two dialects
+discard is the cost of one contract instead of four.
+
+### 16.4 What sending a request does not establish
+
+Emitting `response_format` asks for constrained decoding. It does not prove
+constrained decoding happened, and nothing in this package reports that it
+did. Ollama makes the gap concrete:
+
+```go
+switch strings.ToLower(strings.TrimSpace(r.ResponseFormat.Type)) {
+case "json_object": ...
+case "json_schema":
+    if r.ResponseFormat.JsonSchema != nil { format = ...Schema }
+}
+```
+
+An unrecognised `type`, or a `json_schema` type with the nesting absent,
+leaves the decoding format unset and yields unconstrained output **with no
+error**. A caller treating a successful round trip as proof of conformance
+would be wrong exactly there and would have no way to notice.
+
+So the backend result field is named `response_format_sent`, which is what it
+records. Conformance is established only by validating the response, which
+`scripts/open_model/structured_exchange.py` does against the **existing**
+`scripts/open_model/structured.py`. No second validator was written.
+
+### 16.5 The two validators run in opposite directions
+
+`structured.py` parses an untrusted **response payload string** a model
+emitted. The request-side checks in `structured_request.py` walk a
+caller-supplied **JSON Schema document** about to be serialised outbound.
+Different artifact, opposite direction, no shared decision — which is why one
+is not a reimplementation of the other. The reuse is proved two ways in
+`tests/test_omi_v2_exchange.py`: structurally, by reading the import; and
+behaviourally, by monkeypatching the validator and observing the exchange's
+verdict change, which a private copy could not do.
+
+### 16.6 Closures, and what they cost
+
+- **The dialect is explicit.** It is a constructor parameter and is never
+  inferred from `base_url`, installed software, environment variables, or a
+  probe. None of those identify a runtime: a URL is caller-chosen text, a
+  local port says nothing about what is listening on it, and probing would
+  mean contacting an endpoint in order to decide how to talk to it. A
+  present-but-unrecognised dialect raises at **construction**, before any SDK
+  client is built.
+- **There is no escape hatch.** No `extra_body`, no `**kwargs` passthrough,
+  no provider-specific field. This has a real cost worth naming: vLLM's
+  `structured_outputs` route (which replaced the removed `guided_json` in
+  v0.12.0) is reachable *only* through `extra_body` and is therefore not
+  reachable from here at all. `response_format` is supported by all four
+  runtimes and is the only path built.
+- **Tools and structured output are refused together.** That combination was
+  not verified at any of the four pinned revisions, and tool-choice work is
+  out of scope. Refusing states the limit of the evidence; sending both and
+  describing the result as supported would not. This is a claim about what
+  was checked, not about what the runtimes can do.
+- **Diagnostics carry nothing.** Every refusal is one token from a closed
+  vocabulary. No schema fragment, key name, prompt, response, offset, length,
+  type name, or exception text reaches a result.
+- **The trust path resolves no rebindable name.** `build_response_format`
+  dispatches on inlined string constants and reads neither
+  `SUPPORTED_DIALECTS` nor `DIALECT_WIRE_SHAPES`; both are exported as
+  **inspection mirrors only**, with a drift guard asserting they still match
+  the code. Rebinding the membership check cannot open a fifth dialect,
+  because the guard and the dispatch must both be satisfied.
+
+### 16.7 Interface decisions, recorded rather than taken silently
+
+Five decisions were unavoidable. Each is the narrowest option that still
+delivered the package; all five are also recorded in the module docstring of
+`scripts/agent_backends/openai_compat_backend.py`.
+
+| # | Decision | Why not the alternative |
+|---|---|---|
+| 1 | Structured output is a new method, `complete_structured()`. | Adding a `structured=` keyword to `AgentBackend.complete()` would change the ABC every backend implements, including two out of scope. The ABC is untouched. |
+| 2 | It returns a new `StructuredCompletion`, not an `AgentResponse`. | A refusal must be distinguishable from model output, and `AgentResponse` has nowhere to put a refusal code that a caller could not mistake for content. |
+| 3 | Response validation lives in `scripts/open_model/`, not in the backend. | The validator to be reused lives above the backend package, which imports downward only. Importing it from the backend would invert the layering the package docstring states. |
+| 4 | `dialect` is a constructor parameter, and an invalid value raises. | It is configuration, not a per-call argument, and an explicitly wrong value is a configuration error worth failing at the point of configuration. |
+| 5 | Tools plus structured output is refused. | See §16.6. |
+
+Out of scope and untouched: tool-choice semantics, seed normalisation,
+capability auto-detection, streaming, async, batching, TensorRT-LLM, and NIM.
+No live backend is registered; the catalogue and registry remain inert. No
+prompt, response, schema, or secret enters any persisted evaluation or
+routing record — OMI-V2 persists nothing at all.
+
+### 16.8 What was tested
+
+186 hermetic tests across three files, injected clients only — no network, no
+key, no endpoint, no download.
+
+| File | Tests | Covers |
+|---|---|---|
+| `tests/test_omi_v2_structured_request.py` | 98 | Exact wire shape per dialect; the closed dialect gate; name, schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
+| `tests/test_omi_v2_backend.py` | 48 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
+| `tests/test_omi_v2_exchange.py` | 40 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+
+The ordering control is the load-bearing one. `ExplodingClient` raises on
+every attribute access, so a refusal returned while the backend holds one
+proves the refusal completed before the SDK was reached — a refused request
+never becomes a billed, logged, or rate-limited call. A guard test asserts
+`ExplodingClient` actually fires, so that proof cannot go vacuous.
+
+**Same-author evidence.** Every test here was written by the same agent that
+wrote the code under test. It demonstrates internal consistency, not
+independent acceptance.
