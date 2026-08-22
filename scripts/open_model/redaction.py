@@ -109,6 +109,130 @@ def redact(value: Any, *, max_chars: int = NOTE_MAX_CHARS) -> str:
     return text
 
 
+SAFE_TOKEN_MAX_LEN: Final[int] = 64
+SAFE_REFERENCE_MAX_LEN: Final[int] = 160
+
+INVALID_IDENTIFIER: Final[str] = "invalid-identifier"
+"""Fixed stand-in for a rejected identifier. Carries none of the input."""
+
+_SAFE_TOKEN: Final[Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+"""Short identifiers: case ids, backend names, JSON key names.
+
+Excludes whitespace, quotes, control characters, ``/``, ``:`` and ``@``, so a
+filesystem path, a URL, an email address, or a sentence of prose cannot be
+smuggled through one of these fields.
+"""
+
+_SAFE_REFERENCE: Final[Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
+"""Longer references: model ids, variant ids, revisions.
+
+Necessarily admits ``/`` and ``:`` because model ids look like
+``org/model-name``. The redaction cross-check below is what keeps a
+drive-letter path such as ``C:/Users/...`` out of these fields.
+"""
+
+
+def is_safe_token(value: Any, *, max_len: int = SAFE_TOKEN_MAX_LEN) -> bool:
+    """True only for a short, bounded, non-secret-shaped identifier.
+
+    Three independent conditions, all required:
+
+    1. exactly built-in ``str``, non-empty, within ``max_len``;
+    2. matches the closed ``_SAFE_TOKEN`` character class;
+    3. **survives ``redact`` unchanged.**
+
+    Condition 3 is the one that matters. The character class alone would
+    admit ``sk-ABCDEFGH12345678`` - it is all letters, digits and hyphens -
+    so every candidate identifier is additionally run through the secret
+    matcher and rejected if redaction would have altered it. An identifier
+    that trips any secret pattern is refused rather than stored.
+    """
+    if type(value) is not str:
+        return False
+    if not value or len(value) > max_len:
+        return False
+    if _SAFE_TOKEN.match(value) is None:
+        return False
+    return redact(value, max_chars=max_len) == value
+
+
+def is_safe_reference(value: Any, *, max_len: int = SAFE_REFERENCE_MAX_LEN) -> bool:
+    """True only for a bounded, non-secret-shaped model/variant/revision id.
+
+    Same three conditions as ``is_safe_token`` against the wider
+    ``_SAFE_REFERENCE`` class. The redaction cross-check still rejects
+    drive-letter and POSIX home paths, which the wider class would otherwise
+    admit.
+    """
+    if type(value) is not str:
+        return False
+    if not value or len(value) > max_len:
+        return False
+    if _SAFE_REFERENCE.match(value) is None:
+        return False
+    return redact(value, max_chars=max_len) == value
+
+
+def safe_token_or(value: Any, fallback: str = INVALID_IDENTIFIER) -> str:
+    """``value`` when it is a safe token, else the fixed ``fallback``."""
+    if is_safe_token(value):
+        return value
+    return fallback
+
+
+DIAGNOSTIC_EVENTS: Final[frozenset[str]] = frozenset(
+    {
+        "route-selected",
+        "route-refused",
+        "registration-refused",
+        "construction-refused",
+        "structured-output-refused",
+        "evaluation-completed",
+        "invalid-event",
+    }
+)
+"""Closed vocabulary for ``DiagnosticRecord.event``.
+
+A record cannot carry an event string that is not one of these, so the field
+has no capacity to hold arbitrary text at all.
+"""
+
+ESCALATION_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "no-backend-registered",
+        "requirements-invalid",
+        "model-id-missing",
+        "backend-unavailable",
+        "availability-unknown",
+        "locality-not-local",
+        "locality-unknown",
+        "structured-output-unsupported",
+        "structured-output-unknown",
+        "tool-calling-unsupported",
+        "tool-calling-unknown",
+        "context-below-minimum",
+        "context-unknown",
+        "licence-not-allowed",
+        "licence-unknown",
+        "licence-source-unpinned",
+        "runtime-not-allowed",
+        "runtime-unknown",
+        "variant-unspecified",
+        "repository-revision-unpinned",
+        "artifact-digest-missing",
+    }
+)
+"""Closed vocabulary for every escalation reason this package emits.
+
+Held here, in the disclosure-control module, rather than in ``routing``,
+because every component that stores or reports a reason must agree on the
+same closed set - and because a record must be able to reject a
+non-vocabulary reason without importing the routing layer.
+``scripts.open_model.routing.EscalationReason`` mirrors this set, and
+``tests/test_open_model_routing.py`` asserts the two stay identical.
+"""
+
+
 def describe_size(value: Any) -> str:
     """The only sanctioned way to reference model-facing text in a diagnostic.
 
@@ -126,11 +250,24 @@ def describe_size(value: Any) -> str:
 class DiagnosticRecord:
     """One operator-facing diagnostic line. No prompt field exists, by design.
 
-    ``event`` and ``reasons`` come from this package's closed vocabularies and
-    are safe to log verbatim. ``backend`` is an operator-authored allowlist
-    name. ``note`` is the one free-text field and is redacted and bounded at
-    construction, so an unredacted note cannot exist even transiently on a
-    constructed record.
+    Every field is closed or bounded at construction, so an unredacted or
+    arbitrary value cannot exist on a constructed record even transiently:
+
+    - ``event``    must be a member of ``DIAGNOSTIC_EVENTS``; anything else
+      becomes the literal ``"invalid-event"``. The field therefore has no
+      capacity to hold arbitrary text at all.
+    - ``backend``  must be a safe token - bounded, closed character class,
+      and unchanged by ``redact`` - else it becomes ``INVALID_IDENTIFIER``.
+      A path, URL, email, bearer string, or provider-prefixed key is refused
+      rather than stored.
+    - ``reasons``  keeps only members of ``ESCALATION_REASONS``, in order,
+      capped; non-members are dropped rather than truncated, so a dropped
+      value leaves no fragment behind.
+    - ``note``     is the single free-text field: redacted and bounded.
+
+    Corrected after audit: the previous version bounded these fields by
+    slicing only, which meant ``event``, ``backend`` and ``reasons`` could
+    each retain up to 64-128 characters of arbitrary caller text.
     """
 
     event: str
@@ -140,25 +277,43 @@ class DiagnosticRecord:
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
-        set_(self, "event", self.event[:64] if type(self.event) is str else "")
-        set_(self, "backend", self.backend[:128] if type(self.backend) is str else "")
+        if type(self.event) is str and self.event in DIAGNOSTIC_EVENTS:
+            set_(self, "event", self.event)
+        else:
+            set_(self, "event", "invalid-event")
+        # Exact-type check first: a bare `if not self.backend` would run a
+        # hostile __bool__ before we ever reached the identifier gate.
+        if type(self.backend) is str and not self.backend:
+            set_(self, "backend", "")
+        else:
+            set_(self, "backend", safe_token_or(self.backend))
         if type(self.reasons) is tuple or type(self.reasons) is list:
-            set_(
-                self,
-                "reasons",
-                tuple(r for r in self.reasons if type(r) is str)[:32],
-            )
+            kept: list[str] = []
+            for reason in self.reasons:
+                if len(kept) >= 32:
+                    break
+                if type(reason) is str and reason in ESCALATION_REASONS:
+                    kept.append(reason)
+            set_(self, "reasons", tuple(kept))
         else:
             set_(self, "reasons", ())
         set_(self, "note", redact(self.note))
 
 
 __all__ = [
+    "DIAGNOSTIC_EVENTS",
+    "ESCALATION_REASONS",
+    "INVALID_IDENTIFIER",
     "DiagnosticRecord",
     "NOTE_MAX_CHARS",
     "REDACTED_EMAIL",
     "REDACTED_PATH",
     "REDACTED_SECRET",
+    "SAFE_REFERENCE_MAX_LEN",
+    "SAFE_TOKEN_MAX_LEN",
     "describe_size",
+    "is_safe_reference",
+    "is_safe_token",
     "redact",
+    "safe_token_or",
 ]
