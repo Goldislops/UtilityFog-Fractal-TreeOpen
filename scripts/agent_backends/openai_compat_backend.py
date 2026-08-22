@@ -135,8 +135,9 @@ class StructuredCompletion:
     `response_format_sent` is named for what it actually records: that the
     request carried a `response_format` object. It is NOT a claim that the
     runtime honoured the constraint, and nothing in this module reports such
-    a claim. Whether the output conforms is decided by validating the output,
-    which happens above this layer.
+    a claim. The output is validated above this layer, which establishes
+    that it is a usable JSON object - not that it conforms to the schema
+    that was sent. No layer of this package establishes conformance.
 
     On refusal, `refusal` is one token from the closed vocabulary in
     `structured_request.StructuredRefusal` and `response` is None. No schema
@@ -333,9 +334,11 @@ class OpenAICompatBackend(AgentBackend):
         whether a `response_format` was *sent*, which is not the same as the
         runtime having honoured it - see the module docstring of
         `structured_request.py` for the Ollama case where an unrecognised
-        request degrades silently to unconstrained output. Conformance is
-        decided one layer up by `scripts/open_model/structured_exchange.py`,
-        which reuses `scripts/open_model/structured.py`.
+        request degrades silently to unconstrained output. The response is
+        checked one layer up by `scripts/open_model/structured_exchange.py`,
+        which reuses `scripts/open_model/structured.py` - and that check
+        establishes JSON-object and required-key usability, NOT schema
+        conformance. See `StructuredExchange.schema_conformance`.
         """
         # Gate first. `bool(tools)` is the SAME truth test `_build_request`
         # uses to decide whether to attach tools, so the gate cannot disagree

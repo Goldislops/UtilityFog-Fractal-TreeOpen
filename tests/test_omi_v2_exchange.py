@@ -330,3 +330,103 @@ def test_a_valid_success_still_constructs():
     assert StructuredExchange(
         ok=True, value={"a": 1}, response_format_sent=True
     ).ok is True
+
+
+
+# == gate 2: usability is not schema conformance =============================
+
+
+_STRICT_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+"""Demands a boolean `ok` and forbids extra keys. Used to make the gap
+concrete: the exchange never compares a response against this."""
+
+
+def test_a_wrong_typed_extra_keyed_response_still_validates():
+    """The exact counterexample from the independent audit.
+
+    `{"ok": "wrong type", "extra": 123}` violates _STRICT_SCHEMA twice: `ok`
+    is a string where a boolean is demanded, and `extra` is present where no
+    additional properties are allowed. The exchange reports ok=True anyway,
+    because it checks JSON-object syntax and required-key presence and
+    nothing else. Recorded as a control so the limit cannot be forgotten.
+    """
+    request = StructuredOutputRequest(name="Reply", schema=_STRICT_SCHEMA)
+    result = request_structured_json(
+        _backend(text='{"ok": "wrong type", "extra": 123}'),
+        _MESSAGES,
+        [],
+        structured=request,
+        required_keys=("ok",),
+    )
+    assert result.ok is True
+    assert dict(result.value) == {"ok": "wrong type", "extra": 123}
+    # ...and the result says so in its own state, not merely in prose.
+    assert result.schema_conformance == "unverified"
+
+
+def test_schema_conformance_is_unverified_on_every_reachable_path():
+    """ok, refused, and unusable all report the same closed token."""
+    ok = _exchange(text='{"ok": true}')
+    unusable = _exchange(text="not json at all")
+    refused = request_structured_json(
+        object(), _MESSAGES, [], structured=_REQUEST
+    )
+    assert ok.ok is True
+    assert unusable.ok is False and unusable.response_failure is not None
+    assert refused.ok is False and refused.request_refusal is not None
+    for result in (ok, unusable, refused):
+        assert result.schema_conformance == "unverified"
+
+
+@pytest.mark.parametrize(
+    "value", ["verified", "conformant", "", "unverified ", None, True, 1]
+)
+def test_no_other_conformance_value_can_be_constructed(value):
+    """The vocabulary is closed at runtime, not merely in the type hint.
+
+    A future real conformance check has to widen this deliberately; it cannot
+    arrive by someone setting a field.
+    """
+    with pytest.raises(ValueError):
+        StructuredExchange(
+            ok=True,
+            value={"ok": True},
+            response_format_sent=True,
+            schema_conformance=value,
+        )
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["scripts.open_model.structured", "scripts.open_model.structured_exchange"],
+)
+def test_the_package_ships_no_json_schema_validator(module_name):
+    """Structural control: no conformance checker was added or hand-rolled.
+
+    Gate 2 permitted either a closed validated subset or an explicit
+    unverified report. The second was taken, so there must be no third-party
+    schema dependency behind the `unverified` token. Checked over the import
+    AST rather than the raw text, because the source *discusses* jsonschema
+    in prose and a substring search would match that and pass vacuously.
+    """
+    import ast
+    import importlib
+    import inspect
+
+    tree = ast.parse(inspect.getsource(importlib.import_module(module_name)))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+
+    assert "jsonschema" not in imported
+    assert imported <= {
+        "__future__", "dataclasses", "json", "types", "typing", "scripts",
+    }, imported

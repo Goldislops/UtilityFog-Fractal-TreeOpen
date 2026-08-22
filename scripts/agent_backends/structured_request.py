@@ -94,10 +94,18 @@ Ollama makes the gap concrete: its handler is
 
 An unrecognised ``type``, or a ``json_schema`` type with a missing nesting,
 leaves the decoding format unset and produces unconstrained output with no
-error. Conformance is established only by validating what came back, which
-happens one layer up in ``scripts/open_model/structured_exchange.py`` against
+error. What came back is checked one layer up in
+``scripts/open_model/structured_exchange.py`` against
 ``scripts/open_model/structured.py``. This module does not validate responses
 and does not contain a response validator.
+
+That check does **not** establish schema conformance, and this module does
+not claim it does. It establishes that the payload is a JSON object carrying
+every required key - usability, not conformance. A response of
+``{"ok": "wrong type", "extra": 123}`` satisfies it against a schema
+demanding a boolean ``ok`` and no additional properties. Nothing in this
+package compares a response against the schema it sent; the outbound schema
+is validated for safe serialisation only.
 
 ## Direction of the two validators
 

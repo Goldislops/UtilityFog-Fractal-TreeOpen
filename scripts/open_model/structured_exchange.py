@@ -33,6 +33,25 @@ vocabularies are kept separate rather than merged, because "the runtime was
 never asked" and "the runtime was asked and answered badly" are different
 facts about a system and an operator needs to tell them apart.
 
+## What success here does NOT mean
+
+Success means *usable*, not *conformant*. ``validate_structured_output``
+checks JSON-object syntax and the presence of required keys. It does not
+compare the payload against the schema that was sent, because this package
+carries no JSON Schema implementation and will not hand-roll one.
+
+The gap is concrete: against a schema demanding a boolean ``ok`` and no
+additional properties, the payload ``{"ok": "wrong type", "extra": 123}``
+passes - wrong type, extra key, still ``ok=True``. An earlier revision of
+this package described that check as establishing conformance, which was
+false.
+
+:class:`StructuredExchange` therefore carries a ``schema_conformance`` field
+whose only permitted value is ``"unverified"``. It is closed to that single
+token so the limit is visible in the result itself rather than only in prose,
+and so any future real conformance check has to widen the vocabulary
+deliberately.
+
 ## Nothing is persisted and nothing is disclosed
 
 This module writes no file, opens no socket, and touches no evaluation or
@@ -79,7 +98,8 @@ class StructuredExchange:
     Exactly one of three states, distinguishable without inspecting content:
 
     - **ok** - a request was sent and the response parsed as a JSON object
-      carrying every required key. ``value`` is a read-only view of it.
+      carrying every required key. ``value`` is a read-only view of it. This
+      is *usability*, not schema conformance - see ``schema_conformance``.
     - **refused** - no request was sent. ``request_refusal`` says why.
       ``response_format_sent`` is False.
     - **unusable** - a request was sent and the answer did not validate.
@@ -97,8 +117,25 @@ class StructuredExchange:
     missing_key_indices: tuple[int, ...] = ()
     dialect: Optional[str] = None
     response_format_sent: bool = False
+    schema_conformance: Literal["unverified"] = "unverified"
+    """Always ``"unverified"``. Closed to that one token on purpose.
+
+    Nothing in this package checks a response against the schema that was
+    sent. ``ok=True`` means the payload parsed as a JSON object and carried
+    every required key - usability, not conformance. ``{"ok": "wrong type",
+    "extra": 123}`` satisfies it against a schema demanding a boolean ``ok``
+    and no additional properties.
+
+    Carrying the limit as a field rather than only as prose means a caller
+    reading the result cannot miss it, and a future conformance check cannot
+    arrive silently: it has to widen this vocabulary, in the open.
+    """
 
     def __post_init__(self) -> None:
+        if self.schema_conformance != "unverified":
+            raise ValueError(
+                "schema conformance is never established by this package"
+            )
         if self.ok:
             if self.request_refusal is not None or self.response_failure is not None:
                 raise ValueError("a successful exchange cannot carry a failure")
