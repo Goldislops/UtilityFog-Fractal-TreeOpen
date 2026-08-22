@@ -65,7 +65,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Optional
 
-from scripts.open_model.redaction import is_safe_reference, is_safe_token
+from scripts.open_model.redaction import (
+    is_commit_revision,
+    is_safe_reference,
+    is_safe_revision,
+    is_safe_token,
+)
 
 
 # -- vocabulary --------------------------------------------------------------
@@ -256,6 +261,32 @@ def _exact_reference(value: Any) -> str:
     return ""
 
 
+def _exact_revision(value: Any) -> str:
+    """Keep a full commit id, or a tag/branch-shaped safe reference.
+
+    Corrected after audit: this previously reused the generic reference
+    gate, which rejected ordinary 40-character git SHAs because the
+    long-opaque-run secret rule matched them. See
+    ``redaction.is_commit_revision`` for why the exemption is narrow.
+    """
+    if is_safe_revision(value):
+        return value
+    return ""
+
+
+def _exact_artifact_path(value: Any) -> str:
+    """Keep a repository-relative file path, or ``""``.
+
+    Uses the reference gate, which admits ``/`` for subdirectories while
+    the redaction cross-check still refuses absolute drive-letter and
+    POSIX home paths - a repository-relative path is what belongs here,
+    never a local filesystem location.
+    """
+    if is_safe_reference(value):
+        return value
+    return ""
+
+
 def _exact_digest(value: Any) -> str:
     """Keep ``value`` only when it is exactly ``sha256:`` + 64 lowercase hex.
 
@@ -341,6 +372,7 @@ class ModelCapabilities:
     model_id: str
     variant_id: str = ""
     repository_revision: str = ""
+    artifact_path: str = ""
     artifact_digest: str = ""
     locality: ExecutionLocality = "unknown"
     availability: AvailabilityState = "unknown"
@@ -366,7 +398,7 @@ class ModelCapabilities:
         # matcher unchanged, so a path or credential cannot ride in here.
         set_(self, "model_id", _exact_reference(self.model_id))
         set_(self, "variant_id", _exact_reference(self.variant_id))
-        set_(self, "repository_revision", _exact_reference(self.repository_revision))
+        set_(self, "repository_revision", _exact_revision(self.repository_revision))
         set_(self, "artifact_digest", _exact_digest(self.artifact_digest))
         set_(self, "licence_source_url", _exact_https_url(self.licence_source_url))
         set_(self, "licence_revision", _exact_reference(self.licence_revision))
@@ -434,8 +466,10 @@ class ModelCapabilities:
             unresolved.append("variant_id")
         if not self.repository_revision:
             unresolved.append("repository_revision")
-        if self.quantisation and not self.artifact_digest:
+        if self.artifact_path and not self.artifact_digest:
             unresolved.append("artifact_digest")
+        if self.is_artifact_bearing() and not self.is_byte_pinned():
+            unresolved.append("artifact_pin")
         if not self.licence_source_url:
             unresolved.append("licence_source_url")
         if not self.licence_revision:
@@ -457,6 +491,39 @@ class ModelCapabilities:
         if self.licence_class == "unknown":
             unresolved.append("licence_class")
         return tuple(unresolved)
+
+    def is_artifact_bearing(self) -> bool:
+        """True when this descriptor designates real files somewhere.
+
+        Derived from the declared runtimes rather than from a separate
+        flag an author could forget to set: anything served by a real
+        runtime is backed by files that need pinning, while the
+        in-process double is this repository's own code and has no
+        artifact to digest.
+        """
+        return any(runtime != "in-process-stub" for runtime in self.runtimes)
+
+    def is_byte_pinned(self) -> bool:
+        """True when the bytes this descriptor refers to are pinned.
+
+        Two admissible forms, and the requirement no longer keys off
+        ``quantisation`` (the audit finding):
+
+        - a named single file plus its ``sha256`` digest, which is the
+          right pin for one-file variants such as a GGUF build; or
+        - a **full commit id** in ``repository_revision``, which pins
+          every file in the tree at once and is the only coherent pin
+          for a sharded variant. Granite 4.1 8B BF16, for instance, is
+          four safetensors shards - there is no single file whose
+          digest would mean anything, while the commit id covers all
+          four exactly.
+
+        A symbolic revision such as a branch name is not a pin, because
+        it can be moved after the claim was reviewed.
+        """
+        if self.artifact_path and self.artifact_digest:
+            return True
+        return is_commit_revision(self.repository_revision)
 
     def preference_key(self) -> tuple[int, str]:
         """Deterministic ordering key: lighter declared footprint first, then id.

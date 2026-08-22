@@ -8,11 +8,21 @@ iteration. The same registry and the same requirements always produce an
 identical ``RoutingDecision``, including the order of its escalation reasons.
 
 **Fail-closed.** Eligibility is a conjunction of positive checks. Every
-unknown is a blocking reason with its own escalation code - never a pass -
-and there is no path by which a task requiring local execution can be served
-by a remote or cloud backend. When nothing qualifies, the result is the fixed
-``NO_ELIGIBLE_BACKEND`` outcome carrying the reasons why, not a fallback and
-not an exception.
+unknown is a blocking reason with its own escalation code - never a pass.
+When nothing qualifies, the result is the fixed ``NO_ELIGIBLE_BACKEND``
+outcome carrying the reasons why, not a fallback and not an exception.
+
+**What eligibility does NOT establish.** This layer reads *descriptors*. It
+refuses a candidate whose descriptor says ``remote`` under a local-only task,
+and that is the whole of its locality guarantee. It does not and cannot
+establish where a backend will actually execute: the descriptor is an
+assertion, vouched for by an operator attestation recorded at the
+registration site, and a factory that constructs an opaque backend - one
+exposing no inspectable endpoint - remains undetectable from here.
+``scripts.open_model.registry`` adds a best-effort non-loopback check at
+construction time, which catches the conventional case and is explicitly not
+universal. Any statement that a local-only task *cannot* reach a remote
+service is a statement about descriptors, not about the world.
 
 **Disclosure.** ``TaskRequirements`` carries no prompt, no message, no system
 text, no user identifier and no free text of any kind - only booleans,
@@ -60,6 +70,7 @@ EscalationReason = Literal[
     "variant-unspecified",
     "repository-revision-unpinned",
     "artifact-digest-missing",
+    "artifact-unpinned",
 ]
 """Why a candidate was refused, or why the whole decision escalated.
 
@@ -90,10 +101,11 @@ _ALLOWED_LICENCE_INPUTS: Final[frozenset[str]] = frozenset(
 )
 """Licence classes a task may allow.
 
-``"unknown"`` is deliberately absent and is stripped during normalization, so
-a licence whose class was never established can never be allow-listed - not
-even explicitly. An unresolved licence is a question for a human, not a
-routing option.
+``"unknown"`` is deliberately absent, so asking to allow it is *malformed*
+rather than silently stripped: a licence whose class was never established
+can never be allow-listed, and a caller who tries is told so instead of
+receiving a quietly different constraint. An unresolved licence is a question
+for a human, not a routing option.
 """
 
 _ALLOWED_RUNTIME_INPUTS: Final[frozenset[str]] = frozenset(
@@ -106,7 +118,7 @@ _ALLOWED_RUNTIME_INPUTS: Final[frozenset[str]] = frozenset(
         "in-process-stub",
     }
 )
-"""Runtimes a task may allow. ``"unknown"`` is stripped for the same reason."""
+"""Runtimes a task may allow. ``"unknown"`` is malformed for the same reason."""
 
 _MAX_ALLOWED_ITEMS: Final[int] = 16
 
@@ -137,36 +149,42 @@ def _exact_nonneg_int(value: Any) -> int:
     return 0
 
 
-def _exact_token_tuple(
+def _validated_token_tuple(
     value: Any,
     *,
     allowed: frozenset[str],
-    fallback: tuple[str, ...],
-    use_fallback_when_absent: bool,
-) -> tuple[str, ...]:
-    """Normalize an allow-tuple field to known tokens, order-preserving.
+) -> tuple[tuple[str, ...], bool]:
+    """Validate an allow-tuple. Returns ``(normalized, ok)``.
 
-    A shape that is not exactly ``tuple`` or ``list`` becomes ``fallback``.
-    Within a well-shaped sequence, only exact ``str`` members of ``allowed``
-    survive, de-duplicated, first occurrence kept. An explicitly supplied but
-    fully-filtered sequence becomes ``fallback`` only when
-    ``use_fallback_when_absent`` is set; otherwise it stays empty, because
-    for some fields "empty" is a meaningful, stricter instruction.
+    ``ok`` is ``False`` - meaning the whole requirement set is malformed and
+    must block - when the value is not exactly ``tuple``/``list``, exceeds
+    ``_MAX_ALLOWED_ITEMS``, or contains **any** element that is not an exact
+    ``str`` member of ``allowed``. ``"unknown"`` is not a member of either
+    vocabulary, so asking to allow it is malformed rather than ignorable.
+
+    Corrected after audit. The previous version *filtered* unrecognised
+    elements out, which was a fail-open in the worst possible place: a caller
+    who wrote ``allowed_runtimes=("ollama-v2",)`` - a typo, a stale name, a
+    wrong type - had their constraint silently reduced to the empty tuple,
+    and an empty tuple means "the task does not constrain the runtime". A
+    narrowing instruction became a widening one. Constraints are now taken
+    literally or refused; they are never quietly reinterpreted.
+
+    De-duplication is still silent, because a repeated element expresses the
+    same constraint and changes nothing.
     """
     if type(value) is not tuple and type(value) is not list:
-        return fallback
+        return ((), False)
+    if len(value) > _MAX_ALLOWED_ITEMS:
+        return ((), False)
     kept: list[str] = []
     for element in value:
-        if len(kept) >= _MAX_ALLOWED_ITEMS:
-            break
         if type(element) is not str or element not in allowed:
-            continue
+            return ((), False)
         if element in kept:
             continue
         kept.append(element)
-    if not kept and use_fallback_when_absent:
-        return fallback
-    return tuple(kept)
+    return (tuple(kept), True)
 
 
 # -- what the task needs -----------------------------------------------------
@@ -223,8 +241,6 @@ class TaskRequirements:
         supplied_structured = self.needs_structured_output
         supplied_tools = self.needs_tool_calling
         supplied_context = self.min_context_tokens
-        supplied_licences = self.allowed_licence_classes
-        supplied_runtimes = self.allowed_runtimes
 
         set_(self, "require_local", _exact_bool(self.require_local, True))
         # A malformed capability demand becomes True: demanding more is the
@@ -236,29 +252,18 @@ class TaskRequirements:
         )
         set_(self, "needs_tool_calling", _exact_bool(self.needs_tool_calling, True))
         set_(self, "min_context_tokens", _exact_nonneg_int(self.min_context_tokens))
+        licences, licences_ok = _validated_token_tuple(
+            self.allowed_licence_classes, allowed=_ALLOWED_LICENCE_INPUTS
+        )
         set_(
             self,
             "allowed_licence_classes",
-            _exact_token_tuple(
-                self.allowed_licence_classes,
-                allowed=_ALLOWED_LICENCE_INPUTS,
-                fallback=_DEFAULT_LICENCE_CLASSES,
-                # A malformed shape falls back to the strict default, but an
-                # explicit list that filters to nothing stays empty and
-                # blocks everything.
-                use_fallback_when_absent=False,
-            ),
+            licences if licences_ok else _DEFAULT_LICENCE_CLASSES,
         )
-        set_(
-            self,
-            "allowed_runtimes",
-            _exact_token_tuple(
-                self.allowed_runtimes,
-                allowed=_ALLOWED_RUNTIME_INPUTS,
-                fallback=(),
-                use_fallback_when_absent=False,
-            ),
+        runtimes, runtimes_ok = _validated_token_tuple(
+            self.allowed_runtimes, allowed=_ALLOWED_RUNTIME_INPUTS
         )
+        set_(self, "allowed_runtimes", runtimes)
 
         # Record every field whose supplied value was not the declared shape.
         # Compared by exact type first so no hostile __eq__ participates.
@@ -271,12 +276,9 @@ class TaskRequirements:
             malformed.append("needs_tool_calling")
         if type(supplied_context) is not int or supplied_context < 0:
             malformed.append("min_context_tokens")
-        if (
-            type(supplied_licences) is not tuple
-            and type(supplied_licences) is not list
-        ):
+        if not licences_ok:
             malformed.append("allowed_licence_classes")
-        if type(supplied_runtimes) is not tuple and type(supplied_runtimes) is not list:
+        if not runtimes_ok:
             malformed.append("allowed_runtimes")
         set_(self, "malformed_fields", tuple(malformed))
 
@@ -350,8 +352,14 @@ def evaluate(
         reasons.append("variant-unspecified")
     if not capabilities.repository_revision:
         reasons.append("repository-revision-unpinned")
-    if capabilities.quantisation and not capabilities.artifact_digest:
+    if capabilities.artifact_path and not capabilities.artifact_digest:
         reasons.append("artifact-digest-missing")
+    # Every artifact-bearing variant must be byte-pinned, whether or not it
+    # is quantised: a BF16 or safetensors build is as much a file as a GGUF
+    # one. Satisfied by a named file plus its digest, or by a full commit id
+    # covering the whole tree (the only coherent pin for a sharded variant).
+    if capabilities.is_artifact_bearing() and not capabilities.is_byte_pinned():
+        reasons.append("artifact-unpinned")
     if not capabilities.licence_source_url or not capabilities.licence_revision:
         reasons.append("licence-source-unpinned")
 
@@ -425,8 +433,10 @@ def route(
     The winner is re-evaluated after selection. That second pass is redundant
     by construction and deliberately kept: it means a future edit to the
     selection logic cannot produce a selection that the eligibility rules
-    would have refused, and in particular cannot produce a remote backend for
-    a ``require_local`` task.
+    would have refused, and in particular cannot select a candidate whose
+    **descriptor** declares a remote locality under a ``require_local`` task.
+    That is a guarantee about the descriptor, not about the backend the
+    factory will build - see the module docstring.
     """
     # Checked before the registry so a malformed requirement is always
     # reported as such, rather than being masked by an empty registry.
@@ -482,8 +492,9 @@ def route(
             verdicts=tuple(verdicts),
             escalation=_dedupe(list(residual)),
         )
-    # Stated separately from the loop above so the "never silently fall back
-    # to a remote or cloud backend" rule is legible as its own guard.
+    # Stated separately from the loop above so the "never select a
+    # remote-DECLARING descriptor for a local-only task" rule is legible as
+    # its own guard. It binds the descriptor, not the constructed backend.
     if requirements.require_local and winner_capabilities.locality != "local":
         return RoutingDecision(
             outcome=NO_ELIGIBLE_BACKEND,
