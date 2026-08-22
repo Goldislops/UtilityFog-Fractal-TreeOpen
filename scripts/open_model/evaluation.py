@@ -40,7 +40,7 @@ from typing import Any, Callable, Final, Iterable, Iterator, Optional
 from scripts.agent_backends.base import AgentBackend, AgentResponse, Message, TextBlock
 from scripts.agent_backends.mock import MockBackend
 from scripts.open_model.capabilities import ModelCapabilities
-from scripts.open_model.redaction import describe_size
+from scripts.open_model.redaction import describe_size, is_safe_token
 from scripts.open_model.registry import BackendRegistry, BackendUnavailable
 from scripts.open_model.routing import (
     NO_ELIGIBLE_BACKEND,
@@ -108,6 +108,17 @@ def hermetic_guard() -> Iterator[None]:
 # -- doubles -----------------------------------------------------------------
 
 
+STUB_REVISION: Final[str] = "repo-local-double"
+"""Revision recorded for in-process doubles.
+
+A double has no upstream checkpoint to pin, so it names itself rather than
+borrowing a plausible-looking commit hash. The provenance fields are
+populated honestly rather than left blank, because a blank one would block
+routing and the doubles must be routable for the harness to exercise
+anything.
+"""
+
+
 def stub_capabilities(
     model_id: str,
     *,
@@ -125,9 +136,14 @@ def stub_capabilities(
     llama.cpp, Ollama, vLLM, or SGLang. The licence is stated as this
     repository's own, because a stub is this repository's own code and no
     third-party terms attach to it.
+
+    Makes no artifact-format claim (``quantisation=""``), so no digest is
+    required of it - there is no file to digest.
     """
     return ModelCapabilities(
         model_id=model_id,
+        variant_id="in-process-double",
+        repository_revision=STUB_REVISION,
         locality=locality,  # type: ignore[arg-type]
         availability=availability,  # type: ignore[arg-type]
         resource_class=resource_class,  # type: ignore[arg-type]
@@ -138,6 +154,29 @@ def stub_capabilities(
         runtimes=("in-process-stub",),
         licence_class="osi-open-source",
         licence_name="repository-local test double",
+        licence_source_url="https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen",
+        licence_revision=STUB_REVISION,
+    )
+
+
+def register_stub(
+    registry: BackendRegistry,
+    name: str,
+    capabilities: ModelCapabilities,
+    factory: Callable[[], AgentBackend],
+) -> None:
+    """Register an in-process double, supplying the locality attestation.
+
+    A double genuinely does execute in-process, so asserting locality for it
+    is honest rather than a convenience. This helper exists so that honesty
+    is stated once here instead of being copy-pasted into every fixture,
+    where it would gradually stop being read.
+    """
+    attestation = (
+        "operator-asserted" if capabilities.locality == "local" else "not-required"
+    )
+    registry.register(
+        name, capabilities, factory, locality_attestation=attestation
     )
 
 
@@ -168,7 +207,18 @@ def scripted_stub(payloads: Iterable[str]) -> Callable[[], AgentBackend]:
 
 @dataclass(frozen=True)
 class EvaluationCase:
-    """One synthetic acceptance case. Carries requirements, never content."""
+    """One synthetic acceptance case. Carries requirements, never content.
+
+    ``case_id`` must be a safe token - bounded, closed character class, and
+    unchanged by the secret matcher. It is rejected with ``ValueError``
+    rather than normalized, because an unusable case id is a fixture-
+    authoring mistake that should surface at the point it was written, not a
+    hostile input to be absorbed quietly.
+
+    Corrected after audit: ``case_id`` was previously free text copied
+    verbatim into every record, so a careless fixture could have carried a
+    secret straight into a stored result.
+    """
 
     case_id: str
     requirements: TaskRequirements
@@ -177,6 +227,13 @@ class EvaluationCase:
     required_keys: tuple[str, ...] = ()
     expected_structured_failure: str = ""
     expected_construction_refused: str = ""
+
+    def __post_init__(self) -> None:
+        if not is_safe_token(self.case_id):
+            raise ValueError(
+                "case_id must be a safe token: bounded, "
+                "[A-Za-z0-9][A-Za-z0-9._-]*, and not secret-shaped"
+            )
 
 
 @dataclass(frozen=True)
@@ -195,7 +252,7 @@ class EvaluationRecord:
     escalation: tuple[str, ...]
     construction_refused: str
     structured_failure: str
-    missing_keys: tuple[str, ...]
+    missing_key_indices: tuple[int, ...]
     response_size: str
     passed: bool
 
@@ -216,7 +273,7 @@ def run_case(registry: BackendRegistry, case: EvaluationCase) -> EvaluationRecor
             escalation=tuple(decision.escalation),
             construction_refused="",
             structured_failure="",
-            missing_keys=(),
+            missing_key_indices=(),
             response_size="chars=unknown",
             passed=case.expected_outcome == NO_ELIGIBLE_BACKEND,
         )
@@ -232,7 +289,7 @@ def run_case(registry: BackendRegistry, case: EvaluationCase) -> EvaluationRecor
             escalation=(),
             construction_refused=refusal.reason,
             structured_failure="",
-            missing_keys=(),
+            missing_key_indices=(),
             response_size="chars=unknown",
             passed=case.expected_construction_refused == refusal.reason,
         )
@@ -252,7 +309,7 @@ def run_case(registry: BackendRegistry, case: EvaluationCase) -> EvaluationRecor
         escalation=(),
         construction_refused="",
         structured_failure=failure,
-        missing_keys=tuple(outcome.missing_keys),
+        missing_key_indices=tuple(outcome.missing_key_indices),
         # The size of the response, never the response.
         response_size=describe_size(text),
         passed=(
@@ -278,7 +335,9 @@ __all__ = [
     "EvaluationRecord",
     "HermeticViolation",
     "PROBE_MESSAGES",
+    "STUB_REVISION",
     "hermetic_guard",
+    "register_stub",
     "run_case",
     "run_suite",
     "scripted_stub",

@@ -32,6 +32,7 @@ from scripts.open_model.capabilities import (
     ModelCapabilities,
     RuntimeKind,
 )
+from scripts.open_model.redaction import ESCALATION_REASONS
 from scripts.open_model.registry import BackendRegistry
 
 
@@ -39,6 +40,7 @@ from scripts.open_model.registry import BackendRegistry
 
 EscalationReason = Literal[
     "no-backend-registered",
+    "requirements-invalid",
     "model-id-missing",
     "backend-unavailable",
     "availability-unknown",
@@ -52,8 +54,12 @@ EscalationReason = Literal[
     "context-unknown",
     "licence-not-allowed",
     "licence-unknown",
+    "licence-source-unpinned",
     "runtime-not-allowed",
     "runtime-unknown",
+    "variant-unspecified",
+    "repository-revision-unpinned",
+    "artifact-digest-missing",
 ]
 """Why a candidate was refused, or why the whole decision escalated.
 
@@ -195,9 +201,31 @@ class TaskRequirements:
     min_context_tokens: int = 0
     allowed_licence_classes: tuple[LicenceClass, ...] = _DEFAULT_LICENCE_CLASSES
     allowed_runtimes: tuple[RuntimeKind, ...] = ()
+    malformed_fields: tuple[str, ...] = ()
+    """Names of fields whose supplied value was not the declared shape.
+
+    Always recomputed at construction; any value supplied by a caller is
+    discarded. Non-empty makes **every** candidate ineligible via the
+    ``requirements-invalid`` reason.
+
+    Corrected after audit: a malformed ``min_context_tokens`` - a negative
+    number, a float, a string - previously normalized to ``0``, which reads
+    as "no minimum" and would let a one-token backend satisfy a requirement
+    that had asked for 32k. Silently relaxing a demand is the one direction
+    normalization must never take, so a malformed requirement now refuses to
+    route at all rather than routing on a weaker demand than the caller
+    wrote.
+    """
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
+        supplied_local = self.require_local
+        supplied_structured = self.needs_structured_output
+        supplied_tools = self.needs_tool_calling
+        supplied_context = self.min_context_tokens
+        supplied_licences = self.allowed_licence_classes
+        supplied_runtimes = self.allowed_runtimes
+
         set_(self, "require_local", _exact_bool(self.require_local, True))
         # A malformed capability demand becomes True: demanding more is the
         # conservative direction for a requirement.
@@ -231,6 +259,26 @@ class TaskRequirements:
                 use_fallback_when_absent=False,
             ),
         )
+
+        # Record every field whose supplied value was not the declared shape.
+        # Compared by exact type first so no hostile __eq__ participates.
+        malformed: list[str] = []
+        if type(supplied_local) is not bool:
+            malformed.append("require_local")
+        if type(supplied_structured) is not bool:
+            malformed.append("needs_structured_output")
+        if type(supplied_tools) is not bool:
+            malformed.append("needs_tool_calling")
+        if type(supplied_context) is not int or supplied_context < 0:
+            malformed.append("min_context_tokens")
+        if (
+            type(supplied_licences) is not tuple
+            and type(supplied_licences) is not list
+        ):
+            malformed.append("allowed_licence_classes")
+        if type(supplied_runtimes) is not tuple and type(supplied_runtimes) is not list:
+            malformed.append("allowed_runtimes")
+        set_(self, "malformed_fields", tuple(malformed))
 
 
 # -- verdicts ----------------------------------------------------------------
@@ -288,8 +336,24 @@ def evaluate(
     """
     reasons: list[EscalationReason] = []
 
+    # A requirement set that was not the declared shape blocks everything.
+    # Routing on a silently-relaxed demand is worse than not routing.
+    if requirements.malformed_fields:
+        reasons.append("requirements-invalid")
+
     if not capabilities.model_id:
         reasons.append("model-id-missing")
+
+    # Provenance. An artifact nobody can identify or re-fetch byte-for-byte
+    # is not a candidate; it is a rumour about a candidate.
+    if not capabilities.variant_id:
+        reasons.append("variant-unspecified")
+    if not capabilities.repository_revision:
+        reasons.append("repository-revision-unpinned")
+    if capabilities.quantisation and not capabilities.artifact_digest:
+        reasons.append("artifact-digest-missing")
+    if not capabilities.licence_source_url or not capabilities.licence_revision:
+        reasons.append("licence-source-unpinned")
 
     if capabilities.availability == "absent":
         reasons.append("backend-unavailable")
@@ -364,6 +428,16 @@ def route(
     would have refused, and in particular cannot produce a remote backend for
     a ``require_local`` task.
     """
+    # Checked before the registry so a malformed requirement is always
+    # reported as such, rather than being masked by an empty registry.
+    if requirements.malformed_fields:
+        return RoutingDecision(
+            outcome=NO_ELIGIBLE_BACKEND,
+            selected=None,
+            verdicts=(),
+            escalation=("requirements-invalid",),
+        )
+
     names = registry.names()
     if not names:
         return RoutingDecision(
@@ -427,6 +501,7 @@ def route(
 
 
 __all__ = [
+    "ESCALATION_REASONS",
     "EligibilityVerdict",
     "EscalationReason",
     "NO_ELIGIBLE_BACKEND",

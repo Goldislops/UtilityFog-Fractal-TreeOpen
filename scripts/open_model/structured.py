@@ -20,9 +20,13 @@ Two properties matter to an auditor:
   stack all produce a *result* carrying a stable failure code.
 
 - **Non-disclosing.** A failure result never contains the payload, an excerpt
-  of it, a character offset into it, or a parser message derived from it.
-  Only a fixed code, and - on a missing-key failure - the caller's own
-  required key names, which came from the caller and not from the model.
+  of it, a character offset into it, or a parser message derived from it -
+  and, after audit, never any key *text* either. A missing-key failure
+  reports **indices** into the caller's own ``required_keys`` tuple, which is
+  exactly as informative to the caller (who holds that tuple) and carries
+  nothing to anyone reading a log. Required keys must additionally be safe
+  tokens, so a sensitive schema key is refused at the door rather than
+  processed.
 """
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Optional
+
+from scripts.open_model.redaction import is_safe_token
 
 
 StructuredFailure = Literal[
@@ -41,6 +47,7 @@ StructuredFailure = Literal[
     "duplicate-key",
     "not-json-object",
     "missing-required-key",
+    "required-key-not-safe",
 ]
 """Why a payload was refused. The complete vocabulary; safe to log verbatim."""
 
@@ -101,7 +108,15 @@ class StructuredOutcome:
     ok: bool
     value: Optional[Mapping[str, Any]] = None
     failure: Optional[StructuredFailure] = None
-    missing_keys: tuple[str, ...] = ()
+    missing_key_indices: tuple[int, ...] = ()
+    """Positions in the caller's ``required_keys`` that were absent.
+
+    Indices, not names. Corrected after audit: the previous version returned
+    the missing key *text*, which meant a caller who passed a sensitive
+    schema key had it copied into a result, a record, and any log built from
+    one. The caller already holds the tuple it supplied, so an index is
+    exactly as informative to them and carries nothing to anyone else.
+    """
 
     def __post_init__(self) -> None:
         if self.ok and self.failure is not None:
@@ -112,21 +127,29 @@ class StructuredOutcome:
             raise ValueError("a failed outcome must not carry a value")
 
 
-def _normalized_required_keys(value: Any) -> tuple[str, ...]:
-    """Keep only exact-``str`` key names, de-duplicated, order preserved."""
+def _normalized_required_keys(value: Any) -> Optional[tuple[str, ...]]:
+    """Validate the caller's required-key tuple, or ``None`` to fail closed.
+
+    Returns ``None`` - meaning *refuse the whole validation* - when the shape
+    is wrong, the tuple is over-long, or **any** element is not a safe token.
+
+    Refusing rather than dropping is the point. The previous version silently
+    discarded a key it could not accept, which made
+    ``validate_structured_output`` report success for a payload that had
+    never been checked against that key: a malformed schema turned into a
+    false pass. A key this layer will not handle now stops the validation
+    instead of quietly shrinking it.
+    """
     if type(value) is not tuple and type(value) is not list:
-        return ()
-    kept: list[str] = []
+        return None
+    if len(value) > _MAX_REQUIRED_KEYS:
+        return None
+    # Order and length are preserved exactly - no de-duplication - so a
+    # reported index maps one-to-one onto the tuple the caller passed in.
     for element in value:
-        if len(kept) >= _MAX_REQUIRED_KEYS:
-            break
-        if type(element) is not str or not element:
-            continue
-        sliced = element[:_KEY_MAX_LEN]
-        if sliced in kept:
-            continue
-        kept.append(sliced)
-    return tuple(kept)
+        if not is_safe_token(element, max_len=_KEY_MAX_LEN):
+            return None
+    return tuple(value)
 
 
 def validate_structured_output(
@@ -151,7 +174,13 @@ def validate_structured_output(
        folded into ``invalid-json`` rather than escaping.
     4. ``not-json-object``        - valid JSON, but an array, string, number,
        boolean, or null at the top level.
-    5. ``missing-required-key``   - with the caller's own missing key names.
+    5. ``required-key-not-safe``  - the caller's ``required_keys`` was the
+       wrong shape, over-long, or contained an element that is not a safe
+       token. The whole validation is refused; keys are never silently
+       dropped, because dropping one would report success for a payload that
+       was never checked against it.
+    6. ``missing-required-key``   - reported as **indices** into the caller's
+       ``required_keys``, never as key text.
     """
     if type(payload) is not str:
         return StructuredOutcome(ok=False, failure="payload-not-exact-str")
@@ -179,10 +208,16 @@ def validate_structured_output(
         return StructuredOutcome(ok=False, failure="not-json-object")
 
     wanted = _normalized_required_keys(required_keys)
-    missing = tuple(key for key in wanted if key not in parsed)
+    if wanted is None:
+        return StructuredOutcome(ok=False, failure="required-key-not-safe")
+    missing = tuple(
+        index for index, key in enumerate(wanted) if key not in parsed
+    )
     if missing:
         return StructuredOutcome(
-            ok=False, failure="missing-required-key", missing_keys=missing
+            ok=False,
+            failure="missing-required-key",
+            missing_key_indices=missing,
         )
 
     return StructuredOutcome(ok=True, value=MappingProxyType(parsed))

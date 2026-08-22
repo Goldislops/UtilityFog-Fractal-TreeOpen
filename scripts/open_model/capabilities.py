@@ -41,6 +41,17 @@ rather than replaces):
     provenance for a human auditor; it is normalized to ``https://`` or empty
     and is never fetched, opened, or executed by any code in this package.
 
+**Provenance is part of identity (added after audit).** A descriptor names
+exactly one artifact, and says where that artifact came from:
+``model_id`` + ``variant_id`` + ``repository_revision`` identify it,
+``artifact_digest`` pins the bytes when an artifact-format claim is made, and
+``licence_source_url`` + ``licence_revision`` pin the terms that were read.
+``quantisation`` is singular for the same reason - BF16, NVFP4 and GGUF
+builds of one checkpoint are different files with different digests and
+different runtime support, and collapsing them under a generic model id
+makes a descriptor unfalsifiable. Every one of these is blocking in
+``scripts.open_model.routing``: an unpinned descriptor cannot route.
+
 A note on ``structured_output``: constrained/JSON-schema decoding is in
 practice a property of the *serving runtime* (llama.cpp grammars, vLLM
 structured outputs, SGLang grammar backends), not of the weights. This field
@@ -53,6 +64,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Optional
+
+from scripts.open_model.redaction import is_safe_reference, is_safe_token
 
 
 # -- vocabulary --------------------------------------------------------------
@@ -210,6 +223,11 @@ def _exact_str_tuple(
     """
     if type(value) is not tuple and type(value) is not list:
         return ()
+    # Bound the INPUT, not just the output. Capping only the kept list still
+    # walks every element of an arbitrarily long sequence; refusing an
+    # over-long input outright is both cheaper and fail-closed.
+    if len(value) > _MAX_SEQUENCE_ITEMS:
+        return ()
     kept: list[str] = []
     for element in value:
         if len(kept) >= _MAX_SEQUENCE_ITEMS:
@@ -223,6 +241,50 @@ def _exact_str_tuple(
             continue
         kept.append(sliced)
     return tuple(kept)
+
+
+def _exact_reference(value: Any) -> str:
+    """Keep ``value`` only when it is a safe, bounded, non-secret reference.
+
+    Delegates to ``redaction.is_safe_reference``: exactly built-in ``str``,
+    within the length bound, drawn from a closed character class, and
+    unchanged by the secret matcher. A drive-letter path, a POSIX home path,
+    a bearer string, or a provider-prefixed key is refused and becomes ``""``.
+    """
+    if is_safe_reference(value):
+        return value
+    return ""
+
+
+def _exact_digest(value: Any) -> str:
+    """Keep ``value`` only when it is exactly ``sha256:`` + 64 lowercase hex.
+
+    Shape-checked character by character rather than parsed, and deliberately
+    strict: a digest that is not verifiable at a glance is worse than no
+    digest, because it invites a reader to believe an artifact was pinned
+    when it was not.
+    """
+    if type(value) is not str:
+        return ""
+    prefix = "sha256:"
+    if len(value) != len(prefix) + 64 or not value.startswith(prefix):
+        return ""
+    for character in value[len(prefix) :]:
+        if character not in "0123456789abcdef":
+            return ""
+    return value
+
+
+def _exact_quantisation(value: Any) -> str:
+    """Keep a single artifact-format token, or ``""``.
+
+    One descriptor, one artifact. ``""`` means "this descriptor makes no
+    artifact-format claim", which is what suppresses the digest requirement
+    in ``scripts.open_model.routing``.
+    """
+    if is_safe_token(value, max_len=_TOKEN_MAX_LEN):
+        return value
+    return ""
 
 
 def _exact_https_url(value: Any) -> str:
@@ -277,6 +339,9 @@ class ModelCapabilities:
     """
 
     model_id: str
+    variant_id: str = ""
+    repository_revision: str = ""
+    artifact_digest: str = ""
     locality: ExecutionLocality = "unknown"
     availability: AvailabilityState = "unknown"
     resource_class: ResourceClass = "unknown"
@@ -284,17 +349,27 @@ class ModelCapabilities:
     tool_calling: SupportState = "unknown"
     max_context_tokens: int = 0
     max_output_tokens: int = 0
-    quantisations: tuple[str, ...] = ()
+    quantisation: str = ""
     runtimes: tuple[RuntimeKind, ...] = ()
     licence_class: LicenceClass = "unknown"
     licence_name: str = ""
+    licence_source_url: str = ""
+    licence_revision: str = ""
     licence_notes: str = ""
     provenance_url: str = ""
     observed_on: str = ""
 
     def __post_init__(self) -> None:
         set_ = object.__setattr__
-        set_(self, "model_id", _exact_bounded_str(self.model_id, _MODEL_ID_MAX_LEN))
+        # Identity and provenance are references, not free text: each must be
+        # a bounded, closed-character-class value that survives the secret
+        # matcher unchanged, so a path or credential cannot ride in here.
+        set_(self, "model_id", _exact_reference(self.model_id))
+        set_(self, "variant_id", _exact_reference(self.variant_id))
+        set_(self, "repository_revision", _exact_reference(self.repository_revision))
+        set_(self, "artifact_digest", _exact_digest(self.artifact_digest))
+        set_(self, "licence_source_url", _exact_https_url(self.licence_source_url))
+        set_(self, "licence_revision", _exact_reference(self.licence_revision))
         set_(self, "locality", _exact_member(self.locality, _LOCALITIES, "unknown"))
         set_(
             self,
@@ -318,11 +393,11 @@ class ModelCapabilities:
         )
         set_(self, "max_context_tokens", _exact_nonneg_int(self.max_context_tokens))
         set_(self, "max_output_tokens", _exact_nonneg_int(self.max_output_tokens))
-        set_(
-            self,
-            "quantisations",
-            _exact_str_tuple(self.quantisations, allowed=None, limit=_TOKEN_MAX_LEN),
-        )
+        # Singular, not a tuple: one descriptor describes exactly one
+        # artifact. Collapsing BF16, NVFP4 and GGUF builds of a checkpoint
+        # under one descriptor was the audit finding this closes - those are
+        # different files with different digests and different runtimes.
+        set_(self, "quantisation", _exact_quantisation(self.quantisation))
         set_(
             self,
             "runtimes",
@@ -355,6 +430,16 @@ class ModelCapabilities:
         unresolved: list[str] = []
         if not self.model_id:
             unresolved.append("model_id")
+        if not self.variant_id:
+            unresolved.append("variant_id")
+        if not self.repository_revision:
+            unresolved.append("repository_revision")
+        if self.quantisation and not self.artifact_digest:
+            unresolved.append("artifact_digest")
+        if not self.licence_source_url:
+            unresolved.append("licence_source_url")
+        if not self.licence_revision:
+            unresolved.append("licence_revision")
         if self.locality == "unknown":
             unresolved.append("locality")
         if self.availability == "unknown":
