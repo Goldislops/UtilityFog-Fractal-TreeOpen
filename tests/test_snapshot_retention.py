@@ -2218,3 +2218,283 @@ def test_the_hashed_lock_is_not_claimed_collision_free():
                       "cannot collide"):
         assert overclaim not in source, overclaim
     assert "collision-resistant" in source
+
+
+# ===========================================================================
+# The manifest PATH, and short reads
+# ===========================================================================
+
+def _manifest_of(directory):
+    return Path(directory) / retention.MANIFEST_NAME
+
+
+def _try_symlink(link, target):
+    """Create a real symlink, or report that this platform will not.
+
+    Returns True when a genuine link exists. Never skips: the caller runs the
+    injected equivalent instead, so the property is proved either way and the
+    suite stays zero-skip.
+    """
+    try:
+        os.symlink(os.fspath(target), os.fspath(link))
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    return True
+
+
+def test_a_real_symlinked_manifest_is_refused(tmp_path):
+    """`fstat` on the OPENED handle reports the TARGET, which is a perfectly
+    regular file -- so handle validation alone can never reject a symlinked
+    manifest. The path itself has to be proved.
+
+    Where the platform grants symlink creation this uses a real link; where it
+    does not, the identical condition is injected. Both branches assert the
+    same refusal, and neither skips.
+    """
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    real_target = tmp_path / "real_manifest_target"
+    real_target.write_bytes(_record_bytes(name))
+    manifest = _manifest_of(directory)
+
+    used_real_link = _try_symlink(manifest, real_target)
+    if used_real_link:
+        assert os.path.islink(manifest)
+        assert stat_module.S_ISREG(os.stat(manifest).st_mode), (
+            "the link must point at a regular file, or this proves nothing")
+        survey = _survey(directory)
+    else:
+        manifest.write_bytes(_record_bytes(name))
+        real_lstat = os.lstat
+
+        def _as_symlink(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+                return _Stat(mode=stat_module.S_IFLNK | 0o777,
+                             size=info.st_size, mtime_ns=info.st_mtime_ns,
+                             nlink=1, dev=info.st_dev, ino=info.st_ino)
+            return info
+
+        with mock.patch.object(retention.os, "lstat", _as_symlink):
+            survey = _survey(directory)
+
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert survey.present == 0
+
+
+def test_a_reparse_manifest_path_is_refused(tmp_path, monkeypatch):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_lstat = os.lstat
+
+    def _reparse_path(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1,
+                         dev=info.st_dev, ino=info.st_ino,
+                         file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _reparse_path)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+def test_a_replacement_between_the_path_and_handle_checks_is_refused(
+        tmp_path, monkeypatch):
+    """The path proves one object and the handle another: identity must agree
+    across both, or something was swapped in between."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_fstat = os.fstat
+
+    def _different_object(fd):
+        info = real_fstat(fd)
+        if stat_module.S_ISREG(info.st_mode):
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1,
+                         dev=info.st_dev, ino=info.st_ino + 1)
+        return info
+
+    monkeypatch.setattr(retention.os, "fstat", _different_object)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+def test_a_special_manifest_cannot_block_the_survey(tmp_path):
+    """A FIFO named `manifest.jsonl` would block a plain read-only `open`
+    until a writer appeared. The path check refuses it before `open` is
+    reached, and the open itself uses the platform's nonblocking flag where
+    one exists."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = _manifest_of(directory)
+
+    made_fifo = False
+    if hasattr(os, "mkfifo"):
+        try:
+            os.mkfifo(os.fspath(manifest))
+            made_fifo = True
+        except (OSError, NotImplementedError):
+            made_fifo = False
+
+    if made_fifo:
+        survey = _survey(directory)
+    else:
+        manifest.write_bytes(b"")
+        real_lstat = os.lstat
+
+        def _as_fifo(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+                return _Stat(mode=stat_module.S_IFIFO | 0o644, size=0,
+                             mtime_ns=info.st_mtime_ns, nlink=1,
+                             dev=info.st_dev, ino=info.st_ino)
+            return info
+
+        with mock.patch.object(retention.os, "lstat", _as_fifo):
+            survey = _survey(directory)
+
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+def test_the_manifest_open_uses_no_follow_where_available():
+    source = Path(retention.__file__).read_text(encoding="utf-8")
+    assert "O_NOFOLLOW" in source
+    assert "O_NONBLOCK" in source
+
+
+def test_every_survey_descriptor_is_closed_on_a_validation_failure(tmp_path,
+                                                                   monkeypatch):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    opened = []
+    closed = []
+    real_open = os.open
+    real_close = os.close
+    real_fstat = os.fstat
+
+    def _tracked_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def _wrong(fd):
+        info = real_fstat(fd)
+        if stat_module.S_ISREG(info.st_mode):
+            return _Stat(mode=stat_module.S_IFIFO | 0o644, size=0, mtime_ns=0,
+                         nlink=1, dev=info.st_dev, ino=info.st_ino)
+        return info
+
+    monkeypatch.setattr(retention.os, "open", _tracked_open)
+    monkeypatch.setattr(retention.os, "close",
+                        lambda fd: (closed.append(fd), real_close(fd))[1])
+    monkeypatch.setattr(retention.os, "fstat", _wrong)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert opened and set(opened) <= set(closed)
+
+
+def test_a_survey_read_failure_stays_fixed_and_path_free(tmp_path, monkeypatch,
+                                                          capsys):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+
+    def _read_fails(fd, size):
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(retention.os, "read", _read_fails)
+    survey = _survey(directory)
+    printed = capsys.readouterr()
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert "v070_gen" not in printed.out and "v070_gen" not in printed.err
+    for field in dataclasses.fields(survey):
+        assert not isinstance(getattr(survey, field.name),
+                              (str, bytes, Path)), field.name
+
+
+# -- short reads must not weaken the byte boundary ---------------------------
+
+def _fragmenting_read(monkeypatch, chunk_size):
+    """Deliver every manifest read in `chunk_size`-byte fragments."""
+    real_read = os.read
+    calls = {"n": 0}
+
+    def _short(fd, size):
+        calls["n"] += 1
+        return real_read(fd, min(size, chunk_size))
+
+    monkeypatch.setattr(retention.os, "read", _short)
+    return calls
+
+
+def test_an_exact_budget_manifest_survives_short_reads(tmp_path, monkeypatch):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=2)
+    budget = 2 * retention.MAX_MANIFEST_RECORD_BYTES
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = _manifest_of(directory)
+    manifest.write_bytes(b"x" * (budget - 1) + b"\n")
+
+    calls = _fragmenting_read(monkeypatch, 7)
+    survey = _survey(directory, policy)
+    assert survey.refused is None
+    assert calls["n"] > 1, "the fixture did not actually fragment the read"
+
+
+def test_an_over_budget_manifest_is_refused_across_short_reads(tmp_path,
+                                                               monkeypatch):
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=2)
+    budget = 2 * retention.MAX_MANIFEST_RECORD_BYTES
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, extra_files=[name])
+    manifest = _manifest_of(directory)
+    manifest.write_bytes(b"x" * budget + b"\n")
+
+    calls = _fragmenting_read(monkeypatch, 7)
+    survey = _survey(directory, policy)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED
+    assert calls["n"] > 1
+
+
+def test_a_short_read_is_never_mistaken_for_the_whole_manifest(tmp_path,
+                                                               monkeypatch):
+    """The failure this forbids: one short read treated as EOF, so a partial
+    prefix is validated as the complete journal and every record beyond it is
+    silently reported unmanifested."""
+    policy = dataclasses.replace(_quarantine_policy(), max_actions_per_pass=8)
+    names = _many(3)
+    directory = _pass_dir(tmp_path,
+                          records=[_record_bytes(one) for one in names],
+                          extra_files=names)
+    calls = _fragmenting_read(monkeypatch, 1)
+    survey = _survey(directory, policy)
+    assert survey.refused is None
+    assert survey.manifested == 3, "a partial prefix was taken as complete"
+    assert survey.unmanifested == 0
+    assert calls["n"] > 3
+
+
+def test_the_read_loop_cannot_spin_without_progress(tmp_path, monkeypatch):
+    """A read returning nothing is end-of-file, not an invitation to retry."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    calls = {"n": 0}
+
+    def _always_empty(fd, size):
+        calls["n"] += 1
+        if calls["n"] > 64:
+            raise AssertionError("the read loop spun without progress")
+        return b""
+
+    monkeypatch.setattr(retention.os, "read", _always_empty)
+    survey = _survey(directory)
+    assert survey.refused is None
+    assert survey.unmanifested == 1
+    assert calls["n"] <= 2
