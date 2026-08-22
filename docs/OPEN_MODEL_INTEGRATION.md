@@ -231,7 +231,11 @@ fabricated fact wearing the costume of a measured one.
 | [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/tree/v1.2.1) | `v1.2.1` (stable release) | Apache-2.0 | via its own runtimes | — | — | — | — | Linux primary; Windows supported; NVIDIA GPUs only |
 | [NVIDIA NIM](https://developer.nvidia.com/nim) | — | **proprietary** | OpenAI-compatible | — | — | — | — | self-hostable container |
 
-**Every runtime claim above is pinned to a source and a version.** A runtime's
+**Runtime claims are pinned to a version, with one exception and one
+caveat, both stated in the table below.** The exception is **NVIDIA NIM**,
+which has no public git ref and is recorded as **UNRESOLVED**. The caveat
+is that a pinned *version* is not the same as a document *read at* that
+version - only the Ollama row is pinned end to end. A runtime's
 parameter names, required launch flags and endpoint set all move between
 releases, so an unpinned runtime claim decays into folklore. The claims in
 this table were read on **2026-08-22** from:
@@ -510,7 +514,7 @@ than being quietly accepted or quietly dropped.
 | 2 | `DiagnosticRecord.event`/`backend`/`reasons`, `EvaluationCase.case_id` and `required_keys` retained arbitrary text; missing-key text was recorded. | **Corrected.** Closed vocabularies for `event` and `reasons`; safe-token gates elsewhere, including a redaction cross-check that refuses secret-shaped identifiers a character class would admit. Unsafe `required_keys` now fail closed instead of being dropped — the dropped-key path had been reporting success for unchecked payloads. Missing keys are reported as indices. |
 | 3 | A malformed `min_context_tokens` became `0`, so a one-token backend could satisfy a demand for 32k. | **Corrected.** Any malformed requirement is recorded in `malformed_fields` and blocks every candidate with `requirements-invalid`. The field is always recomputed, so a caller cannot forge it clean. |
 | 4 | No immutable model provenance; BF16/NVFP4/GGUF/dated variants collapsed under a generic model id. | **Corrected.** Added `variant_id`, `repository_revision`, `artifact_digest`, `licence_source_url`, `licence_revision`, all blocking; `quantisation` is now singular. The catalogue was rewritten to exact-variant entries. Revisions and digests are left empty and therefore blocking, because the survey did not retrieve them and inventing them would be worse. |
-| 5 | Reported that current Ollama docs list `tool_choice` as supported. | **Did not reproduce — matrix unchanged**, and the auditor cleared the row in round two. Re-verified against three mechanically corroborating renderings of a single official document, all marking it `[ ]` unsupported; evidence and quotes in §5, together with an explicit statement of how much weight that check does and does not carry. The valid half of the finding *was* acted on: every runtime claim is now pinned to a version, an immutable commit, and a named source. |
+| 5 | Reported that current Ollama docs list `tool_choice` as supported. | **Did not reproduce — matrix unchanged**, and the auditor cleared the row in round two. Re-verified against three mechanically corroborating renderings of a single official document, all marking it `[ ]` unsupported; evidence and quotes in §5, together with an explicit statement of how much weight that check does and does not carry. The valid half of the finding *was* acted on: runtime claims are now pinned to a version, an immutable commit and a named source — **except NIM, which has no public ref and is recorded UNRESOLVED**, and noting that four of five rows had their prose read at a moving ref rather than at the pinned commit. |
 | 6 | Regression tests required for every finding, across all modes. | **Done.** `tests/test_open_model_audit_corrections.py`, plus the existing suites re-run under normal, `-O` and `-OO`. |
 
 On finding 5: the auditor's reading is recorded rather than discarded, and
@@ -557,13 +561,36 @@ five further gates. All five were corrected.
 
 **The stub exception, stated once.** Every provenance and runtime-binding
 requirement above applies to *artifact-bearing* descriptors only, and
-`is_artifact_bearing()` is the single line that draws that boundary: a
-descriptor is exempt exactly when its only runtime is `in-process-stub`. The
-repository-local double has no upstream repository, no licence page and no
-serving runtime to pin, because it is this repository's own code. Adding any
-real runtime to it immediately makes the full requirement apply — which
-`tests/test_open_model_audit_round3.py` asserts directly, so the exception
-cannot quietly widen.
+`is_artifact_bearing()` is the single line that draws that boundary. Round
+four changed *how* that line is drawn — see §12.
+
+## 12. Post-audit corrections, round four (2026-08-22)
+
+A fourth independent audit cleared the round-three controls, the twelve model
+revision pins, the three GGUF digests, the five runtime commit targets, the
+Ollama row, GLM FP8 identity, and the head/base/path inventory. Six gates
+remained.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | `artifact_path` accepted URL schemes and absolute paths verbatim, and a traversal path **collapsed to `""` and then routed** through the repository-commit fallback as though no artifact had been claimed. | `is_canonical_relative_path` rejects schemes, absolute paths, drive letters, backslashes, userinfo, queries, fragments, whitespace, control characters, and any empty/`.`/`..` component. A supplied-but-unusable value now sets `invalid_fields` and blocks with `descriptor-invalid` — it is never silently blanked. |
+| 2 | Evidence URLs were bound by **substring**, so `https://evil.invalid/?x=huggingface.co/org/model/tree/<sha>` satisfied them. | `parse_https_url` parses structurally and rejects userinfo, ports, queries, fragments, control characters, non-canonical hosts and `..`. `is_official_evidence_url` then requires the path to *equal* `/{repo}/{kind}/{revision}`. Model evidence must come from `huggingface.co`, runtime evidence from `github.com`. |
+| 3 | A mutable tag name such as `v0.27.1` inside any URL counted as an immutable runtime binding. | Runtime evidence must resolve to a **full commit id** or a full **tag-object id explicitly labelled** via `bound_runtime_object_kind`, with the source URL on the official host and ending in that object id. |
+| 4 | A missing `bound_runtime` routed whenever the task did not narrow runtimes. | Every artifact-bearing descriptor must declare a bound runtime, **whatever the task asked for**. "The task did not ask" is not a reason to stop requiring it. |
+| 5 | The `in-process-stub` exemption was a **copyable field value** — any external author could type that string and bypass every gate at once. | Exemption is now a property of *how the descriptor was constructed*, not what it says: only an object handed out through `register_harness_double` is exempt, checked **by identity**, so an equal-but-separately-constructed copy is not. A test asserts that closed path has exactly one caller. |
+| 6 | Surviving prose overstated what was pinned. | The catalogue's Gemma note now records the retraction; Llama's note records the literal `gated: "manual"`; the "every runtime claim is pinned" heading is narrowed; the round-two all-pinned statement is qualified. NIM stays **UNRESOLVED**, and pinned commits stay distinguished from documents read at moving references. |
+
+🔵 **Two defects this round's own controls found, recorded rather than
+quietly fixed.** A secret-bearing URL query was *refused for routing* but
+still **stored** on the descriptor and visible in its `repr` — URL fields are
+now structurally normalized at construction, so a credential never lands in
+the object at all. And the credential check initially rejected every
+legitimate pinned URL, because a 40-character hex commit id matches the
+long-opaque-run secret rule — the same false positive `is_commit_revision`
+exists to avoid. `has_credential_shape` now skips exactly that one rule, by
+identity, while every other secret rule still applies; queries, fragments and
+userinfo are already refused structurally, so a credential has no
+conventional place left to hide.
 
 One thing that round did **not** do: it did not make locality a structural
 guarantee. That is not achievable while factories are arbitrary code, and
