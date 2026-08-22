@@ -840,6 +840,96 @@ def _survey_refusal(reason) -> QuarantineSurvey:
     return QuarantineSurvey(0, 0, 0, 0, 0, reason)
 
 
+def _regular_file_identity(info):
+    """`(dev, ino)` for a real regular file, or None.
+
+    Proves the object is regular, is not a reparse point, and has a stable
+    nonzero identity -- the file-shaped counterpart of `directory_state`.
+    """
+    if not stat_module.S_ISREG(info.st_mode) or _is_reparse_point(info):
+        return None
+    identity = _stable_identity(info)
+    if identity is None:
+        return None
+    return identity[:2]
+
+
+#: No-follow and nonblocking where the platform has them. Both are absent on
+#: Windows and default to 0 there, exactly as the archive guard documents.
+#:
+#: `O_NOFOLLOW` closes the window between proving the path and opening it.
+#: `O_NONBLOCK` matters because a plain read-only `open` of a FIFO blocks until
+#: a writer appears: someone able to write into the quarantine directory could
+#: otherwise `mkfifo` a `manifest.jsonl` and hang reconciliation indefinitely.
+_MANIFEST_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def _read_manifest_bytes(manifest, byte_budget):
+    """The journal's bytes, or None when it must be refused.
+
+    Returns `b""` when there is simply no manifest -- an unjournalled pass
+    directory is a state to report, not a fault.
+
+    The PATH is proved before the open and the HANDLE after it, and the two
+    identities must agree. Proving only the handle cannot reject a symlinked
+    manifest at all: `fstat` reports the target, which is a perfectly ordinary
+    regular file, and never the link that led to it.
+
+    As everywhere else here, this detects replacement. It is not an atomic
+    Windows defence against every hostile swap, and does not claim to be.
+    """
+    try:
+        path_info = os.lstat(manifest)
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        return None
+    path_identity = _regular_file_identity(path_info)
+    if path_identity is None:
+        return None
+
+    try:
+        handle = os.open(manifest, _MANIFEST_OPEN_FLAGS)
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        return None
+
+    try:
+        if _regular_file_identity(os.fstat(handle)) != path_identity:
+            # Either the opened object is not what the path described, or it
+            # was replaced between the two reads.
+            return None
+
+        # A bounded read LOOP. One `os.read` may legitimately return fewer
+        # bytes than asked for, and treating that as end-of-file would accept
+        # a partial prefix as the whole journal -- silently reporting every
+        # record beyond it as unmanifested. The loop never accumulates more
+        # than one look-ahead byte past the budget, stops at a genuine
+        # end-of-file, and cannot spin, because each turn either grows the
+        # buffer or breaks.
+        limit = byte_budget + 1
+        collected = bytearray()
+        while len(collected) < limit:
+            chunk = os.read(handle, limit - len(collected))
+            if not chunk:
+                break
+            collected.extend(chunk)
+        return bytes(collected)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+
+
 def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineSurvey:
     """Read-only, BOUNDED reconciliation of one pass directory.
 
@@ -888,29 +978,9 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
     # Exactly one batch of maximum-length records, plus a single look-ahead
     # byte whose arrival is itself the refusal.
     byte_budget = policy.max_actions_per_pass * MAX_MANIFEST_RECORD_BYTES
-    manifest = root / MANIFEST_NAME
-    raw = b""
-    handle = None
-    try:
-        handle = os.open(manifest, os.O_RDONLY)
-    except FileNotFoundError:
-        handle = None
-    except OSError:
+    raw = _read_manifest_bytes(root / MANIFEST_NAME, byte_budget)
+    if raw is None:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
-    if handle is not None:
-        try:
-            # Proved by HANDLE, so a manifest replaced between the directory
-            # read and this open cannot be read as though it were regular.
-            info = os.fstat(handle)
-            if not stat_module.S_ISREG(info.st_mode) or _is_reparse_point(info):
-                return _survey_refusal(
-                    RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
-            raw = os.read(handle, byte_budget + 1)
-        except OSError:
-            return _survey_refusal(
-                RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
-        finally:
-            os.close(handle)
     if len(raw) > byte_budget:
         return _survey_refusal(RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
 
