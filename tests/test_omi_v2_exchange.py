@@ -1,0 +1,332 @@
+"""OMI-V2 - controls on the ask-and-check exchange.
+
+This is where requirement 7 is discharged: response validation must REUSE
+`scripts/open_model/structured.py` rather than grow a second validator. That
+is proved two ways here - structurally, by reading the import; and
+behaviourally, by monkeypatching the validator and observing that the
+exchange's verdict changes, which a private reimplementation could not do.
+
+Hermetic throughout: injected clients only, no network, no key, no runtime.
+
+Same-author evidence: written by the agent that wrote the code under test.
+It demonstrates internal consistency, not independent acceptance.
+"""
+
+from __future__ import annotations
+
+import builtins
+import socket
+from types import SimpleNamespace
+
+import pytest
+
+from scripts.agent_backends.base import Message, ToolSpec
+from scripts.agent_backends.openai_compat_backend import (
+    OpenAICompatBackend,
+    StructuredCompletion,
+)
+from scripts.agent_backends.structured_request import StructuredOutputRequest
+from scripts.open_model import structured_exchange as sx
+from scripts.open_model.structured_exchange import (
+    StructuredExchange,
+    request_structured_json,
+)
+
+
+_SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+_REQUEST = StructuredOutputRequest(name="Reply", schema=_SCHEMA)
+_MESSAGES = [Message(role="user", content="hello")]
+_TOOL = ToolSpec(name="t", description="d", input_schema={"type": "object"})
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    def _refuse(*args, **kwargs):
+        raise AssertionError("a socket was created during a hermetic test")
+
+    monkeypatch.setattr(socket, "socket", _refuse)
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+
+
+class RecordingClient:
+    def __init__(self, text="{}", finish_reason="stop"):
+        self.requests: list[dict] = []
+        self._text = text
+        self._finish_reason = finish_reason
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create)
+        )
+
+    def _create(self, **kwargs):
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=self._text, tool_calls=None),
+                    finish_reason=self._finish_reason,
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+        )
+
+
+def _backend(text="{}", dialect="vllm") -> OpenAICompatBackend:
+    return OpenAICompatBackend(
+        model="m", client=RecordingClient(text=text), dialect=dialect
+    )
+
+
+def _exchange(text="{}", dialect="vllm", **kwargs) -> StructuredExchange:
+    return request_structured_json(
+        _backend(text=text, dialect=dialect), _MESSAGES, [],
+        structured=_REQUEST, **kwargs
+    )
+
+
+# == the success path ========================================================
+
+
+def test_a_conforming_response_validates():
+    result = _exchange(text='{"ok": true, "n": 1}')
+    assert result.ok is True
+    assert dict(result.value) == {"ok": True, "n": 1}
+    assert result.response_format_sent is True
+    assert result.dialect == "vllm"
+    assert result.request_refusal is None
+    assert result.response_failure is None
+
+
+def test_required_keys_are_enforced():
+    result = _exchange(text='{"ok": true}', required_keys=("ok",))
+    assert result.ok is True
+
+
+def test_a_missing_required_key_is_reported_as_an_index_not_a_name():
+    secret_key = "SECRETKEYNAME"
+    result = _exchange(
+        text='{"ok": true}', required_keys=("ok", secret_key)
+    )
+    assert result.ok is False
+    assert result.response_failure == "missing-required-key"
+    assert result.missing_key_indices == (1,)
+    assert secret_key not in repr(result)
+
+
+@pytest.mark.parametrize("dialect", ["llama-cpp", "ollama", "vllm", "sglang"])
+def test_the_exchange_works_across_every_dialect(dialect):
+    result = _exchange(text='{"ok": true}', dialect=dialect)
+    assert result.ok is True
+    assert result.dialect == dialect
+
+
+# == the response-failure boundary ===========================================
+
+
+@pytest.mark.parametrize(
+    "text,failure",
+    [
+        ("I am prose, not JSON.", "invalid-json"),
+        # Empty content produces no TextBlock at all (the backend's existing
+        # `type(text) is str and text` guard), so `AgentResponse.text` is
+        # None and the accurate verdict is the not-a-string one.
+        ("", "payload-not-exact-str"),
+        ("[1, 2, 3]", "not-json-object"),
+        ('"a string"', "not-json-object"),
+        ("42", "not-json-object"),
+        ("null", "not-json-object"),
+        ('{"a": 1, "a": 2}', "duplicate-key"),
+        ('{"a": NaN}', "non-finite-number"),
+        ('{"a": Infinity}', "non-finite-number"),
+        ("{unclosed", "invalid-json"),
+    ],
+)
+def test_an_unusable_response_is_reported_without_disclosure(text, failure):
+    result = _exchange(text=text)
+    assert result.ok is False
+    assert result.response_failure == failure
+    assert result.value is None
+    # A request WAS sent; this is a runtime-behaviour failure, not a refusal.
+    assert result.response_format_sent is True
+    assert result.request_refusal is None
+
+
+def test_a_response_with_no_text_block_is_reported_not_crashed():
+    """`text` is None when the model returned no text at all."""
+    result = _exchange(text=None)
+    assert result.ok is False
+    assert result.response_failure == "payload-not-exact-str"
+
+
+def test_an_oversized_response_is_refused_before_parsing():
+    result = _exchange(text='{"a": "' + "A" * 500 + '"}', max_chars=10)
+    assert result.response_failure == "payload-too-large"
+
+
+def test_an_unsafe_required_key_refuses_the_whole_validation():
+    result = _exchange(text='{"ok": true}', required_keys=("A" * 200,))
+    assert result.ok is False
+    assert result.response_failure == "required-key-not-safe"
+
+
+def test_no_response_text_reaches_the_result():
+    secret = "SECRETRESPONSEBODY"
+    result = _exchange(text="prose containing " + secret)
+    assert result.ok is False
+    assert secret not in repr(result)
+
+
+# == a refused request never becomes a response failure ======================
+
+
+def test_a_request_refusal_propagates_and_is_not_a_response_failure():
+    backend = OpenAICompatBackend(model="m", client=RecordingClient())
+    result = request_structured_json(
+        backend, _MESSAGES, [], structured=_REQUEST
+    )
+    assert result.ok is False
+    assert result.request_refusal == "dialect-not-configured"
+    assert result.response_failure is None
+    assert result.response_format_sent is False
+
+
+def test_the_tools_refusal_propagates():
+    result = request_structured_json(
+        _backend(), _MESSAGES, [_TOOL], structured=_REQUEST
+    )
+    assert result.request_refusal == "tools-with-structured-unsupported"
+    assert result.response_format_sent is False
+
+
+def test_no_request_is_sent_when_the_exchange_refuses():
+    client = RecordingClient()
+    backend = OpenAICompatBackend(model="m", client=client, dialect="vllm")
+    result = request_structured_json(
+        backend, _MESSAGES, [], structured=StructuredOutputRequest(
+            name="R", schema={}
+        )
+    )
+    assert result.request_refusal == "schema-empty"
+    assert client.requests == []
+
+
+# == backends outside OMI-V2 refuse cleanly ==================================
+
+
+def test_a_backend_without_the_method_refuses_rather_than_raising():
+    from scripts.agent_backends.mock import MockBackend
+
+    result = request_structured_json(
+        MockBackend(responses=[]), _MESSAGES, [], structured=_REQUEST
+    )
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+def test_a_backend_returning_a_foreign_object_is_not_believed():
+    class Liar:
+        def complete_structured(self, *args, **kwargs):
+            return SimpleNamespace(
+                ok=True, response=None, refusal=None, dialect="vllm",
+                response_format_sent=True,
+            )
+
+    result = request_structured_json(
+        Liar(), _MESSAGES, [], structured=_REQUEST
+    )
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.ok is False
+
+
+def test_a_non_callable_attribute_refuses():
+    result = request_structured_json(
+        SimpleNamespace(complete_structured="not callable"),
+        _MESSAGES, [], structured=_REQUEST,
+    )
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+# == requirement 7: the existing validator is reused, not reimplemented ======
+
+
+def test_the_exchange_imports_the_existing_validator():
+    from pathlib import Path
+
+    source = Path(sx.__file__).read_text(encoding="utf-8")
+    assert "from scripts.open_model.structured import (" in source
+    assert "validate_structured_output" in source
+
+
+def test_the_validator_is_actually_called(monkeypatch):
+    """Behavioural proof: a private reimplementation would ignore this patch."""
+    seen: list[tuple] = []
+
+    def _fake(payload, *, required_keys=(), max_chars=0):
+        seen.append((payload, required_keys, max_chars))
+        return sx.StructuredOutcome(ok=False, failure="duplicate-key")
+
+    monkeypatch.setattr(sx, "validate_structured_output", _fake)
+    result = _exchange(text='{"ok": true}', required_keys=("ok",), max_chars=99)
+    assert result.response_failure == "duplicate-key"
+    assert seen == [('{"ok": true}', ("ok",), 99)]
+
+
+def test_the_exchange_defines_no_validator_of_its_own():
+    """No JSON parsing lives here; the module delegates."""
+    from pathlib import Path
+
+    source = Path(sx.__file__).read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in source.splitlines() if not line.strip().startswith("#")
+    )
+    assert "json.loads" not in body
+    assert "import json" not in body
+
+
+# == nothing is persisted ====================================================
+
+
+def test_the_exchange_writes_no_file(monkeypatch):
+    def _refuse(*args, **kwargs):
+        raise AssertionError("the exchange opened a file")
+
+    backend = _backend(text='{"ok": true}')
+    monkeypatch.setattr(builtins, "open", _refuse)
+    result = request_structured_json(
+        backend, _MESSAGES, [], structured=_REQUEST
+    )
+    assert result.ok is True
+
+
+def test_the_file_guard_would_actually_fire(monkeypatch):
+    """Guard: an inert monkeypatch would make the test above vacuous."""
+    def _refuse(*args, **kwargs):
+        raise AssertionError("the guard fired")
+
+    monkeypatch.setattr(builtins, "open", _refuse)
+    with pytest.raises(AssertionError):
+        open("nonexistent-omi-v2-probe.txt")
+
+
+# == the carrier cannot express a contradiction ==============================
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ok": True, "value": {"a": 1}, "request_refusal": "schema-empty"},
+        {"ok": True, "response_format_sent": True},
+        {"ok": True, "value": {"a": 1}},
+        {"ok": False},
+        {"ok": False, "request_refusal": "schema-empty", "response_failure": "invalid-json"},
+        {"ok": False, "request_refusal": "schema-empty", "response_format_sent": True},
+        {"ok": False, "response_failure": "invalid-json", "value": {"a": 1}},
+    ],
+)
+def test_contradictory_exchanges_are_refused_at_construction(kwargs):
+    with pytest.raises(ValueError):
+        StructuredExchange(**kwargs)
+
+
+def test_a_valid_success_still_constructs():
+    assert StructuredExchange(
+        ok=True, value={"a": 1}, response_format_sent=True
+    ).ok is True
