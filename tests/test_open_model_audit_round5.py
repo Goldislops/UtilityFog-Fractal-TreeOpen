@@ -324,7 +324,9 @@ def test_j5_the_round_two_row_names_nim_as_unresolved_inline():
         "repository plus an immutable commit"
     )
     assert stale not in flat
-    assert "every runtime claim except NVIDIA NIM" in flat
+    # Asserted as a property rather than a phrase: round six rescoped this
+    # row to the code catalogue, which reworded the surrounding sentence.
+    assert "except NVIDIA NIM" in flat
     assert "NIM has no public git ref and remains UNRESOLVED" in flat
 
 
