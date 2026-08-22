@@ -56,13 +56,42 @@ conservative value, and support flags are tri-state — `supported`,
 reason. Nothing in the package ever upgrades an unknown into a yes. A
 half-filled descriptor is ineligible, not accidentally eligible.
 
-**No silent cloud fallback.** `TaskRequirements.require_local` defaults to
-`True`. A remote candidate under a local-only task is refused with
-`locality-not-local`, and the winner is re-evaluated after selection
-specifically so a future edit to the selection logic cannot produce a remote
-backend for a local-only task. When nothing qualifies the result is the fixed
-`NO_ELIGIBLE_BACKEND` outcome carrying reasons — not an exception, not a
-degraded pick, and not a quiet hop to whichever API key happens to be set.
+**No silent cloud fallback — and an honestly bounded locality claim.**
+`TaskRequirements.require_local` defaults to `True`. A remote *descriptor*
+under a local-only task is refused with `locality-not-local`, and the winner
+is re-evaluated after selection specifically so a future edit to the
+selection logic cannot produce a remote descriptor for a local-only task.
+When nothing qualifies the result is the fixed `NO_ELIGIBLE_BACKEND` outcome
+carrying reasons — not an exception, not a degraded pick, and not a quiet hop
+to whichever API key happens to be set.
+
+What that does **not** mean, and what an earlier draft of this document
+wrongly implied: routing reads a *descriptor*, and a descriptor is an
+assertion. A factory is arbitrary operator code and can construct a backend
+pointed at a paid remote endpoint while its descriptor claims `local`. No
+amount of care in this package makes that impossible. Two things bound it:
+
+- **A gate.** Registering a `local` descriptor requires an explicit
+  `locality_attestation="operator-asserted"` argument at the registration
+  site, so the trust is named in code a reviewer reads rather than implied by
+  a field.
+- **A best-effort detector.** `create()` inspects the constructed backend for
+  a `base_url`-shaped attribute and refuses with `locality-mismatch-detected`
+  when a `local` descriptor produced a non-loopback endpoint. This catches
+  the concrete case in this repository — `OpenAICompatBackend` holds an SDK
+  client with a `base_url` — and anything following the same convention. It
+  is not universal: a backend that hides its endpoint is not detected, and
+  *not detected* is recorded as unknown, never as local.
+
+The residual guarantee is an operator assertion, cross-checked where the
+shape permits. It is not a structural proof and is no longer described as one.
+
+**Provenance is part of identity.** A descriptor names one artifact and says
+where it came from: `model_id` + `variant_id` + `repository_revision`
+identify it, `artifact_digest` pins the bytes whenever an artifact-format
+claim is made, and `licence_source_url` + `licence_revision` pin the terms
+that were actually read. All are blocking. `quantisation` is singular for the
+same reason — see "Variant identity" in §4.
 
 **Disclosure resistance is structural, not filtered.** `TaskRequirements`
 has no prompt, message, system, or free-text field at all; the routing layer
@@ -74,6 +103,20 @@ can come to contain a private prompt. `redact()` exists for the one
 remaining free-text field (an operator note) and is honestly scoped: it
 matches *shaped* secrets, and it is not claimed to sanitise arbitrary natural
 language.
+
+Corrected after audit: "carry codes and names" was the intent, but several
+fields only *sliced* their input, leaving room for 64–128 characters of
+arbitrary caller text. Identifier fields are now closed rather than trimmed —
+`DiagnosticRecord.event` must be a member of `DIAGNOSTIC_EVENTS`, its
+`reasons` members of `ESCALATION_REASONS` (non-members are dropped whole, not
+truncated), and `backend`, `EvaluationCase.case_id` and every entry of
+`required_keys` must be *safe tokens*: bounded, drawn from a closed character
+class, **and unchanged by the secret matcher** — that last condition is what
+refuses `sk-ABCDEFGH12345678`, which the character class alone would admit.
+Unsafe `required_keys` now fail the whole validation rather than being
+dropped, because dropping one silently reported success for a payload that
+had never been checked against it. And missing keys are reported as
+**indices** into the caller's own tuple, never as key text.
 
 **Metadata is not approval.** Every catalogue entry declares
 `availability="unknown"` and `locality="unknown"`, both blocking. No entry
@@ -130,6 +173,26 @@ structured outputs, or SGLang grammar backends. This is why
 model as served by a bound runtime — and why every catalogue entry, which
 binds no runtime, honestly reports `unknown`.
 
+**Variant identity (corrected after audit).** The table above is a *family
+level* survey, which is the right shape for a human reading about the
+landscape. The code catalogue is not: there, one descriptor names exactly one
+artifact. `ibm-granite/granite-4.1-8b` (BF16 safetensors) and
+`ibm-granite/granite-4.1-8b-GGUF` (a first-party quantised build) are
+separate entries with separate `variant_id`s, because they are separate files
+with separate digests, separate runtime support and separate failure modes.
+Collapsing them under one "Granite 4.1 8B" row would make any claim about
+either unfalsifiable — and would let a reader believe a digest or a runtime
+claim applied to an artifact it had never been checked against.
+
+**Provenance is unpinned, deliberately.** Every catalogue entry leaves
+`repository_revision` and `artifact_digest` empty. This survey read model
+cards and licence texts; it did not retrieve commit revisions or file
+digests. Inventing plausible-looking hex would manufacture exactly the false
+confidence those fields exist to prevent, so they are blank — and blank is
+blocking, which is why every entry additionally fails on
+`repository-revision-unpinned`. Populating them is an operator step performed
+against the actual artifact being adopted, at the time of adoption.
+
 **Context figures.** `max_context_tokens` is populated in code only where an
 exact token integer appeared on the vendor's own card (Granite 131072, GLM-5.2
 1048576). Where a source stated a rounded "256K" / "1M" / "10M", the field is
@@ -147,6 +210,51 @@ fabricated fact wearing the costume of a measured one.
 | [SGLang](https://github.com/sgl-project/sglang) | v0.5.18 | Apache-2.0 | `/v1/chat/completions`, `/v1/models`, plus Ollama-shaped `/api/chat` | `response_format.json_schema.schema`, or `extra_body={"ebnf"` \| `"regex"}`; native puts them in `sampling_params` — **exactly one** constraint per request | yes, **requires `--tool-call-parser`**; `required`/named fully supported only on the xgrammar backend | `/v1/models` | `/health`, `/health_generate` | **unverified — assume unsupported** |
 | [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) | 1.3.0 RC line | Apache-2.0 | via its own runtimes | — | — | — | — | Linux primary; Windows supported; NVIDIA GPUs only |
 | [NVIDIA NIM](https://developer.nvidia.com/nim) | — | **proprietary** | OpenAI-compatible | — | — | — | — | self-hostable container |
+
+**Every runtime claim above is pinned to a source and a version.** A runtime's
+parameter names, required launch flags and endpoint set all move between
+releases, so an unpinned runtime claim decays into folklore. The claims in
+this table were read on **2026-08-22** from:
+
+| Runtime | Version the claim is pinned to | Source read |
+|---|---|---|
+| llama.cpp | `v0.2.0`, rolling build `b10569` | `github.com/ggml-org/llama.cpp` `tools/server/README.md` at `master` |
+| Ollama | `v0.32.15` (published 2026-08-19) | `docs.ollama.com/api/openai-compatibility` |
+| vLLM | `v0.27.1` (published 2026-08-11) | `docs.vllm.ai/en/latest/features/structured_outputs/` and `.../tool_calling/` |
+| SGLang | `v0.5.18` (published 2026-08-22) | `docs.sglang.io/docs/advanced_features/structured_outputs` and `.../tool_parser` |
+| TensorRT-LLM | `1.3.0` RC line | `github.com/NVIDIA/TensorRT-LLM` `LICENSE` |
+| NVIDIA NIM | n/a (proprietary, per-container) | `nvidia.com/en-us/agreements/enterprise-software/...` |
+
+### The Ollama `tool_choice` row, re-verified
+
+An independent audit challenged this table, reporting that current official
+documentation lists `tool_choice` as **supported** on
+`/v1/chat/completions`. That claim did not reproduce. The row was
+**re-verified on 2026-08-22 against three independent official sources**,
+all of which mark it unsupported:
+
+1. the rendered page, `https://docs.ollama.com/api/openai-compatibility`
+2. its Markdown source, `https://docs.ollama.com/api/openai-compatibility.md`
+3. the in-repository source at `main`,
+   `https://raw.githubusercontent.com/ollama/ollama/main/docs/api/openai-compatibility.mdx`
+
+All three render the same checklist, in which `tools` is checked and
+`tool_choice` is not:
+
+```
+- [x] `tools`
+- [x] `reasoning_effort`
+- [x] `reasoning`
+- [ ] `tool_choice`
+- [ ] `logit_bias`
+- [ ] `user`
+- [ ] `n`
+```
+
+The table therefore stands as written. This note is recorded rather than
+silently retained so that a future reader can see the claim was contested,
+re-checked, and on what evidence it survived — and so that the check is cheap
+to repeat when Ollama next ships.
 
 Divergences an adapter has to absorb, and the reason a single `response_format`
 passthrough is not sufficient:
@@ -241,20 +349,30 @@ plus runtime, not the vendor's marketing.
 
 ```python
 observed = ModelCapabilities(
-    model_id="ibm-granite/granite-4.1-8b",
+    model_id="ibm-granite/granite-4.1-8b-GGUF",
+    variant_id="gguf-q4-k-m",            # the exact artifact, not the family
+    repository_revision="<the revision you actually pulled>",
+    quantisation="gguf-q4_k_m",
+    artifact_digest="sha256:<digest of the file you actually have>",
     locality="local",
-    availability="present",        # only you can honestly assert this
+    availability="present",              # only you can honestly assert this
     resource_class="light",
-    structured_output="supported", # because the bound runtime provides it
+    structured_output="supported",       # because the bound runtime provides it
     tool_calling="supported",
     max_context_tokens=131072,
     runtimes=("ollama",),
     licence_class="osi-open-source",
     licence_name="Apache-2.0",
-    provenance_url="https://huggingface.co/ibm-granite/granite-4.1-8b",
+    licence_source_url="https://www.apache.org/licenses/LICENSE-2.0",
+    licence_revision="2.0",
+    provenance_url="https://huggingface.co/ibm-granite/granite-4.1-8b-GGUF",
     observed_on="2026-08-22",
 )
 ```
+
+Every provenance field is blocking. A descriptor that cannot say which
+revision it pulled, or that claims an artifact format without a digest, does
+not route — which is the intended outcome, not an obstacle to work around.
 
 **Step 3 — Write a factory, in reviewed code.** The factory takes no
 arguments, so no endpoint or credential can be injected at routing time.
@@ -269,21 +387,32 @@ def make_local_granite() -> AgentBackend:
     )
 ```
 
-**Step 4 — Register it against an explicit allowlist.**
+**Step 4 — Register it against an explicit allowlist, and vouch for the
+locality claim in code.**
 
 ```python
 registry = BackendRegistry(allowed_names=("local-granite",))
-registry.register("local-granite", observed, make_local_granite)
+registry.register(
+    "local-granite",
+    observed,
+    make_local_granite,
+    # Required for any `local` descriptor. This is you saying, in reviewable
+    # code, that you checked what the factory actually constructs.
+    locality_attestation="operator-asserted",
+)
 
 decision = route(registry, TaskRequirements(require_local=True))
 if not decision.has_backend:
     escalate(decision.escalation)   # the only other branch there is
+backend = registry.create(decision.selected)   # may still refuse
 ```
 
 Note what is still true after all four steps: the router will still refuse
 this backend the moment its descriptor stops asserting `present`, `create()`
-will refuse it a second time independently, and a task requiring a capability
-the descriptor does not claim will escalate rather than try its luck.
+will refuse it a second time independently, a `local` descriptor whose
+factory produces a non-loopback endpoint is refused a third time at
+construction, and a task requiring a capability the descriptor does not claim
+will escalate rather than try its luck.
 
 ## 8. Deliberately not implemented
 
@@ -302,3 +431,29 @@ the descriptor does not claim will escalate rather than try its luck.
 - **No cost, latency, or quality model.** `resource_class` is a *declared*
   band authored by a human, not a measurement. This package benchmarks
   nothing and must never be cited as if it had.
+
+## 9. Post-audit corrections (2026-08-22)
+
+An independent audit returned HOLD on six findings. All six were acted on;
+one of them did not reproduce and is recorded here with its evidence rather
+than being quietly accepted or quietly dropped.
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | The locality guarantee was over-claimed: a `local` descriptor could be bound to a factory constructing a remote or paid backend. | **Corrected.** The claim is now bounded to what is enforced (§2), plus a registration-site attestation gate and a best-effort non-loopback detector at `create()`. An adversarial mismatch test asserts the refusal, and a further test asserts the *undetectable* case so the residual boundary is visible in the suite. |
+| 2 | `DiagnosticRecord.event`/`backend`/`reasons`, `EvaluationCase.case_id` and `required_keys` retained arbitrary text; missing-key text was recorded. | **Corrected.** Closed vocabularies for `event` and `reasons`; safe-token gates elsewhere, including a redaction cross-check that refuses secret-shaped identifiers a character class would admit. Unsafe `required_keys` now fail closed instead of being dropped — the dropped-key path had been reporting success for unchecked payloads. Missing keys are reported as indices. |
+| 3 | A malformed `min_context_tokens` became `0`, so a one-token backend could satisfy a demand for 32k. | **Corrected.** Any malformed requirement is recorded in `malformed_fields` and blocks every candidate with `requirements-invalid`. The field is always recomputed, so a caller cannot forge it clean. |
+| 4 | No immutable model provenance; BF16/NVFP4/GGUF/dated variants collapsed under a generic model id. | **Corrected.** Added `variant_id`, `repository_revision`, `artifact_digest`, `licence_source_url`, `licence_revision`, all blocking; `quantisation` is now singular. The catalogue was rewritten to exact-variant entries. Revisions and digests are left empty and therefore blocking, because the survey did not retrieve them and inventing them would be worse. |
+| 5 | Reported that current Ollama docs list `tool_choice` as supported. | **Did not reproduce — matrix unchanged.** Re-verified against three independent official sources, all marking it `[ ]` unsupported; evidence and quotes in §5. The valid half of the finding *was* acted on: every runtime claim is now pinned to a version and a named source. |
+| 6 | Regression tests required for every finding, across all modes. | **Done.** `tests/test_open_model_audit_corrections.py`, plus the existing suites re-run under normal, `-O` and `-OO`. |
+
+On finding 5: the auditor's reading is recorded rather than discarded, and
+the check is written down so it is cheap to repeat. If Ollama ships
+`tool_choice` support, the matrix row and the pinned version should change
+together — that is what the pinning is for.
+
+Two things this correction round did **not** do. It did not make locality a
+structural guarantee; that is not achievable while factories are arbitrary
+code, and claiming it was the original error. And it did not populate
+provenance for the catalogue, because that requires retrieving artifacts,
+which is outside this work's authority.
