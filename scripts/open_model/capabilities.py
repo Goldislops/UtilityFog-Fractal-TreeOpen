@@ -342,24 +342,42 @@ def _exact_quantisation(value: Any) -> str:
     return ""
 
 
-def _exact_https_url(value: Any) -> str:
-    """Keep ``value`` only when it is exactly ``str`` and an ``https://`` URL.
+def _exact_https_url(value: Any, allowed_opaque: tuple[str, ...] = ()) -> str:
+    """Keep ``value`` only when it is a clean, canonical ``https://`` URL.
 
     This field exists so a human auditor can find the official page a claim
     came from. It is **never** fetched, opened, or executed by this package;
     restricting the scheme to ``https`` simply stops a descriptor from
     carrying a ``file:``, ``data:``, or command-shaped string that a future
     reader might mistake for something actionable.
+
+    **Secret detection is per component, not per URL** (corrected after
+    audit). The previous version skipped the long-opaque-run rule for the
+    *entire* URL, because a 40-character hex commit id legitimately matches
+    it - which also excused a 48-character credential sitting in the owner,
+    repository, or file-name position. Now every path component gets the
+    full secret matcher, and the long-run rule is waived **only** for a
+    component that exactly equals one of ``allowed_opaque``: this
+    descriptor's own repository revision or runtime object id. Any other
+    long opaque run is refused, and a refused URL is never stored, so a
+    credential cannot sit in the descriptor's ``repr`` even in cases where
+    routing would later have refused to act on it.
     """
-    ok, _host, _path = parse_https_url(value)
+    ok, host, path = parse_https_url(value)
     if not ok:
         return ""
-    # A URL that trips the secret matcher is refused outright rather than
-    # stored: a credential in a query string would otherwise sit in the
-    # descriptor repr, in any log built from it, and in every diff of this
-    # file, even though routing already refused to act on it.
-    if has_credential_shape(value):
+    if redact(host, max_chars=_URL_MAX_LEN) != host:
         return ""
+    for component in path.split("/"):
+        if not component:
+            continue
+        if component in allowed_opaque:
+            # Waived for the long-run rule only; every other rule still runs.
+            if has_credential_shape(component):
+                return ""
+            continue
+        if redact(component, max_chars=_URL_MAX_LEN) != component:
+            return ""
     return value
 
 
@@ -398,6 +416,26 @@ MODEL_EVIDENCE_HOST: Final[str] = "huggingface.co"
 RUNTIME_EVIDENCE_HOST: Final[str] = "github.com"
 """The single origin runtime evidence may come from."""
 
+RUNTIME_REPOSITORIES: Final[dict[str, str]] = {
+    "llama-cpp": "ggml-org/llama.cpp",
+    "ollama": "ollama/ollama",
+    "vllm": "vllm-project/vllm",
+    "sglang": "sgl-project/sglang",
+    "tensorrt-llm": "NVIDIA/TensorRT-LLM",
+}
+"""The exact official repository for each runtime token.
+
+Corrected after audit: requiring only ``github.com`` plus a trailing object
+id let ``bound_runtime="vllm"`` be evidenced by
+``https://github.com/evil-org/fake-runtime/tree/<a real vLLM commit>`` - a
+genuine commit id borrowed to vouch for an unrelated repository. The token
+now names one repository and the whole path must match it.
+
+``in-process-stub`` deliberately has no entry: it is not a public runtime,
+and a descriptor claiming it while bearing a real artifact has nothing
+legitimate to point at.
+"""
+
 
 def _has_control(text: str) -> bool:
     for character in text:
@@ -434,7 +472,7 @@ def is_canonical_relative_path(value: Any) -> bool:
         return False
     if value.startswith("/") or value.startswith("~"):
         return False
-    if "@" in value or "?" in value or "#" in value:
+    if "@" in value or "?" in value or "#" in value or "%" in value:
         return False
     for component in value.split("/"):
         if not component or component in (".", ".."):
@@ -462,6 +500,13 @@ def parse_https_url(value: Any) -> tuple[bool, str, str]:
     if type(value) is not str or not value or len(value) > _URL_MAX_LEN:
         return (False, "", "")
     if _has_control(value):
+        return (False, "", "")
+    # Percent-encoding is forbidden outright rather than decoded. These URLs
+    # address repository trees and blobs whose names never need it, and
+    # allowing it would mean re-deriving canonicality after a decode step -
+    # %2e%2e, %2f, %40 and %00 all reintroduce exactly the traversal,
+    # separator, userinfo and control cases the rest of this parser refuses.
+    if "%" in value:
         return (False, "", "")
     prefix = "https://"
     if not value.startswith(prefix):
@@ -580,13 +625,25 @@ class ModelCapabilities:
             "bound_runtime_object_kind",
             _exact_member(self.bound_runtime_object_kind, _RUNTIME_OBJECT_KINDS, ""),
         )
+        # Only THIS descriptor's own immutable object ids are waived from the
+        # long-opaque-run rule, and only when a path component equals one of
+        # them exactly. Computed here because both are already normalized.
+        allowed_opaque = tuple(
+            token
+            for token in (self.repository_revision, self.bound_runtime_version)
+            if is_commit_revision(token)
+        )
         set_(
             self,
             "bound_runtime_source_url",
-            _exact_https_url(self.bound_runtime_source_url),
+            _exact_https_url(self.bound_runtime_source_url, allowed_opaque),
         )
         set_(self, "artifact_digest", _exact_digest(self.artifact_digest))
-        set_(self, "licence_source_url", _exact_https_url(self.licence_source_url))
+        set_(
+            self,
+            "licence_source_url",
+            _exact_https_url(self.licence_source_url, allowed_opaque),
+        )
         set_(self, "licence_revision", _exact_reference(self.licence_revision))
         set_(self, "locality", _exact_member(self.locality, _LOCALITIES, "unknown"))
         set_(
@@ -634,7 +691,11 @@ class ModelCapabilities:
             _exact_bounded_str(self.licence_name, _LICENCE_NAME_MAX_LEN),
         )
         set_(self, "licence_notes", _exact_bounded_str(self.licence_notes, _NOTE_MAX_LEN))
-        set_(self, "provenance_url", _exact_https_url(self.provenance_url))
+        set_(
+            self,
+            "provenance_url",
+            _exact_https_url(self.provenance_url, allowed_opaque),
+        )
         set_(self, "observed_on", _exact_iso_date(self.observed_on))
 
         # A field that was SUPPLIED but could not be stored canonically
@@ -796,10 +857,15 @@ class ModelCapabilities:
             return False
         if self.bound_runtime_object_kind not in _RUNTIME_OBJECT_KINDS:
             return False
+        repository = RUNTIME_REPOSITORIES.get(self.bound_runtime)
+        if repository is None:
+            return False
         ok, host, path = parse_https_url(self.bound_runtime_source_url)
         if not ok or host != RUNTIME_EVIDENCE_HOST:
             return False
-        return path.endswith("/tree/" + self.bound_runtime_version)
+        # The COMPLETE canonical path, not a suffix match: owner, repository
+        # and object must all be the expected ones.
+        return path == "/" + repository + "/tree/" + self.bound_runtime_version
 
     def is_byte_pinned(self) -> bool:
         """True when the bytes this descriptor refers to are pinned.
@@ -879,6 +945,7 @@ __all__ = [
     "ModelCapabilities",
     "RESOURCE_ORDER",
     "RUNTIME_EVIDENCE_HOST",
+    "RUNTIME_REPOSITORIES",
     "ResourceClass",
     "RuntimeKind",
     "SupportState",
