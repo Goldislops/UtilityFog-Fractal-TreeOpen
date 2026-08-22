@@ -144,6 +144,22 @@ quality, because this work has measured nothing.
 
 ## 4. Model candidate matrix (observed 2026-08-22)
 
+> 🔴 **This table is a DATED FAMILY SURVEY. It is NOT pinned evidence.**
+> Its links are ordinary vendor pages — repository landing pages without a
+> revision, help-centre articles, licence portals — and **those pages move**.
+> A claim in this table was true of what a human read on 2026-08-22 and is
+> not independently verifiable from the link alone afterwards.
+>
+> **The pinned evidence in this work is the 12 descriptors in
+> [`scripts/open_model/catalogue.py`](../scripts/open_model/catalogue.py)**,
+> and only those. Each carries an exact repository, a full immutable commit
+> id, revision-pinned `provenance_url` and `licence_source_url`, and — for
+> single-file variants — an LFS `sha256`. Those are enforced: a descriptor
+> that loses any of them stops routing.
+>
+> Read this section for orientation across the landscape. Read the catalogue
+> when you need a claim that can be checked.
+
 Licence classes: **(a)** OSI open source · **(b)** open-weight but
 licence-restricted · **(c)** source-available · **(d)** proprietary service.
 Where OSI status could not be confirmed from the licence text itself, the
@@ -534,7 +550,7 @@ were corrected.
 | 2 | Registry names entered routing decisions and records ungated, and a refusal reason raised by an **operator factory** was persisted verbatim. | Names must be safe tokens before entering the allowlist or the registry. `RegistrationRefused` and `BackendUnavailable` now close their reason at the constructor — including for operator-raised instances — so neither the instance nor the exception message can carry supplied text. |
 | 3 | A real 40-character repository SHA was **rejected** as secret-shaped, because the long-opaque-run rule matches any 40+ character alphanumeric run. | `is_commit_revision` admits exactly 40- or 64-character lowercase hex, checked digit by digit — a far narrower class than "long opaque string", and precisely the class that identifies an immutable commit. |
 | 4 | The digest requirement keyed off `quantisation`, so a BF16/safetensors variant was exempt. | The requirement now keys off the artifact: a named single file must carry its digest, and every artifact-bearing descriptor must be byte-pinned by *either* a named file plus digest *or* a full commit id. |
-| 5 | Claims were bound to mutable branch URLs; the GLM FP8 row pointed at the BF16 repository. | Every model and licence claim, and **every runtime claim except NVIDIA NIM**, is bound to an exact repository plus an immutable commit (or labelled tag object) and a revision-pinned URL. **NIM has no public git ref and remains UNRESOLVED** — it is not pinned and is not counted as pinned. The GLM row binds to `zai-org/GLM-5.2-FP8`. TensorRT-LLM re-pinned from an RC line to released `v1.2.1`. Note also that a pinned *version* is not a document *read at* that version; only the Ollama row is pinned end to end (§5). |
+| 5 | Claims were bound to mutable branch URLs; the GLM FP8 row pointed at the BF16 repository. | **Scoped to the 12 code-catalogue descriptors**: each is bound to an exact repository plus a full immutable commit and revision-pinned URLs. **The §4 family survey is NOT covered** — it is a dated survey over moving vendor pages and is labelled as such. Of the runtime claims, **every one except NVIDIA NIM** is bound to an immutable commit or labelled tag object; **NIM has no public git ref and remains UNRESOLVED**, not counted as pinned. The GLM row binds to `zai-org/GLM-5.2-FP8`. TensorRT-LLM re-pinned from an RC line to released `v1.2.1`. And a pinned *version* is not a document *read at* that version; only the Ollama row is pinned end to end (§5). |
 | 6 | Three renderings of one vendor document were described as independent evidence. | Restated as three *mechanically corroborating official representations of a single primary source*: agreement rules out transcription error on my side, not error by the one claimant. |
 | 7 | `routing.py` still carried an absolute locality claim. | Removed. The module now states that eligibility reads descriptors, trusts the operator attestation, and cannot establish where a backend will execute — and that opaque factories remain undetectable. |
 
@@ -579,6 +595,23 @@ remained.
 | 4 | A missing `bound_runtime` routed whenever the task did not narrow runtimes. | Every artifact-bearing descriptor must declare a bound runtime, **whatever the task asked for**. "The task did not ask" is not a reason to stop requiring it. |
 | 5 | The `in-process-stub` exemption was a **copyable field value** — any external author could type that string and bypass every gate at once. | Exemption is now a property of *how the descriptor was constructed*, not what it says: only an object handed out through `register_harness_double` is exempt, checked **by identity**, so an equal-but-separately-constructed copy is not. A test asserts that closed path has exactly one caller. |
 | 6 | Surviving prose overstated what was pinned. | The catalogue's Gemma note now records the retraction; Llama's note records the literal `gated: "manual"`; the "every runtime claim is pinned" heading is narrowed; the round-two all-pinned statement is qualified. NIM stays **UNRESOLVED**, and pinned commits stay distinguished from documents read at moving references. |
+
+## 14. Post-audit corrections, round six (2026-08-22)
+
+A sixth independent audit cleared all four round-five findings and held two
+gates.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | `RUNTIME_REPOSITORIES` was a `Final[dict]`. **`Final` is a type-checker annotation with no runtime effect**, so `RUNTIME_REPOSITORIES["vllm"] = "evil-org/fake-runtime"` silently restored eligibility for an attacker-selected repository — and `update`, `del`, `pop` and `clear` worked just as well. | The authoritative data is now a **tuple of pairs captured in a closure**, reachable by no ordinary expression, and consulted through a private lookup function. `RUNTIME_REPOSITORIES` remains exported as a **`MappingProxyType`** read-only view over a private copy: `__setitem__`, `__delitem__`, `update`, `pop`, `popitem`, `clear` and `setdefault` all refuse. Routing reads the closure, **not** the exported name, so even re-binding the module attribute changes nothing about what is trusted. |
+| 2 | The documentation claimed every model and licence claim was immutably pinned, while the **§4 family survey** still linked moving vendor pages — repository landing pages without a revision, help-centre articles, licence portals. | §4 now opens with an explicit label: it is a **dated family survey, not pinned evidence**, and those pages move. The pinning claim is **scoped to the 12 code-catalogue descriptors**, and the round-two row says so inline. A test asserts the scoped claim is actually *true* of all twelve, so the narrowing cannot become a way to say less and check less. |
+
+**On gate 1, stated plainly.** Python has no true privacy. `__closure__`
+cell surgery, or replacing this module in `sys.modules`, could still defeat
+the closure. Those are not ordinary mutation paths; the claim here is bounded
+to the ordinary ones — assignment, deletion, `update`, `pop`, `clear`,
+`setdefault`, and re-binding the exported name — all of which are now closed
+and asserted closed under normal, `-O` and `-OO`.
 
 ## 13. Post-audit corrections, round five (2026-08-22)
 
