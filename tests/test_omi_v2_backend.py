@@ -261,7 +261,10 @@ def test_structured_adds_exactly_one_key_to_the_legacy_request():
 @pytest.mark.parametrize(
     "dialect,expected",
     [
-        ("llama-cpp", {"type": "json_schema", "schema": _SCHEMA}),
+        (
+            "llama-cpp",
+            {"type": "json_schema", "json_schema": {"schema": _SCHEMA}},
+        ),
         (
             "ollama",
             {"type": "json_schema", "json_schema": {"schema": _SCHEMA}},

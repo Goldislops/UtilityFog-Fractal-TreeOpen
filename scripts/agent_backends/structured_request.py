@@ -14,13 +14,33 @@ environment variable, or a probe.
 
 ``llama-cpp`` - llama.cpp @ ``5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c``
 
-    {"type": "json_schema", "schema": {...}}
+    {"type": "json_schema", "json_schema": {"schema": {...}}}
 
-  ``tools/server/README.md`` documents the schema **flat**, directly under
-  ``response_format``, for both ``json_object`` and ``json_schema`` types.
-  No ``name`` key appears. The server source additionally reads the nested
-  ``json_schema.schema`` path, with the flat form taking precedence; this
-  module emits only the documented flat form (see the recorded decisions).
+  **The README and the server source conflict at this same commit, and the
+  executable source wins.** ``tools/server/README.md`` (blob
+  ``93736c3edfa9bd094bf79f7d2de4659fbf8e74c9``) shows the schema flat under
+  ``response_format`` for the ``json_schema`` type as well as for
+  ``json_object``. The parser that actually runs, in
+  ``tools/server/server-common.cpp`` (blob
+  ``585f65e83c655d3b8b7e398e8bf76552dc846f36``), does not read that::
+
+      if (response_type == "json_object") {
+          if (response_format.contains("schema") || json_schema.empty()) {
+              json_schema = json_value(response_format, "schema", json::object());
+          }
+      } else if (response_type == "json_schema") {
+          auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+          json_schema = json_value(schema_wrapper, "schema", json::object());
+      }
+
+  The flat ``schema`` key is read **only** for ``type=json_object``. For
+  ``type=json_schema`` the server reads ``response_format.json_schema.schema``
+  and nothing else, so a flat schema sent with that type produces an empty
+  wrapper, an empty constraint, and silently unconstrained decoding - exactly
+  the false success this contract exists to prevent. An earlier revision of
+  this module emitted the flat form on the README's authority and carried that
+  defect. Nothing is shotgunned: one path is emitted, and it is the one the
+  pinned executable source reads. No ``name`` key exists on either path.
 
 ``ollama`` - Ollama @ ``b7871fc0d1d82fe109536efa3e0e8e411c766c75``
 
@@ -315,8 +335,11 @@ def build_response_format(
     schema = request.schema
 
     if dialect == "llama-cpp":
-        # Flat, per the pinned tools/server/README.md. No name key exists.
-        return {"type": "json_schema", "schema": schema}
+        # Nested, per the pinned tools/server/server-common.cpp, which reads
+        # the flat `schema` key only for type=json_object. Kept as its own
+        # branch even though it matches Ollama today, so a future divergence
+        # in either runtime cannot be hidden behind a shared one.
+        return {"type": "json_schema", "json_schema": {"schema": schema}}
     if dialect == "ollama":
         # Nested; no name field exists in the Go struct, so none is sent.
         return {"type": "json_schema", "json_schema": {"schema": schema}}
@@ -394,7 +417,7 @@ def plan_structured_request(
 
 
 DIALECT_WIRE_SHAPES: Final[dict[str, str]] = {
-    "llama-cpp": "response_format.schema",
+    "llama-cpp": "response_format.json_schema.schema",
     "ollama": "response_format.json_schema.schema",
     "vllm": "response_format.json_schema.{name,schema}",
     "sglang": "response_format.json_schema.{name,schema}",

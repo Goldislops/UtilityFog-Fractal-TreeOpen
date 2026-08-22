@@ -60,15 +60,66 @@ def restore_module_names():
 # == exact outbound wire shapes, one per dialect =============================
 
 
-def test_llama_cpp_carries_the_schema_flat_and_sends_no_name():
-    """llama.cpp @ 5a32f7b6: tools/server/README.md documents the flat form."""
+def test_llama_cpp_carries_the_schema_nested_and_sends_no_name():
+    """llama.cpp @ 5a32f7b6: server-common.cpp reads json_schema.schema only.
+
+    The README at the same commit shows the flat form for this type. The
+    parser that runs does not read it there, so the executable source is
+    followed and the conflict is recorded in the module docstring.
+    """
     plan = plan_structured_request("llama-cpp", _request())
     assert plan.ok
-    assert plan.response_format == {"type": "json_schema", "schema": _SCHEMA}
-    # The flat form is the whole object: no nesting, and no name key exists
-    # anywhere in llama.cpp's documented response_format.
-    assert "json_schema" not in plan.response_format
-    assert "name" not in plan.response_format
+    assert plan.response_format == {
+        "type": "json_schema",
+        "json_schema": {"schema": _SCHEMA},
+    }
+    # Negative control on the corrected defect: the flat key the README shows
+    # must NOT be emitted. The pinned parser ignores it for this type, so
+    # sending it there would decode unconstrained.
+    assert "schema" not in plan.response_format
+    # No name key exists on either llama.cpp path.
+    assert "name" not in plan.response_format["json_schema"]
+
+
+def _llama_cpp_parses(response_format):
+    """The pinned C++ branch, transcribed from server-common.cpp @ 5a32f7b6.
+
+    blob 585f65e83c655d3b8b7e398e8bf76552dc846f36, lines 1162-1174. The C++
+    `json_value(obj, key, default)` returns the default when the key is
+    absent, which is what `.get(key, default)` does here.
+    """
+    response_type = response_format.get("type", "")
+    if response_type == "json_object":
+        # The server's `json_schema` local starts empty, so
+        # `contains("schema") || json_schema.empty()` is true either way and
+        # the flat key is read.
+        return response_format.get("schema", {})
+    if response_type == "json_schema":
+        wrapper = response_format.get("json_schema", {})
+        return wrapper.get("schema", {})
+    raise AssertionError("the pinned server rejects any other type")
+
+
+def test_the_superseded_flat_llama_cpp_shape_was_an_empty_constraint():
+    """Independent control reproducing the defect this gate corrected.
+
+    Run the pinned parser against the shape this module used to emit and it
+    yields {} - an empty schema, i.e. unconstrained decoding with no error
+    and nothing for a caller to notice. Run it against the shape emitted now
+    and it yields the real schema.
+    """
+    superseded_flat = {"type": "json_schema", "schema": _SCHEMA}
+    assert _llama_cpp_parses(superseded_flat) == {}
+
+    emitted = plan_structured_request("llama-cpp", _request()).response_format
+    assert _llama_cpp_parses(emitted) == _SCHEMA
+
+
+def test_the_flat_key_is_read_only_for_the_json_object_type():
+    """Pins why the flat form looked right: it IS read, but only for the
+    other type. This is the exact asymmetry the README elides."""
+    assert _llama_cpp_parses({"type": "json_object", "schema": _SCHEMA}) == _SCHEMA
+    assert _llama_cpp_parses({"type": "json_schema", "schema": _SCHEMA}) == {}
 
 
 def test_ollama_carries_the_schema_nested_and_sends_no_name():
@@ -106,11 +157,18 @@ def test_the_four_shapes_are_not_all_the_same():
         plan_structured_request(d, _request()).response_format
         for d in SUPPORTED_DIALECTS
     ]
-    assert shapes[0] != shapes[1], "llama-cpp and ollama must differ"
+    # llama-cpp and ollama coincide as of the gate-1 correction: both read
+    # response_format.json_schema.schema and neither has a name field. That
+    # is asserted rather than assumed, so a future divergence in either
+    # runtime has to be made deliberately.
+    assert shapes[0] == shapes[1]
     assert shapes[1] != shapes[2], "ollama and vllm must differ"
     # vLLM and SGLang are byte-identical today; asserted so a future
     # divergence has to be made deliberately rather than drifting in.
     assert shapes[2] == shapes[3]
+    # The guard that keeps every shape test above non-vacuous: the nested
+    # no-name shape and the nested named shape are genuinely different.
+    assert shapes[0] != shapes[2], "llama-cpp and vllm must differ"
 
 
 def test_no_dialect_emits_a_schema_at_both_paths():
