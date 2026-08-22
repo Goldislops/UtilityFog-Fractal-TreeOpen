@@ -152,6 +152,17 @@ def stub_capabilities(
         max_context_tokens=max_context_tokens,
         max_output_tokens=1024,
         runtimes=("in-process-stub",),
+        # A double binds exactly one runtime - itself - so it declares that
+        # binding rather than relying on the plural compatibility list. Its
+        # version and source are repository-local because the double IS this
+        # repository's code; the pinning requirement that would otherwise
+        # apply is skipped only because a stub is not artifact-bearing, which
+        # is the single narrow exception drawn in `evaluate()`.
+        bound_runtime="in-process-stub",
+        bound_runtime_version=STUB_REVISION,
+        bound_runtime_source_url=(
+            "https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen"
+        ),
         licence_class="osi-open-source",
         licence_name="repository-local test double",
         licence_source_url="https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen",
