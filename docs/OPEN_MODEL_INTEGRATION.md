@@ -184,14 +184,33 @@ Collapsing them under one "Granite 4.1 8B" row would make any claim about
 either unfalsifiable — and would let a reader believe a digest or a runtime
 claim applied to an artifact it had never been checked against.
 
-**Provenance is unpinned, deliberately.** Every catalogue entry leaves
-`repository_revision` and `artifact_digest` empty. This survey read model
-cards and licence texts; it did not retrieve commit revisions or file
-digests. Inventing plausible-looking hex would manufacture exactly the false
-confidence those fields exist to prevent, so they are blank — and blank is
-blocking, which is why every entry additionally fails on
-`repository-revision-unpinned`. Populating them is an operator step performed
-against the actual artifact being adopted, at the time of adoption.
+**Provenance is now pinned to immutable identifiers.** Every catalogue entry
+carries a full commit id read on 2026-08-22 from the official Hugging Face
+model metadata API, and every single-file variant additionally carries that
+file's LFS `sha256` read from the official repository tree metadata at the
+same revision. `provenance_url` and `licence_source_url` are revision-pinned,
+never branch-pinned, so both resolve to exactly the content that was read.
+
+**No model bytes or weights were downloaded.** Metadata retrieval is not
+artifact retrieval, and the distinction is worth keeping sharp: a commit id
+and an LFS oid are published *about* a file, and reading them costs kilobytes
+rather than gigabytes.
+
+Two pin shapes are used, chosen by what the artifact actually is:
+
+| Variant shape | Pin | Why |
+|---|---|---|
+| single file (the GGUF builds) | `artifact_path` + `sha256` | one file, one digest |
+| sharded (BF16 safetensors, FP8) | full commit id | Granite 4.1 8B BF16 is **four** shards — no single file's digest would mean anything, while the commit id covers all four |
+
+Per-repository licence declarations at the pinned revision corroborate every
+classification in §4 — including the two that matter most: `Hermes-4-70B`
+declares `llama3`, not `apache-2.0` like its siblings, and
+`Llama-4-Scout-17B-16E-Instruct` reports `gated: true`.
+
+**A pin says which bytes, never that you may run them.** Every entry remains
+`availability="unknown"` and `locality="unknown"`, both blocking, so the
+catalogue is exactly as inert as before.
 
 **Context figures.** `max_context_tokens` is populated in code only where an
 exact token integer appeared on the vendor's own card (Granite 131072, GLM-5.2
@@ -216,29 +235,48 @@ parameter names, required launch flags and endpoint set all move between
 releases, so an unpinned runtime claim decays into folklore. The claims in
 this table were read on **2026-08-22** from:
 
-| Runtime | Version the claim is pinned to | Source read |
-|---|---|---|
-| llama.cpp | `v0.2.0`, rolling build `b10569` | `github.com/ggml-org/llama.cpp` `tools/server/README.md` at `master` |
-| Ollama | `v0.32.15` (published 2026-08-19) | `docs.ollama.com/api/openai-compatibility` |
-| vLLM | `v0.27.1` (published 2026-08-11) | `docs.vllm.ai/en/latest/features/structured_outputs/` and `.../tool_calling/` |
-| SGLang | `v0.5.18` (published 2026-08-22) | `docs.sglang.io/docs/advanced_features/structured_outputs` and `.../tool_parser` |
-| TensorRT-LLM | `1.3.0` RC line | `github.com/NVIDIA/TensorRT-LLM` `LICENSE` |
-| NVIDIA NIM | n/a (proprietary, per-container) | `nvidia.com/en-us/agreements/enterprise-software/...` |
+| Runtime | Tag | **Immutable commit** (from the official git ref API) | Source read |
+|---|---|---|---|
+| llama.cpp | `b10569` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` (commit) | `tools/server/README.md` |
+| Ollama | `v0.32.15` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` (commit) | `docs/api/openai-compatibility.mdx` |
+| vLLM | `v0.27.1` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` (commit) | `features/structured_outputs/`, `features/tool_calling/` |
+| SGLang | `v0.5.18` | `ff4c6e641d9f9bb174d34ff651c01c114aea8e40` (annotated **tag object**) | `advanced_features/structured_outputs`, `.../tool_parser` |
+| TensorRT-LLM | `v1.2.1` | `376f7e1bd8ed543f75014309e3fd4b237e9b0e73` (commit) | repository `LICENSE` |
+| NVIDIA NIM | n/a — proprietary, per-container | n/a | `nvidia.com` enterprise agreements |
 
-### The Ollama `tool_choice` row, re-verified
+A tag can be moved; a commit id cannot, which is why both are recorded and
+the commit is the one that binds. The SGLang row resolves to an *annotated
+tag object* rather than directly to a commit — that is still immutable, and
+it is labelled rather than silently presented as a commit.
+
+🔵 **TensorRT-LLM correction.** An earlier revision of this document recorded
+"1.3.0 RC line" from a repository badge. The official releases API reports
+the latest release as **`v1.2.1`, published 2026-04-20**; 1.3.0 tags exist as
+pre-releases. The stable tag is pinned here instead, since a claim pinned to
+a moving RC line is not pinned at all.
+
+### The Ollama `tool_choice` row, re-verified — and the strength of that check
 
 An independent audit challenged this table, reporting that current official
 documentation lists `tool_choice` as **supported** on
-`/v1/chat/completions`. That claim did not reproduce. The row was
-**re-verified on 2026-08-22 against three independent official sources**,
-all of which mark it unsupported:
+`/v1/chat/completions`. That claim did not reproduce, and the auditor
+subsequently cleared the row: it stands as unsupported in the current
+official source.
 
-1. the rendered page, `https://docs.ollama.com/api/openai-compatibility`
-2. its Markdown source, `https://docs.ollama.com/api/openai-compatibility.md`
-3. the in-repository source at `main`,
-   `https://raw.githubusercontent.com/ollama/ollama/main/docs/api/openai-compatibility.mdx`
+**How strong the check actually was, stated precisely.** The row was
+re-verified on 2026-08-22 by reading three renderings — the rendered page at
+`https://docs.ollama.com/api/openai-compatibility`, its Markdown form at the
+same path with a `.md` suffix, and the repository form at
+`https://raw.githubusercontent.com/ollama/ollama/main/docs/api/openai-compatibility.mdx`.
 
-All three render the same checklist, in which `tools` is checked and
+These are **not three independent sources.** They are three mechanically
+corroborating official representations of a **single primary source**: one
+vendor-authored document, served three ways. Agreement between them rules out
+a transcription or rendering error on my side; it does not corroborate the
+vendor's claim, because there is only one claimant. Calling them independent
+was an overstatement of evidential weight, and this paragraph replaces it.
+
+All three carry the same checklist, in which `tools` is checked and
 `tool_choice` is not:
 
 ```
@@ -444,13 +482,36 @@ than being quietly accepted or quietly dropped.
 | 2 | `DiagnosticRecord.event`/`backend`/`reasons`, `EvaluationCase.case_id` and `required_keys` retained arbitrary text; missing-key text was recorded. | **Corrected.** Closed vocabularies for `event` and `reasons`; safe-token gates elsewhere, including a redaction cross-check that refuses secret-shaped identifiers a character class would admit. Unsafe `required_keys` now fail closed instead of being dropped — the dropped-key path had been reporting success for unchecked payloads. Missing keys are reported as indices. |
 | 3 | A malformed `min_context_tokens` became `0`, so a one-token backend could satisfy a demand for 32k. | **Corrected.** Any malformed requirement is recorded in `malformed_fields` and blocks every candidate with `requirements-invalid`. The field is always recomputed, so a caller cannot forge it clean. |
 | 4 | No immutable model provenance; BF16/NVFP4/GGUF/dated variants collapsed under a generic model id. | **Corrected.** Added `variant_id`, `repository_revision`, `artifact_digest`, `licence_source_url`, `licence_revision`, all blocking; `quantisation` is now singular. The catalogue was rewritten to exact-variant entries. Revisions and digests are left empty and therefore blocking, because the survey did not retrieve them and inventing them would be worse. |
-| 5 | Reported that current Ollama docs list `tool_choice` as supported. | **Did not reproduce — matrix unchanged.** Re-verified against three independent official sources, all marking it `[ ]` unsupported; evidence and quotes in §5. The valid half of the finding *was* acted on: every runtime claim is now pinned to a version and a named source. |
+| 5 | Reported that current Ollama docs list `tool_choice` as supported. | **Did not reproduce — matrix unchanged**, and the auditor cleared the row in round two. Re-verified against three mechanically corroborating renderings of a single official document, all marking it `[ ]` unsupported; evidence and quotes in §5, together with an explicit statement of how much weight that check does and does not carry. The valid half of the finding *was* acted on: every runtime claim is now pinned to a version, an immutable commit, and a named source. |
 | 6 | Regression tests required for every finding, across all modes. | **Done.** `tests/test_open_model_audit_corrections.py`, plus the existing suites re-run under normal, `-O` and `-OO`. |
 
 On finding 5: the auditor's reading is recorded rather than discarded, and
 the check is written down so it is cheap to repeat. If Ollama ships
 `tool_choice` support, the matrix row and the pinned version should change
-together — that is what the pinning is for.
+together — that is what the pinning is for. **The auditor independently
+cleared this row in round two.**
+
+## 10. Post-audit corrections, round two (2026-08-22)
+
+A second independent audit returned HOLD on seven further gates. All seven
+were corrected.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | An invalid, unknown, over-limit or wrong-type `allowed_runtimes` element normalized to the empty tuple — which means *no constraint*. A narrowing instruction silently became a widening one. | Any such element now makes the whole requirement set `requirements-invalid` and blocks every candidate. Applied to `allowed_licence_classes` on the same reasoning. Duplicates remain benign. |
+| 2 | Registry names entered routing decisions and records ungated, and a refusal reason raised by an **operator factory** was persisted verbatim. | Names must be safe tokens before entering the allowlist or the registry. `RegistrationRefused` and `BackendUnavailable` now close their reason at the constructor — including for operator-raised instances — so neither the instance nor the exception message can carry supplied text. |
+| 3 | A real 40-character repository SHA was **rejected** as secret-shaped, because the long-opaque-run rule matches any 40+ character alphanumeric run. | `is_commit_revision` admits exactly 40- or 64-character lowercase hex, checked digit by digit — a far narrower class than "long opaque string", and precisely the class that identifies an immutable commit. |
+| 4 | The digest requirement keyed off `quantisation`, so a BF16/safetensors variant was exempt. | The requirement now keys off the artifact: a named single file must carry its digest, and every artifact-bearing descriptor must be byte-pinned by *either* a named file plus digest *or* a full commit id. |
+| 5 | Claims were bound to mutable branch URLs; the GLM FP8 row pointed at the BF16 repository. | Every model, licence and runtime claim is bound to an exact repository plus an immutable commit (or labelled tag object) and a revision-pinned URL. The GLM row binds to `zai-org/GLM-5.2-FP8`. TensorRT-LLM re-pinned from an RC line to released `v1.2.1`. |
+| 6 | Three renderings of one vendor document were described as independent evidence. | Restated as three *mechanically corroborating official representations of a single primary source*: agreement rules out transcription error on my side, not error by the one claimant. |
+| 7 | `routing.py` still carried an absolute locality claim. | Removed. The module now states that eligibility reads descriptors, trusts the operator attestation, and cannot establish where a backend will execute — and that opaque factories remain undetectable. |
+
+**Evidence provenance for this round.** Read-only metadata retrieval from the
+official Hugging Face model API and the official GitHub git-ref and releases
+APIs. **No weights, no model bytes, no package installs, no service or
+hardware changes.** Test evidence in this repository remains **same-author**:
+it is written by the same agent that wrote the code, and corroborates
+internal consistency rather than constituting independent acceptance.
 
 Two things this correction round did **not** do. It did not make locality a
 structural guarantee; that is not achievable while factories are arbitrary
