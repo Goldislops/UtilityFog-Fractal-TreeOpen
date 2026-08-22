@@ -292,8 +292,18 @@ def is_supported_dialect(value: Any) -> bool:
     )
 
 
-def _schema_refusal(schema: Any) -> Optional[StructuredRefusal]:
+def _schema_refusal(
+    schema: Any,
+) -> tuple[Optional[StructuredRefusal], Optional[str]]:
     """Walk a schema document and refuse anything unsafe to serialise.
+
+    Returns ``(refusal, None)`` on refusal and ``(None, encoded)`` on
+    acceptance, where ``encoded`` is the exact JSON text of the accepted
+    document. The encoding is handed back rather than discarded because
+    :func:`plan_structured_request` needs a snapshot detached from the
+    caller, and re-parsing this string is that snapshot - obtained from work
+    already done rather than from a second traversal that could disagree
+    with the one that did the validating.
 
     The walk is iterative, so a deeply nested document is refused by the
     depth bound rather than by exhausting the interpreter stack. Only exact
@@ -305,27 +315,27 @@ def _schema_refusal(schema: Any) -> Optional[StructuredRefusal]:
     name - reaches the returned token.
     """
     if type(schema) is not dict:
-        return "schema-not-exact-dict"
+        return "schema-not-exact-dict", None
     if not schema:
         # An empty schema constrains nothing. Sending it would ask for
         # structured output and receive whatever the model liked, which is
         # exactly the false-success this contract exists to prevent.
-        return "schema-empty"
+        return "schema-empty", None
 
     stack: list[tuple[Any, int]] = [(schema, 0)]
     nodes = 0
     while stack:
         node, depth = stack.pop()
         if depth > _SCHEMA_MAX_DEPTH:
-            return "schema-too-deep"
+            return "schema-too-deep", None
         nodes += 1
         if nodes > _SCHEMA_MAX_NODES:
-            return "schema-too-large"
+            return "schema-too-large", None
         node_type = type(node)
         if node_type is dict:
             for key, value in node.items():
                 if type(key) is not str:
-                    return "schema-not-serializable"
+                    return "schema-not-serializable", None
                 stack.append((value, depth + 1))
         elif node_type is list:
             for value in node:
@@ -333,23 +343,23 @@ def _schema_refusal(schema: Any) -> Optional[StructuredRefusal]:
         elif node_type is float:
             # `node` is proven exact float, so isfinite invokes no hook.
             if not math.isfinite(node):
-                return "schema-non-finite-number"
+                return "schema-non-finite-number", None
         elif node_type is bool or node_type is int or node_type is str:
             continue
         elif node is None:
             continue
         else:
-            return "schema-not-serializable"
+            return "schema-not-serializable", None
 
     try:
         encoded = json.dumps(schema, allow_nan=False, ensure_ascii=False)
     except (ValueError, TypeError, RecursionError):
         # Unreachable for a document the walk accepted; kept so the function
         # is total rather than relying on that reasoning holding forever.
-        return "schema-not-serializable"
+        return "schema-not-serializable", None
     if len(encoded) > _SCHEMA_MAX_CHARS:
-        return "schema-too-large"
-    return None
+        return "schema-too-large", None
+    return None, encoded
 
 
 def build_response_format(
@@ -438,11 +448,31 @@ def plan_structured_request(
             ok=False, refusal="tools-with-structured-unsupported"
         )
 
-    schema_refusal = _schema_refusal(request.schema)
+    schema_refusal, encoded_schema = _schema_refusal(request.schema)
     if schema_refusal is not None:
         return StructuredRequestPlan(ok=False, refusal=schema_refusal)
 
-    response_format = build_response_format(dialect, request)
+    # Snapshot between validating and building. `StructuredOutputRequest` is
+    # frozen, but freezing a field does not freeze the object it points at:
+    # the caller still holds the very dict that was walked, and could mutate
+    # it after the checks passed and before - or after - the request goes out.
+    # Every guarantee above would then describe a document that is no longer
+    # the one being sent.
+    #
+    # Re-parsing the encoding the walk already produced yields a fresh object
+    # graph sharing no container with the caller's. Using that encoding rather
+    # than a separate deep copy means the snapshot is provably the document
+    # that was validated, not a re-traversal that could differ from it.
+    if encoded_schema is None:
+        # Unreachable while the acceptance path always returns an encoding.
+        # Written as a refusal rather than an assert so that behaviour is
+        # identical under -O and -OO, where asserts are stripped out.
+        return StructuredRequestPlan(ok=False, refusal="schema-not-serializable")
+    snapshot = json.loads(encoded_schema)
+
+    response_format = build_response_format(
+        dialect, StructuredOutputRequest(schema=snapshot)
+    )
     if response_format is None:
         # Unreachable while the dispatch and the guard agree; if they ever
         # drift, drift refuses rather than sending an unshaped request.

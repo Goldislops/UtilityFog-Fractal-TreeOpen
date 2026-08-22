@@ -15,6 +15,7 @@ It demonstrates internal consistency, not independent acceptance.
 from __future__ import annotations
 
 import builtins
+import json
 import socket
 from types import SimpleNamespace
 
@@ -428,3 +429,26 @@ def test_the_package_ships_no_json_schema_validator(module_name):
     assert imported <= {
         "__future__", "dataclasses", "json", "types", "typing", "scripts",
     }, imported
+
+
+def test_mutating_the_schema_after_the_call_cannot_change_what_was_sent():
+    """Gate 5, end to end at the layer that actually transmits.
+
+    The plan-level control proves the snapshot is taken; this proves nothing
+    downstream re-reads the caller's object on the way out.
+    """
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    client = RecordingClient(text='{"ok": true}')
+    backend = OpenAICompatBackend(model="m", client=client, dialect="vllm")
+    result = request_structured_json(
+        backend, _MESSAGES, [], structured=StructuredOutputRequest(schema=schema)
+    )
+    assert result.ok is True
+
+    sent = client.requests[0]["response_format"]
+    before = json.loads(json.dumps(sent))
+    schema["properties"]["ok"]["type"] = "PWNED"
+    schema["injected"] = True
+
+    assert sent == before
+    assert "injected" not in sent["json_schema"]["schema"]

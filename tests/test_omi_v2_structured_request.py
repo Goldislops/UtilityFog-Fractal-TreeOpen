@@ -10,6 +10,8 @@ It demonstrates internal consistency, not independent acceptance.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from scripts.agent_backends import structured_request as sr
@@ -579,3 +581,99 @@ def test_the_request_module_imports_nothing_from_open_model():
         stripped = line.strip()
         if stripped.startswith("import ") or stripped.startswith("from "):
             assert "open_model" not in stripped, stripped
+
+
+# == gate 5: the outbound schema is a snapshot, not the caller's object ======
+
+
+def _mutable_schema():
+    return {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "examples": [{"ok": True}, {"ok": False}],
+    }
+
+
+def test_the_outbound_schema_is_not_the_callers_object():
+    schema = _mutable_schema()
+    wire = plan_structured_request("vllm", _request(schema=schema)).response_format
+    outbound = wire["json_schema"]["schema"]
+    assert outbound == schema
+    assert outbound is not schema
+    assert outbound["properties"] is not schema["properties"]
+    assert outbound["examples"] is not schema["examples"]
+    assert outbound["examples"][0] is not schema["examples"][0]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda s: s.update({"injected": "yes"}), id="top-level-key"),
+        pytest.param(lambda s: s.pop("type"), id="top-level-removal"),
+        pytest.param(
+            lambda s: s["properties"]["ok"].update({"type": "string"}),
+            id="nested-retype",
+        ),
+        pytest.param(
+            lambda s: s["properties"].update({"smuggled": {"type": "string"}}),
+            id="nested-key",
+        ),
+        pytest.param(lambda s: s["examples"].append({"ok": "no"}), id="list-append"),
+        pytest.param(lambda s: s["examples"].clear(), id="list-clear"),
+        pytest.param(
+            lambda s: s["examples"][0].update({"ok": "mutated"}), id="list-item"
+        ),
+    ],
+)
+def test_mutating_the_schema_after_validation_cannot_change_the_wire(mutate):
+    """The regression gate 5 required.
+
+    A frozen dataclass does not freeze what its field points at. Without the
+    snapshot, every check `plan_structured_request` performed would describe
+    a document that is no longer the one being sent - and the caller needs no
+    privileged access to do it, only the reference it already had.
+    """
+    schema = _mutable_schema()
+    plan = plan_structured_request("vllm", _request(schema=schema))
+    assert plan.ok
+    before = json.loads(json.dumps(plan.response_format))
+
+    mutate(schema)
+
+    assert plan.response_format == before
+
+
+def test_the_snapshot_is_faithful_across_every_permitted_json_type():
+    """A snapshot that quietly changed the document would be its own defect."""
+    schema = {
+        "s": "text with unicode: \u00e9\u4e2d",
+        "i": 10**18,
+        "f": 1.5,
+        "neg": -0.0,
+        "t": True,
+        "f2": False,
+        "n": None,
+        "empty_list": [],
+        "empty_dict": {},
+        "nested": [{"a": [1, {"b": None}]}],
+    }
+    plan = plan_structured_request("vllm", _request(schema=schema))
+    assert plan.ok
+    outbound = plan.response_format["json_schema"]["schema"]
+    assert outbound == schema
+    # Types survive exactly - a bool must not arrive as an int, and an int
+    # must not arrive as a float.
+    assert type(outbound["t"]) is bool
+    assert type(outbound["i"]) is int
+    assert type(outbound["f"]) is float
+
+
+def test_two_plans_from_one_mutated_schema_differ_as_the_caller_wrote_them():
+    """Snapshotting must not mean caching: a genuinely changed schema must
+    produce a genuinely changed request on the next call."""
+    schema = _mutable_schema()
+    first = plan_structured_request("vllm", _request(schema=schema)).response_format
+    schema["properties"]["ok"]["type"] = "string"
+    second = plan_structured_request("vllm", _request(schema=schema)).response_format
+    assert first != second
+    assert second["json_schema"]["schema"]["properties"]["ok"]["type"] == "string"
