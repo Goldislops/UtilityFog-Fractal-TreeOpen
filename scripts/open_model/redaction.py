@@ -37,6 +37,9 @@ NOTE_MAX_CHARS: Final[int] = 512
 """Hard ceiling on any note. Applied *before* matching, see ``redact``."""
 
 
+_LONG_OPAQUE_RUN: Final[Pattern[str]] = re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}")
+"""The one rule a legitimate 40-character commit id also matches."""
+
 # Ordered most-specific first. Every pattern is linear in the input - no
 # nested quantifiers - so a hostile note cannot make matching blow up.
 _RULES: Final[tuple[tuple[Pattern[str], str], ...]] = (
@@ -70,7 +73,7 @@ _RULES: Final[tuple[tuple[Pattern[str], str], ...]] = (
     (re.compile(r"\bAKIA[0-9A-Z]{12,}"), REDACTED_SECRET),
     # Long opaque runs - base64/hex blobs. 40 characters keeps ordinary prose
     # and identifiers out while still catching real key material.
-    (re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}"), REDACTED_SECRET),
+    (_LONG_OPAQUE_RUN, REDACTED_SECRET),
     # UNC share, then drive-letter path, then POSIX home paths. The
     # drive-letter rule cannot match a URL scheme: there is no word boundary
     # before the "s" in "https:".
@@ -82,6 +85,33 @@ _RULES: Final[tuple[tuple[Pattern[str], str], ...]] = (
         REDACTED_EMAIL,
     ),
 )
+
+
+def has_credential_shape(value: Any) -> bool:
+    """True when ``value`` trips any secret rule EXCEPT the long-opaque-run one.
+
+    Exists for URLs. A revision-pinned evidence URL legitimately embeds a
+    40-character hex commit id, which the long-run rule matches - the same
+    false positive that ``is_commit_revision`` exists to avoid for bare
+    revisions. Excluding that single rule keeps credential prefixes, bearer
+    strings, secret-named assignments, paths and emails all still refused,
+    while allowing the immutable identifier a pinned URL is *supposed* to
+    carry.
+
+    This is a deliberate narrowing, not a hole: queries, fragments and
+    userinfo are rejected structurally by ``parse_https_url`` before this is
+    consulted, so a credential has no conventional place left to hide, and
+    the exact-shape evidence gate refuses any path that is not the expected
+    one anyway.
+    """
+    if type(value) is not str:
+        return True
+    for pattern, _replacement in _RULES:
+        if pattern is _LONG_OPAQUE_RUN:
+            continue
+        if pattern.search(value):
+            return True
+    return False
 
 
 def redact(value: Any, *, max_chars: int = NOTE_MAX_CHARS) -> str:
@@ -270,6 +300,7 @@ ESCALATION_REASONS: Final[frozenset[str]] = frozenset(
         "no-backend-registered",
         "requirements-invalid",
         "artifact-unpinned",
+        "descriptor-invalid",
         "repository-revision-not-immutable",
         "provenance-unpinned",
         "bound-runtime-unspecified",
@@ -389,6 +420,7 @@ __all__ = [
     "SAFE_REFERENCE_MAX_LEN",
     "SAFE_TOKEN_MAX_LEN",
     "describe_size",
+    "has_credential_shape",
     "is_safe_reference",
     "is_safe_token",
     "redact",
