@@ -26,6 +26,11 @@ What this package adds, because none of it existed:
     JSON through the backend's closed request contract, then checks what came
     back with ``structured`` above. It lives here, not in the backend package,
     because the validator lives here and the imports run one way only.
+    That check establishes JSON-object and required-key **usability**, not
+    schema conformance: nothing in this package compares a response against
+    the schema it sent, and ``StructuredExchange.schema_conformance`` is
+    closed to the single token ``"unverified"`` so the limit travels with
+    every result rather than living only in prose.
   - ``redaction``    - secret scrubbing for operator notes, plus the
     diagnostic record shape that structurally has nowhere to put a prompt
   - ``evaluation``   - a hermetic harness driven entirely by in-process

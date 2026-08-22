@@ -249,7 +249,7 @@ fabricated fact wearing the costume of a measured one.
 
 | Runtime | Version seen | Licence | OpenAI-compatible path | Structured-output parameter | Tool calling | Model list | Health | Native Windows |
 |---|---|---|---|---|---|---|---|---|
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | v0.2.0 / build b10569 | MIT | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and Anthropic-shaped `/v1/messages` | `grammar` (GBNF) or `json_schema` on `/completion`; `response_format:{type, **schema**}` — schema sits **directly under** `response_format` | yes, **requires `--jinja`** | `/v1/models` | `/health` | **yes** (MSVC, winget, prebuilt, WoA arm64) |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | v0.2.0 / build b10569 | MIT | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and Anthropic-shaped `/v1/messages` | `grammar` (GBNF) or `json_schema` on `/completion`; `response_format.json_schema.schema` for `type=json_schema` — the flat `response_format.schema` is read **only** for `type=json_object`, and the server README contradicts the server source on this (§16.3) | yes, **requires `--jinja`** | `/v1/models` | `/health` | **yes** (MSVC, winget, prebuilt, WoA arm64) |
 | [Ollama](https://github.com/ollama/ollama) | v0.32.15 | MIT | `/v1/chat/completions`, `/v1/models`, `/v1/responses` | native `format` on `/api/chat` (`"json"` or a schema); `response_format` on `/v1` | yes, no server flag — but **`tool_choice` is not supported on `/v1`** | `/api/tags`, `/v1/models` | `GET /` (source-verified only) | **yes** (native app, Win10 22H2+) |
 | [vLLM](https://github.com/vllm-project/vllm) | v0.27.1 | Apache-2.0 | `/v1/chat/completions`, `/v1/responses`, `/v1/models` | `extra_body={"structured_outputs":{…}}` — **`guided_*` was removed in v0.12.0** — or `response_format.json_schema.schema` | yes, **requires `--enable-auto-tool-choice` + `--tool-call-parser`** | `/v1/models` | `/health` | **no** — WSL only |
 | [SGLang](https://github.com/sgl-project/sglang) | v0.5.18 | Apache-2.0 | `/v1/chat/completions`, `/v1/models`, plus Ollama-shaped `/api/chat` | `response_format.json_schema.schema`, or `extra_body={"ebnf"` \| `"regex"}`; native puts them in `sampling_params` — **exactly one** constraint per request | yes, **requires `--tool-call-parser`**; `required`/named fully supported only on the xgrammar backend | `/v1/models` | `/health`, `/health_generate` | **unverified — assume unsupported** |
@@ -267,7 +267,7 @@ this table were read on **2026-08-22** from:
 
 | Runtime | Tag | **Immutable object** | Revision-pinned official URL | Doc read at that revision? |
 |---|---|---|---|---|
-| llama.cpp | `b10569` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` (commit) | `https://github.com/ggml-org/llama.cpp/tree/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | **No** — `tools/server/README.md` was read at `master` |
+| llama.cpp | `b10569` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` (commit) | `https://github.com/ggml-org/llama.cpp/tree/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | **Yes** — `tools/server/README.md` and `tools/server/server-common.cpp` both re-read at the pinned commit; **they disagree**, and the executable source is followed (§16.3) |
 | Ollama | `v0.32.15` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` (commit) | `https://raw.githubusercontent.com/ollama/ollama/b7871fc0d1d82fe109536efa3e0e8e411c766c75/docs/api/openai-compatibility.mdx` | **Yes** — re-read at the pinned commit |
 | vLLM | `v0.27.1` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` (commit) | `https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | **No** — docs site read at `latest` |
 | SGLang | `v0.5.18` | tag object `ff4c6e641d9f9bb174d34ff651c01c114aea8e40` → **peeled commit `71de97b264b04dcd514cf904003028aefe9775c8`** | `https://github.com/sgl-project/sglang/tree/71de97b264b04dcd514cf904003028aefe9775c8` | **No** — docs site read at current |
@@ -344,8 +344,11 @@ to repeat when Ollama next ships.
 Divergences an adapter has to absorb, and the reason a single `response_format`
 passthrough is not sufficient:
 
-- llama.cpp puts the schema at `response_format.schema`; vLLM and SGLang put
-  it at `response_format.json_schema.schema`.
+- All four runtimes read the schema at `response_format.json_schema.schema`
+  for `type=json_schema`. llama.cpp additionally reads a flat
+  `response_format.schema`, but **only** for `type=json_object` — its README
+  says otherwise and its source is what runs (§16.3). vLLM and SGLang also
+  carry a `json_schema.name`; llama.cpp and Ollama have no such field.
 - vLLM renamed its guided-decoding parameters in a breaking way
   (`guided_json` → `structured_outputs.json`, removed in v0.12.0).
 - Ollama is the only one needing no server-side tool parser flag — and also
@@ -723,21 +726,54 @@ this is a package rather than a one-line change.
 
 | Dialect | Schema path | `name` sent | Evidence strength |
 |---|---|---|---|
-| `llama-cpp` | `response_format.schema` (**flat**) | no — no such key exists | **Documented** |
+| `llama-cpp` | `response_format.json_schema.schema` | no — no such key exists | **Source** — README conflicts, see §16.3 |
 | `ollama` | `response_format.json_schema.schema` | no — no such field exists | **Source only** |
-| `vllm` | `response_format.json_schema.{name,schema}` | yes | **Documented** |
-| `sglang` | `response_format.json_schema.{name,schema}` | yes | **Documented** |
+| `vllm` | `response_format.json_schema.{name,schema}` | yes — a fixed constant, never caller data | **Source** |
+| `sglang` | `response_format.json_schema.{name,schema}` | yes — a fixed constant, never caller data | **Source** |
 
-Pinned revisions, each read directly:
+Corrected 2026-08-23. The `llama-cpp` row previously read
+`response_format.schema` (**flat**) with evidence strength **Documented**.
+That was wrong in a way that produced silently unconstrained output; §16.3
+records how.
 
-- llama.cpp `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` — `tools/server/README.md`
-  documents the schema flat under `response_format`, for both the
-  `json_object` and `json_schema` types. No `name` key appears.
-- Ollama `b7871fc0d1d82fe109536efa3e0e8e411c766c75` — `openai/openai.go`.
-- vLLM `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac`.
-- SGLang `71de97b264b04dcd514cf904003028aefe9775c8` — which additionally
-  documents that only one constraint parameter (`json_schema`, `regex`, or
-  `ebnf`) may be sent per request. This package sends only `json_schema`.
+Every wire-shape claim above is bound to one exact file at one exact
+commit, identified by its git blob id. A tree URL is not enough: it pins the
+revision but not which file was read, and a claim that cannot be re-fetched
+byte for byte is not evidence. Re-verify any row with
+`git hash-object <file>` after fetching the raw URL.
+
+| Dialect | Repository | Commit | File | Blob (SHA-1) | Bytes |
+|---|---|---|---|---|---|
+| `llama-cpp` | `ggml-org/llama.cpp` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | `tools/server/server-common.cpp` | `585f65e83c655d3b8b7e398e8bf76552dc846f36` | 65,033 |
+| `llama-cpp` (conflicting doc) | `ggml-org/llama.cpp` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | `tools/server/README.md` | `93736c3edfa9bd094bf79f7d2de4659fbf8e74c9` | 105,082 |
+| `ollama` | `ollama/ollama` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` | `openai/openai.go` | `2d38607dbd5d04e35935023ed19962c33685cee7` | 26,679 |
+| `vllm` | `vllm-project/vllm` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | `vllm/entrypoints/openai/chat_completion/protocol.py` | `1cdfd2f698f90a2d76f58c81243b6cdf73e8c6ba` | 47,397 |
+| `sglang` | `sgl-project/sglang` | `71de97b264b04dcd514cf904003028aefe9775c8` | `python/sglang/srt/entrypoints/openai/protocol.py` | `da62e3b0fbd632702a56de76050d2ea37c6e0690` | 70,651 |
+
+Immutable raw URLs, one per row in order:
+
+- `https://raw.githubusercontent.com/ggml-org/llama.cpp/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c/tools/server/server-common.cpp`
+- `https://raw.githubusercontent.com/ggml-org/llama.cpp/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c/tools/server/README.md`
+- `https://raw.githubusercontent.com/ollama/ollama/b7871fc0d1d82fe109536efa3e0e8e411c766c75/openai/openai.go`
+- `https://raw.githubusercontent.com/vllm-project/vllm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/entrypoints/openai/chat_completion/protocol.py`
+- `https://raw.githubusercontent.com/sgl-project/sglang/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/entrypoints/openai/protocol.py`
+
+Two things the file-level read established that a tree-level read had not:
+
+- **vLLM's protocol module has moved.** At this commit it is at
+  `vllm/entrypoints/openai/chat_completion/protocol.py`; the path this
+  document implied, `vllm/entrypoints/openai/protocol.py`, returns 404 at
+  this revision. Its validator raises when `type=json_schema` arrives without
+  a `json_schema` field, so the nesting is required, not merely accepted.
+- **SGLang is lenient where the others are not.** Its `set_json_schema`
+  model-validator pops a flat `schema` and rewrites it into
+  `json_schema.{name,schema}`, deriving the name from the schema's `title`.
+  This package still sends the nested form: relying on a rewrite that only
+  one of four runtimes performs would make the shape correct by accident.
+
+SGLang additionally documents that only one constraint parameter
+(`json_schema`, `regex`, or `ebnf`) may be sent per request. This package
+sends only `json_schema`.
 
 ### 16.2 The Ollama shape is source-derived, and that is a real difference
 
@@ -761,19 +797,51 @@ everywhere it is relied upon. It is not a claim about any other revision.
 
 ### 16.3 Two divergences, and how each was decided
 
-**llama.cpp is emitted flat only.** Its server source also reads the nested
-`json_schema.schema` path, with the flat form taking precedence, so emitting
-the schema at *both* paths would be maximally compatible. That was rejected.
-The pinned README documents the flat form, and shotgunning both paths would
-mean sending a key the documentation for that runtime does not define, in
-order to hedge a question the documentation already answers. Each dialect
-commits to one path; a test asserts no dialect emits a schema at both.
+**llama.cpp: the README and the source conflict, and the source wins.** At
+`5a32f7b6` the README shows the schema flat under `response_format` for the
+`json_schema` type. The parser that runs does not read it there:
 
-**`name` is validated always, transmitted twice.** The request contract
-requires a `name` for every dialect so the caller-facing shape is uniform,
-but only vLLM and SGLang have a field to receive it. llama.cpp and Ollama
-have no such key and are sent none. Validating a field that two dialects
-discard is the cost of one contract instead of four.
+```cpp
+if (response_type == "json_object") {
+    if (response_format.contains("schema") || json_schema.empty()) {
+        json_schema = json_value(response_format, "schema", json::object());
+    }
+} else if (response_type == "json_schema") {
+    auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+    json_schema = json_value(schema_wrapper, "schema", json::object());
+}
+```
+
+The flat key is read **only** for `type=json_object`. Sent with
+`type=json_schema` it is ignored, `schema_wrapper` defaults to `{}`, the
+constraint becomes an empty schema, and decoding proceeds unconstrained —
+with no error, and nothing for a caller to notice. An earlier revision of
+this package emitted the flat form on the README's authority and carried
+exactly that defect.
+
+Both paths are still not shotgunned. One shape is emitted, and it is now the
+one the executable source reads. A test transcribes the branch above and
+asserts the superseded shape decodes to `{}` while the emitted shape decodes
+to the real schema, so the reason for the change survives the code that was
+wrong. A test still asserts no dialect emits a schema at both paths.
+
+**The transmitted `name` is a constant, not caller data.** `json_schema.name`
+is sent to vLLM and SGLang, so whatever it holds leaves the process. It was
+caller-supplied, guarded by a local check — exact `str`, 1..64 characters,
+`[A-Za-z0-9_-]`. That alphabet admits `sk-OMIV2SECRET123456789`, so a caller
+who named a schema after a credential had it put on the wire by the function
+meant to prevent that.
+
+Reusing the hardened primitive in `scripts/open_model/redaction.py` — which
+does reject that string, because it cross-checks candidates against the
+secret matcher — is unreachable from the backend package: `scripts.open_model`
+imports it, so importing back is a genuine import cycle. Copying its rules
+would be a second secret detector free to drift from the first.
+
+So the field stopped being caller data. `STRUCTURED_WIRE_NAME` is a fixed
+constant, `StructuredOutputRequest` has no `name`, and `name-not-safe` has
+left the refusal vocabulary. llama.cpp and Ollama have no such key and are
+still sent none.
 
 ### 16.4 What sending a request does not establish
 
@@ -794,10 +862,27 @@ leaves the decoding format unset and yields unconstrained output **with no
 error**. A caller treating a successful round trip as proof of conformance
 would be wrong exactly there and would have no way to notice.
 
-So the backend result field is named `response_format_sent`, which is what it
-records. Conformance is established only by validating the response, which
-`scripts/open_model/structured_exchange.py` does against the **existing**
+So the backend result field is named `response_format_sent`, which is what
+it records. The response is then checked by
+`scripts/open_model/structured_exchange.py` against the **existing**
 `scripts/open_model/structured.py`. No second validator was written.
+
+**That check does not establish schema conformance, and this package never
+says it does.** It establishes that the payload parsed as a JSON object and
+carried every required key — usability. Nothing here compares a response
+against the schema that was sent, because the package carries no JSON Schema
+implementation and will not hand-roll one. The gap is concrete: against a
+schema demanding a boolean `ok` and forbidding extra properties, the payload
+`{"ok": "wrong type", "extra": 123}` passes — wrong type, extra key, still
+`ok=True`.
+
+Earlier revisions of this document and of three docstrings described that
+check as establishing or deciding conformance. That was false and is
+corrected here. `StructuredExchange` now carries `schema_conformance`, closed
+at runtime to the single token `"unverified"`, so the limit travels in the
+result a caller reads rather than only in prose a caller might not. A real
+conformance check would have to widen that vocabulary deliberately and
+visibly.
 
 ### 16.5 The two validators run in opposite directions
 
