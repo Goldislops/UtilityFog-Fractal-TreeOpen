@@ -2498,3 +2498,198 @@ def test_the_read_loop_cannot_spin_without_progress(tmp_path, monkeypatch):
     assert survey.refused is None
     assert survey.unmanifested == 1
     assert calls["n"] <= 2
+
+
+# ===========================================================================
+# The same-object alias, and close failure
+# ===========================================================================
+
+def test_a_same_object_alias_after_open_is_refused(tmp_path, monkeypatch):
+    """The case pre-open `lstat` plus post-open `fstat` cannot catch.
+
+    Windows has no `O_NOFOLLOW`, so an attacker can move the real manifest
+    aside and drop a symlink at its path pointing back at that SAME object.
+    The open follows the link, so the handle carries exactly the identity the
+    pre-open check recorded and `fstat` agrees -- while the path is now a
+    reparse point. Only a fresh post-open `lstat` of the path can see it.
+
+    Injected rather than built from a real link, so the control is portable
+    and never skips: the identity is deliberately held IDENTICAL throughout,
+    which is precisely what makes the existing comparisons pass.
+    """
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    manifest = _manifest_of(directory)
+    genuine = os.lstat(manifest)
+    seen = {"lstat": 0}
+    reads = {"n": 0}
+    real_lstat = os.lstat
+    real_read = os.read
+
+    def _alias_after_open(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+            seen["lstat"] += 1
+            if seen["lstat"] == 1:
+                return genuine  # pre-open: a perfectly ordinary regular file
+            # post-open: a reparse point standing where the file was, and
+            # aliasing the very same object, so identity still agrees.
+            return _Stat(mode=stat_module.S_IFLNK | 0o777,
+                         size=genuine.st_size, mtime_ns=genuine.st_mtime_ns,
+                         nlink=1, dev=genuine.st_dev, ino=genuine.st_ino,
+                         file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT)
+        return real_lstat(path, *args, **kwargs)
+
+    def _counting_read(fd, size):
+        reads["n"] += 1
+        return real_read(fd, size)
+
+    monkeypatch.setattr(retention.os, "lstat", _alias_after_open)
+    monkeypatch.setattr(retention.os, "read", _counting_read)
+    survey = _survey(directory)
+
+    assert seen["lstat"] >= 2, (
+        "the path was not re-read after the open, so the alias is invisible")
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert reads["n"] == 0, "bytes were read from an aliased manifest path"
+
+
+def test_the_post_open_path_recheck_accepts_an_untouched_manifest(tmp_path,
+                                                                  monkeypatch):
+    """Non-vacuity for the control above: the recheck must not refuse a
+    manifest that nothing has touched."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    seen = {"lstat": 0}
+    real_lstat = os.lstat
+
+    def _counting(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+            seen["lstat"] += 1
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _counting)
+    survey = _survey(directory)
+    assert seen["lstat"] >= 2
+    assert survey.refused is None
+    assert survey.manifested == 1
+
+
+def test_a_path_removed_between_open_and_recheck_is_refused(tmp_path,
+                                                            monkeypatch):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    seen = {"lstat": 0}
+    real_lstat = os.lstat
+
+    def _vanishing(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == retention.MANIFEST_NAME:
+            seen["lstat"] += 1
+            if seen["lstat"] > 1:
+                raise FileNotFoundError(errno.ENOENT, "no such file")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _vanishing)
+    survey = _survey(directory)
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+
+
+# -- a close that fails is a refusal, not a footnote -------------------------
+
+def test_a_close_failure_refuses_rather_than_returning_bytes(tmp_path,
+                                                              capsys):
+    """The helper collected its bytes, then swallowed an `os.close` error and
+    returned them anyway -- so a close failure silently produced a normal
+    answer while the body claimed it produced a refusal. The claim is the one
+    worth keeping."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_close = os.close
+    closes = {"n": 0}
+
+    def _close_then_fail(fd):
+        closes["n"] += 1
+        real_close(fd)                     # the descriptor IS released
+        raise OSError(errno.EIO, "input/output error on close")
+
+    with mock.patch.object(retention.os, "close", _close_then_fail):
+        survey = _survey(directory)
+
+    printed = capsys.readouterr()
+    assert closes["n"] == 1, "the handle received other than one close attempt"
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert survey.present == 0
+    for leak in ("v070_gen", ".npz", "input/output", "Errno", "Traceback",
+                 str(tmp_path)):
+        assert leak not in printed.out and leak not in printed.err, leak
+    for field in dataclasses.fields(survey):
+        assert not isinstance(getattr(survey, field.name),
+                              (str, bytes, Path)), field.name
+
+
+def test_a_successful_close_still_returns_the_bytes(tmp_path):
+    """Non-vacuity: the refusal above must come from the close FAILING, not
+    from the close being attempted at all."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    survey = _survey(directory)
+    assert survey.refused is None
+    assert survey.manifested == 1
+
+
+def test_exactly_one_close_attempt_per_acquired_handle(tmp_path):
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    opened = []
+    closed = []
+    real_open = os.open
+    real_close = os.close
+
+    def _tracked_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def _tracked_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    with mock.patch.object(retention.os, "open", _tracked_open), \
+            mock.patch.object(retention.os, "close", _tracked_close):
+        _survey(directory)
+
+    assert len(opened) == 1
+    assert closed == opened, "the handle was closed other than exactly once"
+
+
+def test_a_close_failure_after_a_read_failure_stays_one_refusal(tmp_path,
+                                                                 capsys):
+    """Both fail: the outcome is still one fixed sanitized refusal, and the
+    handle still receives exactly one close attempt."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(tmp_path, records=[_record_bytes(name)],
+                          extra_files=[name])
+    real_close = os.close
+    closes = {"n": 0}
+
+    def _close_then_fail(fd):
+        closes["n"] += 1
+        real_close(fd)
+        raise OSError(errno.EIO, "close failed")
+
+    def _read_fails(fd, size):
+        raise OSError(errno.EIO, "read failed")
+
+    with mock.patch.object(retention.os, "close", _close_then_fail), \
+            mock.patch.object(retention.os, "read", _read_fails):
+        survey = _survey(directory)
+
+    printed = capsys.readouterr()
+    assert closes["n"] == 1
+    assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
+    assert "close failed" not in printed.out and "read failed" not in printed.out
