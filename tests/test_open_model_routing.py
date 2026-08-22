@@ -391,8 +391,10 @@ def test_an_undeclared_context_blocks_even_when_no_minimum_is_asked_for():
 
 
 def test_a_task_may_decline_to_constrain_the_runtime():
+    # An unconstrained task does not demand a bound runtime; a narrowed one
+    # does. See the round-two suite for the narrowed case.
     requirements = TaskRequirements(allowed_runtimes=())
-    assert evaluate(_usable("m", runtimes=("vllm",)), requirements) == ()
+    assert evaluate(_usable("m"), requirements) == ()
 
 
 # -- the fixed no-eligible-backend outcome -----------------------------------

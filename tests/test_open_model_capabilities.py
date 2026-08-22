@@ -260,8 +260,9 @@ def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
     caps = ModelCapabilities(
         model_id="m",
         variant_id="bf16",
-        repository_revision="1111111111111111111111111111111111111111",
-        licence_source_url="https://example.invalid/licence",
+        repository_revision="1504002f650e656a0a3789d99574df12e3e94ed0",
+        provenance_url="https://huggingface.co/m/tree/" + "1504002f650e656a0a3789d99574df12e3e94ed0",
+        licence_source_url="https://huggingface.co/m/blob/" + "1504002f650e656a0a3789d99574df12e3e94ed0" + "/README.md",
         licence_revision="2.0",
         locality="local",
         availability="present",
@@ -270,6 +271,9 @@ def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
         tool_calling="supported",
         max_context_tokens=8192,
         runtimes=("ollama",),
+        bound_runtime="ollama",
+        bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_source_url="https://github.com/ollama/ollama/tree/" + "6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
         licence_class="osi-open-source",
     )
     assert caps.unresolved_fields() == ()

@@ -152,7 +152,10 @@ def test_acceptance_runtime_not_permitted_for_the_task():
             expected_outcome=NO_ELIGIBLE_BACKEND,
         ),
     )
-    assert record.escalation == ("runtime-not-allowed",)
+    # A plural compatibility list alone cannot satisfy a narrowed runtime
+    # requirement; the bound runtime is what is judged.
+    assert "runtime-not-allowed" in record.escalation
+    assert "bound-runtime-not-allowed" in record.escalation
     assert record.passed is True
 
 

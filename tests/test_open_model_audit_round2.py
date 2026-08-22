@@ -65,6 +65,36 @@ def _pinned(model_id: str = "m", **overrides) -> ModelCapabilities:
     return ModelCapabilities(**base)  # type: ignore[arg-type]
 
 
+_REAL_REPO = "org/model"
+
+
+def _real(**overrides) -> ModelCapabilities:
+    """An artifact-bearing descriptor with complete immutable provenance."""
+    base = dict(
+        model_id=_REAL_REPO,
+        variant_id="bf16",
+        repository_revision=_REAL_SHA,
+        provenance_url="https://huggingface.co/%s/tree/%s" % (_REAL_REPO, _REAL_SHA),
+        licence_source_url=(
+            "https://huggingface.co/%s/blob/%s/README.md" % (_REAL_REPO, _REAL_SHA)
+        ),
+        licence_revision="2.0",
+        locality="local",
+        availability="present",
+        resource_class="light",
+        structured_output="supported",
+        tool_calling="supported",
+        max_context_tokens=8192,
+        runtimes=("vllm",),
+        bound_runtime="vllm",
+        bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_source_url="https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        licence_class="osi-open-source",
+    )
+    base.update(overrides)
+    return ModelCapabilities(**base)  # type: ignore[arg-type]
+
+
 # == R1 - an invalid runtime constraint must never widen the constraint ======
 
 
@@ -302,18 +332,13 @@ def test_r4_an_artifact_bearing_variant_must_be_byte_pinned_somehow():
 
 
 def test_r4_a_full_commit_id_pins_a_sharded_variant():
-    caps = _pinned(runtimes=("vllm",), repository_revision=_REAL_SHA)
+    caps = _real()
     assert caps.is_byte_pinned() is True
     assert evaluate(caps, TaskRequirements()) == ()
 
 
 def test_r4_a_named_file_plus_digest_pins_a_single_file_variant():
-    caps = _pinned(
-        runtimes=("llama-cpp",),
-        repository_revision="main",
-        artifact_path="m.gguf",
-        artifact_digest="sha256:" + "ab" * 32,
-    )
+    caps = _real(artifact_path="m.gguf", artifact_digest="sha256:" + "ab" * 32)
     assert caps.is_byte_pinned() is True
     assert evaluate(caps, TaskRequirements()) == ()
 
