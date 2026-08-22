@@ -71,6 +71,12 @@ EscalationReason = Literal[
     "repository-revision-unpinned",
     "artifact-digest-missing",
     "artifact-unpinned",
+    "repository-revision-not-immutable",
+    "provenance-unpinned",
+    "bound-runtime-unspecified",
+    "bound-runtime-not-allowed",
+    "bound-runtime-not-declared",
+    "bound-runtime-unpinned",
 ]
 """Why a candidate was refused, or why the whole decision escalated.
 
@@ -360,6 +366,22 @@ def evaluate(
     # covering the whole tree (the only coherent pin for a sharded variant).
     if capabilities.is_artifact_bearing() and not capabilities.is_byte_pinned():
         reasons.append("artifact-unpinned")
+
+    # Provenance and licence evidence must be immutable for a real artifact.
+    # The single, narrow exception is the repository-local in-process double,
+    # which is this repository own code: it has no upstream repository, no
+    # licence page, and no serving runtime to pin. `is_artifact_bearing()`
+    # draws that line, and nothing else widens it.
+    if capabilities.is_artifact_bearing():
+        if not capabilities.has_immutable_revision():
+            reasons.append("repository-revision-not-immutable")
+        if not capabilities.has_pinned_provenance():
+            reasons.append("provenance-unpinned")
+        if (
+            not capabilities.has_pinned_licence()
+            and "licence-source-unpinned" not in reasons
+        ):
+            reasons.append("licence-source-unpinned")
     if not capabilities.licence_source_url or not capabilities.licence_revision:
         reasons.append("licence-source-unpinned")
 
@@ -405,6 +427,25 @@ def evaluate(
     elif requirements.allowed_runtimes:
         if not any(r in requirements.allowed_runtimes for r in known_runtimes):
             reasons.append("runtime-not-allowed")
+
+    # `runtimes` is a plural COMPATIBILITY list - what a vendor claims a model
+    # can run under. It is not a statement about what the operator factory
+    # actually constructs. A narrowed runtime requirement is therefore judged
+    # on `bound_runtime`, the single runtime that will really serve, and a
+    # compatibility list alone can never satisfy one.
+    if capabilities.bound_runtime and capabilities.bound_runtime not in known_runtimes:
+        reasons.append("bound-runtime-not-declared")
+    if requirements.allowed_runtimes:
+        if not capabilities.bound_runtime:
+            reasons.append("bound-runtime-unspecified")
+        elif capabilities.bound_runtime not in requirements.allowed_runtimes:
+            reasons.append("bound-runtime-not-allowed")
+    if (
+        capabilities.is_artifact_bearing()
+        and capabilities.bound_runtime
+        and not capabilities.has_pinned_runtime_binding()
+    ):
+        reasons.append("bound-runtime-unpinned")
 
     return tuple(reasons)
 
