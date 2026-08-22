@@ -57,15 +57,16 @@ class _HostileBool:
         raise RuntimeError("__iter__ invoked")
 
 
-def _real(**overrides) -> ModelCapabilities:
+def _real(model_id: str = "org/model", **overrides) -> ModelCapabilities:
     """Artifact-bearing descriptor with complete immutable provenance."""
+    revision = overrides.get("repository_revision", "1504002f650e656a0a3789d99574df12e3e94ed0")
     base = dict(
-        model_id=_REPO,
+        model_id=model_id,
         variant_id="bf16",
-        repository_revision=_SHA,
-        provenance_url="https://huggingface.co/" + _REPO + "/tree/" + _SHA,
+        repository_revision=revision,
+        provenance_url="https://huggingface.co/" + model_id + "/tree/" + revision,
         licence_source_url=(
-            "https://huggingface.co/" + _REPO + "/blob/" + _SHA + "/README.md"
+            "https://huggingface.co/" + model_id + "/blob/" + revision + "/README.md"
         ),
         licence_revision="2.0",
         locality="local",
@@ -76,9 +77,10 @@ def _real(**overrides) -> ModelCapabilities:
         max_context_tokens=8192,
         runtimes=("vllm",),
         bound_runtime="vllm",
-        bound_runtime_version=_VLLM,
+        bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_object_kind="commit",
         bound_runtime_source_url=(
-            "https://github.com/vllm-project/vllm/tree/" + _VLLM
+            "https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
         ),
         licence_class="osi-open-source",
     )
@@ -101,14 +103,20 @@ def test_control1_absolute_secret_shaped_artifact_path_is_normalized_away():
     assert "Users" not in repr(caps)
 
 
-def test_control1_such_a_descriptor_cannot_route_on_a_bogus_digest_pairing():
-    # It normalizes to no path, so the digest no longer describes anything
-    # and the descriptor falls back to the commit-id tree pin.
+def test_control1_a_rejected_path_invalidates_rather_than_collapsing():
+    """Inverted in round four, because the old behaviour was the defect.
+
+    This previously asserted that a rejected path collapsed to "" and the
+    descriptor then routed through the repository-commit fallback - which is
+    exactly the silent downgrade the fourth audit named. A supplied path that
+    cannot be made canonical now invalidates the descriptor instead.
+    """
     caps = _real(
         artifact_path=_ABS_SECRET_PATH, artifact_digest="sha256:" + "ab" * 32
     )
     assert caps.artifact_path == ""
-    assert evaluate(caps, TaskRequirements()) == ()
+    assert caps.invalid_fields == ("artifact_path",)
+    assert "descriptor-invalid" in evaluate(caps, TaskRequirements())
 
 
 @pytest.mark.parametrize(

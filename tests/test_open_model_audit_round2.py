@@ -45,38 +45,15 @@ _PATH = "C:" + chr(92) + "Users" + chr(92) + "kevin" + chr(92) + "creds.txt"
 _REAL_SHA = "1504002f650e656a0a3789d99574df12e3e94ed0"
 
 
-def _pinned(model_id: str = "m", **overrides) -> ModelCapabilities:
+def _pinned(model_id: str = "org/model", **overrides) -> ModelCapabilities:
+    revision = overrides.get("repository_revision", "1504002f650e656a0a3789d99574df12e3e94ed0")
     base = dict(
         model_id=model_id,
         variant_id="bf16",
-        repository_revision=_REAL_SHA,
-        licence_source_url="https://example.invalid/licence",
-        licence_revision="1.0",
-        locality="local",
-        availability="present",
-        resource_class="light",
-        structured_output="supported",
-        tool_calling="supported",
-        max_context_tokens=8192,
-        runtimes=("in-process-stub",),
-        licence_class="osi-open-source",
-    )
-    base.update(overrides)
-    return ModelCapabilities(**base)  # type: ignore[arg-type]
-
-
-_REAL_REPO = "org/model"
-
-
-def _real(**overrides) -> ModelCapabilities:
-    """An artifact-bearing descriptor with complete immutable provenance."""
-    base = dict(
-        model_id=_REAL_REPO,
-        variant_id="bf16",
-        repository_revision=_REAL_SHA,
-        provenance_url="https://huggingface.co/%s/tree/%s" % (_REAL_REPO, _REAL_SHA),
+        repository_revision=revision,
+        provenance_url="https://huggingface.co/" + model_id + "/tree/" + revision,
         licence_source_url=(
-            "https://huggingface.co/%s/blob/%s/README.md" % (_REAL_REPO, _REAL_SHA)
+            "https://huggingface.co/" + model_id + "/blob/" + revision + "/README.md"
         ),
         licence_revision="2.0",
         locality="local",
@@ -88,7 +65,44 @@ def _real(**overrides) -> ModelCapabilities:
         runtimes=("vllm",),
         bound_runtime="vllm",
         bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
-        bound_runtime_source_url="https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_object_kind="commit",
+        bound_runtime_source_url=(
+            "https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
+        ),
+        licence_class="osi-open-source",
+    )
+    base.update(overrides)
+    return ModelCapabilities(**base)  # type: ignore[arg-type]
+
+
+_REAL_REPO = "org/model"
+
+
+def _real(model_id: str = "org/model", **overrides) -> ModelCapabilities:
+    """An artifact-bearing descriptor with complete immutable provenance."""
+    revision = overrides.get("repository_revision", "1504002f650e656a0a3789d99574df12e3e94ed0")
+    base = dict(
+        model_id=model_id,
+        variant_id="bf16",
+        repository_revision=revision,
+        provenance_url="https://huggingface.co/" + model_id + "/tree/" + revision,
+        licence_source_url=(
+            "https://huggingface.co/" + model_id + "/blob/" + revision + "/README.md"
+        ),
+        licence_revision="2.0",
+        locality="local",
+        availability="present",
+        resource_class="light",
+        structured_output="supported",
+        tool_calling="supported",
+        max_context_tokens=8192,
+        runtimes=("vllm",),
+        bound_runtime="vllm",
+        bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_object_kind="commit",
+        bound_runtime_source_url=(
+            "https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
+        ),
         licence_class="osi-open-source",
     )
     base.update(overrides)
@@ -344,7 +358,11 @@ def test_r4_a_named_file_plus_digest_pins_a_single_file_variant():
 
 
 def test_r4_the_in_process_double_bears_no_artifact():
-    caps = _pinned(runtimes=("in-process-stub",), repository_revision="repo-local")
+    # Round four: the exemption is no longer a copyable field value. Only a
+    # descriptor handed out by the harness construction path is exempt.
+    from scripts.open_model.evaluation import stub_capabilities
+
+    caps = stub_capabilities("double")
     assert caps.is_artifact_bearing() is False
     assert "artifact-unpinned" not in evaluate(caps, TaskRequirements())
 

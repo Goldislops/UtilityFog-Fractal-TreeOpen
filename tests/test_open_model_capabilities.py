@@ -243,6 +243,13 @@ def test_unresolved_fields_lists_every_unknown_in_declaration_order():
         "model_id",
         "variant_id",
         "repository_revision",
+        # A bare descriptor is artifact-bearing: the exemption is no longer a
+        # field value, so nothing is exempt merely by saying so.
+        "artifact_pin",
+        "immutable_revision",
+        "provenance_url",
+        "pinned_licence",
+        "bound_runtime",
         "licence_source_url",
         "licence_revision",
         "locality",
@@ -258,11 +265,13 @@ def test_unresolved_fields_lists_every_unknown_in_declaration_order():
 
 def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
     caps = ModelCapabilities(
-        model_id="m",
+        model_id="org/model",
         variant_id="bf16",
         repository_revision="1504002f650e656a0a3789d99574df12e3e94ed0",
-        provenance_url="https://huggingface.co/m/tree/" + "1504002f650e656a0a3789d99574df12e3e94ed0",
-        licence_source_url="https://huggingface.co/m/blob/" + "1504002f650e656a0a3789d99574df12e3e94ed0" + "/README.md",
+        provenance_url="https://huggingface.co/org/model/tree/1504002f650e656a0a3789d99574df12e3e94ed0",
+        licence_source_url=(
+            "https://huggingface.co/org/model/blob/1504002f650e656a0a3789d99574df12e3e94ed0/README.md"
+        ),
         licence_revision="2.0",
         locality="local",
         availability="present",
@@ -270,10 +279,13 @@ def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
         structured_output="supported",
         tool_calling="supported",
         max_context_tokens=8192,
-        runtimes=("ollama",),
-        bound_runtime="ollama",
+        runtimes=("vllm",),
+        bound_runtime="vllm",
         bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
-        bound_runtime_source_url="https://github.com/ollama/ollama/tree/" + "6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_object_kind="commit",
+        bound_runtime_source_url=(
+            "https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
+        ),
         licence_class="osi-open-source",
     )
     assert caps.unresolved_fields() == ()

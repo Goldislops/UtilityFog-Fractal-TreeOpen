@@ -47,21 +47,31 @@ from scripts.open_model.routing import (
 )
 
 
-def _usable(model_id: str, **overrides) -> ModelCapabilities:
+def _usable(model_id: str = "org/model", **overrides) -> ModelCapabilities:
     """A descriptor that satisfies the default requirements."""
+    revision = overrides.get("repository_revision", "1504002f650e656a0a3789d99574df12e3e94ed0")
     base = dict(
         model_id=model_id,
-        variant_id="test-variant",
-        repository_revision="1111111111111111111111111111111111111111",
-        licence_source_url="https://example.invalid/licence",
-        licence_revision="1.0",
+        variant_id="bf16",
+        repository_revision=revision,
+        provenance_url="https://huggingface.co/" + model_id + "/tree/" + revision,
+        licence_source_url=(
+            "https://huggingface.co/" + model_id + "/blob/" + revision + "/README.md"
+        ),
+        licence_revision="2.0",
         locality="local",
         availability="present",
         resource_class="light",
         structured_output="supported",
         tool_calling="supported",
         max_context_tokens=8192,
-        runtimes=("in-process-stub",),
+        runtimes=("vllm",),
+        bound_runtime="vllm",
+        bound_runtime_version="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac",
+        bound_runtime_object_kind="commit",
+        bound_runtime_source_url=(
+            "https://github.com/vllm-project/vllm/tree/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
+        ),
         licence_class="osi-open-source",
     )
     base.update(overrides)
