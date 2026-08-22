@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import weakref
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final, Literal, Optional
 
 from scripts.open_model.redaction import (
@@ -416,24 +417,72 @@ MODEL_EVIDENCE_HOST: Final[str] = "huggingface.co"
 RUNTIME_EVIDENCE_HOST: Final[str] = "github.com"
 """The single origin runtime evidence may come from."""
 
-RUNTIME_REPOSITORIES: Final[dict[str, str]] = {
-    "llama-cpp": "ggml-org/llama.cpp",
-    "ollama": "ollama/ollama",
-    "vllm": "vllm-project/vllm",
-    "sglang": "sgl-project/sglang",
-    "tensorrt-llm": "NVIDIA/TensorRT-LLM",
-}
-"""The exact official repository for each runtime token.
+def _build_runtime_repository_lookup():
+    """Close over the trust mapping so routing cannot be re-pointed at runtime.
 
-Corrected after audit: requiring only ``github.com`` plus a trailing object
-id let ``bound_runtime="vllm"`` be evidenced by
-``https://github.com/evil-org/fake-runtime/tree/<a real vLLM commit>`` - a
-genuine commit id borrowed to vouch for an unrelated repository. The token
-now names one repository and the whole path must match it.
+    Corrected after audit. This was a ``Final[dict]``, and ``Final`` is a
+    *type-checker* annotation with no runtime effect whatsoever: assigning
+    ``RUNTIME_REPOSITORIES["vllm"] = "evil-org/fake-runtime"`` silently
+    restored eligibility for an attacker-selected repository, and ``update``
+    and ``del`` worked just as well. A mapping that decides trust cannot be
+    writable by anyone who can import the module.
 
-``in-process-stub`` deliberately has no entry: it is not a public runtime,
-and a descriptor claiming it while bearing a real artifact has nothing
-legitimate to point at.
+    Two things change here:
+
+    - The authoritative data is a **tuple of pairs** captured in this
+      closure. Tuples have no mutation methods, and the tuple is not bound to
+      any module-level name, so there is no ordinary expression that reaches
+      it.
+    - Routing consults the returned *function*, never the module attribute.
+      Re-binding ``capabilities.RUNTIME_REPOSITORIES`` to a fresh dict - the
+      other obvious ordinary path - therefore changes nothing about what is
+      trusted.
+
+    ``RUNTIME_REPOSITORIES`` remains exported as a ``MappingProxyType`` for
+    readers and tests. It wraps a dict built *inside* this function and bound
+    to nothing else, so it is a read-only view over a private copy:
+    ``__setitem__``, ``__delitem__`` and ``update`` all refuse, and even if
+    the proxy's backing dict were somehow reached, routing does not read it.
+
+    Honest limit: Python has no true privacy. ``__closure__`` cell surgery,
+    or replacing this module in ``sys.modules``, could still defeat this.
+    Those are not ordinary mutation paths, and the claim is bounded to the
+    ordinary ones.
+    """
+    entries = (
+        ("llama-cpp", "ggml-org/llama.cpp"),
+        ("ollama", "ollama/ollama"),
+        ("vllm", "vllm-project/vllm"),
+        ("sglang", "sgl-project/sglang"),
+        ("tensorrt-llm", "NVIDIA/TensorRT-LLM"),
+    )
+
+    def lookup(token: Any) -> Optional[str]:
+        """Official repository for a runtime token, or ``None``.
+
+        Linear scan over the captured tuple - five entries, and immune to
+        the mutation a dict would expose.
+
+        ``in-process-stub`` deliberately has no entry: it is not a public
+        runtime, and a descriptor claiming it while bearing a real artifact
+        has nothing legitimate to point at.
+        """
+        if type(token) is not str:
+            return None
+        for name, repository in entries:
+            if name == token:
+                return repository
+        return None
+
+    return lookup, MappingProxyType(dict(entries))
+
+
+_runtime_repository_for, RUNTIME_REPOSITORIES = _build_runtime_repository_lookup()
+"""Read-only VIEW of the runtime trust mapping.
+
+Exported for readers and tests. **Routing does not consult it** - see
+``_build_runtime_repository_lookup``. Mutating or re-binding this name cannot
+change what is trusted.
 """
 
 
@@ -857,7 +906,9 @@ class ModelCapabilities:
             return False
         if self.bound_runtime_object_kind not in _RUNTIME_OBJECT_KINDS:
             return False
-        repository = RUNTIME_REPOSITORIES.get(self.bound_runtime)
+        # The closed lookup, never the exported view: re-binding or
+        # mutating the module attribute must not change what is trusted.
+        repository = _runtime_repository_for(self.bound_runtime)
         if repository is None:
             return False
         ok, host, path = parse_https_url(self.bound_runtime_source_url)
