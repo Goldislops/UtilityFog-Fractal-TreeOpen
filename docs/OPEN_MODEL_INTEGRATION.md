@@ -596,6 +596,33 @@ remained.
 | 5 | The `in-process-stub` exemption was a **copyable field value** — any external author could type that string and bypass every gate at once. | Exemption is now a property of *how the descriptor was constructed*, not what it says: only an object handed out through `register_harness_double` is exempt, checked **by identity**, so an equal-but-separately-constructed copy is not. A test asserts that closed path has exactly one caller. |
 | 6 | Surviving prose overstated what was pinned. | The catalogue's Gemma note now records the retraction; Llama's note records the literal `gated: "manual"`; the "every runtime claim is pinned" heading is narrowed; the round-two all-pinned statement is qualified. NIM stays **UNRESOLVED**, and pinned commits stay distinguished from documents read at moving references. |
 
+## 15. Post-audit corrections, round seven (2026-08-22)
+
+A seventh independent audit cleared the public-mapping immutability and the
+documentation scoping, and held one material gate.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | Round six moved the trust **data** into a closure but `has_pinned_runtime_binding` still resolved the **lookup** through a module-level name. `capabilities._runtime_repository_for = lambda t: "evil-org/fake-runtime"` made the attacker repository eligible **and the official vLLM repository ineligible**, under normal, `-O` and `-OO`. | The five-repository relationship is now **inlined in the method as code constants**, together with the evidence host. The method reads no rebindable trust name at all — asserted structurally against its `co_names`. `RUNTIME_REPOSITORIES` and `_runtime_repository_for` remain exported for readers and tests and are no longer consulted by routing; a drift guard asserts the inline constants and the exported view still agree in both directions. |
+
+### The supported boundary, stated exactly
+
+**In scope, and closed.** Ordinary reassignment of the repository trust data
+or of its lookup: `RUNTIME_REPOSITORIES`, `_runtime_repository_for`, and the
+evidence-host constant — individually or all at once. Also every ordinary
+mutation of the public mapping: `__setitem__`, `__delitem__`, `update`,
+`pop`, `popitem`, `clear`, `setdefault`. After any of these, the official
+repository stays **eligible** and the attacker repository stays **blocked**.
+
+**Out of scope, and not claimed.** Replacing the class method itself,
+replacing the router, patching the generic validators (`parse_https_url`,
+`is_commit_revision`), `__closure__` cell surgery, or swapping the module in
+`sys.modules`. Those are arbitrary code replacement rather than reassignment
+of trust data, and no amount of care inside this module prevents them.
+
+The distinction is the whole point: a reader should be able to tell which
+attacks this design stops and which it merely does not pretend to.
+
 ## 14. Post-audit corrections, round six (2026-08-22)
 
 A sixth independent audit cleared all four round-five findings and held two
