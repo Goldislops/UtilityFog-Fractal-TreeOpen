@@ -163,6 +163,24 @@ declared one. These are *declared* bands authored by a human, not measured
 values - this package benchmarks nothing.
 """
 
+_MUTABLE_REF_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "main",
+        "master",
+        "head",
+        "latest",
+        "stable",
+        "dev",
+        "develop",
+        "trunk",
+        "edge",
+        "nightly",
+        "current",
+        "release",
+    }
+)
+"""Ref names that move. Never acceptable as a pin for a reviewed claim."""
+
 _MODEL_ID_MAX_LEN: Final[int] = 128
 _LICENCE_NAME_MAX_LEN: Final[int] = 128
 _NOTE_MAX_LEN: Final[int] = 512
@@ -383,6 +401,9 @@ class ModelCapabilities:
     max_output_tokens: int = 0
     quantisation: str = ""
     runtimes: tuple[RuntimeKind, ...] = ()
+    bound_runtime: str = ""
+    bound_runtime_version: str = ""
+    bound_runtime_source_url: str = ""
     licence_class: LicenceClass = "unknown"
     licence_name: str = ""
     licence_source_url: str = ""
@@ -399,6 +420,18 @@ class ModelCapabilities:
         set_(self, "model_id", _exact_reference(self.model_id))
         set_(self, "variant_id", _exact_reference(self.variant_id))
         set_(self, "repository_revision", _exact_revision(self.repository_revision))
+        # Applied here, which the audit found it was not: `_exact_artifact_path`
+        # existed but was never called, so an absolute, secret-shaped, or
+        # hostile value was stored verbatim - and a hostile `__bool__` then
+        # made `evaluate()` non-total the moment it truth-tested this field.
+        set_(self, "artifact_path", _exact_artifact_path(self.artifact_path))
+        set_(self, "bound_runtime", _exact_member(self.bound_runtime, _RUNTIME_KINDS, ""))
+        set_(self, "bound_runtime_version", _exact_revision(self.bound_runtime_version))
+        set_(
+            self,
+            "bound_runtime_source_url",
+            _exact_https_url(self.bound_runtime_source_url),
+        )
         set_(self, "artifact_digest", _exact_digest(self.artifact_digest))
         set_(self, "licence_source_url", _exact_https_url(self.licence_source_url))
         set_(self, "licence_revision", _exact_reference(self.licence_revision))
@@ -468,8 +501,21 @@ class ModelCapabilities:
             unresolved.append("repository_revision")
         if self.artifact_path and not self.artifact_digest:
             unresolved.append("artifact_digest")
-        if self.is_artifact_bearing() and not self.is_byte_pinned():
-            unresolved.append("artifact_pin")
+        if self.is_artifact_bearing():
+            # Reported only for real artifacts. The repository-local
+            # in-process double is the single, narrow exception: it has no
+            # upstream repository, no licence page and no serving runtime to
+            # pin, because it is this repository's own code.
+            if not self.is_byte_pinned():
+                unresolved.append("artifact_pin")
+            if not self.has_immutable_revision():
+                unresolved.append("immutable_revision")
+            if not self.has_pinned_provenance():
+                unresolved.append("provenance_url")
+            if not self.has_pinned_licence():
+                unresolved.append("pinned_licence")
+            if not self.has_pinned_runtime_binding():
+                unresolved.append("bound_runtime")
         if not self.licence_source_url:
             unresolved.append("licence_source_url")
         if not self.licence_revision:
@@ -502,6 +548,66 @@ class ModelCapabilities:
         artifact to digest.
         """
         return any(runtime != "in-process-stub" for runtime in self.runtimes)
+
+    def has_immutable_revision(self) -> bool:
+        """True when the repository revision is a full commit id.
+
+        A symbolic revision - ``main``, a branch, a moving tag - identifies
+        whatever that name points at *today*, which is not what a reviewed
+        claim needs.
+        """
+        return is_commit_revision(self.repository_revision)
+
+    def has_pinned_provenance(self) -> bool:
+        """True when ``provenance_url`` binds this exact repo and revision.
+
+        Both halves matter. A URL that names the repository but not the
+        revision resolves to a moving target; a URL carrying a revision but
+        naming a different repository is evidence about something else.
+        """
+        if not self.provenance_url or not self.model_id:
+            return False
+        if not self.has_immutable_revision():
+            return False
+        return (
+            self.model_id in self.provenance_url
+            and self.repository_revision in self.provenance_url
+        )
+
+    def has_pinned_licence(self) -> bool:
+        """True when the licence claim is bound to immutable evidence.
+
+        Requires a licence source URL naming this repository *at this
+        revision*, and a licence revision that is not a mutable ref name.
+        A ``/blob/main/`` licence URL is the case this refuses: the terms it
+        shows can change after review without the descriptor changing.
+        """
+        if not self.licence_source_url or not self.licence_revision:
+            return False
+        if self.licence_revision.lower() in _MUTABLE_REF_NAMES:
+            return False
+        if not self.has_immutable_revision():
+            return False
+        return (
+            self.model_id in self.licence_source_url
+            and self.repository_revision in self.licence_source_url
+        )
+
+    def has_pinned_runtime_binding(self) -> bool:
+        """True when the *bound* runtime carries an immutable version+source.
+
+        ``runtimes`` is a plural compatibility list - what a vendor claims a
+        model can run under. ``bound_runtime`` is the single runtime the
+        operator factory actually constructs against, and it is the only one
+        a narrowed runtime requirement may be judged on.
+        """
+        if not self.bound_runtime:
+            return False
+        if not self.bound_runtime_version or not self.bound_runtime_source_url:
+            return False
+        if self.bound_runtime_version.lower() in _MUTABLE_REF_NAMES:
+            return False
+        return self.bound_runtime_version in self.bound_runtime_source_url
 
     def is_byte_pinned(self) -> bool:
         """True when the bytes this descriptor refers to are pinned.
