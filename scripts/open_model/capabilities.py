@@ -418,36 +418,48 @@ RUNTIME_EVIDENCE_HOST: Final[str] = "github.com"
 """The single origin runtime evidence may come from."""
 
 def _build_runtime_repository_lookup():
-    """Close over the trust mapping so routing cannot be re-pointed at runtime.
+    """Build the exported inspection mirrors of the runtime trust mapping.
 
-    Corrected after audit. This was a ``Final[dict]``, and ``Final`` is a
-    *type-checker* annotation with no runtime effect whatsoever: assigning
+    **These are mirrors, not the trust path.** The authoritative
+    relationship - which repository may vouch for which runtime token - is
+    written out as code constants inside
+    ``ModelCapabilities.has_pinned_runtime_binding``. Routing reads those
+    constants and nothing else: it does not call the ``lookup`` returned
+    here, and it does not read ``RUNTIME_REPOSITORIES``.
+
+    What the two returned objects are for:
+
+    - ``lookup`` (exported as ``_runtime_repository_for``) - a convenience
+      for readers and tests that want to ask the question in one call.
+    - ``MappingProxyType`` (exported as ``RUNTIME_REPOSITORIES``) - a
+      read-only view for inspection. It wraps a dict built *inside* this
+      function and bound to nothing else, so ``__setitem__``,
+      ``__delitem__``, ``update``, ``pop``, ``popitem``, ``clear`` and
+      ``setdefault`` are all absent from it.
+
+    Because the relationship is written in two places - here and inlined in
+    the method - ``tests/test_open_model_audit_round7.py`` carries a
+    two-directional drift guard: for every token in this view, the official
+    repository must be accepted and an attacker repository refused by the
+    method.
+
+    History, kept because the shape of these objects only makes sense with
+    it. This began as a ``Final[dict]``; ``Final`` is a *type-checker*
+    annotation with no runtime effect, so
     ``RUNTIME_REPOSITORIES["vllm"] = "evil-org/fake-runtime"`` silently
-    restored eligibility for an attacker-selected repository, and ``update``
-    and ``del`` worked just as well. A mapping that decides trust cannot be
-    writable by anyone who can import the module.
+    restored eligibility for an attacker-selected repository (round six).
+    Moving the data into this closure closed that, but routing still
+    resolved the *lookup* through a module-level name, so rebinding
+    ``_runtime_repository_for`` redirected the decision just as effectively
+    (round seven). **Round seven superseded the private-lookup routing
+    design**: a trust decision must resolve no rebindable name at all, which
+    is why the constants now live in the method and these objects are
+    mirrors.
 
-    Two things change here:
-
-    - The authoritative data is a **tuple of pairs** captured in this
-      closure. Tuples have no mutation methods, and the tuple is not bound to
-      any module-level name, so there is no ordinary expression that reaches
-      it.
-    - Routing consults the returned *function*, never the module attribute.
-      Re-binding ``capabilities.RUNTIME_REPOSITORIES`` to a fresh dict - the
-      other obvious ordinary path - therefore changes nothing about what is
-      trusted.
-
-    ``RUNTIME_REPOSITORIES`` remains exported as a ``MappingProxyType`` for
-    readers and tests. It wraps a dict built *inside* this function and bound
-    to nothing else, so it is a read-only view over a private copy:
-    ``__setitem__``, ``__delitem__`` and ``update`` all refuse, and even if
-    the proxy's backing dict were somehow reached, routing does not read it.
-
-    Honest limit: Python has no true privacy. ``__closure__`` cell surgery,
-    or replacing this module in ``sys.modules``, could still defeat this.
-    Those are not ordinary mutation paths, and the claim is bounded to the
-    ordinary ones.
+    Honest limit, unchanged: Python has no true privacy. ``__closure__``
+    cell surgery, or replacing this module in ``sys.modules``, could still
+    defeat any of this. Those are not ordinary mutation paths, and the claim
+    is bounded to the ordinary ones.
     """
     entries = (
         ("llama-cpp", "ggml-org/llama.cpp"),
@@ -460,8 +472,8 @@ def _build_runtime_repository_lookup():
     def lookup(token: Any) -> Optional[str]:
         """Official repository for a runtime token, or ``None``.
 
-        Linear scan over the captured tuple - five entries, and immune to
-        the mutation a dict would expose.
+        An **inspection mirror**, not the trust path - routing does not call
+        this. Linear scan over the captured tuple, five entries.
 
         ``in-process-stub`` deliberately has no entry: it is not a public
         runtime, and a descriptor claiming it while bearing a real artifact
@@ -478,11 +490,12 @@ def _build_runtime_repository_lookup():
 
 
 _runtime_repository_for, RUNTIME_REPOSITORIES = _build_runtime_repository_lookup()
-"""Read-only VIEW of the runtime trust mapping.
+"""Exported inspection mirrors of the runtime trust mapping.
 
-Exported for readers and tests. **Routing does not consult it** - see
-``_build_runtime_repository_lookup``. Mutating or re-binding this name cannot
-change what is trusted.
+Neither is on the trust path. ``ModelCapabilities.has_pinned_runtime_binding``
+holds the authoritative relationship as inlined code constants and reads
+neither of these names, so mutating or re-binding either one cannot change
+what is trusted. See ``_build_runtime_repository_lookup``.
 """
 
 
