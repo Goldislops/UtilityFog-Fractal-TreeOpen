@@ -8,11 +8,39 @@ make three properties structural rather than aspirational:
      that set is refused, so a candidate cannot appear by accident, by import
      side effect, or by data supplied at run time.
 
-  2. **No arbitrary executable or endpoint injection.** No method here accepts
-     a URL, host, port, command, argument vector, credential, or environment
-     value. A backend is supplied as an already-constructed *factory callable*
-     that an operator wrote and a reviewer read. There is no string in this
-     module that is ever spawned, connected to, imported by name, or eval'd.
+  2. **No endpoint injection through this API — a bounded claim.** No method
+     here accepts a URL, host, port, command, argument vector, credential, or
+     environment value, and no string in this module is ever spawned,
+     connected to, imported by name, or eval'd. That is a statement about
+     *this API surface*, and it is all it was ever entitled to be.
+
+     **It does not extend to what an operator-written factory closes over.**
+     A factory is arbitrary code; it can construct a backend pointed at a
+     paid remote endpoint while its descriptor claims ``locality="local"``,
+     and no amount of care in this module can make that impossible. The
+     original wording implied a structural guarantee here that did not
+     exist; the audit was right, and the claim is now bounded to what is
+     actually enforced.
+
+     What *is* enforced, in two layers:
+
+     - **A gate.** Registering a descriptor that claims ``local`` requires an
+       explicit ``locality_attestation="operator-asserted"`` argument at the
+       registration site. The trust is therefore named, in code, where a
+       reviewer reads it - rather than being implied by a descriptor field.
+     - **A best-effort detector.** ``create()`` inspects the constructed
+       backend for a ``base_url``-shaped attribute and refuses when a
+       ``local`` descriptor produced a backend pointed at a non-loopback
+       host. This catches the concrete case that exists in this repository
+       (``OpenAICompatBackend`` holds an SDK client with ``base_url``) and
+       any backend following the same convention. It is **not** universal: a
+       backend that reaches the network by some other route, or that hides
+       its endpoint, is not detected. Detection failure is silent by
+       necessity - absence of evidence, not evidence of locality.
+
+     The residual guarantee is therefore an operator assertion, recorded at
+     the registration site and cross-checked where the shape permits. It is
+     not a structural proof, and this module no longer claims to be one.
 
   3. **Metadata is not approval.** Registering a descriptor is not enough to
      use it. ``create()`` refuses any backend whose descriptor does not
@@ -28,7 +56,7 @@ layer must stay importable with no third-party dependency present at all.
 
 from __future__ import annotations
 
-from typing import Callable, Final, Iterable
+from typing import Callable, Final, Iterable, Literal
 
 from scripts.agent_backends.base import AgentBackend
 from scripts.open_model.capabilities import ModelCapabilities
@@ -70,6 +98,105 @@ class BackendUnavailable(Exception):
 
 _NAME_MAX_LEN: Final[int] = 128
 
+LocalityAttestation = Literal["operator-asserted", "not-required"]
+"""Whether an operator has explicitly vouched for a ``local`` descriptor.
+
+``"operator-asserted"`` is a named, reviewable claim by the person writing
+the registration: *I have confirmed this factory constructs a backend that
+executes locally.* ``"not-required"`` is only valid for descriptors that do
+not claim ``locality="local"``.
+"""
+
+_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
+    {"localhost", "::1", "[::1]", "0:0:0:0:0:0:0:1", "[0:0:0:0:0:0:0:1]"}
+)
+
+_ENDPOINT_ATTRIBUTES: Final[tuple[str, ...]] = ("base_url", "_base_url", "endpoint")
+_CLIENT_ATTRIBUTES: Final[tuple[str, ...]] = ("_client", "client")
+
+
+def _host_of(url: str) -> str:
+    """Extract the host from a URL by string slicing only.
+
+    Hand-parsed rather than routed through ``urllib.parse`` so this module
+    keeps importing nothing that can perform I/O - a property the boundary
+    audit checks. Lowercased; userinfo and port are stripped.
+    """
+    remainder = url
+    marker = remainder.find("://")
+    if marker != -1:
+        remainder = remainder[marker + 3 :]
+    for terminator in ("/", "?", "#"):
+        cut = remainder.find(terminator)
+        if cut != -1:
+            remainder = remainder[:cut]
+    at_sign = remainder.rfind("@")
+    if at_sign != -1:
+        remainder = remainder[at_sign + 1 :]
+    if remainder.startswith("["):
+        close = remainder.find("]")
+        if close != -1:
+            return remainder[: close + 1].lower()
+    colon = remainder.rfind(":")
+    if colon != -1:
+        remainder = remainder[:colon]
+    return remainder.lower()
+
+
+def _is_loopback(host: str) -> bool:
+    """True for loopback names and the whole 127.0.0.0/8 range.
+
+    ``0.0.0.0`` is deliberately **not** loopback: it means "every interface",
+    which is the opposite of the property being checked.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return True
+    if host.endswith(".localhost"):
+        return True
+    if host.startswith("127."):
+        octets = host.split(".")
+        if len(octets) == 4 and all(
+            part.isdigit() and 0 <= int(part) <= 255 for part in octets
+        ):
+            return True
+    return False
+
+
+def detect_endpoint_host(backend: object) -> str:
+    """Best-effort host of a constructed backend, or ``""`` when undetectable.
+
+    Looks for a ``base_url``-shaped attribute directly on the backend, then
+    on a held SDK client. Every read is wrapped, and a value is used only
+    when it is exactly built-in ``str`` or renders to one through an
+    SDK URL object whose ``str`` is safe to take.
+
+    Returning ``""`` means *not detected*, which is not the same as *local*.
+    Callers must treat it as unknown.
+    """
+    candidates: list[object] = [backend]
+    for attribute in _CLIENT_ATTRIBUTES:
+        held = getattr(backend, attribute, None)
+        if held is not None:
+            candidates.append(held)
+    for candidate in candidates:
+        for attribute in _ENDPOINT_ATTRIBUTES:
+            value = getattr(candidate, attribute, None)
+            if value is None:
+                continue
+            if type(value) is str:
+                return _host_of(value)
+            # SDK URL objects (e.g. httpx.URL) are not str but render to one.
+            rendered = getattr(value, "host", None)
+            if type(rendered) is str and rendered:
+                return rendered.lower()
+            try:
+                text = str(value)
+            except Exception:
+                continue
+            if type(text) is str and text:
+                return _host_of(text)
+    return ""
+
 
 class BackendRegistry:
     """Ordered, allowlisted map of name -> (capabilities, factory).
@@ -110,6 +237,7 @@ class BackendRegistry:
         self._order: list[str] = []
         self._capabilities: dict[str, ModelCapabilities] = {}
         self._factories: dict[str, BackendFactory] = {}
+        self._attestations: dict[str, str] = {}
 
     # -- introspection -------------------------------------------------------
 
@@ -147,11 +275,19 @@ class BackendRegistry:
 
     # -- mutation ------------------------------------------------------------
 
+    def attestation_for(self, name: str) -> str:
+        """The locality attestation recorded for ``name`` at registration."""
+        if type(name) is not str or name not in self._attestations:
+            raise BackendUnavailable("name-not-registered")
+        return self._attestations[name]
+
     def register(
         self,
         name: str,
         capabilities: ModelCapabilities,
         factory: BackendFactory,
+        *,
+        locality_attestation: LocalityAttestation = "not-required",
     ) -> None:
         """Bind ``name`` to a descriptor and an operator-supplied factory.
 
@@ -171,6 +307,14 @@ class BackendRegistry:
                                         ``model_id`` away, so it identifies
                                         nothing reviewable.
         - ``factory-not-callable``    - the factory is not callable.
+        - ``locality-attestation-required`` - the descriptor claims
+                                        ``locality="local"`` but the caller
+                                        did not pass
+                                        ``locality_attestation="operator-asserted"``.
+        - ``locality-attestation-not-applicable`` - an attestation was passed
+                                        for a descriptor that does not claim
+                                        ``local``, which would misrepresent
+                                        what was vouched for.
         """
         if type(name) is not str or not name or len(name) > _NAME_MAX_LEN:
             raise RegistrationRefused("name-not-exact-str")
@@ -184,9 +328,18 @@ class BackendRegistry:
             raise RegistrationRefused("capabilities-missing-model-id")
         if not callable(factory):
             raise RegistrationRefused("factory-not-callable")
+        # A `local` claim must be vouched for explicitly, at the registration
+        # site, by the person who can actually check it. See the module
+        # docstring for why this is a gate rather than a proof.
+        if capabilities.locality == "local":
+            if locality_attestation != "operator-asserted":
+                raise RegistrationRefused("locality-attestation-required")
+        elif locality_attestation != "not-required":
+            raise RegistrationRefused("locality-attestation-not-applicable")
         self._order.append(name)
         self._capabilities[name] = capabilities
         self._factories[name] = factory
+        self._attestations[name] = locality_attestation
 
     # -- construction --------------------------------------------------------
 
@@ -214,6 +367,14 @@ class BackendRegistry:
         backend = self._factories[name]()
         if not isinstance(backend, AgentBackend):
             raise BackendUnavailable("factory-returned-wrong-type")
+        # Best-effort cross-check of the operator's locality attestation.
+        # An empty host means "not detected", which is NOT "local" - so this
+        # refuses only on positive evidence of a remote endpoint, and never
+        # claims to have proven locality when it finds nothing.
+        if self._capabilities[name].locality == "local":
+            host = detect_endpoint_host(backend)
+            if host and not _is_loopback(host):
+                raise BackendUnavailable("locality-mismatch-detected")
         return backend
 
 
@@ -221,5 +382,7 @@ __all__ = [
     "BackendFactory",
     "BackendRegistry",
     "BackendUnavailable",
+    "LocalityAttestation",
     "RegistrationRefused",
+    "detect_endpoint_host",
 ]
