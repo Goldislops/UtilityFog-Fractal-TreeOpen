@@ -906,13 +906,43 @@ class ModelCapabilities:
             return False
         if self.bound_runtime_object_kind not in _RUNTIME_OBJECT_KINDS:
             return False
-        # The closed lookup, never the exported view: re-binding or
-        # mutating the module attribute must not change what is trusted.
-        repository = _runtime_repository_for(self.bound_runtime)
-        if repository is None:
+
+        # -- the authoritative trust relationship, inlined ------------------
+        #
+        # Written out here as code constants rather than read from any name.
+        # Round six moved the trust DATA into a closure but still resolved
+        # the LOOKUP through a module-level name, so an ordinary assignment
+        #
+        #     capabilities._runtime_repository_for = lambda t: "evil-org/x"
+        #
+        # redirected routing: the attacker repository became eligible and the
+        # official vLLM repository became ineligible. A trust decision must
+        # not resolve any rebindable name at call time, so this method now
+        # reads nothing but ``self`` and its own constants.
+        #
+        # ``RUNTIME_REPOSITORIES`` and ``_runtime_repository_for`` remain
+        # exported for readers and tests, and are NO LONGER consulted here.
+        # ``tests/test_open_model_audit_round7.py`` asserts this branch chain
+        # and that exported view still agree, so the two cannot drift.
+        token = self.bound_runtime
+        if token == "llama-cpp":
+            repository = "ggml-org/llama.cpp"
+        elif token == "ollama":
+            repository = "ollama/ollama"
+        elif token == "vllm":
+            repository = "vllm-project/vllm"
+        elif token == "sglang":
+            repository = "sgl-project/sglang"
+        elif token == "tensorrt-llm":
+            repository = "NVIDIA/TensorRT-LLM"
+        else:
+            # Includes "in-process-stub": not a public runtime, so an
+            # artifact-bearing descriptor claiming it has nothing to point at.
             return False
+
         ok, host, path = parse_https_url(self.bound_runtime_source_url)
-        if not ok or host != RUNTIME_EVIDENCE_HOST:
+        # The host is a literal here for the same reason as the repositories.
+        if not ok or host != "github.com":
             return False
         # The COMPLETE canonical path, not a suffix match: owner, repository
         # and object must all be the expected ones.
