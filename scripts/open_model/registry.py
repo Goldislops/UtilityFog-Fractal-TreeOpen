@@ -60,6 +60,11 @@ from typing import Callable, Final, Iterable, Literal
 
 from scripts.agent_backends.base import AgentBackend
 from scripts.open_model.capabilities import ModelCapabilities
+from scripts.open_model.redaction import (
+    CONSTRUCTION_REFUSAL_REASONS,
+    REGISTRATION_REFUSAL_REASONS,
+    is_safe_token,
+)
 
 
 BackendFactory = Callable[[], AgentBackend]
@@ -73,7 +78,7 @@ factory, in code that a reviewer reads.
 
 
 class RegistrationRefused(Exception):
-    """A registration was refused. ``reason`` carries a stable code.
+    """A registration was refused. ``reason`` is a closed-vocabulary code.
 
     The supplied value is never echoed into the message - only a fixed reason
     code - so a refusal cannot leak a credential, path, or prompt fragment
@@ -81,19 +86,38 @@ class RegistrationRefused(Exception):
     """
 
     def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
+        code = (
+            reason
+            if type(reason) is str and reason in REGISTRATION_REFUSAL_REASONS
+            else "invalid-reason"
+        )
+        super().__init__(code)
+        self.reason = code
 
 
 class BackendUnavailable(Exception):
-    """Construction was refused. ``reason`` carries a stable code.
+    """Construction was refused. ``reason`` is a closed-vocabulary code.
 
-    As with ``RegistrationRefused``, no supplied value is echoed.
+    Closed at the constructor, not merely at the call sites in this module,
+    because an **operator-written factory** can raise this exception itself
+    and the evaluation harness persists ``reason`` into a stored record.
+    Without normalization here, a factory could write arbitrary text - a
+    credential, a path, a prompt fragment - straight into evidence.
+
+    Anything outside ``CONSTRUCTION_REFUSAL_REASONS`` becomes
+    ``"invalid-reason"``, and the supplied value is retained nowhere: not on
+    the instance, and not in the exception message, since the normalized code
+    is what is passed to ``super().__init__``.
     """
 
     def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
+        code = (
+            reason
+            if type(reason) is str and reason in CONSTRUCTION_REFUSAL_REASONS
+            else "invalid-reason"
+        )
+        super().__init__(code)
+        self.reason = code
 
 
 _NAME_MAX_LEN: Final[int] = 128
@@ -226,9 +250,10 @@ class BackendRegistry:
         else:
             candidates = ()
         for element in candidates:
-            if type(element) is not str:
-                continue
-            if not element or len(element) > _NAME_MAX_LEN:
+            # Allowlist entries must themselves be safe tokens: a name that
+            # reaches a routing decision or an evaluation record must not be
+            # able to carry a path, a URL, or secret-shaped text.
+            if not is_safe_token(element, max_len=_NAME_MAX_LEN):
                 continue
             if element in admitted:
                 continue
@@ -293,8 +318,13 @@ class BackendRegistry:
 
         Refuses, with a stable reason code and no echo of the supplied value:
 
-        - ``name-not-exact-str``      - name is not exactly built-in ``str``,
-                                        is empty, or exceeds the length bound.
+        - ``name-not-safe-token``     - the name is not a safe token:
+                                        wrong type, empty, over-long, outside
+                                        the closed character class, or
+                                        secret-shaped. Names flow into routing
+                                        decisions and stored records, so they
+                                        are gated like any other persisted
+                                        identifier.
         - ``name-not-allowlisted``    - name is outside this registry's allowlist.
         - ``name-already-registered`` - re-registration is never silent; an
                                         operator changing a binding must build
@@ -316,8 +346,8 @@ class BackendRegistry:
                                         ``local``, which would misrepresent
                                         what was vouched for.
         """
-        if type(name) is not str or not name or len(name) > _NAME_MAX_LEN:
-            raise RegistrationRefused("name-not-exact-str")
+        if not is_safe_token(name, max_len=_NAME_MAX_LEN):
+            raise RegistrationRefused("name-not-safe-token")
         if name not in self._allowed:
             raise RegistrationRefused("name-not-allowlisted")
         if name in self._capabilities:
