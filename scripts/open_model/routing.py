@@ -71,6 +71,7 @@ EscalationReason = Literal[
     "repository-revision-unpinned",
     "artifact-digest-missing",
     "artifact-unpinned",
+    "descriptor-invalid",
     "repository-revision-not-immutable",
     "provenance-unpinned",
     "bound-runtime-unspecified",
@@ -349,6 +350,12 @@ def evaluate(
     if requirements.malformed_fields:
         reasons.append("requirements-invalid")
 
+    # A field that was supplied but could not be made canonical invalidates
+    # the descriptor. It must never be silently blanked and then routed as
+    # though the claim had not been made at all.
+    if capabilities.invalid_fields:
+        reasons.append("descriptor-invalid")
+
     if not capabilities.model_id:
         reasons.append("model-id-missing")
 
@@ -435,11 +442,20 @@ def evaluate(
     # compatibility list alone can never satisfy one.
     if capabilities.bound_runtime and capabilities.bound_runtime not in known_runtimes:
         reasons.append("bound-runtime-not-declared")
-    if requirements.allowed_runtimes:
-        if not capabilities.bound_runtime:
-            reasons.append("bound-runtime-unspecified")
-        elif capabilities.bound_runtime not in requirements.allowed_runtimes:
-            reasons.append("bound-runtime-not-allowed")
+    # A real artifact must always name the runtime that will actually serve
+    # it - not only when the task happened to narrow the runtime set. An
+    # unbound descriptor says nothing about what will run, and "the task did
+    # not ask" is not a reason to stop requiring it.
+    if not capabilities.bound_runtime and (
+        capabilities.is_artifact_bearing() or requirements.allowed_runtimes
+    ):
+        reasons.append("bound-runtime-unspecified")
+    if (
+        capabilities.bound_runtime
+        and requirements.allowed_runtimes
+        and capabilities.bound_runtime not in requirements.allowed_runtimes
+    ):
+        reasons.append("bound-runtime-not-allowed")
     if (
         capabilities.is_artifact_bearing()
         and capabilities.bound_runtime

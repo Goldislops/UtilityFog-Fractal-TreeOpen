@@ -39,7 +39,7 @@ from typing import Any, Callable, Final, Iterable, Iterator, Optional
 
 from scripts.agent_backends.base import AgentBackend, AgentResponse, Message, TextBlock
 from scripts.agent_backends.mock import MockBackend
-from scripts.open_model.capabilities import ModelCapabilities
+from scripts.open_model.capabilities import ModelCapabilities, register_harness_double
 from scripts.open_model.redaction import describe_size, is_safe_token
 from scripts.open_model.registry import BackendRegistry, BackendUnavailable
 from scripts.open_model.routing import (
@@ -140,7 +140,10 @@ def stub_capabilities(
     Makes no artifact-format claim (``quantisation=""``), so no digest is
     required of it - there is no file to digest.
     """
-    return ModelCapabilities(
+    # register_harness_double is the closed construction path: exemption
+    # from the artifact/provenance/licence/runtime gates is a property of
+    # having been built HERE, not of any field an external author can copy.
+    return register_harness_double(ModelCapabilities(
         model_id=model_id,
         variant_id="in-process-double",
         repository_revision=STUB_REVISION,
@@ -167,7 +170,7 @@ def stub_capabilities(
         licence_name="repository-local test double",
         licence_source_url="https://github.com/Goldislops/UtilityFog-Fractal-TreeOpen",
         licence_revision=STUB_REVISION,
-    )
+    ))
 
 
 def register_stub(
