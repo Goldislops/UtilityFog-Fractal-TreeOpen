@@ -3,13 +3,33 @@ name: wasm-check
 on:
   pull_request:
     paths:
-      - "crates/uft_ca/**"
+      - ".cargo/**"
       - ".github/workflows/wasm-check.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/.cargo/**"
+      - "crates/Cargo.lock"
+      - "crates/Cargo.toml"
+      - "crates/rust-toolchain"
+      - "crates/rust-toolchain.toml"
+      - "crates/uft_ca/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
   push:
     branches: [main]
     paths:
-      - "crates/uft_ca/**"
+      - ".cargo/**"
       - ".github/workflows/wasm-check.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/.cargo/**"
+      - "crates/Cargo.lock"
+      - "crates/Cargo.toml"
+      - "crates/rust-toolchain"
+      - "crates/rust-toolchain.toml"
+      - "crates/uft_ca/**"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
