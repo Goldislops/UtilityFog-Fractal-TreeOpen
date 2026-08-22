@@ -534,7 +534,7 @@ were corrected.
 | 2 | Registry names entered routing decisions and records ungated, and a refusal reason raised by an **operator factory** was persisted verbatim. | Names must be safe tokens before entering the allowlist or the registry. `RegistrationRefused` and `BackendUnavailable` now close their reason at the constructor — including for operator-raised instances — so neither the instance nor the exception message can carry supplied text. |
 | 3 | A real 40-character repository SHA was **rejected** as secret-shaped, because the long-opaque-run rule matches any 40+ character alphanumeric run. | `is_commit_revision` admits exactly 40- or 64-character lowercase hex, checked digit by digit — a far narrower class than "long opaque string", and precisely the class that identifies an immutable commit. |
 | 4 | The digest requirement keyed off `quantisation`, so a BF16/safetensors variant was exempt. | The requirement now keys off the artifact: a named single file must carry its digest, and every artifact-bearing descriptor must be byte-pinned by *either* a named file plus digest *or* a full commit id. |
-| 5 | Claims were bound to mutable branch URLs; the GLM FP8 row pointed at the BF16 repository. | Every model, licence and runtime claim is bound to an exact repository plus an immutable commit (or labelled tag object) and a revision-pinned URL. The GLM row binds to `zai-org/GLM-5.2-FP8`. TensorRT-LLM re-pinned from an RC line to released `v1.2.1`. |
+| 5 | Claims were bound to mutable branch URLs; the GLM FP8 row pointed at the BF16 repository. | Every model and licence claim, and **every runtime claim except NVIDIA NIM**, is bound to an exact repository plus an immutable commit (or labelled tag object) and a revision-pinned URL. **NIM has no public git ref and remains UNRESOLVED** — it is not pinned and is not counted as pinned. The GLM row binds to `zai-org/GLM-5.2-FP8`. TensorRT-LLM re-pinned from an RC line to released `v1.2.1`. Note also that a pinned *version* is not a document *read at* that version; only the Ollama row is pinned end to end (§5). |
 | 6 | Three renderings of one vendor document were described as independent evidence. | Restated as three *mechanically corroborating official representations of a single primary source*: agreement rules out transcription error on my side, not error by the one claimant. |
 | 7 | `routing.py` still carried an absolute locality claim. | Removed. The module now states that eligibility reads descriptors, trusts the operator attestation, and cannot establish where a backend will execute — and that opaque factories remain undetectable. |
 
@@ -580,7 +580,26 @@ remained.
 | 5 | The `in-process-stub` exemption was a **copyable field value** — any external author could type that string and bypass every gate at once. | Exemption is now a property of *how the descriptor was constructed*, not what it says: only an object handed out through `register_harness_double` is exempt, checked **by identity**, so an equal-but-separately-constructed copy is not. A test asserts that closed path has exactly one caller. |
 | 6 | Surviving prose overstated what was pinned. | The catalogue's Gemma note now records the retraction; Llama's note records the literal `gated: "manual"`; the "every runtime claim is pinned" heading is narrowed; the round-two all-pinned statement is qualified. NIM stays **UNRESOLVED**, and pinned commits stay distinguished from documents read at moving references. |
 
-🔵 **Two defects this round's own controls found, recorded rather than
+## 13. Post-audit corrections, round five (2026-08-22)
+
+A fifth independent audit cleared all six round-four gates under normal,
+`-O` and `-OO`, and held four findings.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | `bound_runtime` was bound only to `github.com` plus a trailing object id, so a **genuine vLLM commit could vouch for an unrelated repository** — `https://github.com/evil-org/fake-runtime/tree/<real vLLM commit>` satisfied it. | `RUNTIME_REPOSITORIES` close-maps each token to its exact official repository (`llama-cpp`→`ggml-org/llama.cpp`, `ollama`→`ollama/ollama`, `vllm`→`vllm-project/vllm`, `sglang`→`sgl-project/sglang`, `tensorrt-llm`→`NVIDIA/TensorRT-LLM`), and the **complete** canonical `/{owner}/{repository}/tree/{object}` path must match. `in-process-stub` deliberately has no entry. |
+| 2 | The long-opaque-run rule was skipped for the **whole URL**, which excused a 48-character credential sitting in the owner, repository or file-name position. | Secret detection is now **per path component**. The long-run rule is waived only for a component that *exactly equals* this descriptor's own repository revision or runtime object id; every other component — owner, repository, file name — gets the full matcher, and so does the host. A foreign 40-hex run is refused. |
+| 3 | A secret-bearing licence path was **stored** on the descriptor even though routing refused it, so it sat in the `repr` and in any log built from one. | A refused URL is never stored. Asserted directly against both the model and licence evidence fields. |
+| 4 | `%2e%2e/%2e%2e/README.md` was neither decoded nor refused — it was stored **and the descriptor stayed eligible**, a working traversal-equivalent bypass. | Percent-encoding is **forbidden outright** in evidence URLs and artifact paths. Decoding would mean re-deriving canonicality afterwards, and `%2e%2e`, `%2f`, `%40` and `%00` reintroduce exactly the traversal, separator, userinfo and control cases the parser already refuses. |
+| 5 | The round-two table still stated that every model, licence and runtime claim was immutably pinned. | That row now says inline that **NIM has no public git ref and remains UNRESOLVED**, and repeats that a pinned version is not a document read at that version. |
+
+🔵 **On finding 4 specifically**: the reproduction was worse than reported.
+`%2e%2e` was not merely stored — the descriptor remained *eligible*, because
+the canonical-path check saw three ordinary-looking components and none of
+them was literally `..`. That is the whole argument for refusing percent
+encoding rather than decoding it.
+
+🔵 **Two defects the round-four controls found, recorded rather than
 quietly fixed.** A secret-bearing URL query was *refused for routing* but
 still **stored** on the descriptor and visible in its `repr` — URL fields are
 now structurally normalized at construction, so a credential never lands in
