@@ -173,6 +173,40 @@ def is_safe_reference(value: Any, *, max_len: int = SAFE_REFERENCE_MAX_LEN) -> b
     return redact(value, max_chars=max_len) == value
 
 
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
+
+
+def is_commit_revision(value: Any) -> bool:
+    """True for a full lowercase hex commit id: 40 (SHA-1) or 64 (SHA-256).
+
+    Exists because ``is_safe_reference`` alone **rejects** an ordinary git
+    SHA. The long-opaque-run secret rule matches any 40+ character run of
+    letters and digits, and a 40-character hex commit id is exactly that -
+    so the generic identifier gate mistook every real repository revision for
+    a credential. That was a defect, not a safety property: refusing to
+    record the one value that makes a claim reproducible is strictly worse
+    than recording it.
+
+    The exemption is deliberately narrow. Only lowercase hex, only at exactly
+    40 or 64 characters, checked digit by digit. That is a far smaller class
+    than "any long opaque string", and it is the class of values that
+    identify an immutable commit.
+    """
+    if type(value) is not str:
+        return False
+    if len(value) not in (40, 64):
+        return False
+    for character in value:
+        if character not in _HEX_DIGITS:
+            return False
+    return True
+
+
+def is_safe_revision(value: Any) -> bool:
+    """True for a full commit id, or for a tag/branch-shaped safe reference."""
+    return is_commit_revision(value) or is_safe_reference(value)
+
+
 def safe_token_or(value: Any, fallback: str = INVALID_IDENTIFIER) -> str:
     """``value`` when it is a safe token, else the fixed ``fallback``."""
     if is_safe_token(value):
@@ -197,10 +231,45 @@ A record cannot carry an event string that is not one of these, so the field
 has no capacity to hold arbitrary text at all.
 """
 
+REGISTRATION_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "name-not-safe-token",
+        "name-not-allowlisted",
+        "name-already-registered",
+        "capabilities-not-exact-type",
+        "capabilities-missing-model-id",
+        "factory-not-callable",
+        "locality-attestation-required",
+        "locality-attestation-not-applicable",
+        "invalid-reason",
+    }
+)
+"""Closed vocabulary for ``RegistrationRefused.reason``."""
+
+CONSTRUCTION_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "name-not-registered",
+        "availability-not-present",
+        "factory-returned-wrong-type",
+        "locality-mismatch-detected",
+        "invalid-reason",
+    }
+)
+"""Closed vocabulary for ``BackendUnavailable.reason``.
+
+Closed rather than free-text because an **operator-written factory** can
+raise ``BackendUnavailable`` itself, and the evaluation harness persists that
+reason into a record. Without a closed set, a factory could write arbitrary
+text - a credential, a path, a prompt fragment - straight into stored
+evidence. Anything outside this set becomes ``"invalid-reason"``, and the
+supplied value is not retained anywhere, including in the exception message.
+"""
+
 ESCALATION_REASONS: Final[frozenset[str]] = frozenset(
     {
         "no-backend-registered",
         "requirements-invalid",
+        "artifact-unpinned",
         "model-id-missing",
         "backend-unavailable",
         "availability-unknown",
@@ -302,8 +371,10 @@ class DiagnosticRecord:
 
 __all__ = [
     "DIAGNOSTIC_EVENTS",
+    "CONSTRUCTION_REFUSAL_REASONS",
     "ESCALATION_REASONS",
     "INVALID_IDENTIFIER",
+    "REGISTRATION_REFUSAL_REASONS",
     "DiagnosticRecord",
     "NOTE_MAX_CHARS",
     "REDACTED_EMAIL",
