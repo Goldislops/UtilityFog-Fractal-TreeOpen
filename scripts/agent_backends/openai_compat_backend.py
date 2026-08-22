@@ -105,6 +105,7 @@ from scripts.agent_backends.base import (
     ToolUseBlock,
 )
 from scripts.agent_backends.structured_request import (
+    REFUSAL_TOKENS,
     StructuredDialect,
     StructuredOutputRequest,
     StructuredRefusal,
@@ -152,6 +153,16 @@ class StructuredCompletion:
     response_format_sent: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.ok) is not bool:
+            raise ValueError("ok must be exactly a bool")
+        if type(self.response_format_sent) is not bool:
+            raise ValueError("response_format_sent must be exactly a bool")
+        if self.refusal is not None and (
+            type(self.refusal) is not str or self.refusal not in REFUSAL_TOKENS
+        ):
+            raise ValueError("refusal must be a token from the closed vocabulary")
+        if self.dialect is not None and not is_supported_dialect(self.dialect):
+            raise ValueError("dialect must be a verified dialect token or None")
         if self.ok and self.refusal is not None:
             raise ValueError("a successful completion cannot carry a refusal code")
         if not self.ok and self.refusal is None:
@@ -160,6 +171,10 @@ class StructuredCompletion:
             raise ValueError("a refused completion must not carry a response")
         if not self.ok and self.response_format_sent:
             raise ValueError("a refused completion cannot have sent a request")
+        if self.ok and self.response is None:
+            raise ValueError("a successful completion must carry a response")
+        if self.ok and not self.response_format_sent:
+            raise ValueError("a successful completion must have sent a request")
 
 
 class OpenAICompatBackend(AgentBackend):

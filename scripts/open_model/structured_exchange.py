@@ -66,11 +66,15 @@ request side.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Optional, Union
+from typing import Any, Final, Literal, Mapping, Optional, Union, get_args
 
 from scripts.agent_backends.base import Message, ToolSpec
 from scripts.agent_backends.openai_compat_backend import StructuredCompletion
-from scripts.agent_backends.structured_request import StructuredRefusal
+from scripts.agent_backends.structured_request import (
+    REFUSAL_TOKENS,
+    StructuredRefusal,
+    is_supported_dialect,
+)
 from scripts.open_model.structured import (
     DEFAULT_MAX_CHARS,
     StructuredFailure,
@@ -89,6 +93,20 @@ closed vocabulary cannot drift out of step with this one. The single extra
 token covers a backend that does not implement the OMI-V2 method at all, or
 returns something other than a ``StructuredCompletion`` from it.
 """
+
+
+EXCHANGE_REFUSALS: Final[frozenset[str]] = REFUSAL_TOKENS | frozenset(
+    ("backend-not-structured-capable",)
+)
+"""Runtime mirror of :data:`ExchangeRefusal`, composed the same way it is.
+
+On the trust path: :class:`StructuredExchange` rejects anything outside it.
+Built from the backend's own set rather than restated, so the two cannot
+drift apart.
+"""
+
+RESPONSE_FAILURES: Final[frozenset[str]] = frozenset(get_args(StructuredFailure))
+"""Runtime mirror of the validator's closed failure vocabulary."""
 
 
 @dataclass(frozen=True)
@@ -132,9 +150,57 @@ class StructuredExchange:
     """
 
     def __post_init__(self) -> None:
-        if self.schema_conformance != "unverified":
+        # Exact bools first: a foreign object with a __bool__ must not be able
+        # to walk itself through the state machine below.
+        if type(self.ok) is not bool:
+            raise ValueError("ok must be exactly a bool")
+        if type(self.response_format_sent) is not bool:
+            raise ValueError("response_format_sent must be exactly a bool")
+        if (
+            type(self.schema_conformance) is not str
+            or self.schema_conformance != "unverified"
+        ):
             raise ValueError(
                 "schema conformance is never established by this package"
+            )
+        if self.request_refusal is not None and (
+            type(self.request_refusal) is not str
+            or self.request_refusal not in EXCHANGE_REFUSALS
+        ):
+            raise ValueError(
+                "request_refusal must be a token from the closed vocabulary"
+            )
+        if self.response_failure is not None and (
+            type(self.response_failure) is not str
+            or self.response_failure not in RESPONSE_FAILURES
+        ):
+            raise ValueError(
+                "response_failure must be a token from the closed vocabulary"
+            )
+        if self.dialect is not None and not is_supported_dialect(self.dialect):
+            raise ValueError("dialect must be a verified dialect token or None")
+        # Missing indices are coherent or absent: exact ints, non-negative,
+        # strictly increasing, and only ever present on the one failure that
+        # produces them. An arbitrary tuple here would be a place to smuggle
+        # content past the closed vocabularies.
+        if type(self.missing_key_indices) is not tuple:
+            raise ValueError("missing_key_indices must be exactly a tuple")
+        if self.missing_key_indices:
+            if self.response_failure != "missing-required-key":
+                raise ValueError(
+                    "missing_key_indices belong only to a missing-required-key "
+                    "failure"
+                )
+            previous = -1
+            for index in self.missing_key_indices:
+                if type(index) is not int or index <= previous:
+                    raise ValueError(
+                        "missing_key_indices must be increasing non-negative ints"
+                    )
+                previous = index
+        elif self.response_failure == "missing-required-key":
+            raise ValueError(
+                "a missing-required-key failure must report which indices"
             )
         if self.ok:
             if self.request_refusal is not None or self.response_failure is not None:
@@ -153,6 +219,10 @@ class StructuredExchange:
                 )
             if self.request_refusal is not None and self.response_format_sent:
                 raise ValueError("a refused exchange cannot have sent a request")
+            if self.response_failure is not None and not self.response_format_sent:
+                raise ValueError(
+                    "a response failure requires that a request was sent"
+                )
 
 
 def request_structured_json(
@@ -238,6 +308,8 @@ def request_structured_json(
 
 
 __all__ = [
+    "EXCHANGE_REFUSALS",
+    "RESPONSE_FAILURES",
     "ExchangeRefusal",
     "StructuredExchange",
     "request_structured_json",

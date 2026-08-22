@@ -155,7 +155,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, Optional
+from typing import Any, Final, Literal, Optional, get_args
 
 
 StructuredDialect = Literal["llama-cpp", "ollama", "vllm", "sglang"]
@@ -194,6 +194,15 @@ StructuredRefusal = Literal[
     "tools-with-structured-unsupported",
 ]
 """Why a structured request was refused. Complete; safe to log verbatim."""
+
+REFUSAL_TOKENS: Final[frozenset[str]] = frozenset(get_args(StructuredRefusal))
+"""The refusal vocabulary as a runtime set, derived from the Literal itself.
+
+Unlike :data:`SUPPORTED_DIALECTS` this one IS on the trust path -
+:class:`StructuredRequestPlan` rejects any token outside it. Deriving it from
+``get_args`` rather than restating it means the check and the declared type
+cannot disagree: there is only one list.
+"""
 
 STRUCTURED_WIRE_NAME: Final[str] = "structured_output"
 """The exact ``json_schema.name`` sent to vLLM and SGLang. Never caller data.
@@ -244,14 +253,24 @@ class StructuredRequestPlan:
     refusal: Optional[StructuredRefusal] = None
 
     def __post_init__(self) -> None:
+        # Exact bool, not truthiness: a foreign object with __bool__ must not
+        # be able to present itself as a successful plan.
+        if type(self.ok) is not bool:
+            raise ValueError("ok must be exactly a bool")
+        if self.refusal is not None and (
+            type(self.refusal) is not str or self.refusal not in REFUSAL_TOKENS
+        ):
+            raise ValueError("refusal must be a token from the closed vocabulary")
         if self.ok and self.refusal is not None:
             raise ValueError("a successful plan cannot carry a refusal code")
         if not self.ok and self.refusal is None:
             raise ValueError("a refused plan must carry a refusal code")
         if not self.ok and self.response_format is not None:
             raise ValueError("a refused plan must not carry a response format")
-        if self.ok and self.response_format is None:
-            raise ValueError("a successful plan must carry a response format")
+        if self.ok and type(self.response_format) is not dict:
+            raise ValueError(
+                "a successful plan must carry an exact dict response format"
+            )
 
 
 def is_supported_dialect(value: Any) -> bool:
@@ -447,6 +466,7 @@ by side, and so a drift test can assert the mirror still matches the code.
 
 __all__ = [
     "DIALECT_WIRE_SHAPES",
+    "REFUSAL_TOKENS",
     "STRUCTURED_WIRE_NAME",
     "SUPPORTED_DIALECTS",
     "StructuredDialect",
