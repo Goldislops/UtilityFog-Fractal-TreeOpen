@@ -161,10 +161,12 @@ CATALOGUE: Final[tuple[ModelCapabilities, ...]] = (
         licence_notes=(
             "Repo metadata at this revision declares license apache-2.0, "
             "corroborating the Gemma 4 move away from the Gemma Terms of Use, "
-            "and the repository is not gated. The Prohibited Use Policy is "
-            "still referenced from the card; whether it binds Apache-2.0 "
-            "weights is unresolved and is a counsel question, not a routing "
-            "input."
+            "and the repository is not gated. The card at this revision was "
+            "checked and references NO prohibited-use policy and no Gemma "
+            "Terms of Use; an earlier claim that it did was false and is "
+            "retracted. A separate general Gemma policy exists elsewhere in "
+            "Google docs and its relation to Apache-2.0 weights is "
+            "unresolved, but this card does not link it."
         ),
         provenance_url=(
             "https://huggingface.co/google/gemma-4-12B-it/tree/707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
@@ -398,7 +400,9 @@ CATALOGUE: Final[tuple[ModelCapabilities, ...]] = (
         licence_revision="2025-04-05",
         licence_notes=(
             "Comparison candidate only. Repo metadata at this revision reports "
-            "gated=true and license=other, corroborating the gating claim: "
+            "the literal gated value \"manual\" - human approval per "
+            "request, not merely true - and license=other, corroborating "
+            "the gating claim: "
             "access requires accepting the licence and submitting legal name, "
             "date of birth and organisation, which is a privacy and automation "
             "problem for any CI path. 700M monthly-active-user trigger; naming "
