@@ -539,6 +539,16 @@ the check is written down so it is cheap to repeat. If Ollama ships
 together — that is what the pinning is for. **The auditor independently
 cleared this row in round two.**
 
+One thing that round did **not** do: it did not make locality a structural
+guarantee. That is not achievable while factories are arbitrary code, and
+claiming it was the original error.
+
+It also stated that catalogue provenance could not be populated without
+retrieving artifacts. **That was wrong, and round two superseded it**:
+revisions and LFS digests are published as *metadata* and were retrieved
+without downloading any model bytes. The catalogue is now fully pinned - see
+§4 and §10.
+
 ## 10. Post-audit corrections, round two (2026-08-22)
 
 A second independent audit returned HOLD on seven further gates. All seven
@@ -596,6 +606,65 @@ remained.
 | 5 | The `in-process-stub` exemption was a **copyable field value** — any external author could type that string and bypass every gate at once. | Exemption is now a property of *how the descriptor was constructed*, not what it says: only an object handed out through `register_harness_double` is exempt, checked **by identity**, so an equal-but-separately-constructed copy is not. A test asserts that closed path has exactly one caller. |
 | 6 | Surviving prose overstated what was pinned. | The catalogue's Gemma note now records the retraction; Llama's note records the literal `gated: "manual"`; the "every runtime claim is pinned" heading is narrowed; the round-two all-pinned statement is qualified. NIM stays **UNRESOLVED**, and pinned commits stay distinguished from documents read at moving references. |
 
+🔵 **Two defects the round-four controls found, recorded rather than
+quietly fixed.** A secret-bearing URL query was *refused for routing* but
+still **stored** on the descriptor and visible in its `repr` — URL fields are
+now structurally normalized at construction, so a credential never lands in
+the object at all. And the credential check initially rejected every
+legitimate pinned URL, because a 40-character hex commit id matches the
+long-opaque-run secret rule — the same false positive `is_commit_revision`
+exists to avoid. `has_credential_shape` now skips exactly that one rule, by
+identity, while every other secret rule still applies; queries, fragments and
+userinfo are already refused structurally, so a credential has no
+conventional place left to hide.
+
+## 13. Post-audit corrections, round five (2026-08-22)
+
+A fifth independent audit cleared all six round-four gates under normal,
+`-O` and `-OO`, and held four findings.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | `bound_runtime` was bound only to `github.com` plus a trailing object id, so a **genuine vLLM commit could vouch for an unrelated repository** — `https://github.com/evil-org/fake-runtime/tree/<real vLLM commit>` satisfied it. | `RUNTIME_REPOSITORIES` close-maps each token to its exact official repository (`llama-cpp`→`ggml-org/llama.cpp`, `ollama`→`ollama/ollama`, `vllm`→`vllm-project/vllm`, `sglang`→`sgl-project/sglang`, `tensorrt-llm`→`NVIDIA/TensorRT-LLM`), and the **complete** canonical `/{owner}/{repository}/tree/{object}` path must match. `in-process-stub` deliberately has no entry. |
+| 2 | The long-opaque-run rule was skipped for the **whole URL**, which excused a 48-character credential sitting in the owner, repository or file-name position. | Secret detection is now **per path component**. The long-run rule is waived only for a component that *exactly equals* this descriptor's own repository revision or runtime object id; every other component — owner, repository, file name — gets the full matcher, and so does the host. A foreign 40-hex run is refused. |
+| 3 | A secret-bearing licence path was **stored** on the descriptor even though routing refused it, so it sat in the `repr` and in any log built from one. | A refused URL is never stored. Asserted directly against both the model and licence evidence fields. |
+| 4 | `%2e%2e/%2e%2e/README.md` was neither decoded nor refused — it was stored **and the descriptor stayed eligible**, a working traversal-equivalent bypass. | Percent-encoding is **forbidden outright** in evidence URLs and artifact paths. Decoding would mean re-deriving canonicality afterwards, and `%2e%2e`, `%2f`, `%40` and `%00` reintroduce exactly the traversal, separator, userinfo and control cases the parser already refuses. |
+| 5 | The round-two table still stated that every model, licence and runtime claim was immutably pinned. | That row now says inline that **NIM has no public git ref and remains UNRESOLVED**, and repeats that a pinned version is not a document read at that version. |
+
+🔵 **On finding 4 specifically**: the reproduction was worse than reported.
+`%2e%2e` was not merely stored — the descriptor remained *eligible*, because
+the canonical-path check saw three ordinary-looking components and none of
+them was literally `..`. That is the whole argument for refusing percent
+encoding rather than decoding it.
+
+## 14. Post-audit corrections, round six (2026-08-22)
+
+A sixth independent audit cleared all four round-five findings and held two
+gates.
+
+| # | Finding | Correction |
+|---|---|---|
+| 1 | `RUNTIME_REPOSITORIES` was a `Final[dict]`. **`Final` is a type-checker annotation with no runtime effect**, so `RUNTIME_REPOSITORIES["vllm"] = "evil-org/fake-runtime"` silently restored eligibility for an attacker-selected repository — and `update`, `del`, `pop` and `clear` worked just as well. | The authoritative data is now a **tuple of pairs captured in a closure**, reachable by no ordinary expression, and consulted through a private lookup function. `RUNTIME_REPOSITORIES` remains exported as a **`MappingProxyType`** read-only view over a private copy: `__setitem__`, `__delitem__`, `update`, `pop`, `popitem`, `clear` and `setdefault` all refuse. Routing reads the closure, **not** the exported name, so even re-binding the module attribute changes nothing about what is trusted. |
+| 2 | The documentation claimed every model and licence claim was immutably pinned, while the **§4 family survey** still linked moving vendor pages — repository landing pages without a revision, help-centre articles, licence portals. | §4 now opens with an explicit label: it is a **dated family survey, not pinned evidence**, and those pages move. The pinning claim is **scoped to the 12 code-catalogue descriptors**, and the round-two row says so inline. A test asserts the scoped claim is actually *true* of all twelve, so the narrowing cannot become a way to say less and check less. |
+
+**On gate 1, stated plainly.** Python has no true privacy. `__closure__`
+cell surgery, or replacing this module in `sys.modules`, could still defeat
+the closure. Those are not ordinary mutation paths; the claim here is bounded
+to the ordinary ones — assignment, deletion, `update`, `pop`, `clear`,
+`setdefault`, and re-binding the exported name — all of which are now closed
+and asserted closed under normal, `-O` and `-OO`.
+
+> ⚠️ **Superseded by round seven (§15).** The account above is preserved as
+> the historical record of what round six did, but its central design — a
+> **private closure lookup that routing consults** — is no longer how this
+> works. Round six closed the trust *data* name and left the *lookup* name
+> resolvable at call time, so rebinding `_runtime_repository_for` still
+> redirected routing. Round seven **inlined the five repositories and the
+> evidence host into `has_pinned_runtime_binding` as code constants**, and
+> routing now consults neither `RUNTIME_REPOSITORIES` nor
+> `_runtime_repository_for`. Both remain exported, as **inspection and
+> testing mirrors only**. Read §15 for the design that is actually in force.
+
 ## 15. Post-audit corrections, round seven (2026-08-22)
 
 A seventh independent audit cleared the public-mapping immutability and the
@@ -622,61 +691,3 @@ of trust data, and no amount of care inside this module prevents them.
 
 The distinction is the whole point: a reader should be able to tell which
 attacks this design stops and which it merely does not pretend to.
-
-## 14. Post-audit corrections, round six (2026-08-22)
-
-A sixth independent audit cleared all four round-five findings and held two
-gates.
-
-| # | Finding | Correction |
-|---|---|---|
-| 1 | `RUNTIME_REPOSITORIES` was a `Final[dict]`. **`Final` is a type-checker annotation with no runtime effect**, so `RUNTIME_REPOSITORIES["vllm"] = "evil-org/fake-runtime"` silently restored eligibility for an attacker-selected repository — and `update`, `del`, `pop` and `clear` worked just as well. | The authoritative data is now a **tuple of pairs captured in a closure**, reachable by no ordinary expression, and consulted through a private lookup function. `RUNTIME_REPOSITORIES` remains exported as a **`MappingProxyType`** read-only view over a private copy: `__setitem__`, `__delitem__`, `update`, `pop`, `popitem`, `clear` and `setdefault` all refuse. Routing reads the closure, **not** the exported name, so even re-binding the module attribute changes nothing about what is trusted. |
-| 2 | The documentation claimed every model and licence claim was immutably pinned, while the **§4 family survey** still linked moving vendor pages — repository landing pages without a revision, help-centre articles, licence portals. | §4 now opens with an explicit label: it is a **dated family survey, not pinned evidence**, and those pages move. The pinning claim is **scoped to the 12 code-catalogue descriptors**, and the round-two row says so inline. A test asserts the scoped claim is actually *true* of all twelve, so the narrowing cannot become a way to say less and check less. |
-
-**On gate 1, stated plainly.** Python has no true privacy. `__closure__`
-cell surgery, or replacing this module in `sys.modules`, could still defeat
-the closure. Those are not ordinary mutation paths; the claim here is bounded
-to the ordinary ones — assignment, deletion, `update`, `pop`, `clear`,
-`setdefault`, and re-binding the exported name — all of which are now closed
-and asserted closed under normal, `-O` and `-OO`.
-
-## 13. Post-audit corrections, round five (2026-08-22)
-
-A fifth independent audit cleared all six round-four gates under normal,
-`-O` and `-OO`, and held four findings.
-
-| # | Finding | Correction |
-|---|---|---|
-| 1 | `bound_runtime` was bound only to `github.com` plus a trailing object id, so a **genuine vLLM commit could vouch for an unrelated repository** — `https://github.com/evil-org/fake-runtime/tree/<real vLLM commit>` satisfied it. | `RUNTIME_REPOSITORIES` close-maps each token to its exact official repository (`llama-cpp`→`ggml-org/llama.cpp`, `ollama`→`ollama/ollama`, `vllm`→`vllm-project/vllm`, `sglang`→`sgl-project/sglang`, `tensorrt-llm`→`NVIDIA/TensorRT-LLM`), and the **complete** canonical `/{owner}/{repository}/tree/{object}` path must match. `in-process-stub` deliberately has no entry. |
-| 2 | The long-opaque-run rule was skipped for the **whole URL**, which excused a 48-character credential sitting in the owner, repository or file-name position. | Secret detection is now **per path component**. The long-run rule is waived only for a component that *exactly equals* this descriptor's own repository revision or runtime object id; every other component — owner, repository, file name — gets the full matcher, and so does the host. A foreign 40-hex run is refused. |
-| 3 | A secret-bearing licence path was **stored** on the descriptor even though routing refused it, so it sat in the `repr` and in any log built from one. | A refused URL is never stored. Asserted directly against both the model and licence evidence fields. |
-| 4 | `%2e%2e/%2e%2e/README.md` was neither decoded nor refused — it was stored **and the descriptor stayed eligible**, a working traversal-equivalent bypass. | Percent-encoding is **forbidden outright** in evidence URLs and artifact paths. Decoding would mean re-deriving canonicality afterwards, and `%2e%2e`, `%2f`, `%40` and `%00` reintroduce exactly the traversal, separator, userinfo and control cases the parser already refuses. |
-| 5 | The round-two table still stated that every model, licence and runtime claim was immutably pinned. | That row now says inline that **NIM has no public git ref and remains UNRESOLVED**, and repeats that a pinned version is not a document read at that version. |
-
-🔵 **On finding 4 specifically**: the reproduction was worse than reported.
-`%2e%2e` was not merely stored — the descriptor remained *eligible*, because
-the canonical-path check saw three ordinary-looking components and none of
-them was literally `..`. That is the whole argument for refusing percent
-encoding rather than decoding it.
-
-🔵 **Two defects the round-four controls found, recorded rather than
-quietly fixed.** A secret-bearing URL query was *refused for routing* but
-still **stored** on the descriptor and visible in its `repr` — URL fields are
-now structurally normalized at construction, so a credential never lands in
-the object at all. And the credential check initially rejected every
-legitimate pinned URL, because a 40-character hex commit id matches the
-long-opaque-run secret rule — the same false positive `is_commit_revision`
-exists to avoid. `has_credential_shape` now skips exactly that one rule, by
-identity, while every other secret rule still applies; queries, fragments and
-userinfo are already refused structurally, so a credential has no
-conventional place left to hide.
-
-One thing that round did **not** do: it did not make locality a structural
-guarantee. That is not achievable while factories are arbitrary code, and
-claiming it was the original error.
-
-It also stated that catalogue provenance could not be populated without
-retrieving artifacts. **That was wrong, and round two superseded it**:
-revisions and LFS digests are published as *metadata* and were retrieved
-without downloading any model bytes. The catalogue is now fully pinned - see
-§4 and §10.
