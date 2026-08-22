@@ -260,7 +260,7 @@ def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
     caps = ModelCapabilities(
         model_id="m",
         variant_id="bf16",
-        repository_revision="abc123",
+        repository_revision="1111111111111111111111111111111111111111",
         licence_source_url="https://example.invalid/licence",
         licence_revision="2.0",
         locality="local",

@@ -55,7 +55,7 @@ def _pinned(model_id: str = "m", **overrides) -> ModelCapabilities:
     base = dict(
         model_id=model_id,
         variant_id="bf16",
-        repository_revision="testrev0",
+        repository_revision="1111111111111111111111111111111111111111",
         licence_source_url="https://example.invalid/licence",
         licence_revision="1.0",
         locality="local",
@@ -356,9 +356,13 @@ def test_finding3_malformed_requirements_are_reported_even_with_no_registry():
     [
         ({"variant_id": ""}, "variant-unspecified"),
         ({"repository_revision": ""}, "repository-revision-unpinned"),
+        (
+            {"repository_revision": "main", "runtimes": ("vllm",)},
+            "artifact-unpinned",
+        ),
         ({"licence_source_url": ""}, "licence-source-unpinned"),
         ({"licence_revision": ""}, "licence-source-unpinned"),
-        ({"quantisation": "gguf"}, "artifact-digest-missing"),
+        ({"artifact_path": "model.gguf"}, "artifact-digest-missing"),
     ],
 )
 def test_finding4_unpinned_provenance_blocks_routing(overrides, reason):
@@ -367,7 +371,9 @@ def test_finding4_unpinned_provenance_blocks_routing(overrides, reason):
 
 def test_finding4_an_artifact_claim_with_a_digest_is_accepted():
     digest = "sha256:" + "ab" * 32
-    caps = _pinned(quantisation="gguf-q4_k_m", artifact_digest=digest)
+    caps = _pinned(
+        quantisation="gguf-q4_k_m", artifact_path="m.gguf", artifact_digest=digest
+    )
     assert caps.artifact_digest == digest
     assert evaluate(caps, TaskRequirements()) == ()
 
@@ -385,7 +391,7 @@ def test_finding4_an_artifact_claim_with_a_digest_is_accepted():
     ],
 )
 def test_finding4_a_malformed_digest_is_refused_not_stored(supplied):
-    caps = _pinned(quantisation="gguf", artifact_digest=supplied)
+    caps = _pinned(artifact_path="m.gguf", artifact_digest=supplied)
     assert caps.artifact_digest == ""
     assert "artifact-digest-missing" in evaluate(caps, TaskRequirements())
 
@@ -414,20 +420,27 @@ def test_finding4_catalogue_variants_are_not_collapsed():
     granite = [e for e in CATALOGUE if e.model_id.startswith("ibm-granite/")]
     assert len(granite) >= 2
     assert {e.quantisation for e in granite} == {"", "gguf-q4_k_m"}
+    # The two Granite rows are different repositories, not one row with a bag
+    # of quantisations.
+    assert len({e.model_id for e in granite}) == 2
 
 
-def test_finding4_catalogue_provenance_is_unpinned_and_therefore_blocking():
-    # Honest state: the survey read cards and licences, not revisions or
-    # digests. Every entry is blocked on the unpinned revision.
+def test_finding4_catalogue_is_byte_pinned_but_still_inert():
+    # Round two: revisions and digests were retrieved from official metadata.
+    # A pin says WHICH BYTES, never THAT YOU MAY RUN THEM - the entries stay
+    # unroutable on availability and locality.
     for entry in CATALOGUE:
-        assert entry.repository_revision == ""
-        assert entry.artifact_digest == ""
-        assert "repository-revision-unpinned" in evaluate(entry, TaskRequirements())
+        assert entry.is_byte_pinned(), entry.model_id
+        assert entry.availability == "unknown"
+        assert entry.locality == "unknown"
+        assert evaluate(entry, TaskRequirements())
 
 
 def test_finding4_find_refuses_to_guess_between_variants():
-    assert find("ibm-granite/granite-4.1-8b").variant_id == "bf16-safetensors"
-    assert find("ibm-granite/granite-4.1-8b", "bf16-safetensors") is not None
+    assert find("ibm-granite/granite-4.1-8b").variant_id == (
+        "bf16-safetensors-sharded"
+    )
+    assert find("ibm-granite/granite-4.1-8b", "bf16-safetensors-sharded") is not None
     assert find("nonexistent/model") is None
 
 

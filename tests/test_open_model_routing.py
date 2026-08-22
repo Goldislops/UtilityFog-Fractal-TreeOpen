@@ -52,7 +52,7 @@ def _usable(model_id: str, **overrides) -> ModelCapabilities:
     base = dict(
         model_id=model_id,
         variant_id="test-variant",
-        repository_revision="testrev0",
+        repository_revision="1111111111111111111111111111111111111111",
         licence_source_url="https://example.invalid/licence",
         licence_revision="1.0",
         locality="local",
@@ -133,10 +133,13 @@ def test_registration_is_never_silently_replaced():
 @pytest.mark.parametrize(
     "name,reason",
     [
-        ("", "name-not-exact-str"),
-        (7, "name-not-exact-str"),
-        (None, "name-not-exact-str"),
-        ("x" * 200, "name-not-exact-str"),
+        ("", "name-not-safe-token"),
+        (7, "name-not-safe-token"),
+        (None, "name-not-safe-token"),
+        ("x" * 200, "name-not-safe-token"),
+        ("has space", "name-not-safe-token"),
+        ("C:/Users/kevin", "name-not-safe-token"),
+        ("sk-ABCDEFGH12345678", "name-not-safe-token"),
     ],
 )
 def test_malformed_names_are_refused_with_a_stable_code(name, reason):
@@ -285,12 +288,17 @@ def test_a_malformed_demand_tightens_rather_than_loosens():
 
 
 def test_unknown_can_never_be_allow_listed():
+    # Round two: asking to allow "unknown" is malformed rather than silently
+    # stripped, so the caller is told instead of getting a different rule.
     requirements = TaskRequirements(
         allowed_licence_classes=("unknown", "osi-open-source"),  # type: ignore[arg-type]
         allowed_runtimes=("unknown", "ollama"),  # type: ignore[arg-type]
     )
-    assert requirements.allowed_licence_classes == ("osi-open-source",)
-    assert requirements.allowed_runtimes == ("ollama",)
+    assert set(requirements.malformed_fields) == {
+        "allowed_licence_classes",
+        "allowed_runtimes",
+    }
+    assert "requirements-invalid" in evaluate(_usable("m"), requirements)
 
 
 def test_an_explicitly_empty_licence_allowlist_blocks_everything():
