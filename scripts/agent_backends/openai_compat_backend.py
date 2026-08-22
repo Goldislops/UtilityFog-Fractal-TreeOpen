@@ -41,12 +41,56 @@ table.
 
 The translation table above is the entire contract; everything in this
 file follows from it.
+
+## OMI-V2 — structured output, and the interface decisions it forced
+
+OMI-V2 adds one closed structured-output request path. Five decisions were
+unavoidable to add it at all. They are recorded here rather than taken
+silently, and each is the narrowest option that still delivered the package.
+
+1. **A new method, not a changed signature.** Structured output arrives as
+   `complete_structured()`, a method on this class. The alternative —
+   adding a `structured=` keyword to `AgentBackend.complete()` — would
+   change the abstract contract every backend implements, including
+   `AnthropicBackend` and `MockBackend`, neither of which is in scope. The
+   ABC is untouched, so `complete()` remains exactly the method every
+   existing caller and backend already implements.
+
+2. **The result is a new type, not an `AgentResponse`.** A refusal has to be
+   distinguishable from a completion, and `AgentResponse` has nowhere to put
+   a refusal code that is not also a place a caller could mistake for model
+   output. `StructuredCompletion` wraps an `AgentResponse` on success.
+
+3. **Response validation lives one layer up, not here.** Requirement: reuse
+   `scripts/open_model/structured.py` rather than write a second validator.
+   That module is in `scripts/open_model/`, which imports *this* package;
+   importing it from here would invert the layering that
+   `scripts/open_model/__init__.py` states explicitly. So this method returns
+   the response and `scripts/open_model/structured_exchange.py` validates it
+   there, reusing the existing validator unchanged. The request-side checks
+   in `structured_request.py` are not a competing validator: they walk an
+   outbound JSON Schema document, where `structured.py` parses an inbound
+   response payload string.
+
+4. **`dialect` is a constructor parameter, and an invalid one raises.** It is
+   configuration, not a per-call argument, and an explicitly wrong value is a
+   configuration error worth failing at construction. Omitting it preserves
+   every pre-OMI-V2 behaviour of this class.
+
+5. **Tools and structured output are refused together.** That combination was
+   not verified at the pinned revisions of any of the four runtimes, and
+   tool-choice work is out of scope. Refusing states the limit of the
+   evidence; sending both and calling it supported would not.
+
+Out of scope and untouched: tool-choice semantics, seed normalisation,
+capability auto-detection, streaming, async, batching, TensorRT-LLM, and NIM.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from scripts.agent_backends.base import (
@@ -59,6 +103,13 @@ from scripts.agent_backends.base import (
     ToolResultBlock,
     ToolSpec,
     ToolUseBlock,
+)
+from scripts.agent_backends.structured_request import (
+    StructuredDialect,
+    StructuredOutputRequest,
+    StructuredRefusal,
+    is_supported_dialect,
+    plan_structured_request,
 )
 
 
@@ -77,6 +128,39 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 
+@dataclass(frozen=True)
+class StructuredCompletion:
+    """Result of one `complete_structured()` call. Carries no schema content.
+
+    `response_format_sent` is named for what it actually records: that the
+    request carried a `response_format` object. It is NOT a claim that the
+    runtime honoured the constraint, and nothing in this module reports such
+    a claim. Whether the output conforms is decided by validating the output,
+    which happens above this layer.
+
+    On refusal, `refusal` is one token from the closed vocabulary in
+    `structured_request.StructuredRefusal` and `response` is None. No schema
+    fragment, key name, prompt, response text, byte offset, length, type
+    name, or exception text is ever carried here.
+    """
+
+    ok: bool
+    response: Optional[AgentResponse] = None
+    refusal: Optional[StructuredRefusal] = None
+    dialect: Optional[str] = None
+    response_format_sent: bool = False
+
+    def __post_init__(self) -> None:
+        if self.ok and self.refusal is not None:
+            raise ValueError("a successful completion cannot carry a refusal code")
+        if not self.ok and self.refusal is None:
+            raise ValueError("a refused completion must carry a refusal code")
+        if not self.ok and self.response is not None:
+            raise ValueError("a refused completion must not carry a response")
+        if not self.ok and self.response_format_sent:
+            raise ValueError("a refused completion cannot have sent a request")
+
+
 class OpenAICompatBackend(AgentBackend):
     """Concrete `AgentBackend` over the OpenAI-compatible chat completions API."""
 
@@ -90,6 +174,7 @@ class OpenAICompatBackend(AgentBackend):
         api_key: Optional[str] = None,
         extra_headers: Optional[dict[str, str]] = None,
         client: Optional[Any] = None,
+        dialect: Optional[str] = None,
     ) -> None:
         """Build an OpenAICompatBackend.
 
@@ -105,7 +190,36 @@ class OpenAICompatBackend(AgentBackend):
                 hints.
             client: Pre-built SDK client. If provided, `base_url`, `api_key`,
                 and `extra_headers` are ignored — used for test injection.
+            dialect: OMI-V2. Optional runtime dialect enabling
+                `complete_structured()`. Must be supplied EXPLICITLY and must
+                name a runtime with a verified wire shape — see
+                `scripts/agent_backends/structured_request.py`. It is never
+                inferred from `base_url`, from installed software, from the
+                environment, or from a probe, because none of those identify
+                a runtime reliably: `base_url` is caller-chosen text, a local
+                port says nothing about what is listening on it, and probing
+                would mean contacting an endpoint to decide how to talk to
+                it. A present-but-unrecognised value raises `ValueError` HERE,
+                at construction, rather than at first use — an explicitly
+                wrong dialect is a configuration error, and failing at the
+                point of configuration is the earliest possible fail-closed.
+                `None` (the default) leaves the instance exactly as it was
+                before OMI-V2: `complete()` is unaffected, and
+                `complete_structured()` refuses with `dialect-not-configured`.
+
+        Raises:
+            ValueError: if `dialect` is supplied but is not one of the
+                verified dialect tokens. The message names the parameter and
+                the closed vocabulary, both of which are fixed constants; no
+                supplied value, type name, or representation is echoed.
         """
+        # Validated FIRST, before any SDK client is constructed, so a
+        # misconfigured instance never reaches the point of holding a client.
+        if dialect is not None and not is_supported_dialect(dialect):
+            raise ValueError(
+                "dialect must be one of: llama-cpp, ollama, vllm, sglang"
+            )
+        self.dialect: Optional[str] = dialect
         self.model = model
         self.extra_headers = dict(extra_headers) if extra_headers else None
         if client is not None:
@@ -147,6 +261,31 @@ class OpenAICompatBackend(AgentBackend):
         max_tokens: int = 2048,
         temperature: float = 0.0,
     ) -> AgentResponse:
+        request = self._build_request(
+            messages,
+            tools,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        response = self._client.chat.completions.create(**request)
+        return self._response_from_wire(response)
+
+    def _build_request(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        system: Optional[str] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        """Assemble the outbound request dict. Extracted verbatim from
+        `complete()` in OMI-V2 so that `complete()` and `complete_structured()`
+        provably build the SAME request, and the legacy shape is defined in
+        exactly one place. This body is unchanged from the pre-OMI-V2
+        `complete()`; the existing backend suite exercises it through
+        `complete()` and therefore proves the legacy shape did not move."""
         wire_messages = []
         if system is not None:
             wire_messages.append({"role": "system", "content": system})
@@ -163,9 +302,74 @@ class OpenAICompatBackend(AgentBackend):
             request["tools"] = [self._tool_to_wire(t) for t in tools]
         if self.extra_headers:
             request["extra_headers"] = dict(self.extra_headers)
+        return request
+
+    # -- OMI-V2: structured output ------------------------------------------
+
+    def complete_structured(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        structured: Any,
+        system: Optional[str] = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.0,
+    ) -> "StructuredCompletion":
+        """Ask the configured runtime for schema-constrained decoding.
+
+        Returns a :class:`StructuredCompletion` for every input reachable
+        through the contract; it never raises to signal a refused request.
+        Transport-level errors from the SDK still propagate, matching
+        `complete()`.
+
+        The refusal gate runs to completion BEFORE `self._client` is read at
+        all. That ordering is the point of the method, not an implementation
+        detail: a refused request must not become a billed, logged, or
+        rate-limited call against a runtime. `test_omi_v2_backend.py` proves
+        it with a client whose every attribute access raises.
+
+        This method deliberately does NOT validate the response. It reports
+        whether a `response_format` was *sent*, which is not the same as the
+        runtime having honoured it - see the module docstring of
+        `structured_request.py` for the Ollama case where an unrecognised
+        request degrades silently to unconstrained output. Conformance is
+        decided one layer up by `scripts/open_model/structured_exchange.py`,
+        which reuses `scripts/open_model/structured.py`.
+        """
+        # Gate first. `bool(tools)` is the SAME truth test `_build_request`
+        # uses to decide whether to attach tools, so the gate cannot disagree
+        # with the request it is guarding.
+        plan = plan_structured_request(
+            self.dialect, structured, has_tools=bool(tools)
+        )
+        if not plan.ok:
+            return StructuredCompletion(
+                ok=False,
+                refusal=plan.refusal,
+                dialect=self.dialect if is_supported_dialect(self.dialect) else None,
+                response_format_sent=False,
+            )
+
+        request = self._build_request(
+            messages,
+            tools,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        # The ONLY key OMI-V2 adds. There is no extra_body, no kwargs
+        # passthrough, and no provider-specific escape hatch by which a
+        # caller could reach any other request field.
+        request["response_format"] = plan.response_format
 
         response = self._client.chat.completions.create(**request)
-        return self._response_from_wire(response)
+        return StructuredCompletion(
+            ok=True,
+            response=self._response_from_wire(response),
+            dialect=self.dialect,
+            response_format_sent=True,
+        )
 
     # -- wire translation (outbound) ---------------------------------------
 
@@ -415,4 +619,11 @@ def _block_to_summary_dict(b: ContentBlock) -> dict[str, Any]:
     return {"type": type(b).__name__}
 
 
-__all__ = ["OpenAICompatBackend", "DEFAULT_MODEL"]
+__all__ = [
+    "DEFAULT_MODEL",
+    "OpenAICompatBackend",
+    "StructuredCompletion",
+    # Re-exported so a caller needs one import to build a structured request.
+    "StructuredDialect",
+    "StructuredOutputRequest",
+]
