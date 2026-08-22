@@ -156,7 +156,16 @@ def test_k1_the_exported_view_is_a_read_only_mapping():
     from types import MappingProxyType
 
     assert isinstance(RUNTIME_REPOSITORIES, MappingProxyType)
-    assert not hasattr(RUNTIME_REPOSITORIES, "__setitem__") or True
+    # Replaces a tautology (`... or True`, which asserted nothing) with the
+    # check it was meant to be: a mappingproxy exposes NONE of the mutating
+    # members, so an explicit call raises AttributeError rather than being
+    # merely refused at runtime.
+    for mutator in ("__setitem__", "__delitem__", "update", "clear", "pop",
+                    "popitem", "setdefault"):
+        assert not hasattr(RUNTIME_REPOSITORIES, mutator), mutator
+    # Read access is unaffected.
+    for reader in ("get", "items", "keys", "values", "__getitem__"):
+        assert hasattr(RUNTIME_REPOSITORIES, reader), reader
     with pytest.raises((TypeError, AttributeError)):
         RUNTIME_REPOSITORIES["new-runtime"] = "evil/evil"
 
