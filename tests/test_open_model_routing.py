@@ -51,6 +51,10 @@ def _usable(model_id: str, **overrides) -> ModelCapabilities:
     """A descriptor that satisfies the default requirements."""
     base = dict(
         model_id=model_id,
+        variant_id="test-variant",
+        repository_revision="testrev0",
+        licence_source_url="https://example.invalid/licence",
+        licence_revision="1.0",
         locality="local",
         availability="present",
         resource_class="light",
@@ -71,7 +75,17 @@ def _factory():
 def _registry(*entries: tuple[str, ModelCapabilities]) -> BackendRegistry:
     registry = BackendRegistry(allowed_names=tuple(name for name, _ in entries))
     for name, capabilities in entries:
-        registry.register(name, capabilities, _factory)
+        # A `local` descriptor now requires an explicit operator attestation
+        # at the registration site; these fixtures are in-process doubles, so
+        # asserting it is honest.
+        attestation = (
+            "operator-asserted"
+            if capabilities.locality == "local"
+            else "not-required"
+        )
+        registry.register(
+            name, capabilities, _factory, locality_attestation=attestation
+        )
     return registry
 
 
@@ -81,7 +95,12 @@ def _registry(*entries: tuple[str, ModelCapabilities]) -> BackendRegistry:
 def test_a_name_outside_the_allowlist_cannot_register():
     registry = BackendRegistry(allowed_names=("approved",))
     with pytest.raises(RegistrationRefused) as excinfo:
-        registry.register("smuggled", _usable("m"), _factory)
+        registry.register(
+            "smuggled",
+            _usable("m"),
+            _factory,
+            locality_attestation="operator-asserted",
+        )
     assert excinfo.value.reason == "name-not-allowlisted"
     assert len(registry) == 0
 
@@ -90,13 +109,23 @@ def test_an_empty_allowlist_admits_nothing():
     registry = BackendRegistry(allowed_names=())
     assert registry.allowed_names == ()
     with pytest.raises(RegistrationRefused):
-        registry.register("anything", _usable("m"), _factory)
+        registry.register(
+            "anything",
+            _usable("m"),
+            _factory,
+            locality_attestation="operator-asserted",
+        )
 
 
 def test_registration_is_never_silently_replaced():
     registry = _registry(("one", _usable("m")))
     with pytest.raises(RegistrationRefused) as excinfo:
-        registry.register("one", _usable("m2"), _factory)
+        registry.register(
+            "one",
+            _usable("m2"),
+            _factory,
+            locality_attestation="operator-asserted",
+        )
     assert excinfo.value.reason == "name-already-registered"
     assert registry.capabilities_for("one").model_id == "m"
 
@@ -113,7 +142,12 @@ def test_registration_is_never_silently_replaced():
 def test_malformed_names_are_refused_with_a_stable_code(name, reason):
     registry = BackendRegistry(allowed_names=("ok",))
     with pytest.raises(RegistrationRefused) as excinfo:
-        registry.register(name, _usable("m"), _factory)
+        registry.register(
+            name,
+            _usable("m"),
+            _factory,
+            locality_attestation="operator-asserted",
+        )
     assert excinfo.value.reason == reason
 
 
@@ -137,19 +171,29 @@ def test_a_descriptor_that_identifies_nothing_is_refused():
 def test_a_non_callable_factory_is_refused():
     registry = BackendRegistry(allowed_names=("ok",))
     with pytest.raises(RegistrationRefused) as excinfo:
-        registry.register("ok", _usable("m"), "ollama serve")
+        registry.register(
+            "ok",
+            _usable("m"),
+            "ollama serve",
+            locality_attestation="operator-asserted",
+        )
     assert excinfo.value.reason == "factory-not-callable"
 
 
 def test_registry_exposes_no_endpoint_or_command_parameter():
     # The structural half of "no arbitrary executable or endpoint injection":
     # there is no parameter through which one could be supplied.
+    code = BackendRegistry.register.__code__
     register_params = set(
-        BackendRegistry.register.__code__.co_varnames[
-            : BackendRegistry.register.__code__.co_argcount
-        ]
+        code.co_varnames[: code.co_argcount + code.co_kwonlyargcount]
     )
-    assert register_params == {"self", "name", "capabilities", "factory"}
+    assert register_params == {
+        "self",
+        "name",
+        "capabilities",
+        "factory",
+        "locality_attestation",
+    }
     forbidden = {"url", "base_url", "host", "port", "command", "argv", "api_key"}
     for member in dir(BackendRegistry):
         attribute = getattr(BackendRegistry, member, None)
@@ -178,7 +222,12 @@ def test_create_refuses_an_absent_backend():
 
 def test_create_refuses_a_factory_that_returns_the_wrong_type():
     registry = BackendRegistry(allowed_names=("bad",))
-    registry.register("bad", _usable("m"), lambda: "not a backend")
+    registry.register(
+        "bad",
+        _usable("m"),
+        lambda: "not a backend",
+        locality_attestation="operator-asserted",
+    )
     with pytest.raises(BackendUnavailable) as excinfo:
         registry.create("bad")
     assert excinfo.value.reason == "factory-returned-wrong-type"
@@ -203,10 +252,19 @@ def test_task_requirements_has_no_field_that_could_hold_a_prompt():
         "min_context_tokens",
         "allowed_licence_classes",
         "allowed_runtimes",
+        "malformed_fields",
     }
     for field in dataclasses.fields(TaskRequirements):
         value = getattr(TaskRequirements(), field.name)
         assert type(value) in (bool, int, tuple)
+
+
+def test_malformed_fields_is_computed_and_cannot_be_supplied():
+    # A caller cannot mark their own malformed input as clean.
+    forged = TaskRequirements(min_context_tokens=-1, malformed_fields=())
+    assert forged.malformed_fields == ("min_context_tokens",)
+    clean = TaskRequirements(malformed_fields=("require_local",))
+    assert clean.malformed_fields == ()
 
 
 def test_requirement_defaults_are_strict():

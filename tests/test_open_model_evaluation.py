@@ -36,6 +36,7 @@ from scripts.open_model.evaluation import (
     EvaluationRecord,
     HermeticViolation,
     hermetic_guard,
+    register_stub,
     run_case,
     run_suite,
     scripted_stub,
@@ -63,7 +64,9 @@ _WELL_FORMED = '{"summary": "ok", "confidence": 1}'
 def _registry(*entries) -> BackendRegistry:
     registry = BackendRegistry(allowed_names=tuple(name for name, _, _ in entries))
     for name, capabilities, factory in entries:
-        registry.register(name, capabilities, factory)
+        # register_stub supplies the locality attestation that a `local`
+        # descriptor now requires at the registration site.
+        register_stub(registry, name, capabilities, factory)
     return registry
 
 
@@ -225,12 +228,13 @@ def test_a_failure_never_carries_payload_content():
     assert "api_key" not in rendered
 
 
-def test_missing_required_keys_report_only_the_callers_own_key_names():
+def test_missing_required_keys_are_reported_as_indices_never_as_text():
     outcome = validate_structured_output(
         '{"summary": "ok"}', required_keys=("summary", "confidence")
     )
     assert outcome.failure == "missing-required-key"
-    assert outcome.missing_keys == ("confidence",)
+    assert outcome.missing_key_indices == (1,)
+    assert "confidence" not in repr(outcome)
 
 
 def test_a_well_formed_payload_is_accepted_and_read_only():
@@ -400,7 +404,7 @@ def test_no_evaluation_record_field_can_hold_a_prompt():
         "escalation",
         "construction_refused",
         "structured_failure",
-        "missing_keys",
+        "missing_key_indices",
         "response_size",
         "passed",
     }

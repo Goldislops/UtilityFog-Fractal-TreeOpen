@@ -74,7 +74,7 @@ def test_defaults_are_all_fail_closed():
     assert caps.tool_calling == "unknown"
     assert caps.max_context_tokens == 0
     assert caps.max_output_tokens == 0
-    assert caps.quantisations == ()
+    assert caps.quantisation == ""
     assert caps.runtimes == ()
     assert caps.licence_class == "unknown"
     assert caps.licence_name == ""
@@ -107,7 +107,7 @@ def test_hostile_values_are_replaced_without_invoking_any_hook():
         tool_calling=_Hostile(),
         max_context_tokens=_Hostile(),
         max_output_tokens=_Hostile(),
-        quantisations=_Hostile(),
+        quantisation=_Hostile(),
         runtimes=_Hostile(),
         licence_class=_Hostile(),
         licence_name=_Hostile(),
@@ -123,7 +123,7 @@ def test_hostile_values_are_replaced_without_invoking_any_hook():
     assert caps.tool_calling == "unknown"
     assert caps.max_context_tokens == 0
     assert caps.max_output_tokens == 0
-    assert caps.quantisations == ()
+    assert caps.quantisation == ""
     assert caps.runtimes == ()
     assert caps.licence_class == "unknown"
     assert caps.licence_name == ""
@@ -181,16 +181,18 @@ def test_runtimes_accept_a_list_and_become_a_tuple():
     assert type(caps.runtimes) is tuple
 
 
-def test_sequence_length_is_capped():
-    caps = ModelCapabilities(
-        model_id="m", quantisations=tuple(f"q{i}" for i in range(100))
+def test_an_over_long_sequence_input_is_refused_outright():
+    # Bounding only the kept list would still walk every element.
+    caps = ModelCapabilities(model_id="m", runtimes=["ollama"] * 100)
+    assert caps.runtimes == ()
+
+
+def test_quantisation_is_singular_and_must_be_a_safe_token():
+    assert ModelCapabilities(model_id="m", quantisation="gguf-q4_k_m").quantisation == (
+        "gguf-q4_k_m"
     )
-    assert len(caps.quantisations) == 32
-
-
-def test_quantisations_keep_only_exact_strings():
-    caps = ModelCapabilities(model_id="m", quantisations=("gguf", 4, None, "fp8"))
-    assert caps.quantisations == ("gguf", "fp8")
+    assert ModelCapabilities(model_id="m", quantisation=("gguf", "fp8")).quantisation == ""
+    assert ModelCapabilities(model_id="m", quantisation="a b").quantisation == ""
 
 
 # -- provenance and dates ----------------------------------------------------
@@ -239,6 +241,10 @@ def test_unresolved_fields_lists_every_unknown_in_declaration_order():
     caps = ModelCapabilities(model_id="")
     assert caps.unresolved_fields() == (
         "model_id",
+        "variant_id",
+        "repository_revision",
+        "licence_source_url",
+        "licence_revision",
         "locality",
         "availability",
         "resource_class",
@@ -253,6 +259,10 @@ def test_unresolved_fields_lists_every_unknown_in_declaration_order():
 def test_unresolved_fields_is_empty_for_a_fully_specified_descriptor():
     caps = ModelCapabilities(
         model_id="m",
+        variant_id="bf16",
+        repository_revision="abc123",
+        licence_source_url="https://example.invalid/licence",
+        licence_revision="2.0",
         locality="local",
         availability="present",
         resource_class="light",
