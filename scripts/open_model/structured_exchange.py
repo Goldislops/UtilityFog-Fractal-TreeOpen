@@ -74,6 +74,7 @@ from scripts.agent_backends.openai_compat_backend import StructuredCompletion
 from scripts.agent_backends.structured_request import (
     REFUSAL_TOKENS,
     StructuredRefusal,
+    is_pre_dialect_refusal,
     is_supported_dialect,
 )
 from scripts.open_model.structured import (
@@ -117,8 +118,16 @@ class StructuredExchange:
     Exactly one of three states, distinguishable without inspecting content:
 
     - **ok** - a request was sent and the response parsed as a JSON object
-      carrying every required key. ``value`` is a read-only view of it. This
-      is *usability*, not schema conformance - see ``schema_conformance``.
+      carrying every required key. This is *usability*, not schema
+      conformance - see ``schema_conformance``.
+
+      ``value`` is a genuinely read-only view, not merely described as one:
+      whatever is supplied is re-wrapped over a fresh top-level copy, so a
+      caller who kept a reference to the mapping they passed in cannot reach
+      through it and change what the result reports. The proxy is **shallow**,
+      exactly as ``StructuredOutcome.value`` is - nested containers reached
+      through it are ordinary mutable objects. It prevents top-level mutation
+      of a shared result; it does not claim deep immutability.
     - **refused** - no request was sent. ``request_refusal`` says why.
       ``response_format_sent`` is False.
     - **unusable** - a request was sent and the answer did not validate.
@@ -150,41 +159,65 @@ class StructuredExchange:
     arrive silently: it has to widen this vocabulary, in the open.
     """
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _refusals: frozenset = EXCHANGE_REFUSALS,
+        _failures: frozenset = RESPONSE_FAILURES,
+        _dialect_ok=is_supported_dialect,
+        _pre_dialect=is_pre_dialect_refusal,
+        _proxy=MappingProxyType,
+        _type=type,
+        _str=str,
+        _bool=bool,
+        _int=int,
+        _dict=dict,
+        _tuple=tuple,
+        _object=object,
+    ) -> None:
+        """Validate the carrier's own coherence.
+
+        The defaulted parameters capture OBJECTS at class-definition time. A
+        dataclass calls ``self.__post_init__()`` with no arguments, so none of
+        them is ever looked up again. Rebinding ``EXCHANGE_REFUSALS``,
+        ``RESPONSE_FAILURES`` or this module's imported ``is_supported_dialect``
+        alias therefore cannot widen what an exchange will accept - which
+        reading them as globals did allow, including admitting arbitrary
+        secret-shaped refusal, failure, or dialect text into a result.
+        """
         # Exact bools first: a foreign object with a __bool__ must not be able
         # to walk itself through the state machine below.
-        if type(self.ok) is not bool:
+        if _type(self.ok) is not _bool:
             raise ValueError("ok must be exactly a bool")
-        if type(self.response_format_sent) is not bool:
+        if _type(self.response_format_sent) is not _bool:
             raise ValueError("response_format_sent must be exactly a bool")
         if (
-            type(self.schema_conformance) is not str
+            _type(self.schema_conformance) is not _str
             or self.schema_conformance != "unverified"
         ):
             raise ValueError(
                 "schema conformance is never established by this package"
             )
         if self.request_refusal is not None and (
-            type(self.request_refusal) is not str
-            or self.request_refusal not in EXCHANGE_REFUSALS
+            _type(self.request_refusal) is not _str
+            or self.request_refusal not in _refusals
         ):
             raise ValueError(
                 "request_refusal must be a token from the closed vocabulary"
             )
         if self.response_failure is not None and (
-            type(self.response_failure) is not str
-            or self.response_failure not in RESPONSE_FAILURES
+            _type(self.response_failure) is not _str
+            or self.response_failure not in _failures
         ):
             raise ValueError(
                 "response_failure must be a token from the closed vocabulary"
             )
-        if self.dialect is not None and not is_supported_dialect(self.dialect):
+        if self.dialect is not None and not _dialect_ok(self.dialect):
             raise ValueError("dialect must be a verified dialect token or None")
         # Missing indices are coherent or absent: exact ints, non-negative,
         # strictly increasing, and only ever present on the one failure that
         # produces them. An arbitrary tuple here would be a place to smuggle
         # content past the closed vocabularies.
-        if type(self.missing_key_indices) is not tuple:
+        if _type(self.missing_key_indices) is not _tuple:
             raise ValueError("missing_key_indices must be exactly a tuple")
         if self.missing_key_indices:
             if self.response_failure != "missing-required-key":
@@ -194,7 +227,7 @@ class StructuredExchange:
                 )
             previous = -1
             for index in self.missing_key_indices:
-                if type(index) is not int or index <= previous:
+                if _type(index) is not _int or index <= previous:
                     raise ValueError(
                         "missing_key_indices must be increasing non-negative ints"
                     )
@@ -211,21 +244,29 @@ class StructuredExchange:
             # Exact types, not merely non-None. `value` was the last field in
             # this class open to an arbitrary object, which made it the one
             # place a caller string - a secret among them - could ride into a
-            # result that every other field is closed against. It is also a
-            # correctness promise: a caller reading `.value` on ok=True is
-            # entitled to a mapping, and `dict(result.value)` on a str raises.
-            # The successful path always supplies the validator's
-            # MappingProxyType; an exact dict is accepted so a caller can
-            # construct one directly.
+            # result that every other field is closed against.
+            #
+            # The class docstring calls this a read-only view, so it is made
+            # one rather than merely described as one. An exact dict or an
+            # exact MappingProxyType is accepted and then re-wrapped over a
+            # FRESH top-level copy, so whoever passed it in cannot reach
+            # through their own reference and change what the result reports.
+            # The proxy is shallow, exactly as `StructuredOutcome.value` is:
+            # nested containers reached through it are ordinary mutable
+            # objects, so this prevents top-level mutation of a shared result
+            # rather than claiming deep immutability.
             if (
-                type(self.value) is not MappingProxyType
-                and type(self.value) is not dict
+                _type(self.value) is not _proxy
+                and _type(self.value) is not _dict
             ):
                 raise ValueError(
                     "a successful exchange must carry an exact mapping value"
                 )
+            _object.__setattr__(self, "value", _proxy(_dict(self.value)))
             if not self.response_format_sent:
                 raise ValueError("a successful exchange must have sent a request")
+            if self.dialect is None:
+                raise ValueError("a successful exchange must name its dialect")
         else:
             if self.value is not None:
                 raise ValueError("a failed exchange must not carry a value")
@@ -239,6 +280,31 @@ class StructuredExchange:
             if self.response_failure is not None and not self.response_format_sent:
                 raise ValueError(
                     "a response failure requires that a request was sent"
+                )
+            # Dialect coherence, same rule as the backend carrier. A refusal
+            # taken before a dialect was established has none to name;
+            # everything reached after that gate - including every response
+            # failure, which by definition follows a sent request - must name
+            # the runtime it concerns, or an operator cannot tell which one
+            # the result is about. `backend-not-structured-capable` joins the
+            # three dialect refusals on the pre-dialect side: it is decided
+            # before any backend was consulted at all.
+            if self.response_failure is not None:
+                if self.dialect is None:
+                    raise ValueError(
+                        "a response failure must name the dialect it was sent to"
+                    )
+            elif self.request_refusal == "backend-not-structured-capable" or (
+                _pre_dialect(self.request_refusal)
+            ):
+                if self.dialect is not None:
+                    raise ValueError(
+                        "a refusal taken before the dialect gate cannot name a "
+                        "dialect"
+                    )
+            elif self.dialect is None:
+                raise ValueError(
+                    "a refusal taken after the dialect gate must name its dialect"
                 )
 
 

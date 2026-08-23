@@ -327,7 +327,7 @@ def test_contradictory_exchanges_are_refused_at_construction(kwargs):
 
 def test_a_valid_success_still_constructs():
     assert StructuredExchange(
-        ok=True, value={"a": 1}, response_format_sent=True
+        ok=True, value={"a": 1}, dialect="vllm", response_format_sent=True
     ).ok is True
 
 

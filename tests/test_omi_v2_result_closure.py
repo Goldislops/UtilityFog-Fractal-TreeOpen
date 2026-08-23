@@ -27,6 +27,7 @@ from scripts.agent_backends.base import AgentResponse
 from scripts.agent_backends.openai_compat_backend import StructuredCompletion
 from scripts.agent_backends.structured_request import (
     REFUSAL_TOKENS,
+    is_pre_dialect_refusal,
     StructuredRequestPlan,
 )
 from scripts.open_model.structured_exchange import (
@@ -138,13 +139,24 @@ def test_every_declared_refusal_token_is_actually_constructible():
     for token in REFUSAL_TOKENS:
         assert StructuredRequestPlan(ok=False, refusal=token).refusal == token
     for token in EXCHANGE_REFUSALS:
-        assert StructuredExchange(ok=False, request_refusal=token).ok is False
+        # Dialect coherence: a pre-dialect refusal names no dialect and a
+        # post-dialect one must. Both sides are exercised by construction.
+        pre = token == "backend-not-structured-capable" or is_pre_dialect_refusal(
+            token
+        )
+        result = StructuredExchange(
+            ok=False,
+            request_refusal=token,
+            dialect=None if pre else "vllm",
+        )
+        assert result.ok is False
     for token in RESPONSE_FAILURES:
         indices = (0,) if token == "missing-required-key" else ()
         result = StructuredExchange(
             ok=False,
             response_failure=token,
             missing_key_indices=indices,
+            dialect="vllm",
             response_format_sent=True,
         )
         assert result.response_failure == token
@@ -297,6 +309,7 @@ def test_coherent_missing_indices_are_accepted():
         ok=False,
         response_failure="missing-required-key",
         missing_key_indices=(0, 3, 17),
+        dialect="vllm",
         response_format_sent=True,
     )
     assert result.missing_key_indices == (0, 3, 17)

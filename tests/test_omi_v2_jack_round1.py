@@ -325,7 +325,9 @@ def test_a_successful_exchange_refuses_a_foreign_value(value):
     "value", [{"a": 1}, MappingProxyType({"a": 1})]
 )
 def test_a_successful_exchange_accepts_an_exact_mapping(value):
-    assert StructuredExchange(ok=True, value=value, response_format_sent=True).ok
+    assert StructuredExchange(
+        ok=True, value=value, dialect="vllm", response_format_sent=True
+    ).ok
 
 
 def test_the_exchange_stays_total_against_a_foreign_completion_payload():

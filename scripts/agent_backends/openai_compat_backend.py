@@ -109,6 +109,7 @@ from scripts.agent_backends.structured_request import (
     StructuredDialect,
     StructuredOutputRequest,
     StructuredRefusal,
+    is_pre_dialect_refusal,
     is_supported_dialect,
     plan_structured_request,
 )
@@ -152,17 +153,50 @@ class StructuredCompletion:
     dialect: Optional[str] = None
     response_format_sent: bool = False
 
-    def __post_init__(self) -> None:
-        if type(self.ok) is not bool:
+    def __post_init__(
+        self,
+        _tokens: frozenset = REFUSAL_TOKENS,
+        _dialect_ok=is_supported_dialect,
+        _pre_dialect=is_pre_dialect_refusal,
+        _agent_response=AgentResponse,
+        _type=type,
+        _str=str,
+        _bool=bool,
+    ) -> None:
+        """Validate the carrier's own coherence.
+
+        The defaulted parameters capture OBJECTS at class-definition time. A
+        dataclass calls ``self.__post_init__()`` with no arguments, so none of
+        these is ever looked up again. Rebinding this module's imported
+        aliases - ``REFUSAL_TOKENS``, ``is_supported_dialect`` - therefore
+        cannot widen what a completion will accept. Reading them as globals
+        did allow exactly that, including admitting arbitrary secret-shaped
+        refusal or dialect text into a result.
+        """
+        if _type(self.ok) is not _bool:
             raise ValueError("ok must be exactly a bool")
-        if type(self.response_format_sent) is not bool:
+        if _type(self.response_format_sent) is not _bool:
             raise ValueError("response_format_sent must be exactly a bool")
         if self.refusal is not None and (
-            type(self.refusal) is not str or self.refusal not in REFUSAL_TOKENS
+            _type(self.refusal) is not _str or self.refusal not in _tokens
         ):
             raise ValueError("refusal must be a token from the closed vocabulary")
-        if self.dialect is not None and not is_supported_dialect(self.dialect):
+        if self.dialect is not None and not _dialect_ok(self.dialect):
             raise ValueError("dialect must be a verified dialect token or None")
+        # Cross-field dialect coherence. A result that names no dialect when
+        # one was established, or names one when none was, is a result an
+        # operator cannot act on: they cannot tell which runtime it concerns.
+        if self.ok and self.dialect is None:
+            raise ValueError("a successful completion must name its dialect")
+        if not self.ok and _pre_dialect(self.refusal):
+            if self.dialect is not None:
+                raise ValueError(
+                    "a refusal taken before the dialect gate cannot name a dialect"
+                )
+        elif not self.ok and self.dialect is None:
+            raise ValueError(
+                "a refusal taken after the dialect gate must name its dialect"
+            )
         if self.ok and self.refusal is not None:
             raise ValueError("a successful completion cannot carry a refusal code")
         if not self.ok and self.refusal is None:
@@ -179,7 +213,7 @@ class StructuredCompletion:
         # while promising to be total: a foreign object here would make that
         # promise false by raising AttributeError from inside it. Checking
         # only for None made the exact-type guard on this class skin-deep.
-        if self.ok and type(self.response) is not AgentResponse:
+        if self.ok and _type(self.response) is not _agent_response:
             raise ValueError(
                 "a successful completion must carry an exact AgentResponse"
             )
