@@ -91,8 +91,8 @@ SNAPSHOT_DISCOVERY_FAILED_TEMPLATE = (
     " no restart decision this cycle"
 )
 SNAPSHOT_HEALTH_UNKNOWN_MESSAGE = (
-    "Snapshot health UNKNOWN: the selected snapshot went away before its age"
-    " could be read"
+    "Snapshot health UNKNOWN: the selected snapshot's metadata could not be"
+    " read; age not established"
 )
 
 # ---------------------------------------------------------------------------
@@ -265,11 +265,20 @@ def check_engine_health(processes):
 
     latest = result.ordered[0]
     # A SECOND metadata read, after selection: `DiscoverySucceeded` carries no
-    # modification time, so the age comparison has to ask again, and that read
-    # races the producer and anything that removes files. The race is not
-    # closed here -- it is given a fixed outcome instead of an `OSError` that
-    # reaches the loop's blanket handler as an unnamed "Watchdog error", or
-    # `--once` as a traceback.
+    # modification time, so the age comparison has to ask again.
+    #
+    # The whole of `OSError` is caught, and it can arrive for ANY reason --
+    # the entry having been removed, a permission or sharing denial, or a
+    # general I/O or mount failure are only examples. Nothing here establishes
+    # which, so nothing here reports one: the outcome is fixed, path-free and
+    # cause-neutral. A message naming a cause it did not establish sends an
+    # operator after the wrong fault, and on a network-mounted data directory
+    # the permission and I/O cases are not the exotic ones.
+    #
+    # None of the underlying races, locks or faults is closed. What changes is
+    # that the failure has a named outcome instead of an `OSError` reaching the
+    # loop's blanket handler as an unnamed "Watchdog error", or `--once` as a
+    # traceback.
     try:
         mtime = latest.stat().st_mtime
     except OSError:
