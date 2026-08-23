@@ -170,6 +170,36 @@ that package sits *above* this one and importing it would invert the layering.
 Every refusal is one token from a closed vocabulary. No schema fragment, key
 name, prompt, response, byte offset, length, type name, or exception text
 ever reaches a refusal value.
+
+## No decision path resolves a rebindable name, transitively
+
+Every function here that takes a trust decision is produced by a small
+factory that binds what it needs into closure cells - the dialect predicate,
+the pre-dialect classifier, the wire-shape check, the snapshot validator, the
+response-format builder, and the planner. That includes the **builtins** the
+exact-type checks use, not only the package's own data.
+
+The builtins are the part that was missed once and is worth spelling out.
+Inlining the dialect literals closed the DATA while the machinery reading it
+still looked up ``type`` and ``str`` as module globals, so an ordinary
+assignment - ``structured_request.type = <replacement>`` - changed the
+answer without replacing the function, its defaults, its code, or
+``sys.modules``. That admitted a ``str`` SUBCLASS, which can carry hidden
+attributes and lie in ``__repr__``, into fields required to hold exact
+tokens, including the transmitted ``json_schema.name``.
+
+Stated exactly, because the boundary matters more than the reassurance:
+
+- **Closed** - ordinary rebinding of any module-level name this module or its
+  consumers resolve, including added builtins.
+- **Deliberately open** - ``_SCHEMA_MAX_CHARS``, ``_SCHEMA_MAX_DEPTH`` and
+  ``_SCHEMA_MAX_NODES``, which bound how MUCH is accepted and never what
+  TYPE, so rebinding one cannot admit a foreign type.
+- **Out of scope, and not claimed** - closure-cell surgery, overwriting
+  ``__defaults__``, replacing a function object, patching a stdlib function
+  such as ``json.dumps``, or swapping this module in ``sys.modules``. Those
+  are arbitrary code replacement, not name rebinding, and no amount of care
+  inside this module prevents them.
 """
 
 from __future__ import annotations
@@ -285,38 +315,57 @@ class StructuredOutputRequest:
     schema: dict[str, Any] = field(default_factory=dict)
 
 
-def is_supported_wire_shape(value: Any) -> bool:
-    """True only for one of the exact dialect ``response_format`` shapes.
+def _closed_wire_shape_predicate():
+    """Build :func:`is_supported_wire_shape`, builtins bound in cells.
 
-    Two shapes exist across the four dialects, and this accepts those and
-    nothing else - not "some dictionary", which is all an earlier revision
-    checked. A carrier that accepts an arbitrary dict on its success path
-    cannot claim the success path carries a dialect shape.
-
-    The literals are inlined, so the decision resolves no rebindable name.
+    This one matters most: ``json_schema.name`` is transmitted, so a
+    ``str`` subclass admitted here leaves the process carrying whatever its
+    author hid on it. Looking up ``type``, ``str``, ``dict`` and ``len`` as
+    module globals meant one ordinary assignment could admit exactly that.
     """
-    if type(value) is not dict:
-        return False
-    if len(value) != 2 or "type" not in value or "json_schema" not in value:
-        return False
-    kind = value["type"]
-    if type(kind) is not str or kind != "json_schema":
-        return False
-    nested = value["json_schema"]
-    if type(nested) is not dict:
-        return False
-    if len(nested) == 1 and "schema" in nested:
-        pass  # llama-cpp and ollama: no name field exists on either
-    elif len(nested) == 2 and "schema" in nested and "name" in nested:
-        name = nested["name"]
-        # vLLM and SGLang: the name is this package's fixed constant, never
-        # caller text. Compared against the same inlined literal the builder
-        # emits, so a rebound mirror cannot widen what a plan may carry.
-        if type(name) is not str or name != "structured_output":
+    _type = type
+    _str = str
+    _dict = dict
+    _len = len
+
+    def is_supported_wire_shape(value: Any) -> bool:
+        """True only for one of the exact dialect ``response_format`` shapes.
+
+        Two shapes exist across the four dialects, and this accepts those and
+        nothing else - not "some dictionary", which is all an earlier
+        revision checked. A carrier that accepts an arbitrary dict on its
+        success path cannot claim the success path carries a dialect shape.
+
+        The literals are inlined and the builtins are bound in cells, so the
+        decision resolves no rebindable name.
+        """
+        if _type(value) is not _dict:
             return False
-    else:
-        return False
-    return type(nested["schema"]) is dict
+        if _len(value) != 2 or "type" not in value or "json_schema" not in value:
+            return False
+        kind = value["type"]
+        if _type(kind) is not _str or kind != "json_schema":
+            return False
+        nested = value["json_schema"]
+        if _type(nested) is not _dict:
+            return False
+        if _len(nested) == 1 and "schema" in nested:
+            pass  # llama-cpp and ollama: no name field exists on either
+        elif _len(nested) == 2 and "schema" in nested and "name" in nested:
+            name = nested["name"]
+            # vLLM and SGLang: the name is this package's fixed constant,
+            # never caller text. Exact-type checked before the comparison, so
+            # a deceptive str subclass cannot present itself as the constant.
+            if _type(name) is not _str or name != "structured_output":
+                return False
+        else:
+            return False
+        return _type(nested["schema"]) is _dict
+
+    return is_supported_wire_shape
+
+
+is_supported_wire_shape = _closed_wire_shape_predicate()
 
 
 @dataclass(frozen=True)
@@ -375,288 +424,398 @@ class StructuredRequestPlan:
             )
 
 
-def is_supported_dialect(value: Any) -> bool:
-    """True only for an exact built-in ``str`` naming a verified dialect.
+def _closed_dialect_predicate():
+    """Build :func:`is_supported_dialect` with its builtins bound in cells.
 
-    Membership is decided by inlined comparisons rather than by reading
-    :data:`SUPPORTED_DIALECTS`, so the answer cannot be changed by rebinding
-    a module attribute. A ``str`` subclass is refused by exact-type identity
-    before any comparison runs, so no overridden ``__eq__`` or ``__hash__``
-    is ever invoked.
+    Inlining the four dialect literals closed the DATA. It did not close the
+    machinery that reads them: the predicate still looked up ``type`` and
+    ``str`` as module globals, and an ordinary assignment -
+    ``structured_request.type = <replacement>`` - changed its answer without
+    replacing the function, its defaults, its code, or ``sys.modules``. That
+    admitted a ``str`` SUBCLASS, which can carry hidden attributes and lie in
+    ``__repr__``, everywhere an exact dialect token was required.
+
+    Binding the two builtins here puts them in this function's closure cells,
+    which a name rebinding cannot reach. Cell surgery remains out of scope,
+    as it has been since the OMI-V1 seventh round.
     """
-    if type(value) is not str:
-        return False
-    return (
-        value == "llama-cpp"
-        or value == "ollama"
-        or value == "vllm"
-        or value == "sglang"
-    )
+    _type = type
+    _str = str
 
+    def is_supported_dialect(value: Any) -> bool:
+        """True only for an exact built-in ``str`` naming a verified dialect.
 
-def is_pre_dialect_refusal(token: Any) -> bool:
-    """True for the refusals decided BEFORE a dialect was ever established.
-
-    These three are reached while the dialect is still unknown, absent, or
-    rejected, so a carrier reporting one of them has no verified dialect to
-    name and must carry none. Every other refusal in the vocabulary is
-    reached only after the dialect passed its gate, so a carrier reporting
-    one of those must name the dialect it was refused for - otherwise an
-    operator cannot tell which runtime a refusal belongs to.
-
-    The literals are inlined, so the decision resolves no rebindable name.
-    """
-    if type(token) is not str:
-        return False
-    return (
-        token == "dialect-not-configured"
-        or token == "dialect-not-exact-str"
-        or token == "dialect-unsupported"
-    )
-
-
-def _validated_snapshot(
-    schema: Any,
-) -> tuple[Optional[StructuredRefusal], Optional[dict[str, Any]]]:
-    """Validate a schema document and build its detached snapshot at once.
-
-    Returns ``(refusal, None)`` on refusal and ``(None, snapshot)`` on
-    acceptance, where ``snapshot`` shares no container with the caller.
-
-    **Why validation and copying are one traversal.** An earlier revision
-    walked the caller's containers to validate them, and then handed the
-    caller's own object to ``json.dumps`` to produce the text it re-parsed as
-    a snapshot. Those are two separate reads of caller-owned data, and
-    anything the caller changed in between landed in the snapshot without
-    ever having been checked: an over-depth structure, an over-node
-    structure, or a type the walk would have refused could all be
-    substituted into an already-visited slot and be serialised as though
-    validated.
-
-    Closing that window means never reading a caller container twice. Each
-    value is checked and copied into the detached structure at the moment it
-    is first seen, so the accepted snapshot contains exactly - and only - the
-    values this function inspected. Everything afterwards, including the
-    encoding, reads the snapshot; the caller's object is never touched again.
-    Scalars are shared rather than copied because ``str``, ``int``,
-    ``float``, ``bool`` and ``None`` are immutable, so sharing them cannot
-    give the caller a way back in.
-
-    The walk is iterative, so a deeply nested document is refused by the
-    depth bound rather than by exhausting the interpreter stack. Only exact
-    built-in JSON types are accepted; every element is checked by
-    ``type(x) is ...`` identity, so no supplied ``__eq__``, ``__hash__``,
-    ``__len__``, ``__iter__``, or ``__bool__`` runs on caller data.
-
-    Nothing about the offending element - its value, position, key, or type
-    name - reaches the returned token.
-    """
-    if type(schema) is not dict:
-        return "schema-not-exact-dict", None
-    if not schema:
-        # An empty schema constrains nothing. Sending it would ask for
-        # structured output and receive whatever the model liked, which is
-        # exactly the false-success this contract exists to prevent.
-        return "schema-empty", None
-
-    root: dict[str, Any] = {}
-    # This function promises a refusal rather than an exception for every
-    # input. A container mutated by another thread mid-read raises
-    # RuntimeError ("dictionary changed size during iteration") from the
-    # iteration itself, which no per-element type check can prevent - so it
-    # is caught and reported as a refusal like every other rejection.
-    try:
-        # (source container, its detached counterpart, depth of the source)
-        stack: list[tuple[Any, Any, int]] = [(schema, root, 0)]
-        nodes = 1  # the root document itself
-        while stack:
-            source, destination, depth = stack.pop()
-            child_depth = depth + 1
-            source_is_dict = type(source) is dict
-            # `enumerate` supplies positions for a list so both containers
-            # drive the same loop; the position is discarded, because list
-            # order is preserved by appending in iteration order.
-            entries = source.items() if source_is_dict else enumerate(source)
-            for key, value in entries:
-                if source_is_dict and type(key) is not str:
-                    return "schema-not-serializable", None
-                nodes += 1
-                if nodes > _SCHEMA_MAX_NODES:
-                    return "schema-too-large", None
-                if child_depth > _SCHEMA_MAX_DEPTH:
-                    return "schema-too-deep", None
-                value_type = type(value)
-                if value_type is dict:
-                    copied: Any = {}
-                    stack.append((value, copied, child_depth))
-                elif value_type is list:
-                    copied = []
-                    stack.append((value, copied, child_depth))
-                elif value_type is float:
-                    # `value` is proven exact float, so isfinite runs no hook.
-                    if not math.isfinite(value):
-                        return "schema-non-finite-number", None
-                    copied = value
-                elif value_type is bool or value_type is int or value_type is str:
-                    copied = value
-                elif value is None:
-                    copied = None
-                else:
-                    return "schema-not-serializable", None
-                if source_is_dict:
-                    destination[key] = copied
-                else:
-                    destination.append(copied)
-    except RuntimeError:
-        return "schema-changed-during-validation", None
-
-    # From here on only the detached snapshot is read. `json.dumps` cannot
-    # see a caller container, so nothing the caller does now can reach the
-    # encoding, the size check, or the request.
-    try:
-        encoded = json.dumps(root, allow_nan=False, ensure_ascii=False)
-    except (ValueError, TypeError, RecursionError):
-        # Unreachable for a document the walk accepted; kept so the function
-        # is total rather than relying on that reasoning holding forever.
-        return "schema-not-serializable", None
-
-    # Every accepted element is an exact built-in, but an exact `str` may
-    # still hold an unpaired UTF-16 surrogate. `json.dumps` accepts one and
-    # emits it verbatim; the transport cannot. Encoding the document here is
-    # the only place that discovers it while a refusal is still possible -
-    # left to the SDK it surfaces as an uncaught UnicodeEncodeError from
-    # inside `complete_structured`, which this contract promises never to do.
-    try:
-        encoded.encode("utf-8")
-    except UnicodeEncodeError:
-        return "schema-not-utf8-encodable", None
-
-    if len(encoded) > _SCHEMA_MAX_CHARS:
-        return "schema-too-large", None
-    return None, root
-
-
-def build_response_format(
-    dialect: str, request: StructuredOutputRequest
-) -> Optional[dict[str, Any]]:
-    """Build the dialect-exact ``response_format`` object, or ``None``.
-
-    Callers must validate first; :func:`plan_structured_request` is the
-    supported entry point and calls this only after every check has passed.
-
-    The dispatch is an inlined chain of exact-string comparisons. It reads no
-    module-level mapping, so no rebinding of :data:`SUPPORTED_DIALECTS` or of
-    :data:`DIALECT_WIRE_SHAPES` can redirect a dialect to another runtime's
-    shape or introduce a fifth. An unrecognised dialect falls through to
-    ``None``, which every caller treats as a refusal.
-    """
-    if type(dialect) is not str:
-        return None
-    schema = request.schema
-
-    if dialect == "llama-cpp":
-        # Nested, per the pinned tools/server/server-common.cpp, which reads
-        # the flat `schema` key only for type=json_object. Kept as its own
-        # branch even though it matches Ollama today, so a future divergence
-        # in either runtime cannot be hidden behind a shared one.
-        return {"type": "json_schema", "json_schema": {"schema": schema}}
-    if dialect == "ollama":
-        # Nested; no name field exists in the Go struct, so none is sent.
-        return {"type": "json_schema", "json_schema": {"schema": schema}}
-    if dialect == "vllm":
-        # The wire name is an inlined literal, NOT a read of
-        # STRUCTURED_WIRE_NAME. This is the one value in the object that both
-        # leaves the process and is not caller data, so resolving it through
-        # a module attribute would have put arbitrary text on the wire for
-        # anyone able to rebind that attribute - reopening by the back door
-        # the exact leak that removing the caller-supplied name closed.
-        return {
-            "type": "json_schema",
-            "json_schema": {"name": "structured_output", "schema": schema},
-        }
-    if dialect == "sglang":
-        # Byte-identical to vLLM today; kept as its own branch so a future
-        # divergence cannot be hidden behind a shared one. Same inlined
-        # literal, for the same reason.
-        return {
-            "type": "json_schema",
-            "json_schema": {"name": "structured_output", "schema": schema},
-        }
-    return None
-
-
-def plan_structured_request(
-    dialect: Any,
-    request: Any,
-    *,
-    has_tools: bool = False,
-) -> StructuredRequestPlan:
-    """Validate a structured request and produce its dialect-exact wire shape.
-
-    Total: returns a plan for every input and never raises. The order below
-    is fixed, and the first refusal wins because later checks are not
-    meaningful once an earlier one has failed:
-
-    1. ``dialect-not-configured``   - no dialect was configured at all.
-    2. ``dialect-not-exact-str``    - a non-string was supplied.
-    3. ``dialect-unsupported``      - a string naming no verified runtime.
-    4. ``request-not-exact-type``   - not exactly a
-       :class:`StructuredOutputRequest`.
-    5. ``tools-with-structured-unsupported`` - see below.
-    6. ``schema-*``                 - see :func:`_schema_refusal`.
-
-    There is no name check because there is no caller-supplied name; see
-    "The wire name is not caller data" in the module docstring.
-
-    On the tool refusal: the interaction between a tool declaration and a
-    ``response_format`` constraint was **not** verified at the pinned
-    revisions of any of the four runtimes, and tool-choice behaviour is out
-    of scope for this package. Rather than send both and describe the result
-    as supported, this refuses the combination. That is a claim about the
-    evidence, not about the runtimes: it says the combination is unverified
-    here, not that it is impossible.
-    """
-    if dialect is None:
-        return StructuredRequestPlan(ok=False, refusal="dialect-not-configured")
-    if type(dialect) is not str:
-        return StructuredRequestPlan(ok=False, refusal="dialect-not-exact-str")
-    if not is_supported_dialect(dialect):
-        return StructuredRequestPlan(ok=False, refusal="dialect-unsupported")
-    if type(request) is not StructuredOutputRequest:
-        return StructuredRequestPlan(ok=False, refusal="request-not-exact-type")
-    if has_tools is not False:
-        return StructuredRequestPlan(
-            ok=False, refusal="tools-with-structured-unsupported"
+        Membership is decided by inlined comparisons rather than by reading
+        :data:`SUPPORTED_DIALECTS`, so the answer cannot be changed by
+        rebinding a module attribute. A ``str`` subclass is refused by
+        exact-type identity before any comparison runs, so no overridden
+        ``__eq__`` or ``__hash__`` is ever invoked - and the identity check
+        itself resolves no module-level name.
+        """
+        if _type(value) is not _str:
+            return False
+        return (
+            value == "llama-cpp"
+            or value == "ollama"
+            or value == "vllm"
+            or value == "sglang"
         )
 
-    # Validation and snapshotting are one traversal, so the accepted
-    # snapshot is exactly the document that was inspected. `_validated_snapshot`
-    # never reads a caller container twice, which is what removes the window
-    # an earlier revision had between checking the caller's data and
-    # serialising it.
-    #
-    # The snapshot matters because `StructuredOutputRequest` is frozen and
-    # freezing a field does not freeze the object it points at: the caller
-    # still holds the very dict that was walked, and could mutate it after
-    # the checks passed. Every guarantee above would then describe a document
-    # that is no longer the one being sent.
-    schema_refusal, snapshot = _validated_snapshot(request.schema)
-    if schema_refusal is not None:
-        return StructuredRequestPlan(ok=False, refusal=schema_refusal)
-    if snapshot is None:
-        # Unreachable while the acceptance path always returns a snapshot.
-        # Written as a refusal rather than an assert so that behaviour is
-        # identical under -O and -OO, where asserts are stripped out.
-        return StructuredRequestPlan(ok=False, refusal="schema-not-serializable")
+    return is_supported_dialect
 
-    response_format = build_response_format(
-        dialect, StructuredOutputRequest(schema=snapshot)
-    )
-    if response_format is None:
-        # Unreachable while the dispatch and the guard agree; if they ever
-        # drift, drift refuses rather than sending an unshaped request.
-        return StructuredRequestPlan(ok=False, refusal="dialect-unsupported")
-    return StructuredRequestPlan(ok=True, response_format=response_format)
+
+is_supported_dialect = _closed_dialect_predicate()
+
+
+def _closed_pre_dialect_predicate():
+    """Build :func:`is_pre_dialect_refusal`, builtins bound in cells.
+
+    Same reasoning as :func:`_closed_dialect_predicate`.
+    """
+    _type = type
+    _str = str
+
+    def is_pre_dialect_refusal(token: Any) -> bool:
+        """True for the refusals decided BEFORE a dialect was established.
+
+        These three are reached while the dialect is still unknown, absent,
+        or rejected, so a carrier reporting one of them has no verified
+        dialect to name and must carry none. Every other refusal in the
+        vocabulary is reached only after the dialect passed its gate, so a
+        carrier reporting one of those must name the dialect it was refused
+        for - otherwise an operator cannot tell which runtime it belongs to.
+
+        The literals are inlined and the builtins are bound in cells, so the
+        decision resolves no rebindable name.
+        """
+        if _type(token) is not _str:
+            return False
+        return (
+            token == "dialect-not-configured"
+            or token == "dialect-not-exact-str"
+            or token == "dialect-unsupported"
+        )
+
+    return is_pre_dialect_refusal
+
+
+is_pre_dialect_refusal = _closed_pre_dialect_predicate()
+
+
+def _closed_snapshot_validator():
+    """Build :func:`_validated_snapshot`, builtins bound in closure cells.
+
+    Every type decision this function makes was previously a module-global
+    lookup, so an ordinary assignment such as
+    ``structured_request._dict = <replacement>`` could change which values it
+    accepted into a snapshot that is then transmitted. The builtins are now
+    bound in cells and cannot be reached by rebinding a name.
+
+    Deliberately NOT captured: ``_SCHEMA_MAX_CHARS``, ``_SCHEMA_MAX_DEPTH``
+    and ``_SCHEMA_MAX_NODES`` stay module-level and adjustable. They bound
+    HOW MUCH is accepted, never WHAT TYPE, so rebinding one cannot admit a
+    foreign type or a ``_str`` subclass - it can only widen or narrow a size
+    limit, which a deployment may legitimately want to do. That boundary is
+    stated rather than quietly assumed.
+
+    ``json.dumps`` and ``math.isfinite`` are likewise reached through their
+    modules: replacing a stdlib function is arbitrary code replacement, not
+    name rebinding, and is out of scope exactly as it has been since the
+    OMI-V1 seventh round.
+    """
+    _type = type
+    _str = str
+    _dict = dict
+    _list = list
+    _float = float
+    _bool = bool
+    _int = int
+    _len = len
+    _enumerate = enumerate
+
+    def _validated_snapshot(
+        schema: Any,
+    ) -> tuple[Optional[StructuredRefusal], Optional[_dict[_str, Any]]]:
+        """Validate a schema document and build its detached snapshot at once.
+
+        Returns ``(refusal, None)`` on refusal and ``(None, snapshot)`` on
+        acceptance, where ``snapshot`` shares no container with the caller.
+
+        **Why validation and copying are one traversal.** An earlier revision
+        walked the caller's containers to validate them, and then handed the
+        caller's own object to ``json.dumps`` to produce the text it re-parsed as
+        a snapshot. Those are two separate reads of caller-owned data, and
+        anything the caller changed in between landed in the snapshot without
+        ever having been checked: an over-depth structure, an over-node
+        structure, or a type the walk would have refused could all be
+        substituted into an already-visited slot and be serialised as though
+        validated.
+
+        Closing that window means never reading a caller container twice. Each
+        value is checked and copied into the detached structure at the moment it
+        is first seen, so the accepted snapshot contains exactly - and only - the
+        values this function inspected. Everything afterwards, including the
+        encoding, reads the snapshot; the caller's object is never touched again.
+        Scalars are shared rather than copied because ``_str``, ``_int``,
+        ``_float``, ``_bool`` and ``None`` are immutable, so sharing them cannot
+        give the caller a way back in.
+
+        The walk is iterative, so a deeply nested document is refused by the
+        depth bound rather than by exhausting the interpreter stack. Only exact
+        built-in JSON types are accepted; every element is checked by
+        ``_type(x) is ...`` identity, so no supplied ``__eq__``, ``__hash__``,
+        ``__len__``, ``__iter__``, or ``__bool__`` runs on caller data.
+
+        Nothing about the offending element - its value, position, key, or type
+        name - reaches the returned token.
+        """
+        if _type(schema) is not _dict:
+            return "schema-not-exact-dict", None
+        if not schema:
+            # An empty schema constrains nothing. Sending it would ask for
+            # structured output and receive whatever the model liked, which is
+            # exactly the false-success this contract exists to prevent.
+            return "schema-empty", None
+
+        root: _dict[_str, Any] = {}
+        # This function promises a refusal rather than an exception for every
+        # input. A container mutated by another thread mid-read raises
+        # RuntimeError ("dictionary changed size during iteration") from the
+        # iteration itself, which no per-element type check can prevent - so it
+        # is caught and reported as a refusal like every other rejection.
+        try:
+            # (source container, its detached counterpart, depth of the source)
+            stack: _list[tuple[Any, Any, _int]] = [(schema, root, 0)]
+            nodes = 1  # the root document itself
+            while stack:
+                source, destination, depth = stack.pop()
+                child_depth = depth + 1
+                source_is_dict = _type(source) is _dict
+                # `enumerate` supplies positions for a _list so both containers
+                # drive the same loop; the position is discarded, because _list
+                # order is preserved by appending in iteration order.
+                entries = source.items() if source_is_dict else _enumerate(source)
+                for key, value in entries:
+                    if source_is_dict and _type(key) is not _str:
+                        return "schema-not-serializable", None
+                    nodes += 1
+                    if nodes > _SCHEMA_MAX_NODES:
+                        return "schema-too-large", None
+                    if child_depth > _SCHEMA_MAX_DEPTH:
+                        return "schema-too-deep", None
+                    value_type = _type(value)
+                    if value_type is _dict:
+                        copied: Any = {}
+                        stack.append((value, copied, child_depth))
+                    elif value_type is _list:
+                        copied = []
+                        stack.append((value, copied, child_depth))
+                    elif value_type is _float:
+                        # `value` is proven exact _float, so isfinite runs no hook.
+                        if not math.isfinite(value):
+                            return "schema-non-finite-number", None
+                        copied = value
+                    elif value_type is _bool or value_type is _int or value_type is _str:
+                        copied = value
+                    elif value is None:
+                        copied = None
+                    else:
+                        return "schema-not-serializable", None
+                    if source_is_dict:
+                        destination[key] = copied
+                    else:
+                        destination.append(copied)
+        except RuntimeError:
+            return "schema-changed-during-validation", None
+
+        # From here on only the detached snapshot is read. `json.dumps` cannot
+        # see a caller container, so nothing the caller does now can reach the
+        # encoding, the size check, or the request.
+        try:
+            encoded = json.dumps(root, allow_nan=False, ensure_ascii=False)
+        except (ValueError, TypeError, RecursionError):
+            # Unreachable for a document the walk accepted; kept so the function
+            # is total rather than relying on that reasoning holding forever.
+            return "schema-not-serializable", None
+
+        # Every accepted element is an exact built-in, but an exact `_str` may
+        # still hold an unpaired UTF-16 surrogate. `json.dumps` accepts one and
+        # emits it verbatim; the transport cannot. Encoding the document here is
+        # the only place that discovers it while a refusal is still possible -
+        # left to the SDK it surfaces as an uncaught UnicodeEncodeError from
+        # inside `complete_structured`, which this contract promises never to do.
+        try:
+            encoded.encode("utf-8")
+        except UnicodeEncodeError:
+            return "schema-not-utf8-encodable", None
+
+        if _len(encoded) > _SCHEMA_MAX_CHARS:
+            return "schema-too-large", None
+        return None, root
+
+    return _validated_snapshot
+
+
+_validated_snapshot = _closed_snapshot_validator()
+
+
+def _closed_response_format_builder():
+    """Build :func:`build_response_format`, builtins bound in cells."""
+    _type = type
+    _str = str
+
+    def build_response_format(
+        dialect: str, request: StructuredOutputRequest
+    ) -> Optional[dict[str, Any]]:
+        """Build the dialect-exact ``response_format`` object, or ``None``.
+
+        Callers must validate first; :func:`plan_structured_request` is the
+        supported entry point and calls this only after every check passed.
+
+        The dispatch is an inlined chain of exact-string comparisons against
+        builtins bound in closure cells. It reads no module-level mapping and
+        no module-level builtin, so neither rebinding
+        :data:`SUPPORTED_DIALECTS` or :data:`DIALECT_WIRE_SHAPES` nor
+        rebinding ``type``/``str`` on this module can redirect a dialect to
+        another runtime's shape, admit a ``str`` subclass, or introduce a
+        fifth. An unrecognised dialect falls through to ``None``, which every
+        caller treats as a refusal.
+        """
+        if _type(dialect) is not _str:
+            return None
+        schema = request.schema
+
+        if dialect == "llama-cpp":
+            # Nested, per the pinned tools/server/server-common.cpp, which reads
+            # the flat `schema` key only for type=json_object. Kept as its own
+            # branch even though it matches Ollama today, so a future divergence
+            # in either runtime cannot be hidden behind a shared one.
+            return {"type": "json_schema", "json_schema": {"schema": schema}}
+        if dialect == "ollama":
+            # Nested; no name field exists in the Go struct, so none is sent.
+            return {"type": "json_schema", "json_schema": {"schema": schema}}
+        if dialect == "vllm":
+            # The wire name is an inlined literal, NOT a read of
+            # STRUCTURED_WIRE_NAME. This is the one value in the object that both
+            # leaves the process and is not caller data, so resolving it through
+            # a module attribute would have put arbitrary text on the wire for
+            # anyone able to rebind that attribute - reopening by the back door
+            # the exact leak that removing the caller-supplied name closed.
+            return {
+                "type": "json_schema",
+                "json_schema": {"name": "structured_output", "schema": schema},
+            }
+        if dialect == "sglang":
+            # Byte-identical to vLLM today; kept as its own branch so a future
+            # divergence cannot be hidden behind a shared one. Same inlined
+            # literal, for the same reason.
+            return {
+                "type": "json_schema",
+                "json_schema": {"name": "structured_output", "schema": schema},
+            }
+        return None
+
+    return build_response_format
+
+
+build_response_format = _closed_response_format_builder()
+
+
+def _closed_planner():
+    """Build :func:`plan_structured_request`, dependencies bound in cells.
+
+    The planner is the single supported entry point, so every name it
+    resolved was a way to change what a caller got back without touching
+    the planner itself: the dialect predicate, the request type it checks
+    against, the validator that builds the snapshot, the builder that shapes
+    it, the carrier that validates the result, and the two builtins the
+    exact-type checks use. All of them are bound here instead.
+    """
+    _type = type
+    _str = str
+    _dialect_ok = is_supported_dialect
+    _request_type = StructuredOutputRequest
+    _snapshot = _validated_snapshot
+    _build = build_response_format
+    _Plan = StructuredRequestPlan
+
+    def plan_structured_request(
+        dialect: Any,
+        request: Any,
+        *,
+        has_tools: bool = False,
+    ) -> StructuredRequestPlan:
+        """Validate a structured request and produce its dialect-exact wire shape.
+
+        Total: returns a plan for every input and never raises. The order below
+        is fixed, and the first refusal wins because later checks are not
+        meaningful once an earlier one has failed:
+
+        1. ``dialect-not-configured``   - no dialect was configured at all.
+        2. ``dialect-not-exact-str``    - a non-string was supplied.
+        3. ``dialect-unsupported``      - a string naming no verified runtime.
+        4. ``request-not-exact-type``   - not exactly a
+           :class:`StructuredOutputRequest`.
+        5. ``tools-with-structured-unsupported`` - see below.
+        6. ``schema-*``                 - see :func:`_validated_snapshot`.
+
+        There is no name check because there is no caller-supplied name; see
+        "The wire name is not caller data" in the module docstring.
+
+        On the tool refusal: the interaction between a tool declaration and a
+        ``response_format`` constraint was **not** verified at the pinned
+        revisions of any of the four runtimes, and tool-choice behaviour is out
+        of scope for this package. Rather than send both and describe the result
+        as supported, this refuses the combination. That is a claim about the
+        evidence, not about the runtimes: it says the combination is unverified
+        here, not that it is impossible.
+        """
+        if dialect is None:
+            return _Plan(ok=False, refusal="dialect-not-configured")
+        if _type(dialect) is not _str:
+            return _Plan(ok=False, refusal="dialect-not-exact-str")
+        if not _dialect_ok(dialect):
+            return _Plan(ok=False, refusal="dialect-unsupported")
+        if _type(request) is not _request_type:
+            return _Plan(ok=False, refusal="request-not-exact-type")
+        if has_tools is not False:
+            return _Plan(
+                ok=False, refusal="tools-with-structured-unsupported"
+            )
+
+        # Validation and snapshotting are one traversal, so the accepted
+        # snapshot is exactly the document that was inspected. `_validated_snapshot`
+        # never reads a caller container twice, which is what removes the window
+        # an earlier revision had between checking the caller's data and
+        # serialising it.
+        #
+        # The snapshot matters because `StructuredOutputRequest` is frozen and
+        # freezing a field does not freeze the object it points at: the caller
+        # still holds the very dict that was walked, and could mutate it after
+        # the checks passed. Every guarantee above would then describe a document
+        # that is no longer the one being sent.
+        schema_refusal, snapshot = _snapshot(request.schema)
+        if schema_refusal is not None:
+            return _Plan(ok=False, refusal=schema_refusal)
+        if snapshot is None:
+            # Unreachable while the acceptance path always returns a snapshot.
+            # Written as a refusal rather than an assert so that behaviour is
+            # identical under -O and -OO, where asserts are stripped out.
+            return _Plan(ok=False, refusal="schema-not-serializable")
+
+        response_format = _build(
+            dialect, _request_type(schema=snapshot)
+        )
+        if response_format is None:
+            # Unreachable while the dispatch and the guard agree; if they ever
+            # drift, drift refuses rather than sending an unshaped request.
+            return _Plan(ok=False, refusal="dialect-unsupported")
+        return _Plan(ok=True, response_format=response_format)
+
+    return plan_structured_request
+
+
+plan_structured_request = _closed_planner()
 
 
 DIALECT_WIRE_SHAPES: Final[dict[str, str]] = {
