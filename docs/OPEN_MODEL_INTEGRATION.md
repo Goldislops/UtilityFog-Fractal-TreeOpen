@@ -976,7 +976,7 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-352 hermetic tests across five files, injected clients only — no network, no
+418 hermetic tests across six files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
@@ -986,6 +986,7 @@ key, no endpoint, no download.
 | `tests/test_omi_v2_exchange.py` | 52 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
 | `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
+| `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
@@ -1038,3 +1039,50 @@ caller data and is transmitted verbatim**, with no secret check. A caller who
 writes a credential into a schema key or description puts it on the wire.
 What is closed is narrower and exact — no field whose value *this package
 chooses* can carry caller text off the machine.
+
+### 16.10 Jack's second independent HOLD round (2026-08-23)
+
+A second independent audit cleared the original six gates and the eight-blob
+evidence matrix, and reproduced three remaining gates. All three are closed.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **A mutation window sat between validation and snapshot.** Validation walked the caller's containers; the snapshot was then produced by handing the **caller's own object** to `json.dumps` and re-parsing the text. That is a second read of caller-owned data, so anything changed in between was serialised having never been checked — an over-depth structure, an over-node structure, or a refused type could all be substituted into an already-visited slot and accepted. | Validation and copying are now **one traversal**. Each value is checked and written into the detached structure the moment it is first seen, so the accepted snapshot contains exactly and only what was inspected. Everything afterwards — including the encoding — reads the snapshot; the caller's object is never touched again. Scalars are shared rather than copied because `str`, `int`, `float`, `bool` and `None` are immutable. |
+| 2 | **Refusal, failure and dialect decisions ran through rebindable names.** `REFUSAL_TOKENS`, `EXCHANGE_REFUSALS`, `RESPONSE_FAILURES` and the imported `is_supported_dialect` aliases were read from module scope inside every carrier's `__post_init__`, so rebinding one attribute admitted arbitrary — including secret-shaped — refusal, failure or dialect text into a result. | Every decision now runs against an **object captured when the class was defined**, bound as a defaulted parameter of `__post_init__`. A dataclass calls it with no arguments, so nothing is ever looked up again. All three carriers now resolve **no trust name at all** — asserted structurally against `co_names`, including the builtins used in the exact-type checks. |
+| 3 | **Cross-field coherence was incomplete.** A carrier could report success without naming a dialect, name a dialect on a refusal taken before the dialect gate, omit one on a refusal taken after it, or carry an arbitrary dictionary on a successful plan. The exchange also *described* its value as read-only while accepting a plain `dict`. | Full coherence is enforced: success requires a verified dialect; pre-dialect refusals (the three dialect refusals plus `backend-not-structured-capable`) carry none; post-dialect refusals and every response failure require one; and a successful plan must carry one of the **two exact dialect wire shapes**, not merely a dictionary. The value claim is made true rather than softened — whatever is supplied is re-wrapped over a fresh top-level copy, so a caller holding the original cannot change what the result reports. |
+
+**How gate 1 is proved deterministically.** The window is reproduced with no
+threads and no timing: `json.dumps` itself performs the mutation, which is
+exactly the instant the old design re-read caller data. If the serialiser
+still received the caller's object, the injected payload would land in the
+snapshot — or, for a refused type, would fail the plan. Three controls inject
+an over-depth structure, an over-node structure and a wrong type, and each
+asserts three things: that the injection really happened, that the serialiser
+was **not** handed the caller's document, and that the snapshot still contains
+only what was validated. A companion control walks both graphs and asserts
+they share no container object, with a guard proving the share-detector
+itself fires.
+
+**How gate 2 is proved.** A fixture rebinds **every** exported or global
+mirror in **every** consuming module — sixteen in total, across
+`structured_request`, `openai_compat_backend` and `structured_exchange`,
+including the wire name, the dialect tuple, the shape mirror, `AgentResponse`
+and `MappingProxyType` — to secret-shaped values, and then asserts that no
+secret-shaped refusal, failure, dialect, wire shape or response can be
+constructed, that a built request still carries the correct wire name, and
+that no fifth dialect opens. A guard asserts the valid cases remain valid, so
+a check that rejected everything could not pass by accident.
+
+**Scope note.** The captures close rebinding of a *name*. They do not claim to
+survive arbitrary code replacement — overwriting `__defaults__`, replacing the
+method object, or swapping the module in `sys.modules` remain out of scope, as
+they have been since the OMI-V1 seventh round. That distinction is the whole
+point of stating it: a reader should be able to tell which attacks this design
+stops and which it does not pretend to.
+
+**The read-only boundary, stated exactly.** `StructuredExchange.value` is a
+genuinely read-only view over a fresh **top-level** copy. The proxy is
+shallow, exactly as `StructuredOutcome.value` is: nested containers reached
+through it remain ordinary mutable objects, and a control asserts that
+directly rather than leaving it implied. It prevents top-level mutation of a
+shared result; it does not claim deep immutability.
