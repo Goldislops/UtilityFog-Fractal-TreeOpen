@@ -812,54 +812,127 @@ def test_s4_once_keeps_its_established_string(monkeypatch, tmp_path, capsys):
     assert "  Latest snapshot: v070_gen1.npz" in capsys.readouterr().out
 
 
-# -- S5: the selected entry disappeared before the later metadata read --------
+# -- S5: the later metadata read did not establish an age ---------------------
 #
 # `DiscoverySucceeded` carries `ordered`, `unreadable`, `processed` and
 # `matched` -- and NO modification time. The age comparison therefore needs a
-# SECOND metadata read, after selection, and that read races the producer and
-# anything that removes files. This tranche does not close that race. It gives
-# it a fixed outcome instead of an `OSError` escaping into the loop's blanket
-# handler (or, from `--once`, into a traceback).
+# SECOND metadata read, after selection, and `check_engine_health` catches the
+# whole of `OSError` there.
+#
+# That read can fail for ANY `OSError` cause -- the entry having been removed,
+# a permission or sharing denial, or a general I/O or mount failure are only
+# examples. The watchdog cannot distinguish them and does not try: one fixed,
+# path-free, cause-neutral outcome covers all of them, because a message that
+# names a cause it did not establish is worse than one that names none. On a
+# network-mounted data directory the permission and I/O cases are not exotic.
+#
+# This tranche does not close the underlying race, lock or fault. It gives the
+# failure a fixed outcome instead of an `OSError` escaping into the loop's
+# blanket handler (or, from `--once`, into a traceback).
 
 
-def _vanishing(target):
+# Factories, not stored instances. Each invocation raises a FRESH exception, so
+# no test can pass by re-raising an object another call already unwound, and
+# the `__traceback__` one raise attaches cannot accumulate into the next.
+STAT_FAILURES = [
+    ("missing", lambda: FileNotFoundError(2, "No such file or directory")),
+    ("permission", lambda: PermissionError(13, "Permission denied")),
+    ("generic_io", lambda: OSError(5, "Input/output error")),
+]
+STAT_FAILURE_IDS = [name for name, _ in STAT_FAILURES]
+
+# Vocabulary that would assert a cause the second metadata read never
+# established. `OSError` is caught whole, so none of these may appear.
+CAUSE_WORDS = (
+    "went away", "disappear", "deleted", "removed", "missing", "gone",
+    "vanish", "permission", "denied", "locked", "unreadable",
+)
+
+
+def _failing_stat(target, make_error):
     real_stat = pathlib.Path.stat
 
     def stat(self, *args, **kwargs):
         if self == target:
-            raise OSError("gone")
+            raise make_error()
         return real_stat(self, *args, **kwargs)
 
     return stat
 
 
-def test_s5_health_reports_a_fixed_unknown_without_raising(monkeypatch, tmp_path):
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_health_reports_the_fixed_unknown_for_every_cause(
+    name, make, monkeypatch, tmp_path
+):
     target = _touch_snapshot(tmp_path, "v070_gen1.npz")
     monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(pathlib.Path, "stat", _vanishing(target))
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
     healthy, status = watchdog.check_engine_health([(1, "x")])
     assert healthy is False
     assert status == watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
 
 
-def test_s5_once_does_not_traceback_and_keeps_exit_zero(monkeypatch, tmp_path, capsys):
+def test_s5_every_cause_produces_the_identical_status(monkeypatch, tmp_path):
+    # Independent of what the message happens to say: the three causes must be
+    # indistinguishable from the outside.
+    seen = set()
+    for _, make in STAT_FAILURES:
+        with monkeypatch.context() as patch:
+            target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+            patch.setattr(watchdog, "DATA_DIR", tmp_path)
+            patch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+            seen.add(watchdog.check_engine_health([(1, "x")]))
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_once_does_not_traceback_and_keeps_exit_zero(
+    name, make, monkeypatch, tmp_path, capsys
+):
     single = "ProcessId   : 1234\nCommandLine : python.exe -u run_v070_engine.py\n"
     target = _touch_snapshot(tmp_path, "v070_gen1.npz")
     monkeypatch.setattr(
         watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout=single)])
     )
     monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(pathlib.Path, "stat", _vanishing(target))
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
     assert watchdog.run_once() == 0
     output = capsys.readouterr().out
     assert watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE in output
     assert "Traceback" not in output
 
 
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_discloses_no_path_for_any_cause(name, make, monkeypatch, tmp_path, capsys):
+    single = "ProcessId   : 1234\nCommandLine : python.exe -u run_v070_engine.py\n"
+    target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout=single)])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+    watchdog.run_once()
+    output = capsys.readouterr().out
+    assert str(tmp_path) not in output
+    assert "v070_gen1.npz" not in output
+
+
 def test_s5_message_is_path_free():
     assert ".npz" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
     assert "/" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
     assert "\\" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+
+
+def test_s5_message_names_no_cause():
+    lowered = watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE.lower()
+    offenders = [word for word in CAUSE_WORDS if word in lowered]
+    assert offenders == []
+
+
+def test_s5_message_states_only_what_was_observed():
+    message = watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+    assert "metadata could not be read" in message
+    assert "age not established" in message
 
 
 # -- the fixed messages stay distinct from one another ------------------------
