@@ -368,60 +368,79 @@ def _closed_wire_shape_predicate():
 is_supported_wire_shape = _closed_wire_shape_predicate()
 
 
-@dataclass(frozen=True)
-class StructuredRequestPlan:
-    """Outcome of validating one structured request against one dialect.
+def _build_request_plan_class():
+    """Build :class:`StructuredRequestPlan` with its authorities in cells.
 
-    On success ``response_format`` is the exact object to place under the
-    ``response_format`` request key - already dialect-shaped, and verified to
-    be one of the two shapes the four dialects actually use. On refusal it is
-    ``None`` and ``refusal`` carries a single closed token.
+    An earlier revision bound these as DEFAULTED PARAMETERS of
+    ``__post_init__``. That closed name rebinding and opened something
+    worse: the parameters were directly addressable, so a caller needed no
+    rebinding at all - just a keyword argument - to supply their own
+    vocabulary or their own shape check. A capture that a caller can pass is
+    not a capture; it is an injection point with a leading underscore.
 
-    Every trust decision below is taken against a value captured when this
-    class was defined, not a name looked up when an instance is built - see
-    the note on ``__post_init__``.
+    Binding them here puts them in cells no caller can address, and leaves
+    the documented public signature exactly as it reads: ``__post_init__()``
+    takes nothing, and passing a former capture keyword raises TypeError.
     """
+    _tokens = REFUSAL_TOKENS
+    _wire_shape_ok = is_supported_wire_shape
+    _type = type
+    _str = str
+    _bool = bool
+    _ValueError = ValueError
 
-    ok: bool
-    response_format: Optional[dict[str, Any]] = None
-    refusal: Optional[StructuredRefusal] = None
+    @dataclass(frozen=True)
+    class StructuredRequestPlan:
+        """Outcome of validating one structured request against one dialect.
 
-    def __post_init__(
-        self,
-        _tokens: frozenset = REFUSAL_TOKENS,
-        _wire_shape_ok=is_supported_wire_shape,
-        _type=type,
-        _str=str,
-        _bool=bool,
-    ) -> None:
-        """Validate the carrier's own coherence.
+        On success ``response_format`` is the exact object to place under the
+        ``response_format`` request key - already dialect-shaped, and verified to
+        be one of the two shapes the four dialects actually use. On refusal it is
+        ``None`` and ``refusal`` carries a single closed token.
 
-        The defaulted parameters are the point, not clutter. A dataclass
-        calls ``self.__post_init__()`` with no arguments, so each default is
-        bound to the OBJECT it names when the class is defined and is never
-        looked up again. Rebinding ``REFUSAL_TOKENS`` or
-        ``is_supported_wire_shape`` on the module therefore cannot widen what
-        a carrier will accept - which reading them as globals did allow,
-        including admitting arbitrary secret-shaped refusal text.
+        Every trust decision below is taken against a value captured when this
+        class was defined, not a name looked up when an instance is built - see
+        the note on ``__post_init__``.
         """
-        # Exact bool, not truthiness: a foreign object with __bool__ must not
-        # be able to present itself as a successful plan.
-        if _type(self.ok) is not _bool:
-            raise ValueError("ok must be exactly a bool")
-        if self.refusal is not None and (
-            _type(self.refusal) is not _str or self.refusal not in _tokens
-        ):
-            raise ValueError("refusal must be a token from the closed vocabulary")
-        if self.ok and self.refusal is not None:
-            raise ValueError("a successful plan cannot carry a refusal code")
-        if not self.ok and self.refusal is None:
-            raise ValueError("a refused plan must carry a refusal code")
-        if not self.ok and self.response_format is not None:
-            raise ValueError("a refused plan must not carry a response format")
-        if self.ok and not _wire_shape_ok(self.response_format):
-            raise ValueError(
-                "a successful plan must carry a supported dialect wire shape"
-            )
+
+        ok: bool
+        response_format: Optional[dict[str, Any]] = None
+        refusal: Optional[StructuredRefusal] = None
+
+        def __post_init__(self) -> None:
+            """Validate the carrier's own coherence.
+
+            The defaulted parameters are the point, not clutter. A dataclass
+            calls ``self.__post_init__()`` with no arguments, so each default is
+            bound to the OBJECT it names when the class is defined and is never
+            looked up again. Rebinding ``REFUSAL_TOKENS`` or
+            ``is_supported_wire_shape`` on the module therefore cannot widen what
+            a carrier will accept - which reading them as globals did allow,
+            including admitting arbitrary secret-shaped refusal text.
+            """
+            # Exact bool, not truthiness: a foreign object with __bool__ must not
+            # be able to present itself as a successful plan.
+            if _type(self.ok) is not _bool:
+                raise _ValueError("ok must be exactly a bool")
+            if self.refusal is not None and (
+                _type(self.refusal) is not _str or self.refusal not in _tokens
+            ):
+                raise _ValueError("refusal must be a token from the closed vocabulary")
+            if self.ok and self.refusal is not None:
+                raise _ValueError("a successful plan cannot carry a refusal code")
+            if not self.ok and self.refusal is None:
+                raise _ValueError("a refused plan must carry a refusal code")
+            if not self.ok and self.response_format is not None:
+                raise _ValueError("a refused plan must not carry a response format")
+            if self.ok and not _wire_shape_ok(self.response_format):
+                raise _ValueError(
+                    "a successful plan must carry a supported dialect wire shape"
+                )
+
+    return StructuredRequestPlan
+
+
+StructuredRequestPlan = _build_request_plan_class()
 
 
 def _closed_dialect_predicate():
@@ -532,6 +551,26 @@ def _closed_snapshot_validator():
     _int = int
     _len = len
     _enumerate = enumerate
+    # Stdlib MODULES and exception classes, bound as objects. Reaching them
+    # through the module-level names `json` / `math` left an ordinary
+    # reassignment - `structured_request.json = <replacement>` - able to
+    # bypass the UTF-8 refusal entirely and admit an unpaired surrogate into
+    # a transmitted schema.
+    #
+    # The module object is captured rather than `json.dumps` itself, and the
+    # difference is deliberate: rebinding this module's `json` NAME is closed,
+    # while patching an attribute ON the captured stdlib module remains the
+    # documented arbitrary-code-replacement boundary - the same boundary as
+    # replacing a function object or swapping `sys.modules`. Keeping that door
+    # where it already was is also what lets the gate-1 controls drive a
+    # mutation at exactly the instant the serialiser runs.
+    _json = json
+    _math = math
+    _ValueError = ValueError
+    _TypeError = TypeError
+    _RecursionError = RecursionError
+    _RuntimeError = RuntimeError
+    _UnicodeEncodeError = UnicodeEncodeError
 
     def _validated_snapshot(
         schema: Any,
@@ -612,7 +651,7 @@ def _closed_snapshot_validator():
                         stack.append((value, copied, child_depth))
                     elif value_type is _float:
                         # `value` is proven exact _float, so isfinite runs no hook.
-                        if not math.isfinite(value):
+                        if not _math.isfinite(value):
                             return "schema-non-finite-number", None
                         copied = value
                     elif value_type is _bool or value_type is _int or value_type is _str:
@@ -625,15 +664,15 @@ def _closed_snapshot_validator():
                         destination[key] = copied
                     else:
                         destination.append(copied)
-        except RuntimeError:
+        except _RuntimeError:
             return "schema-changed-during-validation", None
 
         # From here on only the detached snapshot is read. `json.dumps` cannot
         # see a caller container, so nothing the caller does now can reach the
         # encoding, the size check, or the request.
         try:
-            encoded = json.dumps(root, allow_nan=False, ensure_ascii=False)
-        except (ValueError, TypeError, RecursionError):
+            encoded = _json.dumps(root, allow_nan=False, ensure_ascii=False)
+        except (_ValueError, _TypeError, _RecursionError):
             # Unreachable for a document the walk accepted; kept so the function
             # is total rather than relying on that reasoning holding forever.
             return "schema-not-serializable", None
@@ -646,7 +685,7 @@ def _closed_snapshot_validator():
         # inside `complete_structured`, which this contract promises never to do.
         try:
             encoded.encode("utf-8")
-        except UnicodeEncodeError:
+        except _UnicodeEncodeError:
             return "schema-not-utf8-encodable", None
 
         if _len(encoded) > _SCHEMA_MAX_CHARS:
