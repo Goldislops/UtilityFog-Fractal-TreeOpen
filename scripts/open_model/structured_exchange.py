@@ -121,13 +121,26 @@ class StructuredExchange:
       carrying every required key. This is *usability*, not schema
       conformance - see ``schema_conformance``.
 
-      ``value`` is a genuinely read-only view, not merely described as one:
-      whatever is supplied is re-wrapped over a fresh top-level copy, so a
-      caller who kept a reference to the mapping they passed in cannot reach
-      through it and change what the result reports. The proxy is **shallow**,
-      exactly as ``StructuredOutcome.value`` is - nested containers reached
-      through it are ordinary mutable objects. It prevents top-level mutation
-      of a shared result; it does not claim deep immutability.
+      ``value`` is supplied as an **exact ``dict``** and stored as a
+      genuinely read-only view over a fresh top-level copy, so a caller who
+      kept a reference to the dict they passed in cannot reach through it and
+      change what the result reports.
+
+      An exact ``MappingProxyType`` is **refused**, which is narrower than it
+      first appears to need to be and is deliberate. A proxy is an exact type
+      that can wrap an *arbitrary foreign mapping*, and copying one runs that
+      mapping's ``keys``/``__getitem__``/``__iter__``. An earlier revision
+      accepted a proxy and copied it, so a hostile mapping wrapped in one
+      raised caller-supplied text straight out of this constructor - a public
+      carrier-construction path executing foreign hooks. There is no
+      hook-free way to inspect what a proxy wraps, so the accepted type is
+      narrowed instead of inspected. ``request_structured_json`` adapts the
+      validator's proxy on the trusted internal path before it gets here.
+
+      The stored proxy is **shallow**, exactly as ``StructuredOutcome.value``
+      is - nested containers reached through it are ordinary mutable objects.
+      It prevents top-level mutation of a shared result; it does not claim
+      deep immutability.
     - **refused** - no request was sent. ``request_refusal`` says why.
       ``response_format_sent`` is False.
     - **unusable** - a request was sent and the answer did not validate.
@@ -255,12 +268,22 @@ class StructuredExchange:
             # nested containers reached through it are ordinary mutable
             # objects, so this prevents top-level mutation of a shared result
             # rather than claiming deep immutability.
-            if (
-                _type(self.value) is not _proxy
-                and _type(self.value) is not _dict
-            ):
+            #
+            # EXACT dict only - a MappingProxyType is deliberately NOT
+            # accepted here. A proxy is an exact type that can wrap an
+            # ARBITRARY foreign mapping, and copying one runs that mapping's
+            # `keys`/`__getitem__`/`__iter__`. An earlier revision accepted a
+            # proxy and copied it, so a hostile mapping wrapped in one raised
+            # caller-supplied text out of this constructor - a public
+            # carrier-construction path executing foreign hooks. Narrowing the
+            # public input to a type whose copy cannot call out closes that
+            # without needing to inspect what a proxy wraps, which there is no
+            # hook-free way to do. The canonical internal path in
+            # `request_structured_json` adapts the validator's proxy before it
+            # reaches here.
+            if _type(self.value) is not _dict:
                 raise ValueError(
-                    "a successful exchange must carry an exact mapping value"
+                    "a successful exchange must carry an exact dict value"
                 )
             _object.__setattr__(self, "value", _proxy(_dict(self.value)))
             if not self.response_format_sent:
@@ -319,6 +342,12 @@ def request_structured_json(
     system: Optional[str] = None,
     max_tokens: int = 2048,
     temperature: float = 0.0,
+    _validate=validate_structured_output,
+    _completion_type=StructuredCompletion,
+    _exchange_type=StructuredExchange,
+    _proxy=MappingProxyType,
+    _type=type,
+    _dict=dict,
 ) -> StructuredExchange:
     """Ask ``backend`` for schema-constrained JSON, then validate the answer.
 
@@ -338,7 +367,7 @@ def request_structured_json(
     """
     method = getattr(backend, "complete_structured", None)
     if not callable(method):
-        return StructuredExchange(
+        return _exchange_type(
             ok=False, request_refusal="backend-not-structured-capable"
         )
 
@@ -352,13 +381,13 @@ def request_structured_json(
     )
     # Exact type, not duck typing: a foreign object reaching the branches
     # below could otherwise supply its own `ok` and be believed.
-    if type(completion) is not StructuredCompletion:
-        return StructuredExchange(
+    if _type(completion) is not _completion_type:
+        return _exchange_type(
             ok=False, request_refusal="backend-not-structured-capable"
         )
 
     if not completion.ok:
-        return StructuredExchange(
+        return _exchange_type(
             ok=False,
             request_refusal=completion.refusal,
             dialect=completion.dialect,
@@ -370,11 +399,11 @@ def request_structured_json(
     # through unchanged is correct - the validator is total over any input and
     # reports `payload-not-exact-str`, which is the accurate description.
     payload = response.text if response is not None else None
-    outcome: StructuredOutcome = validate_structured_output(
+    outcome: StructuredOutcome = _validate(
         payload, required_keys=required_keys, max_chars=max_chars
     )
     if not outcome.ok:
-        return StructuredExchange(
+        return _exchange_type(
             ok=False,
             response_failure=outcome.failure,
             missing_key_indices=outcome.missing_key_indices,
@@ -382,9 +411,24 @@ def request_structured_json(
             response_format_sent=True,
         )
 
-    return StructuredExchange(
+    # Adapt the validator's proxy to the exact dict the carrier accepts.
+    # This is the trusted internal path and the conversion is safe BECAUSE of
+    # what `structured.py` guarantees: its `value` is always
+    # `MappingProxyType` over the exact `dict` that `json.loads` produced
+    # under an `object_pairs_hook` which itself returns an exact `dict`. No
+    # foreign mapping can be behind it. `_validate` is captured rather than
+    # looked up, so that guarantee cannot be swapped out by rebinding a name.
+    # A value that is not exactly that proxy is refused rather than copied.
+    if _type(outcome.value) is not _proxy:
+        return _exchange_type(
+            ok=False,
+            response_failure="not-json-object",
+            dialect=completion.dialect,
+            response_format_sent=True,
+        )
+    return _exchange_type(
         ok=True,
-        value=outcome.value,
+        value=_dict(outcome.value),
         dialect=completion.dialect,
         response_format_sent=True,
     )

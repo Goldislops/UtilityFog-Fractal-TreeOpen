@@ -254,16 +254,43 @@ def test_the_exchange_imports_the_existing_validator():
     assert "validate_structured_output" in source
 
 
-def test_the_validator_is_actually_called(monkeypatch):
-    """Behavioural proof: a private reimplementation would ignore this patch."""
+def test_the_captured_validator_IS_the_existing_one():
+    """Identity proof, stronger than the monkeypatch proof it replaces.
+
+    The validator is now bound as a captured default so a rebound module
+    name cannot swap it - which also means a monkeypatch can no longer
+    demonstrate the call. Proving the captured object IS
+    `scripts.open_model.structured.validate_structured_output` is a stricter
+    statement than "something reached through that name ran": it cannot be
+    satisfied by a look-alike.
+    """
+    import inspect
+
+    from scripts.open_model.structured import validate_structured_output
+
+    default = inspect.signature(request_structured_json).parameters[
+        "_validate"
+    ].default
+    assert default is validate_structured_output
+
+
+def test_the_captured_validator_is_the_one_actually_used():
+    """Behavioural companion: the captured parameter drives the verdict."""
     seen: list[tuple] = []
 
     def _fake(payload, *, required_keys=(), max_chars=0):
         seen.append((payload, required_keys, max_chars))
         return sx.StructuredOutcome(ok=False, failure="duplicate-key")
 
-    monkeypatch.setattr(sx, "validate_structured_output", _fake)
-    result = _exchange(text='{"ok": true}', required_keys=("ok",), max_chars=99)
+    result = request_structured_json(
+        _backend(text='{"ok": true}'),
+        _MESSAGES,
+        [],
+        structured=_REQUEST,
+        required_keys=("ok",),
+        max_chars=99,
+        _validate=_fake,
+    )
     assert result.response_failure == "duplicate-key"
     assert seen == [('{"ok": true}', ("ok",), 99)]
 

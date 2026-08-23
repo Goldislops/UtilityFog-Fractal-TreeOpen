@@ -321,13 +321,22 @@ def test_a_successful_exchange_refuses_a_foreign_value(value):
         StructuredExchange(ok=True, value=value, response_format_sent=True)
 
 
-@pytest.mark.parametrize(
-    "value", [{"a": 1}, MappingProxyType({"a": 1})]
-)
-def test_a_successful_exchange_accepts_an_exact_mapping(value):
+def test_a_successful_exchange_accepts_an_exact_dict():
     assert StructuredExchange(
-        ok=True, value=value, dialect="vllm", response_format_sent=True
+        ok=True, value={"a": 1}, dialect="vllm", response_format_sent=True
     ).ok
+
+
+def test_a_successful_exchange_refuses_a_mapping_proxy():
+    """Narrowed in Jack round 3: a proxy can wrap an arbitrary foreign
+    mapping, and copying one would run that mapping's hooks."""
+    with pytest.raises(ValueError):
+        StructuredExchange(
+            ok=True,
+            value=MappingProxyType({"a": 1}),
+            dialect="vllm",
+            response_format_sent=True,
+        )
 
 
 def test_the_exchange_stays_total_against_a_foreign_completion_payload():

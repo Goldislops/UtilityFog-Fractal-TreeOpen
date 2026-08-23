@@ -551,16 +551,17 @@ def test_mutating_the_supplied_mapping_cannot_change_the_result():
     assert _SECRET not in repr(result)
 
 
-def test_a_supplied_proxy_is_also_detached():
+def test_a_supplied_proxy_is_refused_outright():
+    """Narrowed in Jack round 3. Round 2 accepted and copied a proxy; a proxy
+    can wrap an arbitrary foreign mapping, so copying one ran its hooks."""
     underlying = {"a": 1}
-    result = StructuredExchange(
-        ok=True,
-        value=MappingProxyType(underlying),
-        dialect="vllm",
-        response_format_sent=True,
-    )
-    underlying["a"] = 999
-    assert dict(result.value) == {"a": 1}
+    with pytest.raises(ValueError):
+        StructuredExchange(
+            ok=True,
+            value=MappingProxyType(underlying),
+            dialect="vllm",
+            response_format_sent=True,
+        )
 
 
 def test_the_read_only_claim_is_scoped_to_the_top_level():

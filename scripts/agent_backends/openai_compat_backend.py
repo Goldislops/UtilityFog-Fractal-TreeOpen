@@ -235,6 +235,8 @@ class OpenAICompatBackend(AgentBackend):
         extra_headers: Optional[dict[str, str]] = None,
         client: Optional[Any] = None,
         dialect: Optional[str] = None,
+        _dialect_ok=is_supported_dialect,
+        _dict=dict,
     ) -> None:
         """Build an OpenAICompatBackend.
 
@@ -275,13 +277,13 @@ class OpenAICompatBackend(AgentBackend):
         """
         # Validated FIRST, before any SDK client is constructed, so a
         # misconfigured instance never reaches the point of holding a client.
-        if dialect is not None and not is_supported_dialect(dialect):
+        if dialect is not None and not _dialect_ok(dialect):
             raise ValueError(
                 "dialect must be one of: llama-cpp, ollama, vllm, sglang"
             )
         self.dialect: Optional[str] = dialect
         self.model = model
-        self.extra_headers = dict(extra_headers) if extra_headers else None
+        self.extra_headers = _dict(extra_headers) if extra_headers else None
         if client is not None:
             self._client = client
             return
@@ -387,6 +389,10 @@ class OpenAICompatBackend(AgentBackend):
         system: Optional[str] = None,
         max_tokens: int = 2048,
         temperature: float = 0.0,
+        _dialect_ok=is_supported_dialect,
+        _plan=plan_structured_request,
+        _bool=bool,
+        _Completion=StructuredCompletion,
     ) -> "StructuredCompletion":
         """Ask the configured runtime for schema-constrained decoding.
 
@@ -417,15 +423,13 @@ class OpenAICompatBackend(AgentBackend):
         # whose `__bool__` returned False then True passed the gate as
         # tool-free and still had its tools attached alongside the
         # `response_format` - defeating the very combination this refuses.
-        has_tools = bool(tools)
-        plan = plan_structured_request(
-            self.dialect, structured, has_tools=has_tools
-        )
+        has_tools = _bool(tools)
+        plan = _plan(self.dialect, structured, has_tools=has_tools)
         if not plan.ok:
-            return StructuredCompletion(
+            return _Completion(
                 ok=False,
                 refusal=plan.refusal,
-                dialect=self.dialect if is_supported_dialect(self.dialect) else None,
+                dialect=self.dialect if _dialect_ok(self.dialect) else None,
                 response_format_sent=False,
             )
 
@@ -443,7 +447,7 @@ class OpenAICompatBackend(AgentBackend):
         request["response_format"] = plan.response_format
 
         response = self._client.chat.completions.create(**request)
-        return StructuredCompletion(
+        return _Completion(
             ok=True,
             response=self._response_from_wire(response),
             dialect=self.dialect,
@@ -547,7 +551,9 @@ class OpenAICompatBackend(AgentBackend):
     # -- wire translation (inbound) ----------------------------------------
 
     @staticmethod
-    def _response_from_wire(response: Any) -> AgentResponse:
+    def _response_from_wire(
+        response: Any, _agent_response=AgentResponse
+    ) -> AgentResponse:
         """Convert an OpenAI-compatible ChatCompletion into our `AgentResponse`.
 
         Supported containers are SDK-style typed objects (ordinary attribute
@@ -574,7 +580,7 @@ class OpenAICompatBackend(AgentBackend):
         """
         choices = _attr_or_key(response, "choices", None)
         if type(choices) is not list or not choices:
-            return AgentResponse.from_content([], stop_reason="other", usage={})
+            return _agent_response.from_content([], stop_reason="other", usage={})
         choice = choices[0]
         msg = _attr_or_key(choice, "message", None)
 
@@ -651,7 +657,7 @@ class OpenAICompatBackend(AgentBackend):
                 "output_tokens": _attr_or_key(usage_obj, "completion_tokens", None),
             }
 
-        return AgentResponse.from_content(blocks, stop_reason=stop_reason, usage=usage)
+        return _agent_response.from_content(blocks, stop_reason=stop_reason, usage=usage)
 
 
 # -- helpers ----------------------------------------------------------------
