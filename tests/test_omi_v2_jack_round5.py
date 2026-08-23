@@ -152,7 +152,12 @@ def test_the_identity_assertion_would_actually_fire():
 
     built = factory()
     assert "<locals>" in built.__qualname__
-    with pytest.raises(pickle.PicklingError):
+    # CPython reports an unpicklable local object as PicklingError on some
+    # versions and AttributeError ("Can't get local object") on others. Both
+    # mean the same thing, and pinning one of them made this guard pass
+    # locally and fail on CI - the guard has to be about the OUTCOME, not
+    # about which flavour of refusal a particular interpreter chose.
+    with pytest.raises((pickle.PicklingError, AttributeError)):
         pickle.dumps(built)
 
 
