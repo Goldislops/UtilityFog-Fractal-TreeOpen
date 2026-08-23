@@ -2,15 +2,33 @@
 
 This package is the capability, eligibility and evaluation layer that sits
 **above** the merged agent-backend seam in ``scripts/agent_backends/``. It
-does not replace that seam, add a second transport stack, or modify any
-existing backend - per the standing boundary in
-``docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md``: reuse, don't reinvent.
+does not replace that seam and does not add a second transport stack - per
+the standing boundary in ``docs/LOCAL_MODEL_DEPLOYMENT_INCEPTION.md``: reuse,
+don't reinvent.
 
-What the existing seam already provides, and this package uses unchanged:
+**One existing backend has been modified, and it is worth saying plainly.**
+OMI-V1 modified nothing in that package. OMI-V2 deliberately changed
+``OpenAICompatBackend``: it gained an explicit closed ``dialect`` parameter
+and a ``complete_structured()`` method. An earlier revision of this docstring
+still said no existing backend was modified; that sentence was false once
+OMI-V2 landed and is withdrawn. The transport boundary is unaffected - one
+request field was added to the existing seam, and no transport, client, or
+parallel backend was invented. See §16 of
+``docs/OPEN_MODEL_INTEGRATION.md``.
 
-  - ``AgentBackend``  - the ABC every backend implements
-  - ``OpenAICompatBackend`` - one class, many provider configurations
-  - ``MockBackend``   - the scripted double, reused as the evaluation stub
+What the existing seam provides:
+
+  - ``AgentBackend``  - the ABC every backend implements. **Unchanged**: the
+    abstract ``complete()`` signature every backend implements was not
+    touched, which is why structured output arrived as a new method rather
+    than a new keyword.
+  - ``OpenAICompatBackend`` - one class, many provider configurations.
+    **Extended by OMI-V2**, as above. ``complete()`` builds a byte-identical
+    request to the one it built before, whether or not a dialect is
+    configured.
+  - ``MockBackend``   - the scripted double, reused as the evaluation stub.
+    **Unchanged**, and deliberately not given structured-output support: it
+    refuses with ``backend-not-structured-capable``.
 
 What this package adds, because none of it existed:
 

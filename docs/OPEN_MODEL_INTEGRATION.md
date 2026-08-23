@@ -747,7 +747,8 @@ byte for byte is not evidence. Re-verify any row with
 | `llama-cpp` | `ggml-org/llama.cpp` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | `tools/server/server-common.cpp` | `585f65e83c655d3b8b7e398e8bf76552dc846f36` | 65,033 |
 | `llama-cpp` (conflicting doc) | `ggml-org/llama.cpp` | `5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c` | `tools/server/README.md` | `93736c3edfa9bd094bf79f7d2de4659fbf8e74c9` | 105,082 |
 | `ollama` | `ollama/ollama` | `b7871fc0d1d82fe109536efa3e0e8e411c766c75` | `openai/openai.go` | `2d38607dbd5d04e35935023ed19962c33685cee7` | 26,679 |
-| `vllm` | `vllm-project/vllm` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | `vllm/entrypoints/openai/chat_completion/protocol.py` | `1cdfd2f698f90a2d76f58c81243b6cdf73e8c6ba` | 47,397 |
+| `vllm` (nesting required) | `vllm-project/vllm` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | `vllm/entrypoints/openai/chat_completion/protocol.py` | `1cdfd2f698f90a2d76f58c81243b6cdf73e8c6ba` | 47,397 |
+| `vllm` (`name` required) | `vllm-project/vllm` | `6e448d0ea9bf3d88d898b65449ca6dc2aec170ac` | `vllm/entrypoints/openai/engine/protocol.py` | `805c639d7d16a52f495d8942880682732280da0f` | 13,428 |
 | `sglang` | `sgl-project/sglang` | `71de97b264b04dcd514cf904003028aefe9775c8` | `python/sglang/srt/entrypoints/openai/protocol.py` | `da62e3b0fbd632702a56de76050d2ea37c6e0690` | 70,651 |
 
 Immutable raw URLs, one per row in order:
@@ -756,7 +757,20 @@ Immutable raw URLs, one per row in order:
 - `https://raw.githubusercontent.com/ggml-org/llama.cpp/5a32f7b66ef6cfb3e60deea26e3454cc6ad3438c/tools/server/README.md`
 - `https://raw.githubusercontent.com/ollama/ollama/b7871fc0d1d82fe109536efa3e0e8e411c766c75/openai/openai.go`
 - `https://raw.githubusercontent.com/vllm-project/vllm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/entrypoints/openai/chat_completion/protocol.py`
+- `https://raw.githubusercontent.com/vllm-project/vllm/6e448d0ea9bf3d88d898b65449ca6dc2aec170ac/vllm/entrypoints/openai/engine/protocol.py`
 - `https://raw.githubusercontent.com/sgl-project/sglang/71de97b264b04dcd514cf904003028aefe9775c8/python/sglang/srt/entrypoints/openai/protocol.py`
+
+**Why vLLM needs two rows.** The `name` column of the first table asserts
+that `json_schema.name` is required, and the `chat_completion/protocol.py`
+blob does not contain that fact: it types the field as the imported
+`AnyResponseFormat` and only validates that the `json_schema` nesting is
+present at all. The model itself lives in `engine/protocol.py`, where
+`JsonSchemaResponseFormat.name: str` carries no default and is therefore
+mandatory. A round of this audit correctly found the claim bound to a blob
+that did not carry it; rather than soften the claim, the file that does carry
+it is now cited. SGLang needs no second row — its
+`JsonSchemaResponseFormat.name: str` is in the blob already listed, at line
+219.
 
 Two things the file-level read established that a tree-level read had not:
 
@@ -777,9 +791,24 @@ sends only `json_schema`.
 
 ### 16.2 The Ollama shape is source-derived, and that is a real difference
 
-At the pinned revision Ollama's documentation contains **only** a checklist
-line stating that `response_format` is supported. It specifies no shape. The
-mapping used here therefore comes from the source, not from documentation:
+At the pinned revision Ollama's documentation mentions `response_format`
+exactly twice, and **neither mention specifies a shape**:
+
+- `docs/api/openai-compatibility.mdx` (blob
+  `4b34fa0960040bbfb407dc3c564dda6adad72a7a`, 22,463 bytes) line 201 — a bare
+  supported-parameter checklist entry, ``- [x] `response_format` ``.
+- `docs/capabilities/structured-outputs.mdx` (blob
+  `c570a12f9dac6693e9f3e1b8d9242604cc034b5a`, 5,024 bytes) line 197 — a tip
+  bullet, "Structured outputs work through the OpenAI-compatible API via
+  `response_format`". Everything else in that file documents Ollama's
+  *native* `format` parameter on `/api/chat`, which is a different API.
+
+An earlier revision of this section said the documentation contained **only**
+the checklist line. That was wrong in its exclusivity — there are two
+mentions, in two files — and it is corrected here. The load-bearing half is
+unchanged and was independently re-checked: neither mention gives a wire
+shape, so the mapping used here comes from the source, not from
+documentation:
 
 ```go
 type ResponseFormat struct {
@@ -947,14 +976,23 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-186 hermetic tests across three files, injected clients only — no network, no
+352 hermetic tests across five files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_omi_v2_structured_request.py` | 98 | Exact wire shape per dialect; the closed dialect gate; name, schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
-| `tests/test_omi_v2_backend.py` | 48 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
-| `tests/test_omi_v2_exchange.py` | 40 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_structured_request.py` | 94 | Exact wire shape per dialect; the closed dialect gate; schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
+| `tests/test_omi_v2_backend.py` | 47 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
+| `tests/test_omi_v2_exchange.py` | 52 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
+| `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
+
+These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
+asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
+table, that the stated total equals the sum of the rows, and that the table
+names no file that does not exist. The table above went stale once — it
+claimed 186 tests across three files while a fourth file of 111 tests existed
+and none of the three figures was right — and prose alone did not catch it.
 
 The ordering control is the load-bearing one. `ExplodingClient` raises on
 every attribute access, so a refusal returned while the backend holds one
@@ -962,6 +1000,41 @@ proves the refusal completed before the SDK was reached — a refused request
 never becomes a billed, logged, or rate-limited call. A guard test asserts
 `ExplodingClient` actually fires, so that proof cannot go vacuous.
 
+All five files pass identically under normal, `-O` and `-OO`. No library
+`assert` is relied upon (`-O` strips those) and no test reads `__doc__`
+(`-OO` strips that); documentation checks read the source file instead.
+
 **Same-author evidence.** Every test here was written by the same agent that
 wrote the code under test. It demonstrates internal consistency, not
 independent acceptance.
+
+### 16.9 Jack's first independent HOLD round (2026-08-23)
+
+An independent audit reproduced six gates against §16 as it stood at
+`a6577f47`. All six are corrected. A verification sweep run afterwards
+surfaced further defects; those that survived adversarial re-verification are
+corrected here too, and are marked *sweep* below.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **The llama.cpp mapping was wrong and silently unconstrained.** `server-common.cpp` reads the flat `schema` key **only** for `type=json_object`; for `type=json_schema` it reads `response_format.json_schema.schema`. The flat form this package emitted therefore produced an empty schema — no constraint, no error. | The `llama-cpp` dialect now emits the nested form, following the executable source rather than the README. Neither path is shotgunned. The README/source conflict is recorded in §16.3, and a control replays the pinned parser against both the superseded and the corrected shape. |
+| 2 | **Response validation was described as establishing schema conformance.** It establishes JSON-object syntax plus required-key presence; `{"ok":"wrong type","extra":123}` passes against a schema demanding a boolean `ok` and no additional properties. | `StructuredExchange.schema_conformance` is a field closed to the single token `"unverified"`, so the limit is carried in the result rather than only in prose, and a future conformance check has to widen the vocabulary in the open. No JSON Schema validator was hand-rolled and no dependency was added. |
+| 3 | **A secret-shaped schema name could reach the wire.** The caller supplied `json_schema.name`, guarded only by a local `[A-Za-z0-9_-]{1,64}` check — which admits `sk-OMIV2SECRET123456789`. | The field stopped being caller data: `StructuredOutputRequest` has no `name`, and the transmitted value is a fixed literal. Neither of the two rejected repairs was taken — the hardened primitive in `redaction.py` is unreachable without an import cycle, and copying its rules would have created a second drifting detector. |
+| 4 | **The three result carriers accepted incoherent states.** | All three now enforce exact booleans, closed refusal/failure/dialect vocabularies, success requiring both the correct payload and the sent state, response failure requiring a sent request, and coherent missing indices. 111 controls in `test_omi_v2_result_closure.py`. |
+| 5 | **The validated schema was not snapshotted.** A caller could mutate the document after validation and before transmission, so every guarantee described a document that was no longer the one being sent. | The planner re-parses the encoding the walk already produced, which is both a genuine deep snapshot and provably *the validated document* rather than a re-traversal. Mutation regressions cover top-level, nested, and list-element mutation. |
+| 6 | **Wire-shape claims were not bound to immutable evidence.** | Every claim is bound to an exact repository, commit, file path, git blob id, and byte count, with the raw URL given so any row can be re-fetched and re-hashed. See the table in §16.1. |
+| 7 | *sweep* — **A lone UTF-16 surrogate in a schema was accepted.** It is an exact `str` and passes every element check; `json.dumps` emits it verbatim and UTF-8 cannot encode it, so `complete_structured` raised an uncaught `UnicodeEncodeError` from inside the SDK — an exception escaping a method that promises a refusal. | The document is UTF-8 encoded during validation, while a refusal is still possible, and refused as `schema-not-utf8-encodable`. |
+| 8 | *sweep* — **The tools gate was time-of-check/time-of-use bypassable.** `tools` was truth-tested once for the gate and again inside `_build_request`, so an object whose `__bool__` answered `False` then `True` passed the gate as tool-free and still had its tools attached beside the `response_format`. | `tools` is truth-tested exactly once and the result is reused, so the gate and the request cannot disagree. `complete()` is unaffected: it passes no `include_tools` and truth-tests exactly as before. |
+| 9 | *sweep* — **The transmitted wire name resolved a rebindable module global.** `build_response_format` read `STRUCTURED_WIRE_NAME` from module scope, so rebinding one attribute put arbitrary text into `json_schema.name` — reopening by the back door the leak that gate 3 closed. | The literal is inlined at both call sites. `STRUCTURED_WIRE_NAME` remains exported as an inspection mirror with a drift guard, and a structural control asserts the builder's `co_names` contains no rebindable trust name at all — the property the previous round's section header claimed without asserting. |
+| 10 | *sweep* — **`StructuredCompletion.response` and `StructuredExchange.value` were checked only for `None`.** A successful completion could carry any object, which made `request_structured_json` — documented as total — raise `AttributeError`; and `value` was the last field through which an arbitrary caller string could ride into a result. | Both are exact-type checked: an `AgentResponse` and an exact mapping respectively. |
+| 11 | *sweep* — **Concurrent mutation escaped as `RuntimeError`.** A schema mutated by another thread during the walk raised `dictionary changed size during iteration` out of a function that promises a refusal for every input. | Caught and reported as `schema-changed-during-validation`. A control asserts no exception escapes across 3,000 validations against a live mutator. |
+| 12 | *sweep* — **Several controls were vacuous.** The depth-boundary test nested 8 levels against a limit of 32; the ordering test could not distinguish the two orderings it existed to separate, because `ValueError` arrives either way once `openai` is importable; the no-file-write guard covered only `builtins.open`; the drift guard could not detect a corrupted mirror string for `vllm` or `sglang`. | Each is replaced by a control that fails without its feature: both sides of the real depth edge plus a control proving the edge moves with the constant; SDK construction made to raise a *distinct* exception so seeing `ValueError` proves the gate ran first; filesystem guards over `pathlib` and `os` as well, each with its own would-actually-fire guard; and a drift guard that checks every dialect's mirror individually. |
+| 13 | *sweep* — **The `STRUCTURED_WIRE_NAME` docstring claimed both runtimes document an alphabet and length for the field.** Neither pinned source constrains it; both declare a bare `str`. | Claim withdrawn and replaced with the pinned evidence that the field is *required* — which is the fact that actually justifies sending a constant. |
+| 14 | *sweep* — **The documented test inventory was stale in every cell** and omitted an entire test file. | §16.8 corrected, and the suite now asserts its own inventory against the files on disk. |
+
+One residual is stated rather than closed, because it cannot be closed
+without defeating the parameter's purpose: **the schema document itself is
+caller data and is transmitted verbatim**, with no secret check. A caller who
+writes a credential into a schema key or description puts it on the wire.
+What is closed is narrower and exact — no field whose value *this package
+chooses* can carry caller text off the machine.
