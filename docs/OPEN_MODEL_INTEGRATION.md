@@ -947,12 +947,40 @@ verdict change, which a private copy could not do.
 - **Diagnostics carry nothing.** Every refusal is one token from a closed
   vocabulary. No schema fragment, key name, prompt, response, offset, length,
   type name, or exception text reaches a result.
-- **The trust path resolves no rebindable name.** `build_response_format`
-  dispatches on inlined string constants and reads neither
-  `SUPPORTED_DIALECTS` nor `DIALECT_WIRE_SHAPES`; both are exported as
-  **inspection mirrors only**, with a drift guard asserting they still match
-  the code. Rebinding the membership check cannot open a fifth dialect,
-  because the guard and the dispatch must both be satisfied.
+- **No decision path resolves a rebindable name — transitively.** Every
+  function that takes a trust decision binds what it needs in closure cells
+  or captured defaults: the four dialect predicates, the wire-shape check,
+  the snapshot validator, the planner, the backend constructor and its
+  structured method, the exchange entry point, and all three result carriers.
+  That includes the *builtins* the exact-type checks use — `type`, `str`,
+  `dict`, `len`, `bool`, `int`, `tuple`, `enumerate`, `object` — because an
+  ordinary assignment such as `structured_request.type = <replacement>`
+  otherwise changed a decision without replacing the function, its defaults,
+  its code, or `sys.modules`.
+
+  This is stated transitively on purpose. An earlier revision asserted only
+  that the three `__post_init__` bodies resolved no trust name. That was true
+  and insufficient: the helpers they *called* still looked up their builtins
+  as globals, which admitted a deceptive `str` subclass — one carrying hidden
+  attributes and lying in `__repr__` — into `StructuredCompletion.dialect`,
+  `StructuredExchange.dialect`, and a plan's transmitted
+  `json_schema.name`. `tests/test_omi_v2_jack_round3.py` now asserts the
+  closure at **every** layer, not just the carriers, with a guard proving the
+  assertion itself fires on a function that does look a name up.
+
+  `SUPPORTED_DIALECTS`, `DIALECT_WIRE_SHAPES` and `STRUCTURED_WIRE_NAME`
+  remain exported as **inspection mirrors only**, with drift guards asserting
+  they still match the code.
+
+  **Deliberately not captured**, and stated rather than glossed:
+  `_SCHEMA_MAX_CHARS`, `_SCHEMA_MAX_DEPTH` and `_SCHEMA_MAX_NODES` stay
+  module-level and adjustable. They bound *how much* is accepted, never *what
+  type*, so rebinding one cannot admit a foreign type or a `str` subclass. So
+  do `json.dumps` and `math.isfinite`, reached through their modules:
+  replacing a stdlib function is arbitrary code replacement, not name
+  rebinding. Cell surgery, `__defaults__` overwriting, method replacement and
+  `sys.modules` swapping likewise remain out of scope, as they have been
+  since the OMI-V1 seventh round.
 
 ### 16.7 Interface decisions, recorded rather than taken silently
 
@@ -976,17 +1004,18 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-418 hermetic tests across six files, injected clients only — no network, no
+470 hermetic tests across seven files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_omi_v2_structured_request.py` | 94 | Exact wire shape per dialect; the closed dialect gate; schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
 | `tests/test_omi_v2_backend.py` | 47 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
-| `tests/test_omi_v2_exchange.py` | 52 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_exchange.py` | 53 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
 | `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
+| `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
@@ -1086,3 +1115,51 @@ shallow, exactly as `StructuredOutcome.value` is: nested containers reached
 through it remain ordinary mutable objects, and a control asserts that
 directly rather than leaving it implied. It prevents top-level mutation of a
 shared result; it does not claim deep immutability.
+
+> **Amended by §16.11.** This round accepted *either* an exact `dict` or an
+> exact `MappingProxyType` on the public carrier path. That was wrong: a
+> proxy is an exact type that can wrap an **arbitrary foreign mapping**, and
+> copying one runs that mapping's hooks. The public path now accepts an exact
+> `dict` only.
+
+### 16.11 Jack's third independent HOLD round (2026-08-23)
+
+A third independent audit cleared the mutation-window correction, the direct
+named-mirror carrier controls, cross-field coherence, wire-shape enforcement,
+top-level read-only behaviour, the PR-body receipt, ancestry, paths,
+exact-head CI, and the eight-blob matrix. It reproduced three remaining gates.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **The backend's dialect authority was rebindable.** `OpenAICompatBackend.__init__` resolved the imported `is_supported_dialect` alias, and so did the refusal path in `complete_structured`. Rebinding that one attribute admitted an **exact secret-shaped string as backend dialect configuration**. | Both now take the decision against a captured object. The constructor additionally captures `dict`; `complete_structured` captures the planner, the completion carrier and `bool`. |
+| 2 | **The closure was not transitive.** Round 2 asserted that the three `__post_init__` bodies resolved no trust name. True, and insufficient: the helpers they *captured* — `is_supported_dialect`, `is_supported_wire_shape`, `is_pre_dialect_refusal` — still looked up `type`, `str`, `dict` and `len` as module globals. `structured_request.type = <replacement>` changed their decisions without replacing the function, its defaults, its code, or `sys.modules`, and a **deceptive `str` subclass** carrying hidden attributes and lying in `__repr__` was admitted into `StructuredCompletion.dialect`, `StructuredExchange.dialect`, and a plan's transmitted `json_schema.name`. | Every trust-path function is now produced by a factory that binds its builtins and dependencies in **closure cells**: the four predicates, the snapshot validator, the builder, the planner, and — via captured defaults — the backend constructor, `complete_structured`, `_response_from_wire`, `request_structured_json` and all three carriers. A parametrised control asserts the closure at **every** layer. |
+| 3 | **A proxy could smuggle foreign mapping hooks onto the public carrier path.** `StructuredExchange` accepted an exact `MappingProxyType`, then called `dict()` on it. A proxy is an exact type that can wrap an **arbitrary foreign mapping**, so that copy executed the wrapped mapping's `keys`/`__getitem__`/`__iter__` — and a hostile mapping raised caller-supplied secret-shaped `RuntimeError` text out of a public constructor, under normal, `-O` and `-OO`. | The public path accepts an **exact `dict` only**, whose copy cannot call out. There is no hook-free way to inspect what a proxy wraps, so the type is narrowed rather than inspected. The canonical internal path in `request_structured_json` adapts the validator's proxy before it reaches the carrier; that conversion is safe *because* `structured.py` guarantees its `value` is always a proxy over the exact `dict` `json.loads` produced, and the validator is now a captured default so that guarantee cannot be swapped out by rebinding a name. |
+
+**Why the round-2 `co_names` assertion was not proof.** It examined one
+frame. A decision is only as closed as the whole call graph beneath it, and
+the helpers were where the lookups lived. The lesson is recorded here rather
+than quietly fixed: *immediate-layer cleanliness is not transitive closure*,
+and a control that checks one layer should say so.
+
+**How the gates are proved.** A single fixture installs the hostile
+environment — twenty-six rebindings across all three modules, including
+`type`, `str`, `dict` and `len` **added** to namespaces where they do not
+normally exist, every data and predicate mirror, the builder, the snapshot
+validator, the planner, the validator, and both carrier types. A guard test
+asserts the fixture is actually installed, so nothing below can pass by
+accident. Under it: exact secret strings and deceptive subclasses are refused
+as backend dialect, plan wire name, completion dialect and exchange dialect;
+the four real dialects still construct; a real request still succeeds and
+still carries the correct wire name; and the planner still builds the real
+shape. Separately, every decision path is asserted to resolve no forbidden
+name, with a companion asserting each one actually captured something (so a
+function that did nothing could not pass) and a third proving the assertion
+fires on a deliberately leaky function.
+
+For gate 3, a `HostileMapping` records whether any hook ran: the control
+asserts the proxy is refused **and** that `touched` is still False, with a
+guard proving the same mapping does raise when copied normally.
+
+**Same-author evidence.** Everything above was written by the agent that
+wrote the code under test. It demonstrates internal consistency, not
+independent acceptance.
