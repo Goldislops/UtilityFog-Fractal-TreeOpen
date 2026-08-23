@@ -947,40 +947,64 @@ verdict change, which a private copy could not do.
 - **Diagnostics carry nothing.** Every refusal is one token from a closed
   vocabulary. No schema fragment, key name, prompt, response, offset, length,
   type name, or exception text reaches a result.
-- **No decision path resolves a rebindable name — transitively.** Every
-  function that takes a trust decision binds what it needs in closure cells
-  or captured defaults: the four dialect predicates, the wire-shape check,
-  the snapshot validator, the planner, the backend constructor and its
-  structured method, the exchange entry point, and all three result carriers.
-  That includes the *builtins* the exact-type checks use — `type`, `str`,
-  `dict`, `len`, `bool`, `int`, `tuple`, `enumerate`, `object` — because an
-  ordinary assignment such as `structured_request.type = <replacement>`
-  otherwise changed a decision without replacing the function, its defaults,
-  its code, or `sys.modules`.
+- **No decision path resolves an undocumented global — proved at the
+  bytecode.** Every function that takes a trust decision is built by a
+  module-level factory that binds what it needs into **closure cells**: the
+  four predicates, the wire-shape check, the snapshot validator, the
+  response-format builder, the planner, the whole `OpenAICompatBackend` class
+  (constructor, `complete_structured`, `_response_from_wire` and the wire
+  translators), `_attr_or_key`, `_block_to_summary_dict`,
+  `request_structured_json`, and all three result carriers. That includes the
+  builtins the exact-type checks use, the stdlib module objects, and the
+  exception classes.
 
-  This is stated transitively on purpose. An earlier revision asserted only
-  that the three `__post_init__` bodies resolved no trust name. That was true
-  and insufficient: the helpers they *called* still looked up their builtins
-  as globals, which admitted a deceptive `str` subclass — one carrying hidden
-  attributes and lying in `__repr__` — into `StructuredCompletion.dialect`,
-  `StructuredExchange.dialect`, and a plan's transmitted
-  `json_schema.name`. `tests/test_omi_v2_jack_round3.py` now asserts the
-  closure at **every** layer, not just the carriers, with a guard proving the
-  assertion itself fires on a function that does look a name up.
+  **Cells, not defaulted parameters.** An earlier revision bound these as
+  defaulted `_name=` parameters. That closed name rebinding and opened
+  something strictly worse, because a defaulted parameter is *directly
+  addressable*: no rebinding was needed at all. `OpenAICompatBackend(...,
+  dialect="sk-…", _dialect_ok=lambda v: True)` admitted a secret-shaped
+  dialect; `complete_structured(..., _plan=…)` put an arbitrary object on the
+  wire as the `response_format`; `request_structured_json(..., _validate=…)`
+  reported success for invalid JSON. Cells cannot be addressed, the public
+  signatures read exactly as documented, and passing any former capture
+  keyword now raises `TypeError` — asserted for each one by name.
 
-  `SUPPORTED_DIALECTS`, `DIALECT_WIRE_SHAPES` and `STRUCTURED_WIRE_NAME`
-  remain exported as **inspection mirrors only**, with drift guards asserting
-  they still match the code.
+  **The proof is not a list.** `tests/test_omi_v2_jack_round4.py` discovers
+  every authored callable in the three modules and reads the actual
+  `LOAD_GLOBAL` instructions out of its bytecode. A hand-written
+  forbidden-name set had previously stood in for this, and it found only what
+  its author had thought of: it listed no stdlib module alias, so rebinding
+  `structured_request.json` bypassed the UTF-8 refusal outright; it omitted
+  `getattr`, `callable` and `_FINISH_REASON_MAP`; and it never examined
+  `_response_from_wire` at all.
 
-  **Deliberately not captured**, and stated rather than glossed:
-  `_SCHEMA_MAX_CHARS`, `_SCHEMA_MAX_DEPTH` and `_SCHEMA_MAX_NODES` stay
-  module-level and adjustable. They bound *how much* is accepted, never *what
-  type*, so rebinding one cannot admit a foreign type or a `str` subclass. So
-  do `json.dumps` and `math.isfinite`, reached through their modules:
-  replacing a stdlib function is arbitrary code replacement, not name
-  rebinding. Cell surgery, `__defaults__` overwriting, method replacement and
-  `sys.modules` swapping likewise remain out of scope, as they have been
-  since the OMI-V1 seventh round.
+  **The finish reason is inlined, not looked up.** `_FINISH_REASON_MAP` was a
+  plain module dict — rebindable *and* mutable in place — so
+  `_FINISH_REASON_MAP["stop"] = <anything>` put arbitrary text into
+  `AgentResponse.stop_reason`. Every branch now yields a literal from the
+  closed `StopReason` vocabulary. The mapping remains an inspection mirror
+  with a drift guard.
+
+  `SUPPORTED_DIALECTS`, `DIALECT_WIRE_SHAPES`, `STRUCTURED_WIRE_NAME` and
+  `_FINISH_REASON_MAP` are **inspection mirrors only**, each with a drift
+  guard.
+
+  **The complete allowlist is three constants**, and they are the only
+  globals any authored decision path still resolves: `_SCHEMA_MAX_CHARS`,
+  `_SCHEMA_MAX_DEPTH` and `_SCHEMA_MAX_NODES`. They bound *how much* is
+  accepted and never *what type*, so rebinding one cannot admit a foreign
+  type, a `str` subclass, or a secret — only widen or narrow a size limit,
+  which a deployment may legitimately want to do. That openness is itself
+  exercised by a control.
+
+  **Out of scope, and not claimed**: closure-cell surgery, replacing a
+  function or class object, patching an attribute *on* a captured stdlib
+  module, and swapping a module in `sys.modules`. Those are arbitrary code
+  replacement rather than name rebinding, as they have been since the OMI-V1
+  seventh round. Dataclass-generated methods (`__eq__`, `__setattr__`, …) are
+  compiled by `dataclasses` against the defining module's globals and are not
+  authored here; the one that matters — the frozen-instance guard — is
+  separately asserted to hold while `type` is rebound.
 
 ### 16.7 Interface decisions, recorded rather than taken silently
 
@@ -1004,18 +1028,19 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-470 hermetic tests across seven files, injected clients only — no network, no
+555 hermetic tests across eight files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_omi_v2_structured_request.py` | 94 | Exact wire shape per dialect; the closed dialect gate; schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
 | `tests/test_omi_v2_backend.py` | 47 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
-| `tests/test_omi_v2_exchange.py` | 53 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_exchange.py` | 54 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
 | `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
+| `tests/test_omi_v2_jack_round4.py` | 84 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
@@ -1163,3 +1188,35 @@ guard proving the same mapping does raise when copied normally.
 **Same-author evidence.** Everything above was written by the agent that
 wrote the code under test. It demonstrates internal consistency, not
 independent acceptance.
+
+### 16.12 Jack's fourth independent HOLD round (2026-08-23)
+
+A fourth independent audit cleared the backend-alias, captured-helper,
+hostile-proxy, mutation-window, carrier-coherence, wire-shape, evidence,
+ancestry, path, PR-body and exact-head CI gates, and reproduced five more.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **The captures were caller-addressable.** Bound as defaulted `_name=` parameters on `OpenAICompatBackend.__init__`, `complete_structured` and `request_structured_json`, they required no rebinding to defeat — a keyword argument sufficed. Jack used them to admit an exact secret string as backend dialect, send an arbitrary `response_format` shape, and report success for invalid JSON. | Every authority moved into **closure cells** built by module-level factories. The documented public signatures are unchanged and passing any former capture keyword raises `TypeError`, asserted for each of the twelve by name. |
+| 2 | **Stdlib module aliases were open.** `_validated_snapshot` resolved `json`, `math` and its exception classes globally, so `structured_request.json = <replacement>` bypassed the UTF-8 refusal and admitted an unpaired surrogate. | The stdlib **module objects** and every exception class are bound in cells. Capturing the module rather than `json.dumps` is deliberate: rebinding the module-level *name* is closed, while patching an attribute *on* the captured module stays the documented arbitrary-code-replacement boundary — the same boundary the gate-1 mutation-window controls rely on. |
+| 3 | **The capability decision was open.** `request_structured_json` resolved `getattr` and `callable` globally, so rebinding `structured_exchange.getattr` made a plain `object()` present a callable `complete_structured`. | Both are captured. A backend with no real method stays `backend-not-structured-capable` under the hostile fixture, for five different non-backends. |
+| 4 | **Response translation was never audited.** `_response_from_wire` was outside the asserted inventory entirely and resolved `_FINISH_REASON_MAP`, `_attr_or_key`, the block classes, the parsing authorities and the exact-type builtins. `_FINISH_REASON_MAP` is a plain dict, so it was rebindable **and mutable in place**, and either put a secret-shaped string into `AgentResponse.stop_reason`. | The finish-reason decision is **inlined**: every branch yields a literal from the closed `StopReason` vocabulary. The whole translation path — including `_attr_or_key` and `_block_to_summary_dict` — is closed and is now in the asserted inventory. Controls cover ten wire values against both rebinding and in-place mutation. |
+| 5 | **The proof was a hand-written list.** A curated forbidden-name set is only ever as complete as its author's imagination, and this one had missed every defect above. | The proof now **discovers** every authored callable in the three modules and reads the real `LOAD_GLOBAL` instructions from its bytecode. The allowlist is three documented constants. Public signatures are separately asserted to expose no underscore-prefixed parameter and no callable, type or vocabulary default. |
+
+**The lesson, stated plainly.** Round three closed name rebinding by moving
+authorities into defaulted parameters, and the assertion that "proved" it
+could not see the wider hole it had just opened, because the assertion was a
+list written by the same author who chose the mechanism. A capture a caller
+can pass is not a capture. A proof that enumerates what to look for finds only
+what was already suspected. Both are now structural: cells cannot be
+addressed, and the closure check reads bytecode rather than names.
+
+**One defect this file's own controls found.** The first draft classified a
+binding factory by name prefix alone, which silently exempted
+`OpenAICompatBackend._build_request` — a method, not a factory — from the
+closure assertion. A prefix is not a category; factories are now identified as
+module-level builders and additionally asserted to be unexported.
+
+**Same-author evidence.** Everything above was written by the agent that wrote
+the code under test. It demonstrates internal consistency, not independent
+acceptance.
