@@ -114,18 +114,33 @@ rather than bounded here.
 | `propose` | ✅ | ✅ (forced `dry-run`; `commit-pending` refused) | ❌ |
 
 `commit_tuning` is **never** registered as an LLM-facing router handler in any
-mode. Mode resolution (`resolve_mode` / `MEDUSA_ORCHESTRATOR_MODE`) fails closed:
-absent, malformed, or unknown values all resolve to `observe`; only the exact
-tokens `observe`/`propose` are honored, and only `propose` exposes any
-write-adjacent tool. The low-level `OrchestratorClient.commit_tuning` /
+mode. Mode resolution (`resolve_mode` / `MEDUSA_ORCHESTRATOR_MODE`) fails closed
+and is **exact**: only an exact built-in `str` is normalized, and only the
+normalized exact token `propose` enables proposal capability. Absent, unknown,
+foreign, **subclassed** or malformed values all become exact `observe`, and a
+refused value is identified by its type alone — it is never compared,
+truth-tested, represented, converted, measured or otherwise invoked, so no
+supplied hook can run and none can raise out of the resolver.
+
+`resolve_mode` is the module's **single mode authority**: `tools_for_mode`,
+`ToolRouter`, `Orchestrator`, `OrchestratorConfig` and `create_orchestrator`
+all normalize through it and then compare the resulting constant by identity,
+so no two of them can disagree about the resolved mode. Only `propose` exposes
+any write-adjacent tool. The low-level `OrchestratorClient.commit_tuning` /
 `rollback_tuning` primitives are retained for direct **non-LLM** callers and are
 proven unable to enter the tool registry.
 
 **T — hard runtime limits, honest error semantics, bounded audit receipts**
 (`scripts/orchestrator.py`). Two validated budgets bound each iteration: a
-per-turn `max_tool_depth` and a total `max_total_tool_calls` (both positive
-integers within `MAX_LIMIT_CEILING`; malformed values are rejected at
-construction). When a turn's tool calls would exceed the total budget, only the
+per-turn `max_tool_depth` and a total `max_total_tool_calls`. Both are
+validated by `_validate_positive_limit`, which accepts **only exact built-in
+`int`** values in `[1, MAX_LIMIT_CEILING]` inclusive. `bool`, `int`
+**subclasses** and every foreign type are refused by exact type before any
+comparison runs, so a subclass overriding `__lt__`/`__gt__` cannot smuggle
+zero, a negative, or a value above the ceiling past the gate. The refusal text
+is **fixed and supplied-value-free** — it names only the parameter and the
+ceiling, so no supplied value, type name or representation reaches the
+exception and no `repr` is ever called on a refused value. When a turn's tool calls would exceed the total budget, only the
 permitted prefix executes; every remaining call gets an explicit
 `budget_rejection` error result so the conversation history stays structurally
 valid, and the iteration stops (`tool_budget_exhausted`) — the cap is never
