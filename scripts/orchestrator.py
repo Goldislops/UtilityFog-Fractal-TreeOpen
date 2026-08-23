@@ -66,15 +66,32 @@ MODE_PROPOSE: OrchestratorMode = "propose"
 VALID_MODES: tuple[OrchestratorMode, ...] = (MODE_OBSERVE, MODE_PROPOSE)
 
 
-def resolve_mode(raw: Optional[str]) -> OrchestratorMode:
-    """Fail-closed mode resolution. Absent, malformed, or unknown values all
-    resolve to the safe `observe` mode; only the exact tokens "observe" and
-    "propose" (case-insensitive, trimmed) are honored. `propose` — the only
-    mode that exposes any write-adjacent tool — must be opted into explicitly."""
-    # Only a normalized "propose" enables proposal mode; absent, malformed,
-    # unknown, or any other value fails closed to observe. Returning the
-    # module-level Literal constants keeps this typed with no cast/ignore.
-    if isinstance(raw, str) and raw.strip().lower() == MODE_PROPOSE:
+def resolve_mode(raw: object) -> OrchestratorMode:
+    """Fail-closed mode resolution, and the module's single mode authority.
+
+    Absent, malformed, foreign, subclassed, or unknown values all resolve to
+    the safe `observe` mode; only an exact built-in `str` that normalizes to
+    the exact token "propose" enables proposal capability. `propose` — the
+    only mode exposing any write-adjacent tool — must be opted into
+    explicitly.
+
+    **Exact type, not `isinstance`.** An earlier revision accepted any `str`
+    subclass and then called `.strip().lower()` on it, so a subclass whose
+    `strip()` returned "propose" enabled proposal mode, and a subclass whose
+    `strip()` raised escaped this function carrying caller-supplied text.
+    A refused value is now identified by `type(...) is str` alone: nothing is
+    compared, truth-tested, represented, converted, measured, or otherwise
+    invoked on it. Once the exact type is proven, `strip`/`lower`/`==` are the
+    real `str` methods and can run no supplied hook.
+
+    Every consumer in this module and in `orchestrator_config` routes its mode
+    through this one function, so no two of them can disagree about the
+    resolved mode. Returning the module-level Literal constants keeps this
+    typed with no cast/ignore, and lets callers compare by identity.
+    """
+    if type(raw) is not str:
+        return MODE_OBSERVE
+    if raw.strip().lower() == MODE_PROPOSE:
         return MODE_PROPOSE
     return MODE_OBSERVE
 
@@ -267,12 +284,22 @@ def proposal_tools() -> list[ToolSpec]:
     ]
 
 
-def tools_for_mode(mode: OrchestratorMode) -> list[ToolSpec]:
+def tools_for_mode(mode: object) -> list[ToolSpec]:
     """The LLM-facing tool set for a capability mode. `observe` → observation
     only; `propose` → observation + the dry-run proposal tool. No mode exposes
-    a commit tool."""
+    a commit tool.
+
+    The argument is normalized through :func:`resolve_mode` before anything is
+    decided. An earlier revision compared it directly with `==`, which invoked
+    the supplied object's `__eq__` - so an arbitrary object claiming equality
+    with "propose" was handed the proposal tool. Nothing is invoked on a
+    refused value now, and this function cannot disagree with `ToolRouter`,
+    `Orchestrator` or `create_orchestrator`, because all four normalize
+    through the same authority.
+    """
+    resolved = resolve_mode(mode)
     tools = observation_tools()
-    if mode == MODE_PROPOSE:
+    if resolved is MODE_PROPOSE:
         tools = tools + proposal_tools()
     return tools
 
@@ -354,12 +381,32 @@ builtin str up to this length — e.g. the ``prop-newid`` test fixture — so th
 live-result contract and the receipt-canonical contract stay distinct."""
 
 
-def _validate_positive_limit(name: str, value: int) -> int:
-    """A configurable limit must be a positive int within the ceiling."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{name} must be an integer, got {value!r}")
+def _validate_positive_limit(name: str, value: object) -> int:
+    """A configurable limit must be an exact built-in int within the ceiling.
+
+    **Exact type, not `isinstance`.** An earlier revision excluded `bool` by
+    name but accepted every other `int` subclass, and a subclass overriding
+    `__lt__`/`__gt__` therefore passed zero, negatives, or values far above
+    `MAX_LIMIT_CEILING` - defeating both budgets at construction. `type(...)
+    is int` refuses `bool` and every subclass without invoking a comparison,
+    and only after the exact type is proven do `<`/`>` run, as real `int`
+    comparisons that can execute no supplied hook.
+
+    **The refusal text is fixed.** It previously interpolated `{value!r}`, so
+    a foreign object's `__repr__` was copied into the exception - and a
+    `__repr__` that raised escaped this function entirely, carrying
+    caller-supplied text with it. The message now names only the parameter and
+    the ceiling, both of which are this module's own constants: no supplied
+    value, type name, or representation reaches it, and no `repr` is called.
+    """
+    if type(value) is not int:
+        raise ValueError(
+            f"{name} must be an exact int in [1, {MAX_LIMIT_CEILING}]"
+        )
     if value < 1 or value > MAX_LIMIT_CEILING:
-        raise ValueError(f"{name} must be in [1, {MAX_LIMIT_CEILING}], got {value}")
+        raise ValueError(
+            f"{name} must be an exact int in [1, {MAX_LIMIT_CEILING}]"
+        )
     return value
 
 
@@ -386,7 +433,11 @@ class ToolRouter:
         orchestrator_source: str = "agent:orchestrator",
     ) -> None:
         self.client = client
-        self.mode = mode
+        # Normalized through the single mode authority, then stored. An
+        # earlier revision stored the caller's object verbatim and compared it
+        # with `==`, so an object claiming equality with "propose" got the
+        # proposal handler registered.
+        self.mode = resolve_mode(mode)
         self.source = orchestrator_source
         # The router holds no commit approver: committing is not an LLM-facing
         # capability, so it never calls commit on the model's behalf. The
@@ -399,7 +450,7 @@ class ToolRouter:
             "get_params": self._h_params,
             "get_params_schema": self._h_schema,
         }
-        if mode == MODE_PROPOSE:
+        if self.mode is MODE_PROPOSE:
             handlers["propose_tuning"] = self._h_propose
         # commit_tuning is intentionally absent from every mode's registry.
         self._handlers: dict[str, ToolHandler] = handlers
@@ -635,12 +686,18 @@ class Orchestrator:
         self.backend = backend
         self.client = client
         self.system_prompt = system_prompt
-        self.mode = mode
-        # Fail-safe defaults: the tool set and router both derive from `mode`,
-        # which defaults to observe. An explicit `tools`/`router` overrides,
-        # but a bare Orchestrator is observation-only.
-        self.tools = tools if tools is not None else tools_for_mode(mode)
-        self.router = router or ToolRouter(client, mode=mode)
+        # Normalized ONCE through the single mode authority, then used for
+        # every derivation below. This is what makes `Orchestrator`,
+        # `tools_for_mode` and `ToolRouter` structurally unable to disagree:
+        # they are all handed the same already-resolved constant, not the
+        # caller's original object.
+        self.mode = resolve_mode(mode)
+        # Fail-safe defaults: the tool set and router both derive from the
+        # resolved mode, which defaults to observe. An explicit
+        # `tools`/`router` overrides, but a bare Orchestrator is
+        # observation-only.
+        self.tools = tools if tools is not None else tools_for_mode(self.mode)
+        self.router = router or ToolRouter(client, mode=self.mode)
         # Two independent, validated budgets: per-turn depth and total tool
         # calls. Malformed/out-of-range limits are rejected at construction.
         self.max_tool_depth = _validate_positive_limit("max_tool_depth", max_tool_depth)
