@@ -46,9 +46,11 @@ environment variable, or a probe.
 
     {"type": "json_schema", "json_schema": {"schema": {...}}}
 
-  The documentation states only that ``response_format`` is supported; it
-  specifies no shape. The shape above is therefore taken from the source,
-  ``openai/openai.go``, whose structs are::
+  The documentation mentions ``response_format`` exactly twice - a
+  supported-parameter checklist entry in ``docs/api/openai-compatibility.mdx``
+  and a tip bullet in ``docs/capabilities/structured-outputs.mdx`` - and
+  **neither specifies a shape**. The shape above is therefore taken from the
+  source, ``openai/openai.go``, whose structs are::
 
       type ResponseFormat struct {
           Type       string      `json:"type"`
@@ -101,10 +103,30 @@ layering preference. Copying its rules into this module would create a second
 secret detector free to drift from the first, which is precisely the failure
 a shared primitive exists to prevent.
 
-So the field stopped being caller data. :data:`STRUCTURED_WIRE_NAME` is a
-fixed constant, ``StructuredOutputRequest`` has no ``name``, and no path
-carries caller-controlled text into ``json_schema.name``. The detector that
-cannot drift is the one that does not need to exist.
+So the field stopped being caller data. The wire name is an inlined literal
+in :func:`build_response_format`, ``StructuredOutputRequest`` has no
+``name``, and no path carries caller-controlled text into
+``json_schema.name``. The detector that cannot drift is the one that does not
+need to exist.
+
+## The residual this does NOT close, stated plainly
+
+The **schema document itself is caller data and is transmitted verbatim**, to
+all four runtimes, with no secret check of any kind. A caller who writes
+
+    {"properties": {"sk-AKIA...": {"type": "string"}},
+     "description": "bearer sk-..."}
+
+puts that text on the wire, and nothing here stops it. That is not an
+oversight being deferred; it is inherent. The entire purpose of the parameter
+is to transmit the caller's schema, so a layer that refused schema content
+could not do its job, and a secret matcher applied to arbitrary schema text
+would be the second drifting detector this package was told not to build.
+
+What is closed is narrower and worth stating exactly: no field this package
+*chooses the value of* can carry caller text off the machine. The schema is
+the caller's own payload, and its contents remain the caller's
+responsibility. Validation here is for safe serialisation, never for secrets.
 
 ## What sending a request does and does not establish
 
@@ -188,6 +210,8 @@ StructuredRefusal = Literal[
     "schema-not-exact-dict",
     "schema-empty",
     "schema-not-serializable",
+    "schema-not-utf8-encodable",
+    "schema-changed-during-validation",
     "schema-non-finite-number",
     "schema-too-deep",
     "schema-too-large",
@@ -205,12 +229,34 @@ cannot disagree: there is only one list.
 """
 
 STRUCTURED_WIRE_NAME: Final[str] = "structured_output"
-"""The exact ``json_schema.name`` sent to vLLM and SGLang. Never caller data.
+"""Inspection mirror of the ``json_schema.name`` sent to vLLM and SGLang.
 
-vLLM and SGLang both require the key, so something must occupy it. A fixed
-constant occupies it with a value that is identical on every call, carries no
-caller text, and therefore cannot leak one. It satisfies the alphabet and
-length both runtimes document for the field.
+Off the trust path. :func:`build_response_format` emits this text as an
+**inlined literal** and does not read this name, so rebinding it cannot put
+arbitrary text on the wire - it can only make this mirror disagree with the
+code, which ``test_omi_v2_structured_request.py`` asserts against. That
+matters more here than for the other mirrors: this is the one value in the
+request that both leaves the process and is not caller data.
+
+Why a constant at all: both runtimes make the field **required**, so
+something must occupy it, and a value identical on every call carries no
+caller text and therefore cannot leak one.
+
+The requirement is pinned to source, not inferred:
+
+- vLLM ``JsonSchemaResponseFormat.name: str`` (no default) -
+  ``vllm/entrypoints/openai/engine/protocol.py`` @
+  ``6e448d0ea9bf3d88d898b65449ca6dc2aec170ac``, blob
+  ``805c639d7d16a52f495d8942880682732280da0f``.
+- SGLang ``JsonSchemaResponseFormat.name: str`` (no default) -
+  ``python/sglang/srt/entrypoints/openai/protocol.py`` @
+  ``71de97b264b04dcd514cf904003028aefe9775c8``, blob
+  ``da62e3b0fbd632702a56de76050d2ea37c6e0690``.
+
+Neither pinned source constrains the field's alphabet or length - both
+declare a bare ``str``. An earlier revision of this docstring claimed they
+documented both; that claim was not supported by either file and is
+withdrawn. The value chosen is conservative regardless.
 """
 
 _SCHEMA_MAX_CHARS: Final[int] = 65536
@@ -322,41 +368,64 @@ def _schema_refusal(
         # exactly the false-success this contract exists to prevent.
         return "schema-empty", None
 
-    stack: list[tuple[Any, int]] = [(schema, 0)]
-    nodes = 0
-    while stack:
-        node, depth = stack.pop()
-        if depth > _SCHEMA_MAX_DEPTH:
-            return "schema-too-deep", None
-        nodes += 1
-        if nodes > _SCHEMA_MAX_NODES:
-            return "schema-too-large", None
-        node_type = type(node)
-        if node_type is dict:
-            for key, value in node.items():
-                if type(key) is not str:
-                    return "schema-not-serializable", None
-                stack.append((value, depth + 1))
-        elif node_type is list:
-            for value in node:
-                stack.append((value, depth + 1))
-        elif node_type is float:
-            # `node` is proven exact float, so isfinite invokes no hook.
-            if not math.isfinite(node):
-                return "schema-non-finite-number", None
-        elif node_type is bool or node_type is int or node_type is str:
-            continue
-        elif node is None:
-            continue
-        else:
-            return "schema-not-serializable", None
+    # The walk and the encoding both read the caller's containers, and this
+    # function promises a refusal rather than an exception for every input.
+    # A container mutated by another thread mid-read raises RuntimeError
+    # ("dictionary changed size during iteration") from the iteration itself,
+    # which is not something any per-element type check can prevent - so it
+    # is caught here and reported as a refusal like every other rejection.
+    try:
+        stack: list[tuple[Any, int]] = [(schema, 0)]
+        nodes = 0
+        while stack:
+            node, depth = stack.pop()
+            if depth > _SCHEMA_MAX_DEPTH:
+                return "schema-too-deep", None
+            nodes += 1
+            if nodes > _SCHEMA_MAX_NODES:
+                return "schema-too-large", None
+            node_type = type(node)
+            if node_type is dict:
+                for key, value in node.items():
+                    if type(key) is not str:
+                        return "schema-not-serializable", None
+                    stack.append((value, depth + 1))
+            elif node_type is list:
+                for value in node:
+                    stack.append((value, depth + 1))
+            elif node_type is float:
+                # `node` is proven exact float, so isfinite invokes no hook.
+                if not math.isfinite(node):
+                    return "schema-non-finite-number", None
+            elif node_type is bool or node_type is int or node_type is str:
+                continue
+            elif node is None:
+                continue
+            else:
+                return "schema-not-serializable", None
+    except RuntimeError:
+        return "schema-changed-during-validation", None
 
     try:
         encoded = json.dumps(schema, allow_nan=False, ensure_ascii=False)
+    except RuntimeError:
+        return "schema-changed-during-validation", None
     except (ValueError, TypeError, RecursionError):
         # Unreachable for a document the walk accepted; kept so the function
         # is total rather than relying on that reasoning holding forever.
         return "schema-not-serializable", None
+
+    # Every accepted element is an exact built-in, but an exact `str` may
+    # still hold an unpaired UTF-16 surrogate. `json.dumps` accepts one and
+    # emits it verbatim; the transport cannot. Encoding the document here is
+    # the only place that discovers it while a refusal is still possible -
+    # left to the SDK it surfaces as an uncaught UnicodeEncodeError from
+    # inside `complete_structured`, which this contract promises never to do.
+    try:
+        encoded.encode("utf-8")
+    except UnicodeEncodeError:
+        return "schema-not-utf8-encodable", None
+
     if len(encoded) > _SCHEMA_MAX_CHARS:
         return "schema-too-large", None
     return None, encoded
@@ -390,16 +459,23 @@ def build_response_format(
         # Nested; no name field exists in the Go struct, so none is sent.
         return {"type": "json_schema", "json_schema": {"schema": schema}}
     if dialect == "vllm":
+        # The wire name is an inlined literal, NOT a read of
+        # STRUCTURED_WIRE_NAME. This is the one value in the object that both
+        # leaves the process and is not caller data, so resolving it through
+        # a module attribute would have put arbitrary text on the wire for
+        # anyone able to rebind that attribute - reopening by the back door
+        # the exact leak that removing the caller-supplied name closed.
         return {
             "type": "json_schema",
-            "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": schema},
+            "json_schema": {"name": "structured_output", "schema": schema},
         }
     if dialect == "sglang":
         # Byte-identical to vLLM today; kept as its own branch so a future
-        # divergence cannot be hidden behind a shared one.
+        # divergence cannot be hidden behind a shared one. Same inlined
+        # literal, for the same reason.
         return {
             "type": "json_schema",
-            "json_schema": {"name": STRUCTURED_WIRE_NAME, "schema": schema},
+            "json_schema": {"name": "structured_output", "schema": schema},
         }
     return None
 
