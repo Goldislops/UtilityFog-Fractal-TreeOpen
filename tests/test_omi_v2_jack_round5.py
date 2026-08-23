@@ -30,7 +30,7 @@ import dis
 import inspect
 import pickle
 import types
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -184,20 +184,116 @@ def test_the_backend_class_pickles_as_it_did_before_omi_v2():
     "instance",
     [
         StructuredRequestPlan(ok=False, refusal="schema-empty"),
+        StructuredRequestPlan(
+            ok=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"schema": {"a": 1}},
+            },
+        ),
         StructuredOutputRequest(schema={"a": 1}),
+        StructuredCompletion(ok=False, refusal="dialect-not-configured"),
         StructuredCompletion(
-            ok=False, refusal="dialect-not-configured"
+            ok=False, refusal="schema-empty", dialect="vllm"
         ),
         StructuredExchange(
             ok=False, request_refusal="backend-not-structured-capable"
         ),
+        StructuredExchange(
+            ok=False,
+            response_failure="invalid-json",
+            dialect="vllm",
+            response_format_sent=True,
+        ),
     ],
-    ids=["plan", "request", "completion", "exchange"],
+    ids=[
+        "plan-refused",
+        "plan-successful",
+        "request",
+        "completion-pre-dialect",
+        "completion-post-dialect",
+        "exchange-refused",
+        "exchange-response-failure",
+    ],
 )
-def test_carrier_instances_round_trip(instance):
+def test_the_supported_instance_states_round_trip(instance):
+    """These specific states round-trip. That is the whole claim.
+
+    It is deliberately NOT "all carrier instances round-trip" - see
+    `test_a_successful_exchange_instance_cannot_be_pickled` for the state that
+    does not, and why.
+    """
     restored = pickle.loads(pickle.dumps(instance))
     assert restored == instance
     assert type(restored) is type(instance)
+
+
+def _successful_exchange() -> StructuredExchange:
+    """A canonical success, produced by the real path rather than by hand.
+
+    Building it through `request_structured_json` matters: the limitation
+    below is a property of what the supported path actually produces, not of
+    a value a test happened to choose.
+    """
+
+    class _Client:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create)
+            )
+
+        def _create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"ok": true}', tool_calls=None
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+
+    backend = OpenAICompatBackend(model="m", client=_Client(), dialect="vllm")
+    return request_structured_json(
+        backend,
+        _MESSAGES,
+        [],
+        structured=StructuredOutputRequest(schema=_SCHEMA),
+    )
+
+
+def test_a_successful_exchange_instance_cannot_be_pickled():
+    """A DOCUMENTED limitation, asserted rather than left to be discovered.
+
+    A successful exchange carries its value as a `MappingProxyType`, because
+    the read-only view is the point: it is what stops a caller mutating a
+    shared result through their own reference. `mappingproxy` has no pickle
+    support, so the successful state cannot be pickled.
+
+    The honest options were to weaken the proxy or to add custom `__reduce__`
+    behaviour, and this bounded correction does neither - both would trade a
+    live protection for a convenience nobody has asked for. The limitation is
+    stated in the module docstring, in section 16.14 of the integration
+    document, and in the pull-request body, and it is pinned here so it cannot
+    change silently.
+    """
+    result = _successful_exchange()
+    assert result.ok is True
+    assert type(result.value) is MappingProxyType
+    with pytest.raises(TypeError) as caught:
+        pickle.dumps(result)
+    assert "mappingproxy" in str(caught.value)
+
+
+def test_the_successful_exchange_is_otherwise_intact():
+    """Guard: the state above must be a real success, not a degenerate one."""
+    result = _successful_exchange()
+    assert result.dialect == "vllm"
+    assert result.response_format_sent is True
+    assert dict(result.value) == {"ok": True}
+    assert result.schema_conformance == "unverified"
 
 
 def test_no_carrier_repr_exposes_locals():
@@ -219,11 +315,20 @@ _ALLOWED_GLOBALS = frozenset(
 
 
 def _authored_functions():
+    """Every authored function, carrying whether it is bound at MODULE level.
+
+    The module-level flag is the whole point. Round four established that a
+    binding factory is a module-level builder and that matching on the name
+    prefix alone silently exempts `OpenAICompatBackend._build_request` - a
+    method, not a factory - from the closure assertion. Round five reproduced
+    that exact defect by filtering on the prefix again. A prefix is not a
+    category, twice over.
+    """
     out = []
     for module in _MODULES:
         for name, obj in sorted(vars(module).items()):
             if isinstance(obj, types.FunctionType):
-                out.append((module.__name__ + "." + name, name, obj, module))
+                out.append((module.__name__ + "." + name, name, obj, module, True))
             elif isinstance(obj, type):
                 for member_name, member in sorted(vars(obj).items()):
                     func = getattr(member, "__func__", member)
@@ -234,6 +339,7 @@ def _authored_functions():
                                 member_name,
                                 func,
                                 module,
+                                False,
                             )
                         )
     return [
@@ -245,11 +351,34 @@ def _authored_functions():
 
 _AUTHORED = [
     (label, func)
-    for label, attribute, func, module in _authored_functions()
+    for label, attribute, func, module, module_level in _authored_functions()
     if not (
-        attribute.startswith("_closed_") or attribute.startswith("_build_")
+        module_level
+        and (attribute.startswith("_closed_") or attribute.startswith("_build_"))
     )
 ]
+
+#: Methods whose names collide with the factory prefixes. They are the reason
+#: the exemption must test module level and not just the name, and they are
+#: asserted present below so the surface cannot silently shrink again.
+_PREFIX_COLLIDING_METHODS = (
+    "scripts.agent_backends.openai_compat_backend."
+    "OpenAICompatBackend._build_request",
+)
+
+
+def test_the_decision_surface_includes_prefix_colliding_methods():
+    """Non-vacuity guard for the classification defect, now seen twice.
+
+    `_build_request` starts with `_build_`, which is a binding-factory prefix.
+    It is a method, so it is NOT a factory and must be audited like any other
+    decision path. Round four fixed this; round five reintroduced it; this
+    assertion makes a third occurrence impossible to ship quietly.
+    """
+    labels = {label for label, _ in _AUTHORED}
+    for required in _PREFIX_COLLIDING_METHODS:
+        assert required in labels, required
+    assert len(labels) >= 22, sorted(labels)
 
 
 @pytest.mark.parametrize(

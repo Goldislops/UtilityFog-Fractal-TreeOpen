@@ -204,6 +204,22 @@ def _build_structured_exchange_class():
           is - nested containers reached through it are ordinary mutable objects.
           It prevents top-level mutation of a shared result; it does not claim
           deep immutability.
+
+          **A successful exchange cannot be pickled.** ``MappingProxyType``
+          has no pickle support, so ``pickle.dumps`` on a successful result
+          raises ``TypeError: cannot pickle 'mappingproxy' object``. Refused
+          and response-failure results carry no value and pickle normally, as
+          do the exported classes and functions themselves.
+
+          This is a deliberate trade rather than an oversight. Removing it
+          would mean either weakening the read-only proxy - the protection
+          that stops a caller mutating a shared result through their own
+          reference - or adding custom ``__reduce__`` behaviour to work around
+          a limitation nobody has yet needed lifted. A caller who must
+          serialise a successful result can copy the value out:
+          ``dict(result.value)`` is an ordinary picklable dict. The limitation
+          is pinned by a control in ``tests/test_omi_v2_jack_round5.py`` so it
+          cannot change silently.
         - **refused** - no request was sent. ``request_refusal`` says why.
           ``response_format_sent`` is False.
         - **unusable** - a request was sent and the answer did not validate.

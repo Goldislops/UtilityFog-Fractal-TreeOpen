@@ -1028,7 +1028,7 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-716 hermetic tests across nine files, injected clients only — no network, no
+724 hermetic tests across nine files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
@@ -1041,7 +1041,7 @@ key, no endpoint, no download.
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
 | `tests/test_omi_v2_jack_round4.py` | 87 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
-| `tests/test_omi_v2_jack_round5.py` | 158 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
+| `tests/test_omi_v2_jack_round5.py` | 166 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
@@ -1269,8 +1269,11 @@ module level in the three modules is enumerated and asserted to have exact
 itself by name, to expose no `<locals>` on any of its own methods, and to
 pickle to the *identical* object. A guard builds a deliberately factory-local
 function and asserts it both carries `<locals>` and raises `PicklingError`, so
-the assertions cannot pass against a broken check. Carrier instances round-trip
-through pickle and compare equal, and no carrier `repr` contains `<locals>`.
+the assertions cannot pass against a broken check. The **specifically
+supported instance states named by the tests** round-trip through pickle and
+compare equal, and no carrier `repr` contains `<locals>`. That is narrower
+than it first read: a *successful* exchange cannot be pickled at all — see
+§16.14.
 
 **A note on the historical sections.** §16.10 and §16.11 record authorities
 bound as *defaulted parameters of* `__post_init__`. Those statements are
@@ -1280,6 +1283,44 @@ the next defect (§16.12), and every authority now lives in a closure cell with
 `__post_init__(self)` taking nothing else. The three carrier docstrings that
 still described the defaulted-parameter mechanism in the present tense have
 been corrected to describe the cells.
+
+**Same-author evidence.** Everything above was written by the agent that wrote
+the code under test. It demonstrates internal consistency, not independent
+acceptance.
+
+### 16.14 Jack's sixth independent HOLD round (2026-08-23)
+
+A sixth independent audit cleared the identity restoration, public-object
+pickle identity, clean representations and the previous closure protections
+under normal, `-O` and `-OO`. It reproduced two evidence defects — both in the
+controls rather than in the package, and both of the same kind: a claim
+broader than what was actually tested.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **The carrier-instance pickle claim was overbroad.** §16.13 and the round-five controls said "carrier instances round-trip", having tested only *refused* states. A canonical **successful** `request_structured_json` result carries its value as a `MappingProxyType` and raises `TypeError: cannot pickle 'mappingproxy' object`. The claim was true of what was tested and false of what it said. | The claim is narrowed to *the specifically supported instance states named by the tests*, which now include a successful plan and both completion dialect states. A negative control builds a canonical success **through the real path** and pins the `TypeError`, and the limitation is stated in the `StructuredExchange` docstring, here, and in the pull-request body. |
+| 2 | **The round-five closure discovery repeated the round-four classification defect.** It exempted binding factories by name prefix alone, which again silently excluded `OpenAICompatBackend._build_request` — a method, not a factory — from the audited surface. Round four had already fixed exactly this. | Round five now requires a candidate to be **module-level** before the prefix exempts it, matching round four. A non-vacuity guard asserts `_build_request` is present in the discovered surface and that the surface holds at least 22 paths, so a third occurrence cannot ship quietly. Round four's controls are untouched. |
+
+**On the pickle limitation, and why it was not engineered away.** The two
+available fixes were to weaken the read-only proxy or to add custom
+`__reduce__` behaviour. Both were declined in this bounded correction. The
+proxy is a live protection — it is what stops a caller mutating a shared
+result through the reference they passed in — and trading it for a
+serialisation convenience nobody has asked for would be a poor exchange made
+quietly. A caller who needs to serialise a successful result can copy the
+value out: `dict(result.value)` is an ordinary picklable dict.
+
+**What remains true, stated exactly.** The exported classes and functions all
+pickle to their *identical* module attributes; that is the compatibility
+regression §16.13 fixed and it is unaffected. The refused and
+response-failure carrier states pickle and compare equal. The successful
+exchange state does not pickle, by design, and is asserted not to.
+
+**The lesson, again.** Both defects are the same failure: an assertion that
+covered a subset while its wording covered the whole. A control is only
+evidence for the cases it actually runs, and a name is not a category — the
+second of those has now been recorded three times, which is why it is pinned
+by a guard rather than by care.
 
 **Same-author evidence.** Everything above was written by the agent that wrote
 the code under test. It demonstrates internal consistency, not independent
