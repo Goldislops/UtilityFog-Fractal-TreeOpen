@@ -1028,7 +1028,7 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-555 hermetic tests across eight files, injected clients only — no network, no
+716 hermetic tests across nine files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
@@ -1040,7 +1040,8 @@ key, no endpoint, no download.
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
-| `tests/test_omi_v2_jack_round4.py` | 84 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
+| `tests/test_omi_v2_jack_round4.py` | 87 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
+| `tests/test_omi_v2_jack_round5.py` | 158 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
@@ -1105,6 +1106,15 @@ evidence matrix, and reproduced three remaining gates. All three are closed.
 | 2 | **Refusal, failure and dialect decisions ran through rebindable names.** `REFUSAL_TOKENS`, `EXCHANGE_REFUSALS`, `RESPONSE_FAILURES` and the imported `is_supported_dialect` aliases were read from module scope inside every carrier's `__post_init__`, so rebinding one attribute admitted arbitrary — including secret-shaped — refusal, failure or dialect text into a result. | Every decision now runs against an **object captured when the class was defined**, bound as a defaulted parameter of `__post_init__`. A dataclass calls it with no arguments, so nothing is ever looked up again. All three carriers now resolve **no trust name at all** — asserted structurally against `co_names`, including the builtins used in the exact-type checks. |
 | 3 | **Cross-field coherence was incomplete.** A carrier could report success without naming a dialect, name a dialect on a refusal taken before the dialect gate, omit one on a refusal taken after it, or carry an arbitrary dictionary on a successful plan. The exchange also *described* its value as read-only while accepting a plain `dict`. | Full coherence is enforced: success requires a verified dialect; pre-dialect refusals (the three dialect refusals plus `backend-not-structured-capable`) carry none; post-dialect refusals and every response failure require one; and a successful plan must carry one of the **two exact dialect wire shapes**, not merely a dictionary. The value claim is made true rather than softened — whatever is supplied is re-wrapped over a fresh top-level copy, so a caller holding the original cannot change what the result reports. |
 
+
+> **Superseded by §16.12 on the mechanism, 2026-08-23.** Row 2 above records
+> what this round actually did, and is kept as written. It is no longer how
+> the code works: binding an authority as a **defaulted parameter of**
+> `__post_init__` closed name rebinding but left that authority *directly
+> addressable by any caller willing to pass the keyword*, which was a wider
+> hole than the one it closed. Every authority now lives in a **closure
+> cell** and the carriers take `__post_init__(self)` and nothing else.
+
 **How gate 1 is proved deterministically.** The window is reproduced with no
 threads and no timing: `json.dumps` itself performs the mutation, which is
 exactly the instant the old design re-read caller data. If the serialiser
@@ -1159,6 +1169,13 @@ exact-head CI, and the eight-blob matrix. It reproduced three remaining gates.
 | 1 | **The backend's dialect authority was rebindable.** `OpenAICompatBackend.__init__` resolved the imported `is_supported_dialect` alias, and so did the refusal path in `complete_structured`. Rebinding that one attribute admitted an **exact secret-shaped string as backend dialect configuration**. | Both now take the decision against a captured object. The constructor additionally captures `dict`; `complete_structured` captures the planner, the completion carrier and `bool`. |
 | 2 | **The closure was not transitive.** Round 2 asserted that the three `__post_init__` bodies resolved no trust name. True, and insufficient: the helpers they *captured* — `is_supported_dialect`, `is_supported_wire_shape`, `is_pre_dialect_refusal` — still looked up `type`, `str`, `dict` and `len` as module globals. `structured_request.type = <replacement>` changed their decisions without replacing the function, its defaults, its code, or `sys.modules`, and a **deceptive `str` subclass** carrying hidden attributes and lying in `__repr__` was admitted into `StructuredCompletion.dialect`, `StructuredExchange.dialect`, and a plan's transmitted `json_schema.name`. | Every trust-path function is now produced by a factory that binds its builtins and dependencies in **closure cells**: the four predicates, the snapshot validator, the builder, the planner, and — via captured defaults — the backend constructor, `complete_structured`, `_response_from_wire`, `request_structured_json` and all three carriers. A parametrised control asserts the closure at **every** layer. |
 | 3 | **A proxy could smuggle foreign mapping hooks onto the public carrier path.** `StructuredExchange` accepted an exact `MappingProxyType`, then called `dict()` on it. A proxy is an exact type that can wrap an **arbitrary foreign mapping**, so that copy executed the wrapped mapping's `keys`/`__getitem__`/`__iter__` — and a hostile mapping raised caller-supplied secret-shaped `RuntimeError` text out of a public constructor, under normal, `-O` and `-OO`. | The public path accepts an **exact `dict` only**, whose copy cannot call out. There is no hook-free way to inspect what a proxy wraps, so the type is narrowed rather than inspected. The canonical internal path in `request_structured_json` adapts the validator's proxy before it reaches the carrier; that conversion is safe *because* `structured.py` guarantees its `value` is always a proxy over the exact `dict` `json.loads` produced, and the validator is now a captured default so that guarantee cannot be swapped out by rebinding a name. |
+
+
+> **Superseded by §16.12 on the mechanism, 2026-08-23.** Rows 2 and 3 above
+> describe authorities bound "via captured defaults". Kept as the record of
+> this round; no longer current. Defaulted parameters were themselves the
+> next defect — see §16.12 — and every authority is now bound in a closure
+> cell, with no defaulted authority parameter anywhere.
 
 **Why the round-2 `co_names` assertion was not proof.** It examined one
 frame. A decision is only as closed as the whole call graph beneath it, and
@@ -1216,6 +1233,53 @@ binding factory by name prefix alone, which silently exempted
 `OpenAICompatBackend._build_request` — a method, not a factory — from the
 closure assertion. A prefix is not a category; factories are now identified as
 module-level builders and additionally asserted to be unexported.
+
+**Same-author evidence.** Everything above was written by the agent that wrote
+the code under test. It demonstrates internal consistency, not independent
+acceptance.
+
+### 16.13 Jack's fifth independent HOLD round (2026-08-23)
+
+A fifth independent audit cleared the four closure corrections under normal,
+`-O` and `-OO`, and reproduced one compatibility regression that those
+corrections had introduced.
+
+| # | Defect | Correction |
+|---|---|---|
+| 1 | **Factory-built objects lost their module-level identity.** Moving every authority into closure cells meant creating the exported classes and functions *inside* factories, and an object created inside a function takes its `__qualname__` from that function: `_build_backend_class.<locals>.OpenAICompatBackend`. `pickle` resolves an object by `__module__` plus `__qualname__`, so all ten exported classes and functions raised `PicklingError`, and the frozen dataclasses leaked the factory name into every `repr`. | A single `_restore_identity` helper sets `__module__`, `__name__` and `__qualname__` on each factory-built object and on its own methods, immediately at the point of binding. Nothing else is touched. |
+
+**This was a genuine regression, not a theoretical one.** `OpenAICompatBackend`
+pickles at the base commit `3241c40b` and at the previous head `88e8cb5a`, and
+stopped pickling at `c42c8806`. That is the definition of a compatibility
+break, and it was introduced by the round-four commit that wrapped the class.
+
+**What the fix does not do.** It sets three identity attributes. It does not
+read, replace, expose or widen any captured authority; it reintroduces no
+defaulted parameter; and the object bound at module level is the same object
+the factory returned. Rather than assert that by inspection alone, this round
+re-runs the protections directly: the closure completeness check, the
+signature-purity check, a cell-contents check that every captured authority in
+`request_structured_json` is still the object it was, the former-capture
+keywords still raising `TypeError`, a secret-shaped dialect still refused, and
+a mirror rebinding still changing nothing.
+
+**The controls are discovered, not listed.** Every class and function bound at
+module level in the three modules is enumerated and asserted to have exact
+`__module__` / `__name__` / module-level `__qualname__`, to resolve back to
+itself by name, to expose no `<locals>` on any of its own methods, and to
+pickle to the *identical* object. A guard builds a deliberately factory-local
+function and asserts it both carries `<locals>` and raises `PicklingError`, so
+the assertions cannot pass against a broken check. Carrier instances round-trip
+through pickle and compare equal, and no carrier `repr` contains `<locals>`.
+
+**A note on the historical sections.** §16.10 and §16.11 record authorities
+bound as *defaulted parameters of* `__post_init__`. Those statements are
+accurate records of what those rounds did and are kept as written, each now
+carrying an explicit superseded notice: defaulted parameters were themselves
+the next defect (§16.12), and every authority now lives in a closure cell with
+`__post_init__(self)` taking nothing else. The three carrier docstrings that
+still described the defaulted-parameter mechanism in the present tense have
+been corrected to describe the cells.
 
 **Same-author evidence.** Everything above was written by the agent that wrote
 the code under test. It demonstrates internal consistency, not independent
