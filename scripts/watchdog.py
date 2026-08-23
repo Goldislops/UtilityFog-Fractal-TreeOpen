@@ -12,6 +12,22 @@ Or install as a Windows scheduled task for true 24/7 autonomy.
 
 Inspired by Intel's PowerVia: completely separating monitoring (power)
 from execution (signal) to prevent architectural congestion.
+
+Snapshot discovery is BOUNDED and reports its own state (see
+``discover_snapshots``). It is not archive admission, and this module makes no
+admission claim of any kind:
+
+* A corrupt or partially written newest snapshot is still selected and still
+  handed to ``run_v070_engine.py --resume``. The engine will fail to load it,
+  the watchdog will restart, and the restart budget can still be exhausted that
+  way. Closing that needs re-admission at the actual load, which happens in a
+  separate process.
+* A selected path can disappear after discovery succeeds and before the restart
+  subprocess opens it. That window is not closed.
+* Matching symlinks and non-regular entries are not newly admitted or secured
+  here. Discovery reads metadata without following links, which changes which
+  entry a symlink is ordered by; that is a behaviour change, not a proven
+  security improvement.
 """
 
 import os
@@ -33,6 +49,22 @@ PYTHON_EXE = sys.executable  # Use the same Python that runs this script
 ENGINE_SCRIPT = PROJECT_ROOT / "scripts" / "run_v070_engine.py"
 RULE_FILE = PROJECT_ROOT / "ca" / "rules" / "example.toml"
 
+# This module is documented as `python scripts/watchdog.py`, which leaves the
+# repository root off sys.path. The shared discovery primitive lives in the
+# `scripts` package, so the root is put on the path before importing it -- one
+# canonical module name either way, which matters because `DiscoveryFailed` is
+# tested by identity below.
+if str(PROJECT_ROOT) not in sys.path:
+    # Appended, not prepended: this must not be able to shadow a standard
+    # library module with a repository file of the same name.
+    sys.path.append(str(PROJECT_ROOT))
+
+from scripts.snapshot_archive_guard import (  # noqa: E402
+    PRODUCTION_DISCOVERY_POLICY,
+    DiscoveryFailed,
+    discover_snapshot_candidates,
+)
+
 CHECK_INTERVAL = 60        # seconds between pulse checks
 MAX_RESTART_ATTEMPTS = 10  # before giving up
 RESTART_COOLDOWN = 30      # seconds to wait before restart after crash
@@ -44,6 +76,23 @@ PROCESS_NAME = "run_v070_engine.py"
 PROCESS_QUERY_FAILED_MESSAGE = "Process query FAILED: engine status unknown"
 ENGINE_STATUS_UNKNOWN_MESSAGE = (
     "Engine status UNKNOWN: process query failed; no restart decision this cycle"
+)
+
+# Fixed status lines for the snapshot-directory states that are NOT "the
+# directory is empty". Each is path-free: the reason a directory could not be
+# listed must not disclose what is in it. `{reason}` is filled from
+# `DiscoveryFailureReason`, a closed set of four fixed strings.
+SNAPSHOT_METADATA_UNREADABLE_MESSAGE = (
+    "Snapshot metadata UNREADABLE: every matching name failed its metadata read;"
+    " no restart decision this cycle"
+)
+SNAPSHOT_DISCOVERY_FAILED_TEMPLATE = (
+    "Snapshot discovery FAILED ({reason}): directory state unknown;"
+    " no restart decision this cycle"
+)
+SNAPSHOT_HEALTH_UNKNOWN_MESSAGE = (
+    "Snapshot health UNKNOWN: the selected snapshot went away before its age"
+    " could be read"
 )
 
 # ---------------------------------------------------------------------------
@@ -121,16 +170,37 @@ def find_engine_processes():
     return processes
 
 
-def find_latest_snapshot():
-    """Find the most recent .npz snapshot in the data directory."""
-    snapshots = sorted(
-        DATA_DIR.glob("v070_gen*.npz"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if snapshots:
-        return snapshots[0]
-    return None
+def discover_snapshots():
+    """Discover snapshot candidates under a bound, newest first.
+
+    Returns the shared primitive's ``DiscoverySucceeded`` or ``DiscoveryFailed``
+    rather than a single path, because ``Path | None`` cannot express what the
+    callers need to keep apart: an empty directory, a directory whose matching
+    names all failed their metadata reads, and a listing that could not be
+    completed at all are three different facts, and only the first is evidence
+    that there is nothing to resume from.
+
+    This replaces `sorted(DATA_DIR.glob("v070_gen*.npz"), key=...)`, which was
+    unbounded and ran once per 60-second cycle in the healthy path. `glob`
+    cannot be fixed downstream -- `glob.glob` is `list(iglob(...))` and even
+    `iglob` reaches `_listdir`, which is `return list(it)` -- so by the time
+    anything saw a candidate the whole directory was already materialised. It
+    also called `p.stat()` inside the sort key, so a candidate removed mid-scan
+    raised `OSError` out of the sort and into the loop's blanket handler.
+
+    Both globals are read at call time so a caller can be pointed at a
+    different directory, and the caps are the one calibrated production
+    instance rather than a local number.
+
+    Discovery ONLY. No archive admission happens here or anywhere in this
+    module: the selected path is handed to `run_v070_engine.py --resume` in a
+    separate process, which performs its own `np.load`, so there is no in-process
+    load here at which a typed refusal could be raised. A corrupt or partially
+    written newest snapshot is still selected and can still burn the restart
+    budget, and matching symlinks and non-regular entries are not admitted or
+    secured by anything in this module.
+    """
+    return discover_snapshot_candidates(DATA_DIR, policy=PRODUCTION_DISCOVERY_POLICY)
 
 
 def kill_process(pid):
@@ -178,12 +248,34 @@ def start_engine(snapshot_path):
 
 
 def check_engine_health(processes):
-    """Check if the engine is producing recent snapshots."""
-    latest = find_latest_snapshot()
-    if not latest:
+    """Check if the engine is producing recent snapshots.
+
+    Never starts an engine, whatever discovery reports -- this is the reporting
+    lane, and the only `start_engine` call site is the engine-down branch of
+    `run_watchdog`.
+    """
+    result = discover_snapshots()
+    if isinstance(result, DiscoveryFailed):
+        return False, SNAPSHOT_DISCOVERY_FAILED_TEMPLATE.format(
+            reason=result.reason.value)
+    if result.all_matching_unreadable:
+        return False, SNAPSHOT_METADATA_UNREADABLE_MESSAGE
+    if not result.ordered:
         return False, "No snapshots found"
 
-    age = time.time() - latest.stat().st_mtime
+    latest = result.ordered[0]
+    # A SECOND metadata read, after selection: `DiscoverySucceeded` carries no
+    # modification time, so the age comparison has to ask again, and that read
+    # races the producer and anything that removes files. The race is not
+    # closed here -- it is given a fixed outcome instead of an `OSError` that
+    # reaches the loop's blanket handler as an unnamed "Watchdog error", or
+    # `--once` as a traceback.
+    try:
+        mtime = latest.stat().st_mtime
+    except OSError:
+        return False, SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+
+    age = time.time() - mtime
     if age > 900:  # 15 minutes without a snapshot = stalled
         return False, f"Latest snapshot is {age/60:.0f} min old (stale)"
 
@@ -250,9 +342,22 @@ def run_watchdog():
                     time.sleep(CHECK_INTERVAL * 5)  # Back off
                     continue
 
-                snapshot = find_latest_snapshot()
-                if snapshot:
-                    pid = start_engine(snapshot)
+                # Only a COMPLETED discovery that actually produced a candidate
+                # may start an engine. An unreadable or unfinishable directory
+                # is an unknown state, exactly like a failed process query
+                # above, and no restart decision may be made from it: nothing
+                # is started and restart_count / last_restart_time are left
+                # exactly as they were. Each branch falls through to the single
+                # trailing sleep, so an unknown directory does not double the
+                # cadence.
+                result = discover_snapshots()
+                if isinstance(result, DiscoveryFailed):
+                    log.error(SNAPSHOT_DISCOVERY_FAILED_TEMPLATE.format(
+                        reason=result.reason.value))
+                elif result.all_matching_unreadable:
+                    log.error(SNAPSHOT_METADATA_UNREADABLE_MESSAGE)
+                elif result.ordered:
+                    pid = start_engine(result.ordered[0])
                     if pid:
                         restart_count += 1
                         last_restart_time = time.time()
@@ -313,9 +418,14 @@ def run_once():
         print(f"  Health: {'OK' if healthy else 'WARNING'} — {status}")
     else:
         print("Engine NOT running!")
-        snapshot = find_latest_snapshot()
-        if snapshot:
-            print(f"  Latest snapshot: {snapshot.name}")
+        result = discover_snapshots()
+        if isinstance(result, DiscoveryFailed):
+            print("  " + SNAPSHOT_DISCOVERY_FAILED_TEMPLATE.format(
+                reason=result.reason.value))
+        elif result.all_matching_unreadable:
+            print("  " + SNAPSHOT_METADATA_UNREADABLE_MESSAGE)
+        elif result.ordered:
+            print(f"  Latest snapshot: {result.ordered[0].name}")
         else:
             print("  No snapshots found!")
     return 0
