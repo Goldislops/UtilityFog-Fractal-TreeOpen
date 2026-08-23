@@ -130,578 +130,675 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 
-@dataclass(frozen=True)
-class StructuredCompletion:
-    """Result of one `complete_structured()` call. Carries no schema content.
+def _build_structured_completion_class():
+    """Build :class:`StructuredCompletion` with its authorities in cells.
 
-    `response_format_sent` is named for what it actually records: that the
-    request carried a `response_format` object. It is NOT a claim that the
-    runtime honoured the constraint, and nothing in this module reports such
-    a claim. The output is validated above this layer, which establishes
-    that it is a usable JSON object - not that it conforms to the schema
-    that was sent. No layer of this package establishes conformance.
-
-    On refusal, `refusal` is one token from the closed vocabulary in
-    `structured_request.StructuredRefusal` and `response` is None. No schema
-    fragment, key name, prompt, response text, byte offset, length, type
-    name, or exception text is ever carried here.
+    These were defaulted parameters of ``__post_init__``. That closed name
+    rebinding and opened a wider hole: a defaulted parameter is directly
+    addressable, so no rebinding was needed to supply a different vocabulary
+    or a different dialect authority - a keyword argument sufficed. Cells are
+    not addressable, and the documented signature stays exactly as it reads.
     """
+    _tokens = REFUSAL_TOKENS
+    _dialect_ok = is_supported_dialect
+    _pre_dialect = is_pre_dialect_refusal
+    _agent_response = AgentResponse
+    _type = type
+    _str = str
+    _bool = bool
+    _ValueError = ValueError
 
-    ok: bool
-    response: Optional[AgentResponse] = None
-    refusal: Optional[StructuredRefusal] = None
-    dialect: Optional[str] = None
-    response_format_sent: bool = False
+    @dataclass(frozen=True)
+    class StructuredCompletion:
+        """Result of one `complete_structured()` call. Carries no schema content.
 
-    def __post_init__(
-        self,
-        _tokens: frozenset = REFUSAL_TOKENS,
-        _dialect_ok=is_supported_dialect,
-        _pre_dialect=is_pre_dialect_refusal,
-        _agent_response=AgentResponse,
-        _type=type,
-        _str=str,
-        _bool=bool,
-    ) -> None:
-        """Validate the carrier's own coherence.
+        `response_format_sent` is named for what it actually records: that the
+        request carried a `response_format` object. It is NOT a claim that the
+        runtime honoured the constraint, and nothing in this module reports such
+        a claim. The output is validated above this layer, which establishes
+        that it is a usable JSON object - not that it conforms to the schema
+        that was sent. No layer of this package establishes conformance.
 
-        The defaulted parameters capture OBJECTS at class-definition time. A
-        dataclass calls ``self.__post_init__()`` with no arguments, so none of
-        these is ever looked up again. Rebinding this module's imported
-        aliases - ``REFUSAL_TOKENS``, ``is_supported_dialect`` - therefore
-        cannot widen what a completion will accept. Reading them as globals
-        did allow exactly that, including admitting arbitrary secret-shaped
-        refusal or dialect text into a result.
+        On refusal, `refusal` is one token from the closed vocabulary in
+        `structured_request.StructuredRefusal` and `response` is None. No schema
+        fragment, key name, prompt, response text, byte offset, length, type
+        name, or exception text is ever carried here.
         """
-        if _type(self.ok) is not _bool:
-            raise ValueError("ok must be exactly a bool")
-        if _type(self.response_format_sent) is not _bool:
-            raise ValueError("response_format_sent must be exactly a bool")
-        if self.refusal is not None and (
-            _type(self.refusal) is not _str or self.refusal not in _tokens
-        ):
-            raise ValueError("refusal must be a token from the closed vocabulary")
-        if self.dialect is not None and not _dialect_ok(self.dialect):
-            raise ValueError("dialect must be a verified dialect token or None")
-        # Cross-field dialect coherence. A result that names no dialect when
-        # one was established, or names one when none was, is a result an
-        # operator cannot act on: they cannot tell which runtime it concerns.
-        if self.ok and self.dialect is None:
-            raise ValueError("a successful completion must name its dialect")
-        if not self.ok and _pre_dialect(self.refusal):
-            if self.dialect is not None:
-                raise ValueError(
-                    "a refusal taken before the dialect gate cannot name a dialect"
+
+        ok: bool
+        response: Optional[AgentResponse] = None
+        refusal: Optional[StructuredRefusal] = None
+        dialect: Optional[str] = None
+        response_format_sent: bool = False
+
+        def __post_init__(self) -> None:
+            """Validate the carrier's own coherence.
+
+            The defaulted parameters capture OBJECTS at class-definition time. A
+            dataclass calls ``self.__post_init__()`` with no arguments, so none of
+            these is ever looked up again. Rebinding this module's imported
+            aliases - ``REFUSAL_TOKENS``, ``is_supported_dialect`` - therefore
+            cannot widen what a completion will accept. Reading them as globals
+            did allow exactly that, including admitting arbitrary secret-shaped
+            refusal or dialect text into a result.
+            """
+            if _type(self.ok) is not _bool:
+                raise _ValueError("ok must be exactly a bool")
+            if _type(self.response_format_sent) is not _bool:
+                raise _ValueError("response_format_sent must be exactly a bool")
+            if self.refusal is not None and (
+                _type(self.refusal) is not _str or self.refusal not in _tokens
+            ):
+                raise _ValueError("refusal must be a token from the closed vocabulary")
+            if self.dialect is not None and not _dialect_ok(self.dialect):
+                raise _ValueError("dialect must be a verified dialect token or None")
+            # Cross-field dialect coherence. A result that names no dialect when
+            # one was established, or names one when none was, is a result an
+            # operator cannot act on: they cannot tell which runtime it concerns.
+            if self.ok and self.dialect is None:
+                raise _ValueError("a successful completion must name its dialect")
+            if not self.ok and _pre_dialect(self.refusal):
+                if self.dialect is not None:
+                    raise _ValueError(
+                        "a refusal taken before the dialect gate cannot name a dialect"
+                    )
+            elif not self.ok and self.dialect is None:
+                raise _ValueError(
+                    "a refusal taken after the dialect gate must name its dialect"
                 )
-        elif not self.ok and self.dialect is None:
-            raise ValueError(
-                "a refusal taken after the dialect gate must name its dialect"
+            if self.ok and self.refusal is not None:
+                raise _ValueError("a successful completion cannot carry a refusal code")
+            if not self.ok and self.refusal is None:
+                raise _ValueError("a refused completion must carry a refusal code")
+            if not self.ok and self.response is not None:
+                raise _ValueError("a refused completion must not carry a response")
+            if not self.ok and self.response_format_sent:
+                raise _ValueError("a refused completion cannot have sent a request")
+            if self.ok and self.response is None:
+                raise _ValueError("a successful completion must carry a response")
+            # Exact type, not merely non-None. A caller reading `.response` on a
+            # successful completion is entitled to an AgentResponse, and
+            # `structured_exchange.request_structured_json` reads `.text` off it
+            # while promising to be total: a foreign object here would make that
+            # promise false by raising AttributeError from inside it. Checking
+            # only for None made the exact-type guard on this class skin-deep.
+            if self.ok and _type(self.response) is not _agent_response:
+                raise _ValueError(
+                    "a successful completion must carry an exact AgentResponse"
+                )
+            if self.ok and not self.response_format_sent:
+                raise _ValueError("a successful completion must have sent a request")
+
+    return StructuredCompletion
+
+
+StructuredCompletion = _build_structured_completion_class()
+
+
+def _build_backend_class():
+    """Build :class:`OpenAICompatBackend` with every authority in cells.
+
+    An earlier revision bound the dialect authority, the planner, the result
+    carrier and several builtins as DEFAULTED PARAMETERS of ``__init__``,
+    ``complete_structured`` and ``_response_from_wire``. That closed name
+    rebinding and opened a wider hole: a defaulted parameter is directly
+    addressable, so no rebinding was needed at all. A caller could write
+
+        OpenAICompatBackend(..., dialect="sk-...", _dialect_ok=lambda v: True)
+        backend.complete_structured(..., _plan=lambda *a, **k: FakePlan())
+
+    and admit a secret-shaped dialect, or put an arbitrary object on the wire
+    as the `response_format`. A capture a caller can pass is not a capture; it
+    is an injection point with a leading underscore.
+
+    Binding them in this factory puts them in cells no caller can address,
+    and leaves every documented public signature exactly as it reads -
+    passing a former capture keyword now raises TypeError.
+
+    The class is wrapped rather than each method individually so that the
+    whole translation path, not just the structured-output path, shares one
+    audited set of captures.
+    """
+    _dialect_ok = is_supported_dialect
+    _plan = plan_structured_request
+    _Completion = StructuredCompletion
+    _agent_response = AgentResponse
+    _TextBlock = TextBlock
+    _ToolUseBlock = ToolUseBlock
+    _ToolResultBlock = ToolResultBlock
+    _attr = _attr_or_key
+    _block_summary = _block_to_summary_dict
+    _json = json
+    _os = os
+    _type = type
+    _str = str
+    _dict = dict
+    _list = list
+    _bool = bool
+    _isinstance = isinstance
+    _ValueError = ValueError
+    _RuntimeError = RuntimeError
+    _ImportError = ImportError
+    _RecursionError = RecursionError
+
+
+    class OpenAICompatBackend(AgentBackend):
+        """Concrete `AgentBackend` over the OpenAI-compatible chat completions API."""
+
+        name: ClassVar[str] = "openai-compat"
+
+        def __init__(
+            self,
+            *,
+            base_url: Optional[str] = None,
+            model: str = DEFAULT_MODEL,
+            api_key: Optional[str] = None,
+            extra_headers: Optional[dict[str, str]] = None,
+            client: Optional[Any] = None,
+            dialect: Optional[str] = None,
+        ) -> None:
+            """Build an OpenAICompatBackend.
+
+            Args:
+                base_url: Provider endpoint (e.g. `"https://api.deepseek.com/v1"`,
+                    `"http://localhost:11434/v1"` for Ollama). If None, the SDK
+                    uses OpenAI's default `https://api.openai.com/v1`.
+                model: Model identifier passed as `model=`. Provider-specific.
+                api_key: Optional API key; if None, the SDK reads `OPENAI_API_KEY`
+                    (or whichever env var the SDK is configured to use).
+                extra_headers: Optional headers added to every request — for
+                    providers that require non-Bearer auth schemes or routing
+                    hints.
+                client: Pre-built SDK client. If provided, `base_url`, `api_key`,
+                    and `extra_headers` are ignored — used for test injection.
+                dialect: OMI-V2. Optional runtime dialect enabling
+                    `complete_structured()`. Must be supplied EXPLICITLY and must
+                    name a runtime with a verified wire shape — see
+                    `scripts/agent_backends/structured_request.py`. It is never
+                    inferred from `base_url`, from installed software, from the
+                    environment, or from a probe, because none of those identify
+                    a runtime reliably: `base_url` is caller-chosen text, a local
+                    port says nothing about what is listening on it, and probing
+                    would mean contacting an endpoint to decide how to talk to
+                    it. A present-but-unrecognised value raises `ValueError` HERE,
+                    at construction, rather than at first use — an explicitly
+                    wrong dialect is a configuration error, and failing at the
+                    point of configuration is the earliest possible fail-closed.
+                    `None` (the default) leaves the instance exactly as it was
+                    before OMI-V2: `complete()` is unaffected, and
+                    `complete_structured()` refuses with `dialect-not-configured`.
+
+            Raises:
+                ValueError: if `dialect` is supplied but is not one of the
+                    verified dialect tokens. The message names the parameter and
+                    the closed vocabulary, both of which are fixed constants; no
+                    supplied value, type name, or representation is echoed.
+            """
+            # Validated FIRST, before any SDK client is constructed, so a
+            # misconfigured instance never reaches the point of holding a client.
+            if dialect is not None and not _dialect_ok(dialect):
+                raise _ValueError(
+                    "dialect must be one of: llama-cpp, ollama, vllm, sglang"
+                )
+            self.dialect: Optional[str] = dialect
+            self.model = model
+            self.extra_headers = _dict(extra_headers) if extra_headers else None
+            if client is not None:
+                self._client = client
+                return
+            try:
+                from openai import OpenAI
+            except _ImportError as e:
+                raise _RuntimeError(
+                    "OpenAICompatBackend requires `pip install openai`"
+                ) from e
+            kwargs: dict[str, Any] = {}
+
+            # PR 7b: the OpenAI SDK raises at construction if no api_key is set
+            # AND OPENAI_API_KEY env var is empty. That's hostile when talking
+            # to a passwordless local server (Ollama, vLLM, llama.cpp). If the
+            # caller didn't supply a key and the env var isn't set, supply a
+            # placeholder so construction succeeds. Real auth-required providers
+            # (DeepSeek, NIM, etc.) will fail later with a clear 401, which is
+            # a much better failure mode than crashing at startup.
+            effective_key = api_key
+            if effective_key is None and not _os.environ.get("OPENAI_API_KEY"):
+                effective_key = "not-needed"  # placeholder for SDKs that demand a string
+
+            if effective_key is not None:
+                kwargs["api_key"] = effective_key
+            if base_url is not None:
+                kwargs["base_url"] = base_url
+            self._client = OpenAI(**kwargs)
+
+        # -- the one contract method --------------------------------------------
+
+        def complete(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            *,
+            system: Optional[str] = None,
+            max_tokens: int = 2048,
+            temperature: float = 0.0,
+        ) -> AgentResponse:
+            request = self._build_request(
+                messages,
+                tools,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
-        if self.ok and self.refusal is not None:
-            raise ValueError("a successful completion cannot carry a refusal code")
-        if not self.ok and self.refusal is None:
-            raise ValueError("a refused completion must carry a refusal code")
-        if not self.ok and self.response is not None:
-            raise ValueError("a refused completion must not carry a response")
-        if not self.ok and self.response_format_sent:
-            raise ValueError("a refused completion cannot have sent a request")
-        if self.ok and self.response is None:
-            raise ValueError("a successful completion must carry a response")
-        # Exact type, not merely non-None. A caller reading `.response` on a
-        # successful completion is entitled to an AgentResponse, and
-        # `structured_exchange.request_structured_json` reads `.text` off it
-        # while promising to be total: a foreign object here would make that
-        # promise false by raising AttributeError from inside it. Checking
-        # only for None made the exact-type guard on this class skin-deep.
-        if self.ok and _type(self.response) is not _agent_response:
-            raise ValueError(
-                "a successful completion must carry an exact AgentResponse"
+            response = self._client.chat.completions.create(**request)
+            return self._response_from_wire(response)
+
+        def _build_request(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            *,
+            system: Optional[str] = None,
+            max_tokens: int = 2048,
+            temperature: float = 0.0,
+            include_tools: Optional[bool] = None,
+        ) -> dict[str, Any]:
+            """Assemble the outbound request dict. Extracted verbatim from
+            `complete()` in OMI-V2 so that `complete()` and `complete_structured()`
+            provably build the SAME request, and the legacy shape is defined in
+            exactly one place. This body is unchanged from the pre-OMI-V2
+            `complete()`; the existing backend suite exercises it through
+            `complete()` and therefore proves the legacy shape did not move.
+
+            `include_tools` exists only to close a time-of-check/time-of-use gap
+            in `complete_structured()`. Left as None - which is what `complete()`
+            passes, and therefore what every pre-OMI-V2 call site does - this
+            method truth-tests `tools` exactly as it always has. A caller that has
+            ALREADY truth-tested `tools` to make a decision passes the result it
+            got, so the decision and the request are built from one evaluation
+            rather than two. A `tools` object whose `__bool__` answers differently
+            on a second call can then no longer make the two disagree.
+            """
+            wire_messages = []
+            if system is not None:
+                wire_messages.append({"role": "system", "content": system})
+            for m in messages:
+                wire_messages.extend(self._message_to_wire(m))
+
+            request: dict[str, Any] = {
+                "model": self.model,
+                "messages": wire_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            attach_tools = _bool(tools) if include_tools is None else include_tools
+            if attach_tools:
+                request["tools"] = [self._tool_to_wire(t) for t in tools]
+            if self.extra_headers:
+                request["extra_headers"] = _dict(self.extra_headers)
+            return request
+
+        # -- OMI-V2: structured output ------------------------------------------
+
+        def complete_structured(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            *,
+            structured: Any,
+            system: Optional[str] = None,
+            max_tokens: int = 2048,
+            temperature: float = 0.0,
+        ) -> "StructuredCompletion":
+            """Ask the configured runtime for schema-constrained decoding.
+
+            Returns a :class:`StructuredCompletion` for every input reachable
+            through the contract; it never raises to signal a refused request.
+            Transport-level errors from the SDK still propagate, matching
+            `complete()`.
+
+            The refusal gate runs to completion BEFORE `self._client` is read at
+            all. That ordering is the point of the method, not an implementation
+            detail: a refused request must not become a billed, logged, or
+            rate-limited call against a runtime. `test_omi_v2_backend.py` proves
+            it with a client whose every attribute access raises.
+
+            This method deliberately does NOT validate the response. It reports
+            whether a `response_format` was *sent*, which is not the same as the
+            runtime having honoured it - see the module docstring of
+            `structured_request.py` for the Ollama case where an unrecognised
+            request degrades silently to unconstrained output. The response is
+            checked one layer up by `scripts/open_model/structured_exchange.py`,
+            which reuses `scripts/open_model/structured.py` - and that check
+            establishes JSON-object and required-key usability, NOT schema
+            conformance. See `StructuredExchange.schema_conformance`.
+            """
+            # Gate first, on ONE evaluation of `tools`. The result is reused
+            # below rather than recomputed: an earlier revision truth-tested
+            # `tools` here and again inside `_build_request`, and a `tools` object
+            # whose `__bool__` returned False then True passed the gate as
+            # tool-free and still had its tools attached alongside the
+            # `response_format` - defeating the very combination this refuses.
+            has_tools = _bool(tools)
+            plan = _plan(self.dialect, structured, has_tools=has_tools)
+            if not plan.ok:
+                return _Completion(
+                    ok=False,
+                    refusal=plan.refusal,
+                    dialect=self.dialect if _dialect_ok(self.dialect) else None,
+                    response_format_sent=False,
+                )
+
+            request = self._build_request(
+                messages,
+                tools,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                include_tools=has_tools,
             )
-        if self.ok and not self.response_format_sent:
-            raise ValueError("a successful completion must have sent a request")
+            # The ONLY key OMI-V2 adds. There is no extra_body, no kwargs
+            # passthrough, and no provider-specific escape hatch by which a
+            # caller could reach any other request field.
+            request["response_format"] = plan.response_format
 
-
-class OpenAICompatBackend(AgentBackend):
-    """Concrete `AgentBackend` over the OpenAI-compatible chat completions API."""
-
-    name: ClassVar[str] = "openai-compat"
-
-    def __init__(
-        self,
-        *,
-        base_url: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
-        api_key: Optional[str] = None,
-        extra_headers: Optional[dict[str, str]] = None,
-        client: Optional[Any] = None,
-        dialect: Optional[str] = None,
-        _dialect_ok=is_supported_dialect,
-        _dict=dict,
-    ) -> None:
-        """Build an OpenAICompatBackend.
-
-        Args:
-            base_url: Provider endpoint (e.g. `"https://api.deepseek.com/v1"`,
-                `"http://localhost:11434/v1"` for Ollama). If None, the SDK
-                uses OpenAI's default `https://api.openai.com/v1`.
-            model: Model identifier passed as `model=`. Provider-specific.
-            api_key: Optional API key; if None, the SDK reads `OPENAI_API_KEY`
-                (or whichever env var the SDK is configured to use).
-            extra_headers: Optional headers added to every request — for
-                providers that require non-Bearer auth schemes or routing
-                hints.
-            client: Pre-built SDK client. If provided, `base_url`, `api_key`,
-                and `extra_headers` are ignored — used for test injection.
-            dialect: OMI-V2. Optional runtime dialect enabling
-                `complete_structured()`. Must be supplied EXPLICITLY and must
-                name a runtime with a verified wire shape — see
-                `scripts/agent_backends/structured_request.py`. It is never
-                inferred from `base_url`, from installed software, from the
-                environment, or from a probe, because none of those identify
-                a runtime reliably: `base_url` is caller-chosen text, a local
-                port says nothing about what is listening on it, and probing
-                would mean contacting an endpoint to decide how to talk to
-                it. A present-but-unrecognised value raises `ValueError` HERE,
-                at construction, rather than at first use — an explicitly
-                wrong dialect is a configuration error, and failing at the
-                point of configuration is the earliest possible fail-closed.
-                `None` (the default) leaves the instance exactly as it was
-                before OMI-V2: `complete()` is unaffected, and
-                `complete_structured()` refuses with `dialect-not-configured`.
-
-        Raises:
-            ValueError: if `dialect` is supplied but is not one of the
-                verified dialect tokens. The message names the parameter and
-                the closed vocabulary, both of which are fixed constants; no
-                supplied value, type name, or representation is echoed.
-        """
-        # Validated FIRST, before any SDK client is constructed, so a
-        # misconfigured instance never reaches the point of holding a client.
-        if dialect is not None and not _dialect_ok(dialect):
-            raise ValueError(
-                "dialect must be one of: llama-cpp, ollama, vllm, sglang"
-            )
-        self.dialect: Optional[str] = dialect
-        self.model = model
-        self.extra_headers = _dict(extra_headers) if extra_headers else None
-        if client is not None:
-            self._client = client
-            return
-        try:
-            from openai import OpenAI
-        except ImportError as e:
-            raise RuntimeError(
-                "OpenAICompatBackend requires `pip install openai`"
-            ) from e
-        kwargs: dict[str, Any] = {}
-
-        # PR 7b: the OpenAI SDK raises at construction if no api_key is set
-        # AND OPENAI_API_KEY env var is empty. That's hostile when talking
-        # to a passwordless local server (Ollama, vLLM, llama.cpp). If the
-        # caller didn't supply a key and the env var isn't set, supply a
-        # placeholder so construction succeeds. Real auth-required providers
-        # (DeepSeek, NIM, etc.) will fail later with a clear 401, which is
-        # a much better failure mode than crashing at startup.
-        effective_key = api_key
-        if effective_key is None and not os.environ.get("OPENAI_API_KEY"):
-            effective_key = "not-needed"  # placeholder for SDKs that demand a string
-
-        if effective_key is not None:
-            kwargs["api_key"] = effective_key
-        if base_url is not None:
-            kwargs["base_url"] = base_url
-        self._client = OpenAI(**kwargs)
-
-    # -- the one contract method --------------------------------------------
-
-    def complete(
-        self,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        *,
-        system: Optional[str] = None,
-        max_tokens: int = 2048,
-        temperature: float = 0.0,
-    ) -> AgentResponse:
-        request = self._build_request(
-            messages,
-            tools,
-            system=system,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        response = self._client.chat.completions.create(**request)
-        return self._response_from_wire(response)
-
-    def _build_request(
-        self,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        *,
-        system: Optional[str] = None,
-        max_tokens: int = 2048,
-        temperature: float = 0.0,
-        include_tools: Optional[bool] = None,
-    ) -> dict[str, Any]:
-        """Assemble the outbound request dict. Extracted verbatim from
-        `complete()` in OMI-V2 so that `complete()` and `complete_structured()`
-        provably build the SAME request, and the legacy shape is defined in
-        exactly one place. This body is unchanged from the pre-OMI-V2
-        `complete()`; the existing backend suite exercises it through
-        `complete()` and therefore proves the legacy shape did not move.
-
-        `include_tools` exists only to close a time-of-check/time-of-use gap
-        in `complete_structured()`. Left as None - which is what `complete()`
-        passes, and therefore what every pre-OMI-V2 call site does - this
-        method truth-tests `tools` exactly as it always has. A caller that has
-        ALREADY truth-tested `tools` to make a decision passes the result it
-        got, so the decision and the request are built from one evaluation
-        rather than two. A `tools` object whose `__bool__` answers differently
-        on a second call can then no longer make the two disagree.
-        """
-        wire_messages = []
-        if system is not None:
-            wire_messages.append({"role": "system", "content": system})
-        for m in messages:
-            wire_messages.extend(self._message_to_wire(m))
-
-        request: dict[str, Any] = {
-            "model": self.model,
-            "messages": wire_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        attach_tools = bool(tools) if include_tools is None else include_tools
-        if attach_tools:
-            request["tools"] = [self._tool_to_wire(t) for t in tools]
-        if self.extra_headers:
-            request["extra_headers"] = dict(self.extra_headers)
-        return request
-
-    # -- OMI-V2: structured output ------------------------------------------
-
-    def complete_structured(
-        self,
-        messages: list[Message],
-        tools: list[ToolSpec],
-        *,
-        structured: Any,
-        system: Optional[str] = None,
-        max_tokens: int = 2048,
-        temperature: float = 0.0,
-        _dialect_ok=is_supported_dialect,
-        _plan=plan_structured_request,
-        _bool=bool,
-        _Completion=StructuredCompletion,
-    ) -> "StructuredCompletion":
-        """Ask the configured runtime for schema-constrained decoding.
-
-        Returns a :class:`StructuredCompletion` for every input reachable
-        through the contract; it never raises to signal a refused request.
-        Transport-level errors from the SDK still propagate, matching
-        `complete()`.
-
-        The refusal gate runs to completion BEFORE `self._client` is read at
-        all. That ordering is the point of the method, not an implementation
-        detail: a refused request must not become a billed, logged, or
-        rate-limited call against a runtime. `test_omi_v2_backend.py` proves
-        it with a client whose every attribute access raises.
-
-        This method deliberately does NOT validate the response. It reports
-        whether a `response_format` was *sent*, which is not the same as the
-        runtime having honoured it - see the module docstring of
-        `structured_request.py` for the Ollama case where an unrecognised
-        request degrades silently to unconstrained output. The response is
-        checked one layer up by `scripts/open_model/structured_exchange.py`,
-        which reuses `scripts/open_model/structured.py` - and that check
-        establishes JSON-object and required-key usability, NOT schema
-        conformance. See `StructuredExchange.schema_conformance`.
-        """
-        # Gate first, on ONE evaluation of `tools`. The result is reused
-        # below rather than recomputed: an earlier revision truth-tested
-        # `tools` here and again inside `_build_request`, and a `tools` object
-        # whose `__bool__` returned False then True passed the gate as
-        # tool-free and still had its tools attached alongside the
-        # `response_format` - defeating the very combination this refuses.
-        has_tools = _bool(tools)
-        plan = _plan(self.dialect, structured, has_tools=has_tools)
-        if not plan.ok:
+            response = self._client.chat.completions.create(**request)
             return _Completion(
-                ok=False,
-                refusal=plan.refusal,
-                dialect=self.dialect if _dialect_ok(self.dialect) else None,
-                response_format_sent=False,
+                ok=True,
+                response=self._response_from_wire(response),
+                dialect=self.dialect,
+                response_format_sent=True,
             )
 
-        request = self._build_request(
-            messages,
-            tools,
-            system=system,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            include_tools=has_tools,
-        )
-        # The ONLY key OMI-V2 adds. There is no extra_body, no kwargs
-        # passthrough, and no provider-specific escape hatch by which a
-        # caller could reach any other request field.
-        request["response_format"] = plan.response_format
+        # -- wire translation (outbound) ---------------------------------------
 
-        response = self._client.chat.completions.create(**request)
-        return _Completion(
-            ok=True,
-            response=self._response_from_wire(response),
-            dialect=self.dialect,
-            response_format_sent=True,
-        )
+        @staticmethod
+        def _message_to_wire(m: Message) -> list[dict[str, Any]]:
+            """Translate a `Message` to one or MORE OpenAI wire messages.
 
-    # -- wire translation (outbound) ---------------------------------------
+            Most cases produce one message. The exception is a user-role message
+            whose content is a list containing `ToolResultBlock`s — each
+            ToolResultBlock becomes its own `{"role": "tool", ...}` message
+            in OpenAI's protocol, and any plain text accompanying them
+            becomes a separate user message. This is the explosion rule.
+            """
+            if _isinstance(m.content, _str):
+                # bare string content — pass through, role unchanged.
+                return [{"role": m.role, "content": m.content}]
 
-    @staticmethod
-    def _message_to_wire(m: Message) -> list[dict[str, Any]]:
-        """Translate a `Message` to one or MORE OpenAI wire messages.
+            # Block-list content. Behaviour depends on role.
+            if m.role == "assistant":
+                # Combine TextBlocks into `content`, ToolUseBlocks into `tool_calls`.
+                text_parts: list[str] = []
+                tool_calls: list[dict[str, Any]] = []
+                for b in m.content:
+                    if _isinstance(b, _TextBlock):
+                        text_parts.append(b.text)
+                    elif _isinstance(b, _ToolUseBlock):
+                        tool_calls.append({
+                            "id": b.id,
+                            "type": "function",
+                            "function": {
+                                "name": b.name,
+                                "arguments": _json.dumps(b.input or {}, default=_str),
+                            },
+                        })
+                    # ToolResultBlock on assistant role doesn't make sense; skip.
+                wire: dict[str, Any] = {"role": "assistant"}
+                wire["content"] = "\n".join(text_parts) if text_parts else None
+                if tool_calls:
+                    wire["tool_calls"] = tool_calls
+                return [wire]
 
-        Most cases produce one message. The exception is a user-role message
-        whose content is a list containing `ToolResultBlock`s — each
-        ToolResultBlock becomes its own `{"role": "tool", ...}` message
-        in OpenAI's protocol, and any plain text accompanying them
-        becomes a separate user message. This is the explosion rule.
-        """
-        if isinstance(m.content, str):
-            # bare string content — pass through, role unchanged.
-            return [{"role": m.role, "content": m.content}]
-
-        # Block-list content. Behaviour depends on role.
-        if m.role == "assistant":
-            # Combine TextBlocks into `content`, ToolUseBlocks into `tool_calls`.
-            text_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
-            for b in m.content:
-                if isinstance(b, TextBlock):
-                    text_parts.append(b.text)
-                elif isinstance(b, ToolUseBlock):
-                    tool_calls.append({
-                        "id": b.id,
-                        "type": "function",
-                        "function": {
-                            "name": b.name,
-                            "arguments": json.dumps(b.input or {}, default=str),
-                        },
-                    })
-                # ToolResultBlock on assistant role doesn't make sense; skip.
-            wire: dict[str, Any] = {"role": "assistant"}
-            wire["content"] = "\n".join(text_parts) if text_parts else None
-            if tool_calls:
-                wire["tool_calls"] = tool_calls
-            return [wire]
-
-        if m.role == "user":
-            # Explode ToolResultBlocks into role:tool messages; collect any
-            # other text/tool_use into a plain user message at the end.
-            out: list[dict[str, Any]] = []
-            text_parts: list[str] = []
-            for b in m.content:
-                if isinstance(b, ToolResultBlock):
-                    if isinstance(b.content, str):
-                        result_content = b.content
-                    else:
-                        # If a ToolResult contains nested blocks, JSON-encode
-                        # them so the receiving model has a stable string.
-                        result_content = json.dumps(
-                            [_block_to_summary_dict(bb) for bb in b.content],
-                            default=str,
-                        )
-                    # PR 7a: OpenAI's `role:"tool"` message has no `is_error`
-                    # field analogous to Anthropic's ToolResultBlock.is_error.
-                    # When the source side flagged an error, prefix the content
-                    # with a stable marker so the receiving model can tell the
-                    # tool failed. The system prompt instructs the model to
-                    # recognise "[ERROR] ..." as failure. (Without this fix,
-                    # a tool failure looks like a normal tool success to an
-                    # OpenAI-compatible model.)
-                    if b.is_error:
-                        result_content = "[ERROR] " + result_content
-                    out.append({
-                        "role": "tool",
-                        "tool_call_id": b.tool_use_id,
-                        "content": result_content,
-                    })
-                elif isinstance(b, TextBlock):
-                    text_parts.append(b.text)
-                # ToolUseBlock on user role doesn't make sense; skip.
-            if text_parts:
-                out.append({"role": "user", "content": "\n".join(text_parts)})
-            return out
-
-        # role == "system" with block-list content: collapse to a single
-        # system message with concatenated text.
-        text_parts = [b.text for b in m.content if isinstance(b, TextBlock)]
-        return [{"role": "system", "content": "\n".join(text_parts) or "(system blocks)"}]
-
-    @staticmethod
-    def _tool_to_wire(t: ToolSpec) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.input_schema,
-            },
-        }
-
-    # -- wire translation (inbound) ----------------------------------------
-
-    @staticmethod
-    def _response_from_wire(
-        response: Any, _agent_response=AgentResponse
-    ) -> AgentResponse:
-        """Convert an OpenAI-compatible ChatCompletion into our `AgentResponse`.
-
-        Supported containers are SDK-style typed objects (ordinary attribute
-        access, which is inherent to supporting them) and exact built-in dicts
-        (built-in lookup first); dict SUBCLASSES are refused as unsupported
-        mapping containers without invoking their overridden `.get()` or
-        attribute hooks — see `_attr_or_key`. Arbitrary hostile NON-dict
-        proxies are outside the supported SDK-object contract (supporting real
-        SDK typed objects requires ordinary attribute access). This matches the
-        established AnthropicBackend boundary contract.
-
-        Within that contract decoding is total and hook-free over extracted
-        field values: `choices` and `tool_calls` are iterated only after an
-        exact-`list` proof (a list SUBCLASS is refused); `content`, the
-        tool-call `type` discriminator, `finish_reason`, and the tool-call
-        `id`/`name` are exact-type-checked before any truth, equality, hashing,
-        iteration, mapping-conversion, or string-conversion could run, and
-        `id`/`name` are handed to `ToolUseBlock` for its established
-        normalization (no truth-testing `or`). `finish_reason` keeps the
-        established semantics — absent, None, or empty exact string →
-        "end_turn"; a known exact string → its mapped value; any other exact
-        string → "other"; a non-string → "other". A dict-subclass `usage`
-        container is refused to empty usage.
-        """
-        choices = _attr_or_key(response, "choices", None)
-        if type(choices) is not list or not choices:
-            return _agent_response.from_content([], stop_reason="other", usage={})
-        choice = choices[0]
-        msg = _attr_or_key(choice, "message", None)
-
-        blocks: list[ContentBlock] = []
-        text = _attr_or_key(msg, "content", None) if msg is not None else None
-        if type(text) is str and text:
-            blocks.append(TextBlock(text=text))
-
-        tool_calls = _attr_or_key(msg, "tool_calls", None) if msg is not None else None
-        if type(tool_calls) is list:
-            for tc in tool_calls:
-                tc_type = _attr_or_key(tc, "type", "function")
-                # The discriminator is proven exact str before the equality
-                # check, so a non-str / hostile-__eq__ type never runs a hook.
-                if type(tc_type) is not str or tc_type != "function":
-                    continue  # unknown / absent-typed tool-call kind; ignore
-                fn = _attr_or_key(tc, "function", None)
-                if fn is None:
-                    continue
-                name = _attr_or_key(fn, "name", "")
-                # `arguments` is model/server-reachable and can be any value,
-                # so decoding is total and hook-free: the value's truthiness,
-                # iteration, mapping-conversion, and string-conversion hooks
-                # are never invoked. Exact strings are parsed (JSON object →
-                # kept; other valid JSON → {}; undecodable or parser
-                # recursion → the established raw-fallback shape); exact
-                # dicts continue into ToolUseBlock's hardened normalization;
-                # every other value — absent included — becomes a fresh {}.
-                # MemoryError is deliberately not caught.
-                args_raw = _attr_or_key(fn, "arguments", None)
-                if type(args_raw) is str:
-                    if args_raw == "":
-                        args = {}
-                    else:
-                        try:
-                            parsed = json.loads(args_raw)
-                        except (ValueError, RecursionError):
-                            args = {"_raw_arguments": args_raw}
+            if m.role == "user":
+                # Explode ToolResultBlocks into role:tool messages; collect any
+                # other text/tool_use into a plain user message at the end.
+                out: list[dict[str, Any]] = []
+                text_parts: list[str] = []
+                for b in m.content:
+                    if _isinstance(b, _ToolResultBlock):
+                        if _isinstance(b.content, _str):
+                            result_content = b.content
                         else:
-                            args = parsed if type(parsed) is dict else {}
-                elif type(args_raw) is dict:
-                    args = args_raw
-                else:
-                    args = {}
-                # `id`/`name` are handed to ToolUseBlock unchanged (no `or`
-                # truth-test); ToolUseBlock keeps them only when exactly str.
-                blocks.append(ToolUseBlock(
-                    id=_attr_or_key(tc, "id", ""),
-                    name=name,
-                    input=args,
-                ))
+                            # If a ToolResult contains nested blocks, JSON-encode
+                            # them so the receiving model has a stable string.
+                            result_content = _json.dumps(
+                                [_block_summary(bb) for bb in b.content],
+                                default=_str,
+                            )
+                        # PR 7a: OpenAI's `role:"tool"` message has no `is_error`
+                        # field analogous to Anthropic's ToolResultBlock.is_error.
+                        # When the source side flagged an error, prefix the content
+                        # with a stable marker so the receiving model can tell the
+                        # tool failed. The system prompt instructs the model to
+                        # recognise "[ERROR] ..." as failure. (Without this fix,
+                        # a tool failure looks like a normal tool success to an
+                        # OpenAI-compatible model.)
+                        if b.is_error:
+                            result_content = "[ERROR] " + result_content
+                        out.append({
+                            "role": "tool",
+                            "tool_call_id": b.tool_use_id,
+                            "content": result_content,
+                        })
+                    elif _isinstance(b, _TextBlock):
+                        text_parts.append(b.text)
+                    # ToolUseBlock on user role doesn't make sense; skip.
+                if text_parts:
+                    out.append({"role": "user", "content": "\n".join(text_parts)})
+                return out
 
-        # finish_reason: preserve established absent/None/empty → "end_turn";
-        # exact-type-checked before the mapping lookup so a non-str value is
-        # never hashed or compared (no __hash__/__eq__ hook).
-        raw_finish = _attr_or_key(choice, "finish_reason", None)
-        if raw_finish is None:
-            stop_reason: StopReason = "end_turn"
-        elif type(raw_finish) is str:
-            if raw_finish == "":
-                stop_reason = "end_turn"
-            else:
-                stop_reason = _FINISH_REASON_MAP.get(raw_finish, "other")
-        else:
-            stop_reason = "other"
+            # role == "system" with block-list content: collapse to a single
+            # system message with concatenated text.
+            text_parts = [b.text for b in m.content if _isinstance(b, _TextBlock)]
+            return [{"role": "system", "content": "\n".join(text_parts) or "(system blocks)"}]
 
-        usage_obj = _attr_or_key(response, "usage", None)
-        if isinstance(usage_obj, dict) and type(usage_obj) is not dict:
-            usage_obj = None  # dict-subclass usage container refused → empty usage
-        usage: dict[str, Any] = {}
-        if usage_obj is not None:
-            usage = {
-                "input_tokens": _attr_or_key(usage_obj, "prompt_tokens", None),
-                "output_tokens": _attr_or_key(usage_obj, "completion_tokens", None),
+        @staticmethod
+        def _tool_to_wire(t: ToolSpec) -> dict[str, Any]:
+            return {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
             }
 
-        return _agent_response.from_content(blocks, stop_reason=stop_reason, usage=usage)
+        # -- wire translation (inbound) ----------------------------------------
+
+        @staticmethod
+        def _response_from_wire(response: Any) -> AgentResponse:
+            """Convert an OpenAI-compatible ChatCompletion into our `AgentResponse`.
+
+            Supported containers are SDK-style typed objects (ordinary attribute
+            access, which is inherent to supporting them) and exact built-in dicts
+            (built-in lookup first); dict SUBCLASSES are refused as unsupported
+            mapping containers without invoking their overridden `.get()` or
+            attribute hooks — see `_attr_or_key`. Arbitrary hostile NON-dict
+            proxies are outside the supported SDK-object contract (supporting real
+            SDK typed objects requires ordinary attribute access). This matches the
+            established AnthropicBackend boundary contract.
+
+            Within that contract decoding is total and hook-free over extracted
+            field values: `choices` and `tool_calls` are iterated only after an
+            exact-`list` proof (a list SUBCLASS is refused); `content`, the
+            tool-call `type` discriminator, `finish_reason`, and the tool-call
+            `id`/`name` are exact-type-checked before any truth, equality, hashing,
+            iteration, mapping-conversion, or string-conversion could run, and
+            `id`/`name` are handed to `ToolUseBlock` for its established
+            normalization (no truth-testing `or`). `finish_reason` keeps the
+            established semantics — absent, None, or empty exact string →
+            "end_turn"; a known exact string → its mapped value; any other exact
+            string → "other"; a non-string → "other". A dict-subclass `usage`
+            container is refused to empty usage.
+            """
+            choices = _attr(response, "choices", None)
+            if _type(choices) is not _list or not choices:
+                return _agent_response.from_content([], stop_reason="other", usage={})
+            choice = choices[0]
+            msg = _attr(choice, "message", None)
+
+            blocks: list[ContentBlock] = []
+            text = _attr(msg, "content", None) if msg is not None else None
+            if _type(text) is _str and text:
+                blocks.append(_TextBlock(text=text))
+
+            tool_calls = _attr(msg, "tool_calls", None) if msg is not None else None
+            if _type(tool_calls) is _list:
+                for tc in tool_calls:
+                    tc_type = _attr(tc, "type", "function")
+                    # The discriminator is proven exact str before the equality
+                    # check, so a non-str / hostile-__eq__ type never runs a hook.
+                    if _type(tc_type) is not _str or tc_type != "function":
+                        continue  # unknown / absent-typed tool-call kind; ignore
+                    fn = _attr(tc, "function", None)
+                    if fn is None:
+                        continue
+                    name = _attr(fn, "name", "")
+                    # `arguments` is model/server-reachable and can be any value,
+                    # so decoding is total and hook-free: the value's truthiness,
+                    # iteration, mapping-conversion, and string-conversion hooks
+                    # are never invoked. Exact strings are parsed (JSON object →
+                    # kept; other valid JSON → {}; undecodable or parser
+                    # recursion → the established raw-fallback shape); exact
+                    # dicts continue into ToolUseBlock's hardened normalization;
+                    # every other value — absent included — becomes a fresh {}.
+                    # MemoryError is deliberately not caught.
+                    args_raw = _attr(fn, "arguments", None)
+                    if _type(args_raw) is _str:
+                        if args_raw == "":
+                            args = {}
+                        else:
+                            try:
+                                parsed = _json.loads(args_raw)
+                            except (_ValueError, _RecursionError):
+                                args = {"_raw_arguments": args_raw}
+                            else:
+                                args = parsed if _type(parsed) is _dict else {}
+                    elif _type(args_raw) is _dict:
+                        args = args_raw
+                    else:
+                        args = {}
+                    # `id`/`name` are handed to ToolUseBlock unchanged (no `or`
+                    # truth-test); ToolUseBlock keeps them only when exactly str.
+                    blocks.append(_ToolUseBlock(
+                        id=_attr(tc, "id", ""),
+                        name=name,
+                        input=args,
+                    ))
+
+            # finish_reason: preserve established absent/None/empty → "end_turn";
+            # exact-type-checked before the mapping lookup so a non-str value is
+            # never hashed or compared (no __hash__/__eq__ hook).
+            raw_finish = _attr(choice, "finish_reason", None)
+            # Inlined, not a mapping lookup. `_FINISH_REASON_MAP` is a plain
+            # module-level dict, so it was both rebindable AND mutable in place -
+            # `_FINISH_REASON_MAP["stop"] = <anything>` put arbitrary text into
+            # `AgentResponse.stop_reason`, a field whose whole value is that it
+            # comes from a closed vocabulary. Inlining makes every branch produce
+            # a literal from that vocabulary and nothing else. The mapping remains
+            # exported as an inspection mirror, with a drift guard.
+            if raw_finish is None:
+                stop_reason: StopReason = "end_turn"
+            elif _type(raw_finish) is not _str:
+                stop_reason = "other"
+            elif raw_finish == "" or raw_finish == "stop":
+                stop_reason = "end_turn"
+            elif raw_finish == "tool_calls" or raw_finish == "function_call":
+                stop_reason = "tool_use"
+            elif raw_finish == "length":
+                stop_reason = "max_tokens"
+            elif raw_finish == "stop_sequence":
+                stop_reason = "stop_sequence"
+            else:
+                stop_reason = "other"
+
+            usage_obj = _attr(response, "usage", None)
+            if _isinstance(usage_obj, _dict) and _type(usage_obj) is not _dict:
+                usage_obj = None  # dict-subclass usage container refused → empty usage
+            usage: dict[str, Any] = {}
+            if usage_obj is not None:
+                usage = {
+                    "input_tokens": _attr(usage_obj, "prompt_tokens", None),
+                    "output_tokens": _attr(usage_obj, "completion_tokens", None),
+                }
+
+            return _agent_response.from_content(blocks, stop_reason=stop_reason, usage=usage)
+
+    return OpenAICompatBackend
+
+
 
 
 # -- helpers ----------------------------------------------------------------
 
 
-def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
-    """Read `name` from a supported container, else return `default`.
+def _closed_attr_or_key():
+    """Build :func:`_attr_or_key`, builtins bound in cells."""
+    _type = type
+    _dict = dict
+    _isinstance = isinstance
+    _getattr = getattr
 
-    Supported-container contract (matches AnthropicBackend._attr_or_key):
-      - an exact built-in dict takes the built-in dict lookup path first
-        (its `.get` cannot be overridden);
-      - a dict SUBCLASS is refused as an unsupported mapping container —
-        checked before any attribute access, so neither its overridden
-        `.get()` nor its attribute hooks are ever invoked;
-      - anything else keeps ordinary attribute access, which is inherent to
-        supporting SDK-style typed objects (and SimpleNamespace test fixtures);
-      - missing fields return `default`.
+    def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
+        """Read `name` from a supported container, else return `default`.
 
-    Arbitrary hostile NON-dict proxies (objects with adversarial `__getattr__`)
-    are outside the supported SDK-object contract: supporting real SDK typed
-    objects requires ordinary attribute access, and JSON received through an
-    ordinary provider deserializes to builtins only, so a dict subclass or a
-    hostile proxy is unreachable via PUBLIC provider traffic and reachable only
-    by DIRECT / injected-client construction.
-    """
-    if type(obj) is dict:
-        return obj.get(name, default)
-    if isinstance(obj, dict):
+        Supported-container contract (matches AnthropicBackend._attr_or_key):
+          - an exact built-in dict takes the built-in dict lookup path first
+            (its `.get` cannot be overridden);
+          - a dict SUBCLASS is refused as an unsupported mapping container —
+            checked before any attribute access, so neither its overridden
+            `.get()` nor its attribute hooks are ever invoked;
+          - anything else keeps ordinary attribute access, which is inherent to
+            supporting SDK-style typed objects (and SimpleNamespace test fixtures);
+          - missing fields return `default`.
+
+        Arbitrary hostile NON-dict proxies (objects with adversarial `__getattr__`)
+        are outside the supported SDK-object contract: supporting real SDK typed
+        objects requires ordinary attribute access, and JSON received through an
+        ordinary provider deserializes to builtins only, so a dict subclass or a
+        hostile proxy is unreachable via PUBLIC provider traffic and reachable only
+        by DIRECT / injected-client construction.
+        """
+        if _type(obj) is _dict:
+            return obj.get(name, default)
+        if _isinstance(obj, _dict):
+            return default
+        val = _getattr(obj, name, None)
+        if val is not None:
+            return val
         return default
-    val = getattr(obj, name, None)
-    if val is not None:
-        return val
-    return default
+
+    return _attr_or_key
 
 
-def _block_to_summary_dict(b: ContentBlock) -> dict[str, Any]:
-    """Best-effort summary dict for nested blocks inside a ToolResultBlock.
-    Only used as a fallback when a tool result wraps richer content; the
-    OpenAI protocol expects a string for tool messages so we serialize."""
-    if isinstance(b, TextBlock):
-        return {"type": "text", "text": b.text}
-    if isinstance(b, ToolUseBlock):
-        return {"type": "tool_use", "id": b.id, "name": b.name, "input": dict(b.input)}
-    return {"type": type(b).__name__}
+_attr_or_key = _closed_attr_or_key()
+
+
+def _closed_block_summary():
+    """Build :func:`_block_to_summary_dict`, authorities bound in cells."""
+    _type = type
+    _dict = dict
+    _isinstance = isinstance
+    _TextBlock = TextBlock
+    _ToolUseBlock = ToolUseBlock
+
+    def _block_to_summary_dict(b: ContentBlock) -> dict[str, Any]:
+        """Best-effort summary dict for nested blocks inside a ToolResultBlock.
+        Only used as a fallback when a tool result wraps richer content; the
+        OpenAI protocol expects a string for tool messages so we serialize."""
+        if _isinstance(b, _TextBlock):
+            return {"type": "text", "text": b.text}
+        if _isinstance(b, _ToolUseBlock):
+            return {"type": "tool_use", "id": b.id, "name": b.name, "input": _dict(b.input)}
+        return {"type": _type(b).__name__}
+
+    return _block_to_summary_dict
+
+
+_block_to_summary_dict = _closed_block_summary()
+
+
+OpenAICompatBackend = _build_backend_class()
 
 
 __all__ = [

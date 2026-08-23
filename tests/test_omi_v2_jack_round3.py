@@ -500,9 +500,9 @@ def test_the_canonical_internal_path_still_produces_a_usable_value():
 
 
 def test_the_internal_path_captures_the_real_validator():
+    """Read from the closure cell - the parameter it used to read is gone."""
     from scripts.open_model.structured import validate_structured_output
 
-    default = inspect.signature(request_structured_json).parameters[
-        "_validate"
-    ].default
-    assert default is validate_structured_output
+    index = request_structured_json.__code__.co_freevars.index("_validate")
+    captured = request_structured_json.__closure__[index].cell_contents
+    assert captured is validate_structured_output

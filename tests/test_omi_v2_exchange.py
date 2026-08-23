@@ -254,45 +254,52 @@ def test_the_exchange_imports_the_existing_validator():
     assert "validate_structured_output" in source
 
 
-def test_the_captured_validator_IS_the_existing_one():
-    """Identity proof, stronger than the monkeypatch proof it replaces.
+def _captured(func, name):
+    """Read a closure cell by free-variable name.
 
-    The validator is now bound as a captured default so a rebound module
-    name cannot swap it - which also means a monkeypatch can no longer
-    demonstrate the call. Proving the captured object IS
-    `scripts.open_model.structured.validate_structured_output` is a stricter
-    statement than "something reached through that name ran": it cannot be
-    satisfied by a look-alike.
+    This is how identity is proved now that the authorities are no longer
+    addressable parameters: the object is read out of the cell rather than
+    supplied into a keyword. Inspection, not injection.
     """
-    import inspect
+    index = func.__code__.co_freevars.index(name)
+    return func.__closure__[index].cell_contents
 
+
+def test_the_captured_validator_IS_the_existing_one():
+    """Identity proof, read from the closure cell.
+
+    The validator is bound in a cell precisely so a caller cannot substitute
+    it, which also means it can no longer be proved by passing one in - an
+    earlier version of this test did exactly that, and the parameter it relied
+    on was itself the defect. Reading the cell proves the captured object IS
+    `scripts.open_model.structured.validate_structured_output`, which a
+    look-alike cannot satisfy.
+    """
     from scripts.open_model.structured import validate_structured_output
 
-    default = inspect.signature(request_structured_json).parameters[
-        "_validate"
-    ].default
-    assert default is validate_structured_output
-
-
-def test_the_captured_validator_is_the_one_actually_used():
-    """Behavioural companion: the captured parameter drives the verdict."""
-    seen: list[tuple] = []
-
-    def _fake(payload, *, required_keys=(), max_chars=0):
-        seen.append((payload, required_keys, max_chars))
-        return sx.StructuredOutcome(ok=False, failure="duplicate-key")
-
-    result = request_structured_json(
-        _backend(text='{"ok": true}'),
-        _MESSAGES,
-        [],
-        structured=_REQUEST,
-        required_keys=("ok",),
-        max_chars=99,
-        _validate=_fake,
+    assert _captured(request_structured_json, "_validate") is (
+        validate_structured_output
     )
+
+
+def test_the_real_validator_actually_runs():
+    """Behavioural proof that needs no injection point.
+
+    `duplicate-key` is a verdict only `structured.py` produces: it comes from
+    that module's `object_pairs_hook`, and a plain `json.loads` would accept
+    `{"a": 1, "a": 2}` and keep the last value silently. Observing that
+    verdict end-to-end therefore proves the reused validator ran, without
+    reopening the public signature.
+    """
+    result = _exchange(text='{"a": 1, "a": 2}')
     assert result.response_failure == "duplicate-key"
-    assert seen == [('{"ok": true}', ("ok",), 99)]
+
+
+def test_the_duplicate_key_verdict_is_not_what_plain_json_would_do():
+    """Guard: if json.loads also rejected this, the proof above is vacuous."""
+    import json
+
+    assert json.loads('{"a": 1, "a": 2}') == {"a": 2}
 
 
 def test_the_exchange_defines_no_validator_of_its_own():
