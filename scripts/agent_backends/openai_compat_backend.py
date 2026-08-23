@@ -173,6 +173,16 @@ class StructuredCompletion:
             raise ValueError("a refused completion cannot have sent a request")
         if self.ok and self.response is None:
             raise ValueError("a successful completion must carry a response")
+        # Exact type, not merely non-None. A caller reading `.response` on a
+        # successful completion is entitled to an AgentResponse, and
+        # `structured_exchange.request_structured_json` reads `.text` off it
+        # while promising to be total: a foreign object here would make that
+        # promise false by raising AttributeError from inside it. Checking
+        # only for None made the exact-type guard on this class skin-deep.
+        if self.ok and type(self.response) is not AgentResponse:
+            raise ValueError(
+                "a successful completion must carry an exact AgentResponse"
+            )
         if self.ok and not self.response_format_sent:
             raise ValueError("a successful completion must have sent a request")
 
@@ -295,13 +305,24 @@ class OpenAICompatBackend(AgentBackend):
         system: Optional[str] = None,
         max_tokens: int = 2048,
         temperature: float = 0.0,
+        include_tools: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Assemble the outbound request dict. Extracted verbatim from
         `complete()` in OMI-V2 so that `complete()` and `complete_structured()`
         provably build the SAME request, and the legacy shape is defined in
         exactly one place. This body is unchanged from the pre-OMI-V2
         `complete()`; the existing backend suite exercises it through
-        `complete()` and therefore proves the legacy shape did not move."""
+        `complete()` and therefore proves the legacy shape did not move.
+
+        `include_tools` exists only to close a time-of-check/time-of-use gap
+        in `complete_structured()`. Left as None - which is what `complete()`
+        passes, and therefore what every pre-OMI-V2 call site does - this
+        method truth-tests `tools` exactly as it always has. A caller that has
+        ALREADY truth-tested `tools` to make a decision passes the result it
+        got, so the decision and the request are built from one evaluation
+        rather than two. A `tools` object whose `__bool__` answers differently
+        on a second call can then no longer make the two disagree.
+        """
         wire_messages = []
         if system is not None:
             wire_messages.append({"role": "system", "content": system})
@@ -314,7 +335,8 @@ class OpenAICompatBackend(AgentBackend):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if tools:
+        attach_tools = bool(tools) if include_tools is None else include_tools
+        if attach_tools:
             request["tools"] = [self._tool_to_wire(t) for t in tools]
         if self.extra_headers:
             request["extra_headers"] = dict(self.extra_headers)
@@ -355,11 +377,15 @@ class OpenAICompatBackend(AgentBackend):
         establishes JSON-object and required-key usability, NOT schema
         conformance. See `StructuredExchange.schema_conformance`.
         """
-        # Gate first. `bool(tools)` is the SAME truth test `_build_request`
-        # uses to decide whether to attach tools, so the gate cannot disagree
-        # with the request it is guarding.
+        # Gate first, on ONE evaluation of `tools`. The result is reused
+        # below rather than recomputed: an earlier revision truth-tested
+        # `tools` here and again inside `_build_request`, and a `tools` object
+        # whose `__bool__` returned False then True passed the gate as
+        # tool-free and still had its tools attached alongside the
+        # `response_format` - defeating the very combination this refuses.
+        has_tools = bool(tools)
         plan = plan_structured_request(
-            self.dialect, structured, has_tools=bool(tools)
+            self.dialect, structured, has_tools=has_tools
         )
         if not plan.ok:
             return StructuredCompletion(
@@ -375,6 +401,7 @@ class OpenAICompatBackend(AgentBackend):
             system=system,
             max_tokens=max_tokens,
             temperature=temperature,
+            include_tools=has_tools,
         )
         # The ONLY key OMI-V2 adds. There is no extra_body, no kwargs
         # passthrough, and no provider-specific escape hatch by which a

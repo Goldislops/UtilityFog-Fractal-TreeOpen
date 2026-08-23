@@ -66,6 +66,7 @@ request side.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Optional, Union, get_args
 
 from scripts.agent_backends.base import Message, ToolSpec
@@ -207,6 +208,22 @@ class StructuredExchange:
                 raise ValueError("a successful exchange cannot carry a failure")
             if self.value is None:
                 raise ValueError("a successful exchange must carry a value")
+            # Exact types, not merely non-None. `value` was the last field in
+            # this class open to an arbitrary object, which made it the one
+            # place a caller string - a secret among them - could ride into a
+            # result that every other field is closed against. It is also a
+            # correctness promise: a caller reading `.value` on ok=True is
+            # entitled to a mapping, and `dict(result.value)` on a str raises.
+            # The successful path always supplies the validator's
+            # MappingProxyType; an exact dict is accepted so a caller can
+            # construct one directly.
+            if (
+                type(self.value) is not MappingProxyType
+                and type(self.value) is not dict
+            ):
+                raise ValueError(
+                    "a successful exchange must carry an exact mapping value"
+                )
             if not self.response_format_sent:
                 raise ValueError("a successful exchange must have sent a request")
         else:
