@@ -111,6 +111,47 @@ RESPONSE_FAILURES: Final[frozenset[str]] = frozenset(get_args(StructuredFailure)
 """Runtime mirror of the validator's closed failure vocabulary."""
 
 
+def _closed_identity_restorer():
+    """Build :func:`_restore_identity`, builtins bound in closure cells."""
+    _isinstance = isinstance
+    _type = type
+    _vars = vars
+    _getattr = getattr
+    _setattr = setattr
+
+    def _restore_identity(obj, name: str, module_name: str):
+        """Give a factory-built object its module-level public identity back.
+
+        A class or function created inside a factory carries a ``<locals>``
+        qualname. ``pickle`` resolves an object by ``__module__`` plus
+        ``__qualname__``, so that name made every exported class and function
+        unpicklable - a real compatibility regression, since the pre-OMI-V2
+        backend pickled at both the base commit and the previous head. It also
+        leaked the factory name into every frozen-dataclass ``repr``.
+
+        Only the three identity attributes are touched, on the object and on
+        its own methods. No captured authority is read, replaced or exposed:
+        the closure cells are untouched, no defaulted parameter is
+        reintroduced, and the object returned is the same object.
+        """
+        _setattr(obj, "__module__", module_name)
+        _setattr(obj, "__name__", name)
+        _setattr(obj, "__qualname__", name)
+        if _isinstance(obj, _type):
+            for member_name, member in _vars(obj).items():
+                func = _getattr(member, "__func__", member)
+                qualname = _getattr(func, "__qualname__", "")
+                if "<locals>" in qualname:
+                    _setattr(func, "__qualname__", name + "." + member_name)
+                    _setattr(func, "__module__", module_name)
+        return obj
+
+    return _restore_identity
+
+
+_restore_identity = _closed_identity_restorer()
+_restore_identity.__qualname__ = "_restore_identity"
+
 def _build_structured_exchange_class():
     """Build :class:`StructuredExchange` with its authorities in cells.
 
@@ -197,13 +238,17 @@ def _build_structured_exchange_class():
         def __post_init__(self) -> None:
             """Validate the carrier's own coherence.
 
-            The defaulted parameters capture OBJECTS at class-definition time. A
-            dataclass calls ``self.__post_init__()`` with no arguments, so none of
-            them is ever looked up again. Rebinding ``EXCHANGE_REFUSALS``,
-            ``RESPONSE_FAILURES`` or this module's imported ``is_supported_dialect``
-            alias therefore cannot widen what an exchange will accept - which
-            reading them as globals did allow, including admitting arbitrary
-            secret-shaped refusal, failure, or dialect text into a result.
+            Every authority this method uses is read from a **closure cell**
+            filled by the enclosing factory when the class was defined. Nothing
+            is looked up at call time, so rebinding ``EXCHANGE_REFUSALS``,
+            ``RESPONSE_FAILURES`` or this module's imported
+            ``is_supported_dialect`` alias cannot widen what an exchange
+            accepts.
+
+            The signature takes ``self`` and nothing else. An earlier revision
+            bound these as defaulted ``_name=`` parameters, which closed name
+            rebinding but left the authorities directly addressable by any
+            caller willing to pass a keyword.
             """
             # Exact bools first: a foreign object with a __bool__ must not be able
             # to walk itself through the state machine below.
@@ -341,7 +386,7 @@ def _build_structured_exchange_class():
     return StructuredExchange
 
 
-StructuredExchange = _build_structured_exchange_class()
+StructuredExchange = _restore_identity(_build_structured_exchange_class(), "StructuredExchange", __name__)
 
 
 def _closed_exchange_entry_point():
@@ -470,7 +515,7 @@ def _closed_exchange_entry_point():
     return request_structured_json
 
 
-request_structured_json = _closed_exchange_entry_point()
+request_structured_json = _restore_identity(_closed_exchange_entry_point(), "request_structured_json", __name__)
 
 __all__ = [
     "EXCHANGE_REFUSALS",

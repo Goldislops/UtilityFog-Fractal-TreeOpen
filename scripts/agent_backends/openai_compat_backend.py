@@ -130,6 +130,47 @@ _FINISH_REASON_MAP: dict[str, StopReason] = {
 }
 
 
+def _closed_identity_restorer():
+    """Build :func:`_restore_identity`, builtins bound in closure cells."""
+    _isinstance = isinstance
+    _type = type
+    _vars = vars
+    _getattr = getattr
+    _setattr = setattr
+
+    def _restore_identity(obj, name: str, module_name: str):
+        """Give a factory-built object its module-level public identity back.
+
+        A class or function created inside a factory carries a ``<locals>``
+        qualname. ``pickle`` resolves an object by ``__module__`` plus
+        ``__qualname__``, so that name made every exported class and function
+        unpicklable - a real compatibility regression, since the pre-OMI-V2
+        backend pickled at both the base commit and the previous head. It also
+        leaked the factory name into every frozen-dataclass ``repr``.
+
+        Only the three identity attributes are touched, on the object and on
+        its own methods. No captured authority is read, replaced or exposed:
+        the closure cells are untouched, no defaulted parameter is
+        reintroduced, and the object returned is the same object.
+        """
+        _setattr(obj, "__module__", module_name)
+        _setattr(obj, "__name__", name)
+        _setattr(obj, "__qualname__", name)
+        if _isinstance(obj, _type):
+            for member_name, member in _vars(obj).items():
+                func = _getattr(member, "__func__", member)
+                qualname = _getattr(func, "__qualname__", "")
+                if "<locals>" in qualname:
+                    _setattr(func, "__qualname__", name + "." + member_name)
+                    _setattr(func, "__module__", module_name)
+        return obj
+
+    return _restore_identity
+
+
+_restore_identity = _closed_identity_restorer()
+_restore_identity.__qualname__ = "_restore_identity"
+
 def _build_structured_completion_class():
     """Build :class:`StructuredCompletion` with its authorities in cells.
 
@@ -174,13 +215,16 @@ def _build_structured_completion_class():
         def __post_init__(self) -> None:
             """Validate the carrier's own coherence.
 
-            The defaulted parameters capture OBJECTS at class-definition time. A
-            dataclass calls ``self.__post_init__()`` with no arguments, so none of
-            these is ever looked up again. Rebinding this module's imported
-            aliases - ``REFUSAL_TOKENS``, ``is_supported_dialect`` - therefore
-            cannot widen what a completion will accept. Reading them as globals
-            did allow exactly that, including admitting arbitrary secret-shaped
-            refusal or dialect text into a result.
+            Every authority this method uses is read from a **closure cell**
+            filled by the enclosing factory when the class was defined. Nothing
+            is looked up at call time, so rebinding this module's imported
+            aliases - ``REFUSAL_TOKENS``, ``is_supported_dialect`` - cannot
+            widen what a completion accepts.
+
+            The signature takes ``self`` and nothing else. An earlier revision
+            bound these as defaulted ``_name=`` parameters, which closed name
+            rebinding but left the authorities directly addressable by any
+            caller willing to pass a keyword.
             """
             if _type(self.ok) is not _bool:
                 raise _ValueError("ok must be exactly a bool")
@@ -232,7 +276,7 @@ def _build_structured_completion_class():
     return StructuredCompletion
 
 
-StructuredCompletion = _build_structured_completion_class()
+StructuredCompletion = _restore_identity(_build_structured_completion_class(), "StructuredCompletion", __name__)
 
 
 def _build_backend_class():
@@ -771,7 +815,7 @@ def _closed_attr_or_key():
     return _attr_or_key
 
 
-_attr_or_key = _closed_attr_or_key()
+_attr_or_key = _restore_identity(_closed_attr_or_key(), "_attr_or_key", __name__)
 
 
 def _closed_block_summary():
@@ -795,10 +839,10 @@ def _closed_block_summary():
     return _block_to_summary_dict
 
 
-_block_to_summary_dict = _closed_block_summary()
+_block_to_summary_dict = _restore_identity(_closed_block_summary(), "_block_to_summary_dict", __name__)
 
 
-OpenAICompatBackend = _build_backend_class()
+OpenAICompatBackend = _restore_identity(_build_backend_class(), "OpenAICompatBackend", __name__)
 
 
 __all__ = [

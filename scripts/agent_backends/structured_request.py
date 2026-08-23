@@ -315,6 +315,47 @@ class StructuredOutputRequest:
     schema: dict[str, Any] = field(default_factory=dict)
 
 
+def _closed_identity_restorer():
+    """Build :func:`_restore_identity`, builtins bound in closure cells."""
+    _isinstance = isinstance
+    _type = type
+    _vars = vars
+    _getattr = getattr
+    _setattr = setattr
+
+    def _restore_identity(obj, name: str, module_name: str):
+        """Give a factory-built object its module-level public identity back.
+
+        A class or function created inside a factory carries a ``<locals>``
+        qualname. ``pickle`` resolves an object by ``__module__`` plus
+        ``__qualname__``, so that name made every exported class and function
+        unpicklable - a real compatibility regression, since the pre-OMI-V2
+        backend pickled at both the base commit and the previous head. It also
+        leaked the factory name into every frozen-dataclass ``repr``.
+
+        Only the three identity attributes are touched, on the object and on
+        its own methods. No captured authority is read, replaced or exposed:
+        the closure cells are untouched, no defaulted parameter is
+        reintroduced, and the object returned is the same object.
+        """
+        _setattr(obj, "__module__", module_name)
+        _setattr(obj, "__name__", name)
+        _setattr(obj, "__qualname__", name)
+        if _isinstance(obj, _type):
+            for member_name, member in _vars(obj).items():
+                func = _getattr(member, "__func__", member)
+                qualname = _getattr(func, "__qualname__", "")
+                if "<locals>" in qualname:
+                    _setattr(func, "__qualname__", name + "." + member_name)
+                    _setattr(func, "__module__", module_name)
+        return obj
+
+    return _restore_identity
+
+
+_restore_identity = _closed_identity_restorer()
+_restore_identity.__qualname__ = "_restore_identity"
+
 def _closed_wire_shape_predicate():
     """Build :func:`is_supported_wire_shape`, builtins bound in cells.
 
@@ -365,7 +406,7 @@ def _closed_wire_shape_predicate():
     return is_supported_wire_shape
 
 
-is_supported_wire_shape = _closed_wire_shape_predicate()
+is_supported_wire_shape = _restore_identity(_closed_wire_shape_predicate(), "is_supported_wire_shape", __name__)
 
 
 def _build_request_plan_class():
@@ -410,13 +451,18 @@ def _build_request_plan_class():
         def __post_init__(self) -> None:
             """Validate the carrier's own coherence.
 
-            The defaulted parameters are the point, not clutter. A dataclass
-            calls ``self.__post_init__()`` with no arguments, so each default is
-            bound to the OBJECT it names when the class is defined and is never
-            looked up again. Rebinding ``REFUSAL_TOKENS`` or
-            ``is_supported_wire_shape`` on the module therefore cannot widen what
-            a carrier will accept - which reading them as globals did allow,
-            including admitting arbitrary secret-shaped refusal text.
+            Every authority this method uses - the refusal vocabulary, the
+            wire-shape check, the exact-type builtins - is read from a
+            **closure cell** filled by the enclosing factory when the class was
+            defined. Nothing is looked up at call time, so rebinding
+            ``REFUSAL_TOKENS`` or ``is_supported_wire_shape`` on the module
+            cannot widen what a carrier accepts.
+
+            The signature takes ``self`` and nothing else, and that is
+            load-bearing. An earlier revision bound these as defaulted
+            ``_name=`` parameters, which closed name rebinding but left the
+            authorities directly addressable by any caller willing to pass a
+            keyword. A capture a caller can pass is not a capture.
             """
             # Exact bool, not truthiness: a foreign object with __bool__ must not
             # be able to present itself as a successful plan.
@@ -440,7 +486,7 @@ def _build_request_plan_class():
     return StructuredRequestPlan
 
 
-StructuredRequestPlan = _build_request_plan_class()
+StructuredRequestPlan = _restore_identity(_build_request_plan_class(), "StructuredRequestPlan", __name__)
 
 
 def _closed_dialect_predicate():
@@ -483,7 +529,7 @@ def _closed_dialect_predicate():
     return is_supported_dialect
 
 
-is_supported_dialect = _closed_dialect_predicate()
+is_supported_dialect = _restore_identity(_closed_dialect_predicate(), "is_supported_dialect", __name__)
 
 
 def _closed_pre_dialect_predicate():
@@ -518,7 +564,7 @@ def _closed_pre_dialect_predicate():
     return is_pre_dialect_refusal
 
 
-is_pre_dialect_refusal = _closed_pre_dialect_predicate()
+is_pre_dialect_refusal = _restore_identity(_closed_pre_dialect_predicate(), "is_pre_dialect_refusal", __name__)
 
 
 def _closed_snapshot_validator():
@@ -695,7 +741,7 @@ def _closed_snapshot_validator():
     return _validated_snapshot
 
 
-_validated_snapshot = _closed_snapshot_validator()
+_validated_snapshot = _restore_identity(_closed_snapshot_validator(), "_validated_snapshot", __name__)
 
 
 def _closed_response_format_builder():
@@ -757,7 +803,7 @@ def _closed_response_format_builder():
     return build_response_format
 
 
-build_response_format = _closed_response_format_builder()
+build_response_format = _restore_identity(_closed_response_format_builder(), "build_response_format", __name__)
 
 
 def _closed_planner():
@@ -854,7 +900,7 @@ def _closed_planner():
     return plan_structured_request
 
 
-plan_structured_request = _closed_planner()
+plan_structured_request = _restore_identity(_closed_planner(), "plan_structured_request", __name__)
 
 
 DIALECT_WIRE_SHAPES: Final[dict[str, str]] = {
