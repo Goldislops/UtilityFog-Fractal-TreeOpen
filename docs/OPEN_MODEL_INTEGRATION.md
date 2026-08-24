@@ -1372,7 +1372,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected three times, after three independent HOLD rounds (2026-08-24).**
+**Corrected four times (2026-08-24 / 25).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1398,7 +1398,12 @@ before a result is consumed, and rejected as a false choice the residual round
 two had offered as a trade: the result is now measured on the canonical adapter
 path, where a mapping proxy's provenance is knowable, so the executor never
 walks a mapping and the byte bound is kept. Sections 15, 14 and 16 record the
-findings and two reporting errors in this work's own earlier evidence.
+findings and two reporting errors in this work's own earlier evidence. A
+fourth adversarial review then found that the executor and the canonical
+adapter both went on reading the envelope *after* validation - with
+caller-supplied callables running in between, which is how a hostile clock
+could shrink a bound mid-flight and a hostile exchange could make receipt
+construction raise. Section 17 records it.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,

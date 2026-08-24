@@ -1,9 +1,9 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected three times — after
-> Jack's first independent HOLD round (§ 11), his second (§ 13), and his third
-> (§ 15). Each section lists every defect that round found and what each one
-> cost. Modules
+> **Status**: implemented, inert, and hermetic. Corrected four times — after
+> Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), and a
+> fourth adversarial review (§ 17). Each section lists every defect that round
+> found and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -168,8 +168,14 @@ and it was real: `object.__setattr__` needs no cooperation from anyone, and
 another thread needs no cooperation at all.
 
 Now the constructor installs exactly what validation returned and hashes exactly
-the document validation built. **Nothing re-reads an envelope after validation
-— not the constructor, not the executor, not even to compute its digest.**
+the document validation built.
+
+> **This claim was false when round three made it, and § 17 records how.** It
+> was true of the *constructor* and of the evidence and reservation; it was not
+> true of the executor, which went on re-reading `issued_ns`, `deadline_ns`,
+> `max_result_bytes` and every provenance field off the envelope — with two
+> caller-supplied callables running in between. It is true now, of all three
+> consumers, and a control reads it off the AST rather than off the prose.
 
 A caller who keeps a reference to what they passed in holds an object the
 envelope no longer contains. Controls assert this by *identity*, not equality —
@@ -386,6 +392,20 @@ substituted something nothing will ever read — a control asserts the mapping's
 hooks fire *zero* times on the accepted path, where round two could only assert
 that nothing leaked. The byte bound is kept in full.
 
+### What the measurement is, and is not, evidence of
+
+`ObservationExchange` guarantees `result_bytes == len(result_snapshot)`, so a
+carrier cannot claim a size its own bytes do not have. It does **not** guarantee
+those bytes describe the exchange's value: an *injected* exchange builds its own
+carrier and may pair a large value with a small snapshot.
+
+That buys an attacker nothing — a caller who controls the exchange could simply
+have returned a small value — but round three's wording implied a binding it
+does not have. On the **canonical adapter path** the measurement is of the value
+OMI-V2 produced, and a control asserts the recorded count equals the real
+canonical rendering. For an injected exchange the count is that exchange's own
+claim. Limitation 13.
+
 `_result_snapshot_bytes` guards only its encoder, with named exceptions, so a
 `HermeticViolation` raised by a mapping — or by anything else the exchange
 touches — stays loud instead of becoming `result-not-serializable`.
@@ -457,7 +477,7 @@ identifiers OMI-V1's secret matcher will actually admit.
 
 ## 8. What was tested
 
-Two suites, **1027 controls** (728 + 299), all passing under normal Python,
+Two suites, **1050 controls** (728 + 322), all passing under normal Python,
 `-O`, and `-OO`.
 
 - [`tests/test_omi_v3_observation_envelope.py`](../tests/test_omi_v3_observation_envelope.py)
@@ -520,9 +540,18 @@ names V3A imports.
 11. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
     the OMI-V1 and OMI-V2 modules.** The authority for this work limited that
     file to exports. Recorded here rather than closed outside the fence.
-12. **Same-author evidence** — every control cited was written by the agent
+12. **An injected exchange may send anything at all** — it receives an
+    envelope and is free to ignore it. The receipt therefore attests *what the
+    executor validated*, never *what a third-party callable transmitted*. On
+    the canonical adapter path the two coincide, and § 17 says why.
+13. **An injected exchange supplies its own measurement** — `result_bytes` is
+    bound to the carrier's own snapshot bytes, not to the exchange's value.
+    Truthful on the canonical adapter path; a self-report otherwise.
+14. **Same-author evidence** — every control cited was written by the agent
     that wrote the code under test. Internal consistency, not independent
-    acceptance.
+    acceptance. The fourth round (§ 17) was adversarial and fresh-seated, and
+    it found real defects, but it was performed by the same agent lineage: it
+    is stronger internal evidence, still not independent acceptance.
 
 > Limitations 12 and 13 of the previous revision — the foreign-mapping residual
 > and the trade it was said to imply against the result-byte bound — are
@@ -844,3 +873,103 @@ looking for the rule in the repository and concluding it had been removed.
 Recorded here for the same reason § 14 records the check-count error: the
 failures worth writing down are the ones where the evidence was stated more
 confidently than it had been checked.
+
+## 17. Fourth adversarial review (2026-08-25)
+
+A fresh Kev-seat review, attacking the claim surface rather than re-running the
+controls. Five named attack points; **two produced demonstrated defects, one
+produced a demonstrated overclaim, and two came back clean.**
+
+### Clean
+
+**Adapter-path provenance.** `_result_snapshot_bytes` copies a proxy exactly
+once, on the canonical adapter path. The chain was traced end to end and probed
+with tampering backends: `request_structured_json` builds the value from
+`validate_structured_output`, which parses an exact `str` payload with
+`json.loads` under a hook returning exact dicts, and `StructuredExchange`
+re-wraps a fresh copy. No backend can place a foreign mapping there. Controls
+now assert this positively instead of leaving it to argument.
+
+**The exchange state machine.** A differential over the whole small state space
+— 480 combinations — put each to OMI-V2 by construction and to
+`_exchange_state_ok` by inspection. Zero disagreements in either direction. That
+control replaced one that only asserted the checker *held* OMI-V2's vocabularies
+in cells, which shows it consults the right values, not that it draws the same
+boundary.
+
+### Defect 1 — the executor re-read the envelope after validation
+
+Round three's claim that nothing re-reads an envelope after validation was
+false for the executor. It re-read `issued_ns`, `deadline_ns`,
+`max_result_bytes`, `task_id`, `authorizing_principal`, `worker`,
+`schema_digest`, `context_ceiling_tokens` and `required_keys`.
+
+The window was not a thread race. **`execute_observation` calls two
+caller-supplied callables** — the clock and the exchange — so the caller gets to
+run arbitrary code *inside* the interval. Demonstrated:
+
+- a hostile clock rewrote `max_result_bytes` from 8192 to 8, and the executor
+  enforced the tampered bound;
+- a hostile clock rewrote `deadline_ns`, changing the outcome to `void`;
+- a hostile exchange rewrote `worker` to a secret-shaped token, and receipt
+  construction raised **`ValueError` out of a function documented as total**;
+- the same for `task_id`.
+
+**Corrected**: every value consumed after validation is bound once, from the
+document `_envelope_semantics` produced, and `_receipt` is assembled from that
+document rather than from the envelope. An AST control asserts the executor
+reads no attribute of the envelope after the digest bind.
+
+### Defect 2 — the canonical adapter sent unvalidated values
+
+The same shape, one layer along, and worse. The adapter read the envelope when
+it was *invoked* — after the clock had run. Demonstrated:
+
+- a clock that swapped the evidence tuple made the adapter transmit
+  `OTHER EVIDENCE` while the receipt recorded the digest of `the evidence`.
+  The digest chain no longer described what was sent, which is the one thing it
+  exists to do;
+- a clock that corrupted `schema_bytes` made the adapter raise a **decoder's
+  exception, message and all**, out of package-owned code.
+
+**Corrected in two steps.** The adapter now validates the envelope it is handed
+and sends only values from that validation, refusing an invalid one with a fixed
+non-disclosing message. And the executor hands the exchange a **package-owned
+envelope rebuilt from the snapshot**, not the caller's object — so on the
+canonical path what is transmitted is what was recorded, and a control asserts
+the caller's envelope never appears in the executor's tail at all.
+
+> An *injected* exchange may still ignore the envelope and send whatever it
+> likes. That is what injecting one means, and no receipt can claim otherwise.
+> Limitation 12 states it.
+
+### Defect 3 — a structural control that was not structural
+
+Both AST controls split the source text and searched for `self.field` /
+`receipt.`. A probe fed each a source that had moved the read behind a helper —
+`_helper(self)`, `_reread(receipt)` — and both controls passed while the mutable
+object was still handed on. They were not vacuous, but they proved something
+about spelling rather than about structure.
+
+**Corrected**: both now parse the function, take the statements after the
+marker, and walk them for `Name` nodes. A non-vacuity control feeds the
+predicates the same synthetic sources the probe used and requires them to
+reject both.
+
+### What this round is evidence for
+
+Rounds one to three were about claims outrunning code, checksums mistaken for
+authorisations, and fixes that left the gap between their own two checks. This
+one adds: **an interval is only safe if you know whose code runs inside it.**
+Every defect here came from treating "after validation" as an instant, when the
+executor deliberately calls out to caller-supplied code twice in the middle of
+it. Round three closed the windows it could see between its own statements and
+did not ask what ran between them.
+
+### Provenance of this round
+
+Performed in a fresh Kev seat, adversarially, reproducing before fixing and
+adding a regression for every demonstrated defect. It was **not** independent
+acceptance: the same agent lineage wrote the code, the controls, and this
+section. It is stronger internal evidence than a re-run of existing controls,
+and it is still internal evidence.
