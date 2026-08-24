@@ -3341,3 +3341,131 @@ def test_no_transmission_claim_survives_in_the_tree():
         assert "what is transmitted is what was recorded" not in text, relative
         assert "what is sent is what was recorded" not in text, relative
         assert "the two coincide" not in text, relative
+
+
+def _unqualified_planner_totality(text: str) -> list[str]:
+    """Paragraphs claiming ``plan_observation`` totality without the boundary.
+
+    Paragraph granularity rather than line: the claim wraps across lines, and a
+    line-scoped search would read as coverage while missing the same sentence
+    written one word wider. A paragraph offends when it names
+    ``plan_observation``, asserts totality in either of the two obsolete
+    formulations, and does not name ``BaseException``.
+
+    Scope, stated rather than implied: this pins exactly the two formulations
+    that were found live - "total over every input" and "never raises". It is
+    not a general detector of every way totality could be overclaimed, and it
+    judges only the text it is handed.
+    """
+    offending = []
+    for paragraph in text.split("\n\n"):
+        flat = " ".join(paragraph.split())
+        if "plan_observation" not in flat:
+            continue
+        if "total over every input" not in flat and "never raises" not in flat:
+            continue
+        if "BaseException" in flat:
+            continue
+        offending.append(flat)
+    return offending
+
+
+def _plan_with(clock):
+    """Plan using the rehearsal's own inputs, with one substituted clock."""
+    return ob.plan_observation(
+        task_id=FIXED_TASK_ID,
+        authorizing_principal="kev",
+        worker="observer-1",
+        evidence=[ob.EvidenceItem(evidence_id="e1", content=b"the evidence")],
+        dialect="ollama",
+        schema=dict(SCHEMA),
+        endpoint=ENDPOINT,
+        reservation=ob.ResourceReservation(cpu_cores=2, memory_mib=4096),
+        clock=clock,
+        required_keys=("summary",),
+        duration_ns=30000000000,
+    )
+
+
+def test_the_document_states_the_planner_totality_boundary():
+    """``plan_observation`` catches ``Exception`` and not ``BaseException``.
+
+    Both halves are demonstrated before the wording is pinned, so this control
+    is anchored to behaviour rather than to prose. The obsolete claim - that
+    the planner is total over *every* input and never raises - was false in
+    exactly the corner the second half exercises.
+    """
+    import pathlib
+
+    def ordinary_clock():
+        raise RuntimeError("x")
+
+    def interrupting_clock():
+        raise KeyboardInterrupt()
+
+    # An ordinary exception becomes a closed token...
+    refused = _plan_with(ordinary_clock)
+    assert refused.ok is False
+    assert refused.refusal == "clock-raised"
+
+    # ...and a BaseException propagates, which is what made the old wording
+    # false rather than merely imprecise.
+    with pytest.raises(KeyboardInterrupt):
+        _plan_with(interrupting_clock)
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    document = (root / "docs" / "OMI_V3_OBSERVATION_INCEPTION.md").read_text(
+        encoding="utf-8"
+    )
+
+    # The historical sections quote the obsolete claim deliberately: a
+    # correction log that edits its own past is not a correction log. Only the
+    # live contract sections - the text a reader relies on for the contract -
+    # are pinned. The two anchors keep this honest: if either section is
+    # renamed or moved past the split, the control fails rather than passing
+    # over an empty string.
+    live = document.split("## 11. ")[0]
+    assert "## 3. The envelope contract" in live
+    assert "**Totality, stated exactly.**" in live
+    assert _unqualified_planner_totality(live) == []
+
+
+def test_the_planner_totality_control_is_not_vacuous():
+    """Feed the predicate the exact bytes it exists to reject.
+
+    Both live instances are reproduced verbatim as they stood at ``cca8182``:
+    the Section 3 sentence the review named, and the Section 6 one under the
+    heading "Totality, stated exactly" that the same claim had also survived
+    in and that a line-scoped reading had not reached.
+    """
+    section_3 = (
+        "`plan_observation` is keyword-only, **total over every input including "
+        "a clock\nthat raises**, and never raises. It returns an "
+        "`ObservationPlan` carrying\neither an `ObservationEnvelope` or one "
+        "closed token."
+    )
+    section_6 = (
+        "**Totality, stated exactly.** `plan_observation` is total over every "
+        "input.\n`execute_observation` is total over every input **except an "
+        "exception raised by\nthe injected `exchange`**, which propagates."
+    )
+    assert len(_unqualified_planner_totality(section_3)) == 1
+    assert len(_unqualified_planner_totality(section_6)) == 1
+
+    # A paragraph may still use the strong phrase, provided it states the
+    # boundary in the same breath: the predicate exempts on `BaseException`,
+    # not on avoiding a word.
+    qualified = (
+        "`plan_observation` is total over every input except that it does not "
+        "catch `BaseException`."
+    )
+    assert _unqualified_planner_totality(qualified) == []
+
+    # And the wording actually shipped passes for the ordinary reason.
+    corrected = (
+        "`plan_observation` returns a plan for every ordinary input, including "
+        "a `clock` that raises `Exception`. Neither entry point catches "
+        "`BaseException`, so a `KeyboardInterrupt` or `SystemExit` raised by a "
+        "caller-supplied callable propagates."
+    )
+    assert _unqualified_planner_totality(corrected) == []

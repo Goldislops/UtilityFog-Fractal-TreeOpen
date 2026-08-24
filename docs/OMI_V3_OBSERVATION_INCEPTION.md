@@ -92,9 +92,21 @@ in OMI-V3A compares a response against the schema that was sent.
 
 ## 3. The envelope contract
 
-`plan_observation` is keyword-only, **total over every input including a clock
-that raises**, and never raises. It returns an `ObservationPlan` carrying
-either an `ObservationEnvelope` or one closed token.
+`plan_observation` is keyword-only. It returns an `ObservationPlan` carrying
+either an `ObservationEnvelope` or one closed token, and it returns that plan
+for every ordinary input and for a `clock` that raises `Exception` — which it
+records as `clock-raised` rather than letting it escape.
+
+**It deliberately does not catch `BaseException`.** A clock raising
+`KeyboardInterrupt` or `SystemExit` propagates, because neither is a result to
+be reported.
+
+> **This section was wrong until now.** It read "total over every input ... and
+> never raises". Round five narrowed exactly that wording in the function's own
+> docstring (§ 18, finding 3) and left this section — and § 6's — still
+> asserting it, so the document went on contradicting
+> [`observation.py`](../scripts/open_model/observation.py)'s own contract. A
+> control now pins both against the behaviour that makes the old wording false.
 
 | Property | How it is enforced |
 |----------|--------------------|
@@ -355,13 +367,16 @@ and no loop of any kind.
 > attempt. Disabling and proving that is live-adapter work under separate
 > authority.
 
-**Totality, stated exactly.** `plan_observation` is total over every input.
-`execute_observation` is total over every input **except an exception raised by
-the injected `exchange`**, which propagates — because it matches OMI-V2, and
-because OMI-V1's `HermeticViolation` must stay loud. That is the only
-exception it lets past; a raising clock does not qualify (§ 4a). Removing the
-executor's mapping walk (§ 6a) removed its last broad `except`, which is what
-makes that statement unconditional rather than nearly true.
+**Totality, stated exactly.** `plan_observation` returns a plan for every
+ordinary input, including a `clock` that raises `Exception`. Neither entry
+point catches `BaseException`, so a `KeyboardInterrupt` or `SystemExit` raised
+by a caller-supplied callable propagates (§ 3). `execute_observation` lets one
+further exception past — **one raised by the injected `exchange`** — because it
+matches OMI-V2, and because OMI-V1's `HermeticViolation` must stay loud. That
+is the only ordinary exception it lets past; a raising clock does not qualify
+(§ 4a). Removing the executor's mapping walk (§ 6a) removed its last broad
+`except`, which is what makes that statement unconditional rather than nearly
+true.
 
 ## 6a. Where the result is measured, and why not in the executor
 
