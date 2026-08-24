@@ -27,6 +27,7 @@ import pytest
 from scripts.agent_backends.base import Message, ToolUseBlock
 from scripts.agent_backends.openai_compat_backend import OpenAICompatBackend
 from scripts.agent_backends.structured_request import StructuredOutputRequest
+from scripts.open_model.structured_exchange import request_structured_json
 
 
 @pytest.fixture(autouse=True)
@@ -309,6 +310,35 @@ def test_complete_structured_also_refuses_before_any_transport():
     ]
     with pytest.raises(ValueError) as caught:
         backend.complete_structured(
+            poisoned,
+            [],
+            structured=StructuredOutputRequest(
+                schema={"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            ),
+        )
+    assert str(caught.value) == _FIXED_ERROR
+    assert caught.value.__cause__ is None
+    assert client.requests == []
+
+
+def test_the_exchange_layer_propagates_the_fixed_error_unchained():
+    # `request_structured_json` invokes the structurally supplied
+    # `complete_structured` directly and catches nothing from it, so the
+    # fixed pre-transport encoding error propagates through the exchange
+    # layer - exactly as its clarified contract states - with no chained
+    # cause and zero requests reaching the client.
+    client = RecordingClient(content="{}")
+    backend = _backend(client)
+    poisoned = [
+        Message(role="user", content="hi"),
+        Message(
+            role="assistant",
+            content=[ToolUseBlock(id="i1", name="t", input={"x": float("inf")})],
+        ),
+    ]
+    with pytest.raises(ValueError) as caught:
+        request_structured_json(
+            backend,
             poisoned,
             [],
             structured=StructuredOutputRequest(

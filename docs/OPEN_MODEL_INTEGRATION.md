@@ -1028,7 +1028,7 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-757 hermetic tests across ten files, injected clients only — no network, no
+758 hermetic tests across ten files, injected clients only — no network, no
 key, no endpoint, no download.
 
 | File | Tests | Covers |
@@ -1042,7 +1042,7 @@ key, no endpoint, no download.
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
 | `tests/test_omi_v2_jack_round4.py` | 87 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
 | `tests/test_omi_v2_jack_round5.py` | 166 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
-| `tests/test_omi_v2_backend_arguments_boundary.py` | 33 | The tool-call `arguments` JSON-string boundary in both directions: non-finite spellings (tokens and overflow literals) folded into the byte-verbatim raw fallback inbound; strict `allow_nan=False` encoding outbound behind one fixed, non-disclosing, cause-agnostic error, with a circular exact-dict control and a pre-transport failure proof. |
+| `tests/test_omi_v2_backend_arguments_boundary.py` | 34 | The tool-call `arguments` JSON-string boundary in both directions: non-finite spellings (tokens and overflow literals) folded into the byte-verbatim raw fallback inbound; strict `allow_nan=False` encoding outbound behind one fixed, non-disclosing, cause-agnostic error, with a circular exact-dict control and a pre-transport failure proof. |
 
 These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
 asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
