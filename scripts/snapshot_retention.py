@@ -1248,6 +1248,43 @@ def format_report(report: PassReport) -> str:
     )
 
 
+def _idle_quarantine_root_usable(data_root, device) -> bool:
+    """Whether an EXISTING quarantine root is usable, creating nothing.
+
+    The sibling below creates the root when it is missing, which is exactly
+    what a pass with no actions must not do. This answers the narrower
+    question an idle pass needs, from ONE non-following read:
+
+        absent                          -> True, and nothing was created
+        present, usable, same device    -> True
+        present and anything else       -> False
+
+    Only `FileNotFoundError` counts as absent. Any other metadata failure is a
+    root that exists and cannot be proved, which fails closed -- an idle pass
+    that reported a clean no-op over an unusable root would tell an operator
+    the directory is healthy right up until the next action-bearing pass.
+
+    The three structural checks mirror `directory_state`, deliberately, rather
+    than calling it: distinguishing absence from unusability needs the errno,
+    and a second `os.lstat` would open a window between the two reads for the
+    very replacement this is looking for.
+    """
+    root = Path(data_root) / QUARANTINE_DIRNAME
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+        return False
+    identity = _stable_identity(info)
+    # Same volume: a same-volume rename is the whole basis for the move being
+    # a directory-entry operation, so a root that has become a mount point
+    # elsewhere is already unusable, today's pass moving nothing or not.
+    return identity is not None and identity[0] == device
+
+
 def _validated_quarantine_root(data_root):
     """The quarantine root as a real, non-reparse directory on this volume."""
     root = Path(data_root) / QUARANTINE_DIRNAME
@@ -1561,11 +1598,22 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         # without this the pass would report a clean no-op against something
         # that is not a directory at all. Proving costs one read and creates
         # nothing.
-        if directory_state(directory) is None:
+        data_state = directory_state(directory)
+        if data_state is None:
             return _report(mode,
                            refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                            scan=observed, plan=plan, actions=actions,
                            reserve_ok=reserve_ok, blocked=blocked)
+        # `_quarantine` was also the only place an EXISTING quarantine root
+        # was proved, so skipping it must not skip that too. This creates
+        # nothing: an absent root stays absent, and the next action-bearing
+        # pass is what makes it.
+        if not _idle_quarantine_root_usable(directory, data_state[0]):
+            return _report(
+                mode,
+                refused=RetentionFailureReason.QUARANTINE_ROOT_INVALID,
+                scan=observed, plan=plan, actions=actions,
+                reserve_ok=reserve_ok, blocked=blocked)
         return _report(mode, scan=observed, plan=plan, actions=actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
