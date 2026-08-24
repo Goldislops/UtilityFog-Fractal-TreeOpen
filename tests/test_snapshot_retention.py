@@ -3162,7 +3162,22 @@ def test_a_nonempty_quarantine_pass_still_creates_its_state(tmp_path):
 
 
 class _ManifestCloseFault:
-    """Fail the close of the quarantine manifest, and only that descriptor."""
+    """Fail the close of the quarantine manifest, for ONE descriptor lifetime.
+
+    `retention.os` is the process-global `os` module, so patching `os.close`
+    here is global for the duration of the test. That is only safe while the
+    injector matches exactly one descriptor lifetime, because a file
+    descriptor is a NUMBER the operating system recycles the moment it is
+    released -- the next `os.open` can hand the same integer to something
+    entirely unrelated.
+
+    So the target is retired BEFORE the real close, not after. Clearing it
+    afterwards would leave a window in which the number has already been
+    released and reissued while the injector still matched it, which would
+    fail an unrelated close and inflate `close_attempts` -- the very counter
+    the "exactly one close attempt" control depends on. Retiring first makes
+    the match strictly one-shot: this descriptor, this lifetime, once.
+    """
 
     def __init__(self, monkeypatch, *, fail=True):
         self.fail = fail
@@ -3181,6 +3196,9 @@ class _ManifestCloseFault:
         def _close(fd):
             if self.target_fd is not None and fd == self.target_fd:
                 self.close_attempts.append(fd)
+                # Retire the target FIRST: from here the number may be reissued
+                # at any moment, and every later close must delegate.
+                self.target_fd = None
                 real_close(fd)          # release for real: never leak an fd
                 if self.fail:
                     raise OSError(errno.EIO, "injected manifest close failure")
