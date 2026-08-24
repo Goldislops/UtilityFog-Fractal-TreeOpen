@@ -25,6 +25,7 @@ import ast
 import copy
 import hashlib
 import inspect
+import itertools
 import json
 import pickle
 import socket
@@ -2621,7 +2622,8 @@ def test_validation_returns_the_detached_carriers_it_installed():
 
     refusal, snapshot = ob._envelope_semantics(envelope)
     assert refusal is None
-    detached_evidence, detached_reservation, document = snapshot
+    detached_evidence, detached_reservation, document, schema_bytes = snapshot
+    assert schema_bytes == envelope.schema_bytes
 
     # What validation returns is detached from what it was given...
     assert detached_evidence[0] is not item
@@ -2641,21 +2643,23 @@ def test_nothing_is_read_off_the_envelope_after_validation():
     satisfy nor defeat it. After ``_semantics(self)`` returns, the only names
     the constructor touches are the snapshot's own parts.
     """
-    source = _code_only(inspect.getsource(ob.ObservationEnvelope.__post_init__))
-    tail = source.split("_semantics(self)", 1)[1]
-    assert "self.evidence" not in tail
-    assert "self.reservation" not in tail
-    assert "self.schema" not in tail
-    assert "self.task_id" not in tail
-    assert "_digest_of(document)" in tail
+    # Delegated to the AST predicate rather than a substring search. The
+    # string version passed a source that still handed `self` to a helper - a
+    # probe in the fourth round demonstrated exactly that - so what looked like
+    # a structural proof was only a proof about spelling.
+    tail = _tail_ast(ob.ObservationEnvelope.__post_init__, "_semantics(self)")
+    assert _attribute_reads_in(tail, "self") == []
+    unparsed = " ".join(ast.unparse(s) for s in tail)
+    assert "_digest_of(document)" in unparsed
 
 
 def test_nothing_is_read_off_the_receipt_after_revalidation():
     """Gate 2, structurally: the serialiser writes the checker's document."""
-    source = _code_only(inspect.getsource(rc.serialize_receipt))
-    tail = source.split("_check(receipt)", 1)[1]
-    assert "receipt." not in tail
-    assert "document" in tail
+    # Same delegation, same reason.
+    tail = _tail_ast(rc.serialize_receipt, "_check(receipt)")
+    assert _names_in(tail, "receipt") == []
+    unparsed = " ".join(ast.unparse(s) for s in tail)
+    assert "document" in unparsed
 
 
 def test_the_checker_returns_the_document_the_serialiser_writes():
@@ -2685,3 +2689,470 @@ def test_the_serialiser_holds_the_checker_function_itself():
         )
     )
     assert cells["_check"] is rc._check_receipt
+
+
+# ============================================================================
+# Fourth-round adversarial review - regressions for every demonstrated defect
+# ============================================================================
+#
+# Provenance: this round was performed in a fresh Kev seat by the same agent
+# lineage that wrote the code. It is adversarial and it found real defects, but
+# it is NOT independent acceptance. See section 17 of the inception document.
+
+
+def _tail_ast(function, marker):
+    """The AST of everything a function does after ``marker`` appears.
+
+    Parsed rather than string-searched, so a read moved behind a helper is
+    still visible as a ``Name`` node. The previous revision's structural
+    controls split the source text and looked for ``self.field`` - which a
+    refactor to ``_helper(self)`` walked straight past, as a probe in this
+    round demonstrated.
+    """
+    source = textwrap.dedent(inspect.getsource(function))
+    tree = ast.parse(source)
+    body = tree.body[0].body
+    cut = None
+    for index, statement in enumerate(body):
+        if marker in ast.unparse(statement):
+            cut = index + 1
+            break
+    if cut is None:
+        raise AssertionError("marker %r not found in %s" % (marker, function))
+    return body[cut:]
+
+
+def _names_in(statements, target):
+    found = []
+    for statement in statements:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Name) and node.id == target:
+                found.append(node)
+    return found
+
+
+def _attribute_reads_in(statements, target):
+    found = []
+    for statement in statements:
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == target
+            ):
+                found.append(node.attr)
+    return sorted(set(found))
+
+
+# -- D1: the executor consumes the validated document, never the envelope ----
+
+
+def test_the_executor_reads_no_envelope_attribute_after_validation():
+    """The structural half of the fourth round's first finding.
+
+    Two caller-supplied callables run inside ``execute_observation`` - the clock
+    and the exchange - so "after validation" is not a thread-race window, it is
+    code the executor calls on purpose. Every value consumed after validation
+    now comes from the document validation produced.
+
+    Read from the AST, so a read moved behind a helper would still show up as a
+    ``Name`` node rather than slipping past a substring search.
+    """
+    tail = _tail_ast(ob.execute_observation, "rederived = _digest_of(document)")
+    # Not merely no attribute READS - the caller's envelope does not appear in
+    # the tail at all. The exchange is handed a package-owned envelope rebuilt
+    # from the snapshot, so a caller-supplied clock cannot reach what the
+    # exchange sees either.
+    assert _attribute_reads_in(tail, "envelope") == []
+    assert _names_in(tail, "envelope") == []
+    unparsed = " ".join(ast.unparse(s) for s in tail)
+    assert "_invoke_once(validated)" in unparsed
+    assert "envelope." not in unparsed
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["max_result_bytes", "deadline_ns", "issued_ns", "context_ceiling_tokens"],
+)
+def test_a_hostile_clock_cannot_rewrite_a_limit_the_executor_then_uses(field):
+    """A clock runs between validation and every later decision."""
+    envelope = build_envelope()
+    original = getattr(envelope, field)
+    calls = []
+
+    def tampering_clock():
+        calls.append(1)
+        if len(calls) == 1:
+            object.__setattr__(envelope, field, 8 if "bytes" in field else 1)
+        return 1000 if len(calls) == 1 else 1100
+
+    backend = FakeBackend('{"summary": "%s"}' % ("x" * 200))
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=ob.structured_exchange_adapter(backend),
+            clock=tampering_clock,
+            reservation_decision=satisfied_for(envelope),
+        )
+    # The tamper landed on the caller's envelope...
+    assert getattr(envelope, field) != original
+    # ...and changed nothing the executor decided, and nothing the canonical
+    # adapter transmitted: both work from the snapshot validation produced.
+    assert result.ok is True
+    assert result.receipt.outcome == "observed"
+    assert result.receipt.context_ceiling_tokens == 8192
+    assert backend.seen[0]["max_tokens"] == 1024
+    assert backend.seen[0]["messages"][0].content == "the evidence"
+    assert rc.serialize_receipt(result.receipt)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("worker", "sk-OMIV3ASECRET123456789"),
+        ("worker", "has space"),
+        ("authorizing_principal", "sk-OMIV3ASECRET123456789"),
+        ("task_id", "not-a-uuid"),
+        ("schema_digest", "nope"),
+        ("required_keys", ("a",) * 200),
+    ],
+)
+def test_a_hostile_exchange_cannot_rewrite_what_the_receipt_records(field, value):
+    """The half that broke totality outright.
+
+    A hostile exchange rewriting ``worker`` or ``task_id`` made the receipt
+    carrier refuse the tampered value by raising ``ValueError`` **out of**
+    ``execute_observation`` - a function documented as total. The receipt is
+    now assembled from the validated document, so the tamper reaches nothing.
+    """
+    envelope = build_envelope()
+    seen = {}
+
+    def tampering_exchange(target):
+        # The exchange receives a package-owned envelope, not the caller's, so
+        # this tamper cannot even reach `envelope` - and it changes nothing the
+        # receipt records either.
+        seen["target"] = target
+        object.__setattr__(target, field, value)
+        return observation_exchange()
+
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=tampering_exchange,
+            clock=make_clock([1000, 1100]),
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert seen["target"] is not envelope, "the caller's envelope is not handed on"
+    assert getattr(seen["target"], field) == value, "the tamper must land somewhere"
+    assert getattr(envelope, field) != value, "...but never on the caller's object"
+    assert result.ok is True
+    assert result.receipt.worker == "observer-1"
+    assert result.receipt.authorizing_principal == "kev"
+    assert result.receipt.task_id == FIXED_TASK_ID
+    rendered = rc.serialize_receipt(result.receipt)
+    assert b"sk-" not in rendered
+
+
+def test_a_hostile_exchange_cannot_rewrite_the_deadline_the_executor_rechecks():
+    envelope = build_envelope()
+    original = envelope.deadline_ns
+
+    def tampering_exchange(target):
+        object.__setattr__(target, "deadline_ns", 1)
+        return observation_exchange()
+
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=tampering_exchange,
+            clock=make_clock([1000, 1100]),
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert envelope.deadline_ns == original
+    assert result.receipt.outcome == "observed"
+    assert result.receipt.deadline_result == "within-deadline"
+
+
+def test_a_hostile_exchange_cannot_swap_the_evidence_the_receipt_records():
+    envelope = build_envelope()
+
+    def tampering_exchange(target):
+        other = ob.EvidenceItem(evidence_id="swapped", content=b"other bytes")
+        object.__setattr__(target, "evidence", (other,))
+        return observation_exchange()
+
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=tampering_exchange,
+            clock=make_clock([1000, 1100]),
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert envelope.evidence[0].evidence_id == "e1"
+    assert result.receipt.evidence_ids == ("e1",)
+    assert result.receipt.evidence_bytes == len(b"the evidence")
+
+
+# -- D3: the structural controls are robust to reads behind helpers ----------
+
+
+def test_the_envelope_constructor_hands_self_only_to_setattr_after_validation():
+    tail = _tail_ast(ob.ObservationEnvelope.__post_init__, "_semantics(self)")
+    assert _attribute_reads_in(tail, "self") == []
+    uses = _names_in(tail, "self")
+    setattrs = 0
+    for statement in tail:
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "__setattr__"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "self"
+            ):
+                setattrs += 1
+    assert setattrs >= 3
+    assert len(uses) == setattrs, "self may only be written, never passed on"
+
+
+def test_the_serialiser_touches_the_receipt_nowhere_after_the_check():
+    tail = _tail_ast(rc.serialize_receipt, "_check(receipt)")
+    assert _names_in(tail, "receipt") == []
+
+
+def test_the_structural_controls_catch_a_read_moved_behind_a_helper():
+    """Non-vacuity: the controls above must flag what a probe showed they missed.
+
+    The previous revision split the source text and looked for ``self.field``.
+    A refactor to ``_helper(self)`` passed it while still handing the mutable
+    object on. These synthetic sources reproduce exactly that, and the AST
+    predicates must reject both.
+    """
+    hidden_self = textwrap.dedent(
+        '''
+        def __post_init__(self):
+            refusal, snapshot = _semantics(self)
+            evidence, reservation, document = snapshot
+            _object.__setattr__(self, "evidence", _helper(self))
+        '''
+    )
+    body = ast.parse(hidden_self).body[0].body
+    cut = next(i for i, s in enumerate(body) if "_semantics(self)" in ast.unparse(s))
+    tail = body[cut + 1 :]
+    setattrs = sum(
+        1
+        for statement in tail
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "__setattr__"
+    )
+    assert len(_names_in(tail, "self")) > setattrs, (
+        "the predicate must notice self being handed to a helper"
+    )
+
+    hidden_receipt = textwrap.dedent(
+        '''
+        def serialize_receipt(receipt):
+            document = _check(receipt)
+            document["worker"] = _reread(receipt)
+            return _json.dumps(document).encode("ascii")
+        '''
+    )
+    body = ast.parse(hidden_receipt).body[0].body
+    cut = next(i for i, s in enumerate(body) if "_check(receipt)" in ast.unparse(s))
+    assert _names_in(body[cut + 1 :], "receipt") != [], (
+        "the predicate must notice receipt being handed to a helper"
+    )
+
+
+# -- attack 4: the state machine matches OMI-V2's, differentially ------------
+
+
+_STATE_SPACE = list(
+    itertools.product(
+        [True, False],
+        [None, {"a": 1}],
+        [None, "backend-not-structured-capable", "dialect-not-configured",
+         "schema-empty", "tools-with-structured-unsupported"],
+        [None, "invalid-json", "missing-required-key"],
+        [None, "ollama"],
+        [True, False],
+        [(), (0,)],
+    )
+)
+
+
+def test_v3a_accepts_exactly_the_carriers_omi_v2_can_construct():
+    """A differential over the whole small state space, both directions.
+
+    Stronger than asserting the checker holds OMI-V2's vocabularies in cells:
+    that shows it consults the right *values*, not that it draws the same
+    *boundary*. Here every combination is put to OMI-V2 by construction and to
+    V3A by inspection, and the two verdicts must agree.
+    """
+    rejects_valid = []
+    accepts_invalid = []
+    constructible = 0
+    for ok, value, rr, rf, dialect, sent, idx in _STATE_SPACE:
+        try:
+            built = StructuredExchange(
+                ok=ok, value=value, request_refusal=rr, response_failure=rf,
+                missing_key_indices=idx, dialect=dialect,
+                response_format_sent=sent,
+            )
+            omi_v2 = True
+        except ValueError:
+            built = None
+            omi_v2 = False
+        if omi_v2:
+            constructible += 1
+            if not ob._exchange_state_ok(built):
+                rejects_valid.append((ok, value, rr, rf, dialect, sent, idx))
+            continue
+        victim = StructuredExchange(
+            ok=True, value={"a": 1}, dialect="ollama", response_format_sent=True
+        )
+        object.__setattr__(victim, "ok", ok)
+        object.__setattr__(
+            victim, "value", MappingProxyType(value) if value is not None else None
+        )
+        object.__setattr__(victim, "request_refusal", rr)
+        object.__setattr__(victim, "response_failure", rf)
+        object.__setattr__(victim, "dialect", dialect)
+        object.__setattr__(victim, "response_format_sent", sent)
+        object.__setattr__(victim, "missing_key_indices", idx)
+        if ob._exchange_state_ok(victim):
+            accepts_invalid.append((ok, value, rr, rf, dialect, sent, idx))
+
+    assert constructible > 0, "the space must contain constructible carriers"
+    assert rejects_valid == [], "V3A rejects a carrier OMI-V2 can build"
+    assert accepts_invalid == [], "V3A accepts a state OMI-V2 refuses"
+
+
+# -- attack 1: the adapter path's provenance, asserted positively ------------
+
+
+class TamperingBackend:
+    """Returns a completion whose fields are tampered after construction."""
+
+    def __init__(self, **tampers):
+        self.tampers = tampers
+
+    def complete_structured(self, messages, tools, **kwargs):
+        completion = StructuredCompletion(
+            ok=True,
+            response=AgentResponse.from_content(
+                [TextBlock(text='{"summary": "x"}')]
+            ),
+            dialect="ollama",
+            response_format_sent=True,
+        )
+        for field, value in self.tampers.items():
+            object.__setattr__(completion, field, value)
+        return completion
+
+
+@pytest.mark.parametrize(
+    "tampers",
+    [
+        {},
+        {"response": None},
+        {"dialect": "vllm"},
+    ],
+)
+def test_the_adapter_path_always_yields_a_package_owned_value(tampers):
+    """No backend can put a foreign mapping into the measured value.
+
+    ``request_structured_json`` builds the value from
+    ``validate_structured_output``, which parses an exact ``str`` payload with
+    ``json.loads`` under a hook returning exact dicts; ``StructuredExchange``
+    then re-wraps a fresh copy. So the proxy ``_result_snapshot_bytes`` copies
+    on the adapter path wraps a dict this package created - which is the entire
+    provenance argument, asserted here rather than assumed.
+    """
+    envelope = build_envelope()
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=ob.structured_exchange_adapter(TamperingBackend(**tampers)),
+            clock=make_clock([1000, 1100]),
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert result.receipt is not None
+    assert rc.serialize_receipt(result.receipt)
+    if result.exchange is not None and result.exchange.ok:
+        assert type(result.exchange.value) is MappingProxyType
+        assert dict(result.exchange.value) == {"summary": "x"}
+
+
+def test_a_backend_returning_a_foreign_object_is_refused_not_measured():
+    class ForeignCompletionBackend:
+        def complete_structured(self, messages, tools, **kwargs):
+            return object()
+
+    envelope = build_envelope()
+    result = run(
+        envelope,
+        ob.structured_exchange_adapter(ForeignCompletionBackend()),
+        [1000, 1100],
+    )
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == "backend-not-structured-capable"
+
+
+# -- attack 3: what an injected exchange is trusted for, pinned honestly -----
+
+
+def test_an_injected_exchange_supplies_its_own_measurement_and_that_is_the_limit():
+    """The trust boundary, asserted rather than overstated.
+
+    ``ObservationExchange`` guarantees ``result_bytes == len(result_snapshot)``,
+    so a carrier cannot claim a size its own bytes do not have. It does **not**
+    guarantee those bytes describe the exchange's value: an injected exchange
+    builds its own carrier, and can pair a large value with a small snapshot.
+
+    That buys an attacker nothing - a caller who controls the exchange could
+    simply have returned a small value - but the previous revision's wording
+    implied a binding it does not have, so the actual behaviour is pinned here
+    and recorded as limitation 13.
+    """
+    large = StructuredExchange(
+        ok=True, value={"summary": "y" * 5000}, dialect="ollama",
+        response_format_sent=True,
+    )
+    honest = len(ob._result_snapshot_bytes(large.value))
+    assert honest > 5000
+
+    lying = ob.ObservationExchange(exchange=large, result_snapshot=b"{}")
+    assert lying.result_bytes == 2, "the carrier binds the count to its bytes..."
+    assert lying.result_bytes != honest, "...but not to the value"
+
+    envelope = build_envelope(max_result_bytes=16)
+    result = run(envelope, CountingExchange(lying), [1000, 1100])
+    assert result.ok is True
+    assert result.receipt.result_bytes == 2
+    # What it cannot do: put any of the value into the receipt.
+    rendered = rc.serialize_receipt(result.receipt)
+    assert b"yyyy" not in rendered
+    assert len(rendered) <= rc.RECEIPT_MAX_BYTES
+
+
+def test_the_canonical_adapter_measures_the_value_it_actually_received():
+    """And on the path this package owns, the count is the real one."""
+    payload = '{"summary": "%s"}' % ("z" * 300)
+    envelope = build_envelope(max_result_bytes=4096)
+    backend = FakeBackend(payload)
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+    assert result.ok is True
+    expected = len(
+        json.dumps(
+            dict(result.exchange.value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    )
+    assert result.receipt.result_bytes == expected

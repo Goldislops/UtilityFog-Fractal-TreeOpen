@@ -964,14 +964,17 @@ def _closed_envelope_semantics():
         """Validate an envelope and **return its detached snapshot**.
 
         Returns ``(refusal, snapshot)``. On acceptance ``snapshot`` is a
-        three-tuple ``(evidence, reservation, document)``:
+        four-tuple ``(evidence, reservation, document, schema_bytes)``:
 
         - ``evidence`` - a tuple of fresh package-owned :class:`EvidenceItem`
           carriers, built during validation from the exact ``str`` and ``bytes``
           that were proved acceptable;
         - ``reservation`` - a fresh :class:`ResourceReservation`, likewise;
         - ``document`` - the canonical digest document, built entirely from
-          primitives proved during the same pass.
+          primitives proved during the same pass;
+        - ``schema_bytes`` - the canonical rendering this pass verified, so the
+          canonical adapter can send exactly what was validated rather than
+          re-reading the envelope when it is invoked.
 
         Nothing here is read from the envelope a second time, and that is the
         correction for Jack's third-round first finding. The previous revision
@@ -1099,7 +1102,7 @@ def _closed_envelope_semantics():
             "issued_ns": issued_ns,
             "deadline_ns": deadline_ns,
         }
-        return None, (detached_evidence, detached_reservation, document)
+        return None, (detached_evidence, detached_reservation, document, canonical)
 
     return _envelope_semantics
 
@@ -1553,7 +1556,7 @@ def _build_envelope_class():
             refusal, snapshot = _semantics(self)
             if refusal is not None:
                 raise _Refused(refusal)
-            evidence, reservation, document = snapshot
+            evidence, reservation, document, _schema = snapshot
             _object.__setattr__(self, "evidence", evidence)
             _object.__setattr__(self, "reservation", reservation)
             _object.__setattr__(self, "envelope_digest", _digest_of(document))
@@ -2107,7 +2110,8 @@ def _closed_executor():
     }
 
     def _receipt(
-        envelope,
+        document,
+        envelope_digest,
         evidence,
         *,
         outcome,
@@ -2125,14 +2129,28 @@ def _closed_executor():
         response_failure=None,
         missing_key_indices=(),
     ):
-        """Assemble the payload-free receipt from envelope metadata only."""
+        """Assemble the receipt from the VALIDATED DOCUMENT, never the envelope.
+
+        Jack's fourth round demonstrated why this matters. The executor calls
+        two caller-supplied callables - the clock and the exchange - and an
+        earlier revision re-read the envelope's own fields afterwards. A hostile
+        exchange could therefore rewrite ``worker`` between validation and this
+        assembly, and the receipt carrier would refuse the tampered value by
+        raising ``ValueError`` **out of a function documented as total**. The
+        same held for ``task_id``.
+
+        Everything here now comes from the document ``_envelope_semantics``
+        built during validation, which is package-owned, never handed to a
+        caller, and immutable in practice because nothing outside this call
+        holds a reference to it.
+        """
         return _Receipt(
-            task_id=envelope.task_id,
+            task_id=document["task_id"],
             outcome=outcome,
-            envelope_digest=envelope.envelope_digest,
-            schema_digest=envelope.schema_digest,
-            authorizing_principal=envelope.authorizing_principal,
-            worker=envelope.worker,
+            envelope_digest=envelope_digest,
+            schema_digest=document["schema"][0],
+            authorizing_principal=document["authorizing_principal"],
+            worker=document["worker"],
             evidence_ids=_tuple(item.evidence_id for item in evidence),
             evidence_digests=_tuple(item.digest for item in evidence),
             evidence_bytes=_sum(_len(item.content) for item in evidence),
@@ -2144,8 +2162,8 @@ def _closed_executor():
             exchange_invocations=invocations,
             elapsed_ns=elapsed_ns,
             result_bytes=result_bytes,
-            context_ceiling_tokens=envelope.context_ceiling_tokens,
-            required_key_count=_len(envelope.required_keys),
+            context_ceiling_tokens=document["context_ceiling_tokens"],
+            required_key_count=_len(document["required_keys"]),
             dialect=dialect,
             refusal=refusal,
             request_refusal=request_refusal,
@@ -2154,7 +2172,8 @@ def _closed_executor():
         )
 
     def _refuse(
-        envelope,
+        document,
+        envelope_digest,
         evidence,
         token,
         *,
@@ -2176,7 +2195,8 @@ def _closed_executor():
             ok=False,
             refusal=token,
             receipt=_receipt(
-                envelope,
+                document,
+                envelope_digest,
                 evidence,
                 outcome="refused",
                 deadline_result=deadline_result,
@@ -2266,9 +2286,28 @@ def _closed_executor():
         refusal, snapshot = _semantics(envelope)
         if refusal is not None:
             return _Result(ok=False, refusal="envelope-semantics-invalid")
-        evidence, reservation, document = snapshot
-        if _digest_of(document) != envelope.envelope_digest:
+        evidence, reservation, document, _schema = snapshot
+        # The recorded digest is read here, before the bind below and before
+        # any caller-supplied callable has run. After this line the executor
+        # reads no attribute of the envelope at all.
+        recorded = envelope.envelope_digest
+        rederived = _digest_of(document)
+        if rederived != recorded:
             return _Result(ok=False, refusal="envelope-digest-mismatch")
+        # Bound ONCE, here, from the document validation produced. Everything
+        # below uses these locals and never touches the envelope again.
+        #
+        # This is Jack's fourth-round finding. Two caller-supplied callables run
+        # inside this function - the clock and the exchange - and an earlier
+        # revision re-read `issued_ns`, `deadline_ns`, `max_result_bytes` and
+        # the provenance fields from the envelope afterwards. A hostile clock
+        # could shrink the result bound mid-flight; a hostile exchange could
+        # rewrite `worker` or `task_id` and make receipt construction raise
+        # `ValueError` out of a function documented as total. The window was not
+        # a race between threads - it was code the executor calls on purpose.
+        issued_ns = document["issued_ns"]
+        deadline_ns = document["deadline_ns"]
+        max_result_bytes = document["max_result_bytes"]
         # The reservation's own digest must describe its own fields before it
         # can bind a decision. The envelope digest already covers both, so this
         # is unreachable for an envelope that got here - it is kept because the
@@ -2280,7 +2319,8 @@ def _closed_executor():
 
         if not _callable(exchange):
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "exchange-not-callable",
                 deadline_result="not-evaluated",
@@ -2291,16 +2331,18 @@ def _closed_executor():
         code, before = _clock_read(clock)
         if code is not None:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 _CLOCK_TOKENS[code],
                 deadline_result="not-evaluated",
                 reservation_result="not-evaluated",
                 invocations=0,
             )
-        if before < envelope.issued_ns:
+        if before < issued_ns:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "clock-not-monotonic",
                 deadline_result="not-evaluated",
@@ -2308,14 +2350,15 @@ def _closed_executor():
                 invocations=0,
             )
 
-        if before >= envelope.deadline_ns:
+        if before >= deadline_ns:
             # Void, not refused: the deadline decided this, and OMI-V3A does not
             # retry it. The reservation is recorded as never evaluated, because
             # it never was.
             return _Result(
                 ok=False,
                 receipt=_receipt(
-                    envelope,
+                    document,
+                    rederived,
                     evidence,
                     outcome="void",
                     deadline_result="exceeded-before-request",
@@ -2330,7 +2373,8 @@ def _closed_executor():
 
         if _type(reservation_decision) is not _Decision:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "reservation-decision-not-exact-type",
                 deadline_result="within-deadline",
@@ -2342,7 +2386,8 @@ def _closed_executor():
             # decision. Checked before `satisfied` is read in a boolean context,
             # so a supplied `__bool__` never runs.
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "reservation-decision-field-invalid",
                 deadline_result="within-deadline",
@@ -2355,7 +2400,8 @@ def _closed_executor():
             # this one, however satisfied it says it is. Bound to the RECOMPUTED
             # digest, never to the one the reservation happens to be storing.
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "reservation-decision-mismatch",
                 deadline_result="within-deadline",
@@ -2364,7 +2410,8 @@ def _closed_executor():
             )
         if not reservation_decision.satisfied:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "reservation-not-satisfied",
                 deadline_result="within-deadline",
@@ -2376,6 +2423,37 @@ def _closed_executor():
         # The latch. There is one call site and it can fire once. An edit that
         # later added a retry would raise here rather than retry, which is the
         # difference between a documented property and an enforced one.
+        # The exchange is handed a PACKAGE-OWNED envelope rebuilt from the
+        # snapshot, not the caller's object. Jack's fourth round showed why: a
+        # caller-supplied clock runs before this point, so a clock that swapped
+        # the evidence tuple made the canonical adapter transmit one payload
+        # while the receipt recorded the digest of another. Rebuilding severs
+        # that: the adapter validates an object the caller has no reference to,
+        # so on the canonical path what is sent is what was recorded.
+        #
+        # An INJECTED exchange may still ignore this envelope and send anything
+        # it likes - that is what injecting one means - so the receipt attests
+        # what this executor validated, never what a third-party callable
+        # transmitted. See the note on the receipt assembler below.
+        validated = _Envelope(
+            task_id=document["task_id"],
+            authorizing_principal=document["authorizing_principal"],
+            worker=document["worker"],
+            evidence=evidence,
+            dialect=document["dialect"],
+            schema_bytes=_schema,
+            schema_digest=document["schema"][0],
+            required_keys=_tuple(document["required_keys"]),
+            endpoint=document["endpoint"],
+            reservation=reservation,
+            context_ceiling_tokens=document["context_ceiling_tokens"],
+            max_evidence_bytes=document["max_evidence_bytes"],
+            max_result_bytes=max_result_bytes,
+            max_output_tokens=document["max_output_tokens"],
+            issued_ns=issued_ns,
+            deadline_ns=deadline_ns,
+        )
+
         latch = []
 
         def _invoke_once(target):
@@ -2384,7 +2462,7 @@ def _closed_executor():
             latch.append(1)
             return exchange(target)
 
-        completed_carrier = _invoke_once(envelope)
+        completed_carrier = _invoke_once(validated)
 
         # The clock is read before anything is asked of `completed`, so a
         # deadline crossed while the exchange ran is discovered even when what
@@ -2392,7 +2470,8 @@ def _closed_executor():
         code, after = _clock_read(clock)
         if code is not None:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 _CLOCK_TOKENS[code],
                 deadline_result="not-evaluated",
@@ -2402,7 +2481,8 @@ def _closed_executor():
             )
         if after < before:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "clock-not-monotonic",
                 deadline_result="not-evaluated",
@@ -2415,14 +2495,15 @@ def _closed_executor():
         # can reach a receipt or a serialiser.
         elapsed = after - before
 
-        if after >= envelope.deadline_ns:
+        if after >= deadline_ns:
             # Void even if the exchange succeeded. A late answer is not an
             # answer, and keeping the value would turn a void observation into a
             # used one.
             return _Result(
                 ok=False,
                 receipt=_receipt(
-                    envelope,
+                    document,
+                    rederived,
                     evidence,
                     outcome="void",
                     deadline_result="exceeded-during-request",
@@ -2443,7 +2524,8 @@ def _closed_executor():
         # taken and why the provenance there is knowable.
         if _type(completed_carrier) is not _Carrier:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "exchange-result-not-exact-type",
                 deadline_result="within-deadline",
@@ -2458,7 +2540,8 @@ def _closed_executor():
         # reached receipt construction and raised there.
         if not _carrier_intact(completed_carrier):
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "exchange-result-field-invalid",
                 deadline_result="within-deadline",
@@ -2475,7 +2558,8 @@ def _closed_executor():
                 ok=False,
                 exchange=completed,
                 receipt=_receipt(
-                    envelope,
+                    document,
+                    rederived,
                     evidence,
                     outcome="unusable",
                     deadline_result="within-deadline",
@@ -2502,7 +2586,8 @@ def _closed_executor():
         # HermeticViolation from anywhere in the exchange loud.
         if completed_carrier.result_snapshot is None:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "result-not-serializable",
                 deadline_result="within-deadline",
@@ -2512,9 +2597,10 @@ def _closed_executor():
                 attestation=attestation,
             )
         size = completed_carrier.result_bytes
-        if size > envelope.max_result_bytes:
+        if size > max_result_bytes:
             return _refuse(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 "result-too-large",
                 deadline_result="within-deadline",
@@ -2528,7 +2614,8 @@ def _closed_executor():
             ok=True,
             exchange=completed,
             receipt=_receipt(
-                envelope,
+                document,
+                rederived,
                 evidence,
                 outcome="observed",
                 deadline_result="within-deadline",
@@ -2558,7 +2645,9 @@ def _closed_adapter_factory():
     """Build :func:`structured_exchange_adapter`, dependencies in cells."""
     _Envelope = ObservationEnvelope
     _Carrier = ObservationExchange
+    _semantics = _envelope_semantics
     _snapshot = _result_snapshot_bytes
+    _tuple = tuple
     _request = request_structured_json
     _request_type = StructuredOutputRequest
     _Message = Message
@@ -2607,21 +2696,39 @@ def _closed_adapter_factory():
         def exchange(envelope: Any) -> StructuredExchange:
             if _type(envelope) is not _Envelope:
                 raise _ValueError("the adapter accepts exactly an ObservationEnvelope")
+            # Validated HERE, at the moment of invocation, and everything sent
+            # comes from that validation. The executor hands this callable the
+            # envelope, and by then a caller-supplied clock has already run - so
+            # reading the envelope's own fields would mean sending values nobody
+            # had checked. Jack's fourth round demonstrated exactly that: a clock
+            # that swapped the evidence tuple made this adapter transmit one
+            # payload while the receipt recorded the digest of another, and a
+            # clock that corrupted `schema_bytes` made it raise a decoder's
+            # exception - text and all - out of package-owned code.
+            refusal, snapshot = _semantics(envelope)
+            if refusal is not None:
+                # A fixed message. The refusal token is closed and safe, but it
+                # is not carried here either: this is a programming error at the
+                # call site, not a result to be interpreted.
+                raise _ValueError(
+                    "the adapter accepts only a valid ObservationEnvelope"
+                )
+            evidence, _reservation, document, schema_bytes = snapshot
             messages = _list(
                 _Message(role="user", content=item.content.decode("utf-8"))
-                for item in envelope.evidence
+                for item in evidence
             )
             completed = _request(
                 backend,
                 messages,
                 [],
                 structured=_request_type(
-                    schema=_json.loads(envelope.schema_bytes.decode("ascii"))
+                    schema=_json.loads(schema_bytes.decode("ascii"))
                 ),
-                required_keys=envelope.required_keys,
-                max_chars=envelope.max_result_bytes,
+                required_keys=_tuple(document["required_keys"]),
+                max_chars=document["max_result_bytes"],
                 system=_system,
-                max_tokens=envelope.max_output_tokens,
+                max_tokens=document["max_output_tokens"],
                 temperature=0.0,
             )
             # Measured HERE, where the value is demonstrably the one OMI-V2 just

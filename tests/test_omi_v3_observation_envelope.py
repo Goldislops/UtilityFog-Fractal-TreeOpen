@@ -2939,9 +2939,14 @@ def test_the_semantics_function_is_total_and_returns_only_closed_tokens():
     envelope = fixed_envelope()
     refusal, snapshot = ob._envelope_semantics(envelope)
     assert refusal is None
-    detached_evidence, detached_reservation, document = snapshot
+    detached_evidence, detached_reservation, document, schema_bytes = snapshot
     assert type(detached_evidence) is tuple
     assert type(document) is dict
+    # The validated canonical schema travels in the snapshot too, so the
+    # canonical adapter sends what was validated rather than re-reading the
+    # envelope when it is invoked.
+    assert type(schema_bytes) is bytes
+    assert schema_bytes == envelope.schema_bytes
     for field, value in RESEALED_TAMPERS:
         tampered = fixed_envelope()
         object.__setattr__(tampered, field, value)
