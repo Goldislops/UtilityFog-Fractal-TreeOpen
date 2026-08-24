@@ -2931,3 +2931,202 @@ def test_plan_and_quarantine_consume_the_same_refilled_selection(tmp_path):
     assert ([action.basename for action in planned.planned_actions]
             == [action.basename for action in quarantined.planned_actions])
     assert quarantined.moved == 3
+
+
+# ---------------------------------------------------------------------------
+# Empty quarantine passes must be side-effect free
+# ---------------------------------------------------------------------------
+#
+# `_validated_quarantine_root` creates `.retention_quarantine` when it is
+# absent, and `_quarantine` then exclusively creates a pass directory and a
+# manifest. Reaching that code with an empty action set writes three objects
+# while moving nothing.
+#
+# That is not merely untidy. The scan charges EVERY yielded root entry against
+# `max_directory_entries` -- excluded directories included -- and refuses one
+# entry past the limit. A directory that scanned at exactly the limit is
+# therefore pushed over it by the very pass meant to relieve it, after which no
+# later pass can get far enough to help.
+#
+# The refusal for an unusable data root has to survive that change. The scan
+# treats a missing or non-directory target as an EMPTY SUCCESSFUL scan, so the
+# `_quarantine` call is presently the only thing that turns such a target into
+# the fixed `IDENTITY_UNAVAILABLE` refusal. Skipping `_quarantine` without
+# re-proving the root would silently report a clean no-op against a path that
+# is not a directory at all.
+
+
+def _no_action_policy(**kwargs):
+    """Floors high enough that nothing in a small fixture is ever eligible."""
+    base = dict(entries=1_000, combined=1_000, snap=1_000, telem=1_000,
+                ceiling=8_192, floor=50)
+    base.update(kwargs)
+    return _tiny(**base)
+
+
+def _no_action_run(directory, policy=None, pass_id="p20260101T000000",
+                   admit=None, mover=_injected_mover):
+    return retention.run_pass(
+        directory, policy=policy or _no_action_policy(),
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id=pass_id, admit=admit if admit is not None else _Admit({0, 1, 2}),
+        mover=mover)
+
+
+def test_a_no_action_quarantine_pass_creates_no_quarantine_state(tmp_path):
+    made = _populate(tmp_path, snapshots=4)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    report = _no_action_run(tmp_path)
+    assert report.planned_actions == ()
+    assert report.moved == 0
+    assert not _quarantine_root(tmp_path).exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    assert all(path.exists() for path in made)
+
+
+def test_a_reserve_blocked_pass_with_no_eligible_telemetry_creates_nothing(
+        tmp_path):
+    """The exact shape the refill correction can produce: snapshots blocked,
+    nothing left to refill with, so the pass must do nothing at all."""
+    for index in range(5):
+        _write(tmp_path, _snap_name(index, index), age_days=400 + index)
+    _write(tmp_path, _telem_name("20260101T000001"), age_days=100)
+    report = _no_action_run(tmp_path, policy=_quarantine_policy(),
+                            admit=_Admit({0, 1}))
+    assert report.snapshot_actions_blocked is True
+    assert report.reserve_ok is False
+    assert report.snapshot_eligible == 4          # complete, not selected
+    assert report.telemetry_eligible == 0
+    assert report.planned_actions == ()
+    assert report.planned_actions_count == 0
+    assert report.moved == 0
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_no_action_pass_leaves_a_full_directory_scannable(tmp_path):
+    """A directory sitting at exactly `max_directory_entries` must still be
+    scannable on the next pass. One created root entry would end that."""
+    count = 6
+    for index in range(count):
+        _write(tmp_path, _snap_name(index, index), age_days=400 + index)
+    policy = _no_action_policy(entries=count)
+
+    first = _no_action_run(tmp_path, policy=policy)
+    assert first.refused is None
+    assert first.planned_actions == ()
+    assert first.processed == count
+    assert len(list(tmp_path.iterdir())) == count
+
+    second = _no_action_run(tmp_path, policy=policy,
+                            pass_id="p20260101T000001")
+    assert second.refused is not (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+    assert second.refused is None
+    assert second.processed == count
+
+
+@pytest.mark.parametrize("entries", [0, 1, 5, 6])
+def test_a_no_action_pass_never_grows_the_directory(tmp_path, entries):
+    for index in range(entries):
+        _write(tmp_path, _snap_name(index, index), age_days=400 + index)
+    policy = _no_action_policy(entries=max(entries, 1))
+    report = _no_action_run(tmp_path, policy=policy)
+    assert report.planned_actions == ()
+    assert len(list(tmp_path.iterdir())) == entries
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_no_action_report_keeps_its_mode_counters_and_status(tmp_path):
+    _populate(tmp_path, snapshots=4)
+    report = _no_action_run(tmp_path)
+    assert report.mode == retention.RetentionMode.QUARANTINE.value
+    assert report.refused is None
+    assert report.processed == 4
+    assert report.inspected == 4
+    assert report.snapshot_eligible == 0
+    assert report.telemetry_eligible == 0
+    assert report.ambiguous == 0
+    assert report.planned_actions_count == 0
+    assert report.moved == 0
+    assert report.skipped == 0
+    assert report.unmanifested == 0
+    assert report.halted is False
+    assert report.reserve_ok is True
+    assert report.snapshot_actions_blocked is False
+    line = retention.format_report(report)
+    assert "mode=quarantine" in line
+    assert "refused=none" in line
+    assert "planned=0" in line
+    assert "moved=0" in line
+
+
+def test_timestamp_ambiguity_still_refuses_before_the_no_action_return(
+        tmp_path):
+    _populate(tmp_path, snapshots=3)
+    _write(tmp_path, _snap_name(900, 900), age_days=-5)      # future-dated
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.TIMESTAMP_AMBIGUOUS)
+    assert report.ambiguous == 1
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_an_invalid_pass_identifier_still_precedes_the_no_action_return(
+        tmp_path):
+    _populate(tmp_path, snapshots=4)
+    report = _no_action_run(tmp_path, pass_id="../escape")
+    assert report.refused is retention.RetentionFailureReason.PASS_ID_INVALID
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_the_platform_gate_still_precedes_the_no_action_return(tmp_path):
+    """With no injected mover the platform gate is checked before anything is
+    created. Where it does not fire, the no-action path must still create
+    nothing, so this control is meaningful on both platforms."""
+    _populate(tmp_path, snapshots=4)
+    report = _no_action_run(tmp_path, mover=None)
+    if os.name == "nt":
+        assert report.refused is not (
+            retention.RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
+    else:
+        assert report.refused is (
+            retention.RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_non_directory_data_root_still_refuses_identity_unavailable(
+        tmp_path):
+    """The scan reports a missing or non-directory target as an EMPTY SUCCESS,
+    so the no-action path must re-prove the root rather than inherit a clean
+    report from a target that is not a directory."""
+    plain = tmp_path / "not_a_directory"
+    plain.write_bytes(b"x")
+    report = _no_action_run(plain)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.moved == 0
+    assert report.planned_actions == ()
+
+
+def test_a_missing_data_root_still_refuses_identity_unavailable(tmp_path):
+    report = _no_action_run(tmp_path / "gone")
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.moved == 0
+    assert report.planned_actions == ()
+
+
+def test_a_nonempty_quarantine_pass_still_creates_its_state(tmp_path):
+    """The correction must not disturb the ordinary path."""
+    _populate(tmp_path, snapshots=4)
+    report = retention.run_pass(
+        tmp_path, policy=_quarantine_policy(),
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id="p20260101T000000", admit=_Admit({0, 1, 2}),
+        mover=_injected_mover)
+    assert report.planned_actions
+    assert report.moved == len(report.planned_actions)
+    root = _quarantine_root(tmp_path)
+    assert root.is_dir()
+    assert (root / "p20260101T000000").is_dir()
+    assert (root / "p20260101T000000" / retention.MANIFEST_NAME).is_file()
