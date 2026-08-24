@@ -2693,3 +2693,241 @@ def test_a_close_failure_after_a_read_failure_stays_one_refusal(tmp_path,
     assert closes["n"] == 1
     assert survey.refused is retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID
     assert "close failed" not in printed.out and "read failed" not in printed.out
+
+
+# ---------------------------------------------------------------------------
+# Reserve-blocked telemetry refill
+# ---------------------------------------------------------------------------
+#
+# The adversarial ordering is the whole point: eligible snapshots are made
+# strictly OLDER than eligible telemetry, so the oldest-first merged list is
+# entirely snapshots for the first `max_actions_per_pass` positions. A reserve
+# shortfall then removes every one of them, and the question these controls
+# settle is whether the vacated positions are refilled from the telemetry that
+# was eligible all along but fell outside the cap.
+#
+# The existing shortfall control cannot see this: its combined eligible
+# population is 88 + 76, far below the 512 cap, so the cap never binds and no
+# position is ever vacated.
+
+_REFILL_SNAPSHOT_AGE_DAYS = 400          # older -- sorts first, takes the cap
+_REFILL_TELEMETRY_AGE_DAYS = 100         # newer, still far beyond 14 days
+_REFILL_SNAPSHOT_TOTAL = 1_100           # 588 eligible above the 512 floor
+
+
+def _refill_snapshots(count=_REFILL_SNAPSHOT_TOTAL):
+    return [
+        _entry(_snap_name(index, index), retention.SNAPSHOT_CLASS,
+               NOW - _ns(_REFILL_SNAPSHOT_AGE_DAYS * DAY) - _ns(index),
+               index, index)
+        for index in range(count)
+    ]
+
+
+def _refill_telemetry(count, *, tail_ties=0):
+    """`count` telemetry entries, the oldest `tail_ties` sharing one mtime.
+
+    The tie group is emitted in DESCENDING name order so that insertion order
+    is not the expected order: only the basename tie-break can produce it.
+    """
+    entries = [
+        _entry(_telem_name("20260101T%06d" % index), retention.TELEMETRY_CLASS,
+               NOW - _ns(_REFILL_TELEMETRY_AGE_DAYS * DAY) - _ns(index))
+        for index in range(count - tail_ties)
+    ]
+    tie_mtime = NOW - _ns(_REFILL_TELEMETRY_AGE_DAYS * DAY) - _ns(count)
+    entries.extend(
+        _entry(_telem_name("20260102T%06d" % (tail_ties - 1 - offset)),
+               retention.TELEMETRY_CLASS, tie_mtime)
+        for offset in range(tail_ties)
+    )
+    return entries
+
+
+def _refill_scan(telemetry_count, *, tail_ties=0,
+                 snapshot_count=_REFILL_SNAPSHOT_TOTAL):
+    return _built_scan(snapshots=_refill_snapshots(snapshot_count),
+                       telemetry=_refill_telemetry(telemetry_count,
+                                                   tail_ties=tail_ties))
+
+
+def _refill_report(scan, admit=None):
+    return retention.run_pass(
+        "data", policy=retention.PRODUCTION_RETENTION_POLICY,
+        mode=retention.RetentionMode.PLAN, now_ns=NOW, scan=scan,
+        admit=admit if admit is not None else _Admit({0, 1}))
+
+
+def _expected_refill_basenames(telemetry_count, cap=512):
+    """Derived from the fixture, not from the implementation.
+
+    Telemetry index `i` carries mtime `NOW - 100d - i`, so a larger index is
+    older. The newest `recovery_floor` are protected; everything past them is
+    eligible, and oldest-first means descending index.
+    """
+    floor = retention.PRODUCTION_RETENTION_POLICY.telemetry.recovery_floor
+    oldest_first = [_telem_name("20260101T%06d" % index)
+                    for index in range(telemetry_count - 1, floor - 1, -1)]
+    return oldest_first[:cap]
+
+
+def test_at_least_512_older_eligible_snapshots_occupy_the_original_cap():
+    """The premise every refill control below rests on."""
+    scan = _refill_scan(1_724)
+    plan = _plan(scan)
+    assert plan.snapshot_eligible == 588
+    assert plan.telemetry_eligible == 700
+    assert len(plan.actions) == 512
+    assert all(action.klass == retention.SNAPSHOT_CLASS
+               for action in plan.actions)
+
+
+def test_a_reserve_shortfall_refills_the_batch_with_every_eligible_telemetry():
+    """Under the cap: every eligible telemetry action must survive."""
+    scan = _refill_scan(1_324)               # 300 eligible telemetry
+    report = _refill_report(scan)
+    assert report.reserve_ok is False
+    assert report.snapshot_actions_blocked is True
+    names = [action.basename for action in report.planned_actions]
+    assert len(names) == 300
+    assert names == _expected_refill_basenames(1_324)
+
+
+def test_a_reserve_shortfall_refill_stops_at_the_action_cap():
+    """Over the cap: exactly `max_actions_per_pass` telemetry actions."""
+    scan = _refill_scan(1_724)               # 700 eligible telemetry
+    report = _refill_report(scan)
+    assert report.snapshot_actions_blocked is True
+    names = [action.basename for action in report.planned_actions]
+    assert len(names) == 512
+    assert names == _expected_refill_basenames(1_724)
+
+
+def test_refilled_telemetry_stays_oldest_first_with_the_basename_tie_break():
+    scan = _refill_scan(1_044, tail_ties=20)
+    report = _refill_report(scan)
+    assert report.snapshot_actions_blocked is True
+    names = [action.basename for action in report.planned_actions]
+    assert len(names) == 20
+    assert names == sorted(names)
+    assert names == [_telem_name("20260102T%06d" % index)
+                     for index in range(20)]
+
+
+def test_no_snapshot_action_survives_a_reserve_shortfall():
+    report = _refill_report(_refill_scan(1_724))
+    assert report.snapshot_actions_blocked is True
+    assert report.planned_actions
+    assert not any(action.klass == retention.SNAPSHOT_CLASS
+                   for action in report.planned_actions)
+
+
+def test_reserve_blocked_eligibility_counts_stay_complete_not_selected():
+    """The counts are eligibility, not selection, and the refill must not
+    quietly redefine them as the number of actions taken."""
+    report = _refill_report(_refill_scan(1_724))
+    assert report.snapshot_eligible == 588
+    assert report.telemetry_eligible == 700
+    assert report.planned_actions_count == 512
+
+
+def test_planned_reflects_the_refilled_action_set():
+    report = _refill_report(_refill_scan(1_724))
+    assert report.planned_actions_count == len(report.planned_actions)
+    line = retention.format_report(report)
+    assert "planned=512" in line
+    assert "snap_eligible=588" in line
+    assert "telem_eligible=700" in line
+    assert "snapshot_blocked=True" in line
+
+
+def test_the_refill_never_exceeds_the_action_cap():
+    cap = retention.PRODUCTION_RETENTION_POLICY.max_actions_per_pass
+    assert cap == 512
+    for telemetry_count in (1_324, 1_724, 3_000):
+        report = _refill_report(_refill_scan(telemetry_count))
+        assert len(report.planned_actions) <= cap
+
+
+def test_a_passing_reserve_leaves_combined_ordering_and_cap_unchanged():
+    """The refill must be confined to the blocked branch."""
+    scan = _refill_scan(1_724)
+    report = _refill_report(scan, admit=_Admit({0, 1, 2}))
+    assert report.reserve_ok is True
+    assert report.snapshot_actions_blocked is False
+    assert report.planned_actions == _plan(scan).actions
+    assert len(report.planned_actions) == 512
+    assert all(action.klass == retention.SNAPSHOT_CLASS
+               for action in report.planned_actions)
+
+
+def test_no_eligible_snapshot_leaves_behavior_identical_and_never_probes():
+    """`snap_eligible=0` is the branch the accepted operational PLAN took."""
+    scan = _refill_scan(1_324, snapshot_count=100)    # 100 < the 512 floor
+    admit = _Admit({0, 1})
+    report = _refill_report(scan, admit=admit)
+    assert report.snapshot_eligible == 0
+    assert admit.calls == []                          # reserve never probed
+    assert report.reserve_ok is True
+    assert report.snapshot_actions_blocked is False
+    assert report.planned_actions == _plan(scan).actions
+
+
+def test_an_unexpected_reserve_exception_still_refuses_the_whole_refill_pass():
+    def _boom(path, *, data_dir, policy=None):
+        raise RuntimeError("unexpected")
+
+    report = _refill_report(_refill_scan(1_724), admit=_boom)
+    assert report.refused is retention.RetentionFailureReason.RESERVE_CHECK_FAILED
+    assert report.planned_actions == ()
+
+
+def _refill_disk_policy():
+    """A tiny policy so the cap binds with ten real files rather than 2,800."""
+    return retention.RetentionPolicy(
+        snapshot=retention.ClassRetentionPolicy(
+            max_age_seconds=30 * DAY, recovery_floor=1,
+            absolute_ceiling=8_192, max_inspected=1_000),
+        telemetry=retention.ClassRetentionPolicy(
+            max_age_seconds=14 * DAY, recovery_floor=1,
+            absolute_ceiling=8_192, max_inspected=1_000),
+        quiescence_seconds=900, max_actions_per_pass=3,
+        max_directory_entries=1_000, max_combined_inspected=1_000,
+        reserve_window=8, reserve_required=3)
+
+
+def _populate_refill_dir(directory):
+    for index in range(5):
+        _write(directory, _snap_name(index, index),
+               age_days=_REFILL_SNAPSHOT_AGE_DAYS + index)
+    for index in range(5):
+        _write(directory, _telem_name("20260101T%06d" % index),
+               age_days=_REFILL_TELEMETRY_AGE_DAYS + index)
+
+
+def test_plan_and_quarantine_consume_the_same_refilled_selection(tmp_path):
+    policy = _refill_disk_policy()
+    plan_dir = tmp_path / "plan"
+    quarantine_dir = tmp_path / "quarantine"
+    plan_dir.mkdir()
+    quarantine_dir.mkdir()
+    _populate_refill_dir(plan_dir)
+    _populate_refill_dir(quarantine_dir)
+
+    planned = retention.run_pass(
+        plan_dir, policy=policy, mode=retention.RetentionMode.PLAN,
+        now_ns=NOW, admit=_Admit({0, 1}))
+    quarantined = retention.run_pass(
+        quarantine_dir, policy=policy,
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id="p20260101T000000", admit=_Admit({0, 1}),
+        mover=_injected_mover)
+
+    assert planned.snapshot_actions_blocked is True
+    assert quarantined.snapshot_actions_blocked is True
+    assert len(planned.planned_actions) == 3
+    assert all(action.klass == retention.TELEMETRY_CLASS
+               for action in planned.planned_actions)
+    assert ([action.basename for action in planned.planned_actions]
+            == [action.basename for action in quarantined.planned_actions])
+    assert quarantined.moved == 3
