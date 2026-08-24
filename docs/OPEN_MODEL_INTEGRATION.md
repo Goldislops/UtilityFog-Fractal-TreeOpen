@@ -1372,7 +1372,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected once, after Jack's first independent HOLD round (2026-08-24).**
+**Corrected twice, after two independent HOLD rounds (2026-08-24).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1383,7 +1383,15 @@ standard through OMI-V2's own dialect and schema authorities; a clock that
 raises is refused with a fixed token and every clock figure is bounded;
 execution-time revalidation proves field types before anything is iterated,
 compared or truth-tested; and the receipt enforces every bound it documents.
-Section 11 of the inception document lists each finding and its correction.
+The second round went further: it found the two gates *still* disagreeing about
+strict UTF-8 evidence, found accepted envelopes retaining the caller's own
+carriers, and - most importantly - found an **unkeyed digest being treated as
+authority for validity**, so that an envelope resealed after a tamper executed
+normally. Every semantic constraint is now revalidated before execution, the
+returned OMI-V2 carrier is revalidated field by field before any of it is read,
+and the receipt re-checks itself at serialisation. Sections 11 and 13 of the
+inception document list each finding and its correction; section 14 records a
+reporting error in this work's own earlier evidence.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,

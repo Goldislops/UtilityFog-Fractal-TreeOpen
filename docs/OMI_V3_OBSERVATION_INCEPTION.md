@@ -1,8 +1,8 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected once, after Jack's
-> first independent HOLD round — see § 11, which lists every defect that round
-> found and what each one cost. Modules
+> **Status**: implemented, inert, and hermetic. Corrected twice — after Jack's
+> first independent HOLD round (§ 11) and his second (§ 13). Each section lists
+> every defect that round found and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -124,23 +124,41 @@ own past, so **every consumer re-derives**:
 
 This is the correction for Jack's first finding; § 11 records what it cost.
 
-### Direct construction is held to the planner's standard
+### One semantic authority, three consumers
 
-`ObservationEnvelope` can be constructed directly, and doing so **re-runs every
-check the planner applies** — a claim the previous revision made and did not
-keep. A directly accepted envelope cannot carry an unsupported, arbitrary,
-subclassed or secret-shaped dialect; schema bytes that are not the canonical
-ASCII rendering of a snapshot OMI-V2 accepts *for that dialect*; a
-`schema_digest` that does not hash exactly those bytes; a stale evidence or
-reservation digest; an over-limit field; or incoherent required keys. Every
-rejection is a `ValueError` from `__post_init__`, so no half-built envelope
-exists for a caller to hand to the executor.
+There is now exactly **one** definition of an acceptable envelope —
+`_envelope_semantics` — and the planner, the carrier and the executor all hold
+it in a closure cell. That is structural rather than editorial, and it is the
+answer to the same mistake found twice: Jack's first round caught the carrier
+checking less than the planner about the dialect and the schema, and his second
+caught it *still* checking less about strict UTF-8 evidence, which let invalid
+bytes reach the adapter and raise `UnicodeDecodeError` out of a function
+documented as total. Two gates that must agree cannot be two pieces of code.
+
+A directly accepted envelope therefore cannot carry an unsupported, arbitrary,
+subclassed or secret-shaped dialect; evidence that is not strict UTF-8; schema
+bytes that are not the canonical ASCII rendering of a snapshot OMI-V2 accepts
+*for that dialect*; a `schema_digest` that does not hash exactly those bytes; a
+stale evidence or reservation digest; an over-limit field; or incoherent
+required keys. Every rejection is `_EnvelopeRefused` — a `ValueError` carrying
+the closed token — so no half-built envelope exists for a caller to hand to the
+executor, and `plan_observation` stays total by translating the token back into
+a plan refusal.
 
 The schema check is not a second validator: the bytes are decoded, parsed, and
 put back through OMI-V2's own `plan_structured_request`, and the snapshot it
-returns is re-rendered canonically and compared byte-for-byte. Both the planner
-and the carrier reach that logic through the *same* `_canonical_schema`
-function, and a control asserts it.
+returns is re-rendered canonically and compared byte-for-byte. A control
+asserts, by object identity, that all three consumers hold the same functions.
+
+### An accepted envelope holds none of the caller's carriers
+
+Validation is followed by **detachment**: the accepted primitive values are
+copied into fresh package-owned `EvidenceItem` and `ResourceReservation`
+carriers, each recomputing its own digest. A caller who keeps a reference to
+what they passed in holds an object the envelope no longer contains, so
+mutating it afterwards reaches nothing. Controls assert this by *identity*, not
+equality — equality would pass while the envelope still held the very object
+the caller could reach.
 
 **Exact integers only.** Every declared limit is checked with
 `type(value) is int` **before** any comparison or representation, so `True`,
@@ -260,11 +278,18 @@ see them, cannot pause them, and cannot reprioritise them.
 The order is fixed:
 
 1. the envelope's **exact type**, then **every field's exact runtime type**,
-   then its **re-derived digest tree**. All three produce a result with **no
-   receipt**. The field check comes first so that no foreign `__iter__`,
-   `__eq__`, `__ne__`, `__hash__` or `__len__` is ever reached: an earlier
-   revision compared the digest with `!=` and walked `envelope.evidence` before
-   knowing either was what it claimed;
+   then **every semantic constraint**, then its **re-derived digest tree**. All
+   four produce a result with **no receipt**. The field check comes first so
+   that no foreign `__iter__`, `__eq__`, `__ne__`, `__hash__` or `__len__` is
+   ever reached. The semantics check comes *before* the digest, and is the
+   correction for Jack's third second-round finding: **the digest is unkeyed**.
+   It is a pure function of the envelope's own public fields, computed by a
+   function this package exports, so anyone able to mutate a field can
+   recompute and reinstall it. Digest equality establishes *self-consistency*,
+   never *validity* — and the previous revision treated the two as the same
+   thing, executing resealed envelopes that carried an unsupported dialect, a
+   DNS endpoint, an over-limit reservation, or evidence that was no longer
+   UTF-8;
 2. `exchange` callability;
 3. the first clock reading: callable, non-raising, exact `int`, in range, and
    not earlier than `issued_ns`;
@@ -276,7 +301,12 @@ The order is fixed:
 7. the second clock reading, then the deadline again. A deadline crossed while
    the exchange ran voids the observation **even when the exchange succeeded**,
    and the value is discarded;
-8. the exchange result's exact type, then OMI-V2's own three-state outcome;
+8. the exchange result's exact type **and every one of its fields**, then
+   OMI-V2's own three-state outcome. OMI-V2's carrier is frozen, not sealed: a
+   tampered `ok` ran a `__bool__` hook, and a tampered `dialect` carried
+   secret-shaped text as far as receipt construction and raised there. Both
+   vocabularies and the dialect predicate are imported, so OMI-V2 remains the
+   authority on what those values may be;
 9. the result size, measured on the canonical rendering of what OMI-V2
    accepted.
 
@@ -346,7 +376,14 @@ without an attestation, or an unevaluated one with one; or — using OMI-V2's ow
 `is_pre_dialect_refusal` — a pre-dialect refusal that names a dialect or a
 post-dialect refusal that does not.
 
-`serialize_receipt` is deterministic and bounded: sorted keys, fixed
+`serialize_receipt` **re-runs the full coherence check before writing
+anything**. Freezing is not sealing, and serialisation is exactly where that
+matters: a receipt built honestly and then given a secret-shaped `worker` wrote
+that secret into stored evidence, and one given a 5000-digit `elapsed_ns` raised
+out of the serialiser instead of refusing. The check is reached through the
+*class*, not the instance, because an instance attribute shadows a class method
+— a caller able to mutate a receipt could otherwise install a `__post_init__`
+that does nothing. It is deterministic and bounded: sorted keys, fixed
 separators, ASCII output, refused for anything that is not exactly a receipt.
 Because every field is bounded, **every accepted receipt serialises inside
 `RECEIPT_MAX_BYTES`** — proved by a control that constructs the largest receipt
@@ -417,7 +454,15 @@ names V3A imports.
 11. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
     the OMI-V1 and OMI-V2 modules.** The authority for this work limited that
     file to exports. Recorded here rather than closed outside the fence.
-12. **Same-author evidence** — every control cited was written by the agent
+12. **A foreign mapping behind a proxy** — when an exchange reports success,
+    `value` must be exactly a `MappingProxyType`, but a proxy can wrap an
+    arbitrary mapping and there is no hook-free way to inspect what it wraps.
+    Measuring the result can run that mapping's hooks. Bounded, not closed:
+    see § 13's residual note.
+13. **The result-byte bound and that residual are the same trade** — the value
+    is the only place the size can be measured, so closing the residual means
+    dropping the bound. Recorded as a decision for review rather than taken.
+14. **Same-author evidence** — every control cited was written by the agent
     that wrote the code under test. Internal consistency, not independent
     acceptance.
 
@@ -533,3 +578,108 @@ rewind, so refs are re-verified after every GitHub write.
 **Per Jack's instruction, no further metadata repair will be performed if this
 recurs.** A recurrence is reported as a 🔴 stop with the exact Kev action
 required, and nothing is touched.
+
+## 13. Jack's second independent HOLD round (2026-08-24)
+
+Twenty-one cases were demonstrated against head `310e28d` and **all twenty-one
+reproduced**. Several escaped as raw `ValueError` or `UnicodeDecodeError` *out
+of* `execute_observation`, which is the sharpest way of putting the round's
+theme: the previous revision's totality claim was not true, and the reason it
+was not true is that validation and *authority* had been confused.
+
+**Finding 1 — direct construction skipped the strict-UTF-8 gate.** The planner
+refused evidence that was not strict UTF-8; the carrier did not. An envelope
+built directly with `b"\xff\xfe"` reached the adapter, whose `decode("utf-8")`
+raised out of the executor. **Corrected** by making
+`_envelope_semantics` the single definition of an acceptable envelope, held in
+a closure cell by all three consumers. This is the second round in which the
+two gates were found disagreeing; they are now one function, so there is
+nothing left to disagree.
+
+**Finding 2 — accepted envelopes retained the caller's carriers.**
+`envelope.evidence[0] is caller_item` was true, as was
+`envelope.reservation is caller_reservation`. Tampering was caught by the
+digest, but the envelope was still holding objects a caller could reach.
+**Corrected** by detaching during validation: the accepted primitive values are
+copied into fresh package-owned carriers that recompute their own digests.
+
+**Finding 3 — an unkeyed digest was treated as authority for validity.** This
+is the round's most important finding. `_envelope_digest` is a pure function of
+the envelope's public fields and this package exports it, so a caller who
+mutates a field can reseal. Resealed envelopes carrying a secret-shaped
+principal, an unsupported dialect, a DNS endpoint, an over-limit reservation,
+an over-limit result bound and non-UTF-8 evidence were all **executed** — and
+several then raised out of receipt construction, because the receipt correctly
+refused what the executor had wrongly accepted. **Corrected** by revalidating
+every semantic constraint before the digest, with the new receiptless refusal
+`envelope-semantics-invalid`.
+
+**Finding 4 — the returned exchange carrier was consumed unchecked.** Only its
+outer type was verified before `ok` was read in a boolean context, `value` was
+copied, and `dialect` was copied into a receipt. A tampered `ok` ran a
+`__bool__` hook; a tampered `dialect` carried secret-shaped text to receipt
+construction and raised. **Corrected** by `_exchange_fields_intact`, which
+proves every field against OMI-V2's own imported vocabularies and predicate
+before any of them is read, refusing with `exchange-result-field-invalid`.
+
+**Finding 5 — a mutated receipt serialised.** A receipt given a secret-shaped
+`worker` after construction wrote that secret into stored evidence; one given a
+5000-digit `elapsed_ns` raised out of the serialiser. **Corrected** by
+re-running the coherence check inside `serialize_receipt`, reached through the
+class so an instance attribute cannot shadow it.
+
+**Finding 6 — receipt coherence was incomplete.** A satisfied reservation with
+zero invocations constructed, though the executor goes straight from the
+satisfied gate to the latched invocation with no path between them that can
+refuse. Refused and void receipts accepted a dialect, though both discard
+whatever came back. **Corrected**: satisfied and attempted now imply one
+another in both directions, and neither a refused nor a void receipt may name a
+dialect.
+
+**Finding 7 — an evidence-reporting error.** See § 14.
+
+**What this round is evidence for.** Round one's lesson was *a docstring is not
+a control*. Round two's is narrower and sharper: **a checksum is not an
+authorisation.** An unkeyed digest answers "is this the same as it was?" and
+nothing else, and every place the previous revision leaned on it to answer "is
+this fit to act on?" was a place it could be walked straight through by anyone
+willing to recompute it.
+
+### The one residual, stated rather than closed
+
+When an exchange reports success its `value` must be exactly a
+`MappingProxyType`, which closes every substitution of a different type. A
+proxy can still wrap an arbitrary foreign mapping, and **OMI-V2's own carrier
+records that there is no hook-free way to inspect what a proxy wraps** — so
+measuring the result runs that mapping's `keys`/`__getitem__`.
+
+Two things bound it. A foreign mapping that yields non-JSON, or that raises,
+produces one fixed refusal and never an escaping exception. And a foreign
+mapping that yields well-formed JSON is *indistinguishable from a legitimate
+answer* — the exchange is injected, so a caller able to substitute a proxy could
+equally have returned the same JSON openly. Nothing from the walk reaches the
+receipt, which takes a byte count and nothing else.
+
+Closing it entirely would mean dropping the result-byte bound, since the value
+is the only place the size can be measured. That trade was not taken
+unilaterally; it is recorded here as limitation 13 and offered as a decision.
+
+## 14. Correction to this document's own evidence (finding 7)
+
+The first-round handback and the previous PR body reported **"8/8 checks pass,
+including `tripwire`"** for head `310e28d`. That was wrong. `310e28d` exposes
+**seven** checks and `tripwire` is **absent**; the eight-check list including
+`tripwire` belonged to the earlier head `e53b98f`, and was carried across
+without being re-read.
+
+The error is worth naming precisely because of what kind it is. Nothing about
+the code was misstated — the checks that did run all passed. What was misstated
+was *evidence about the current head*, reported from a stale observation of a
+different one. That is the same failure this package spends its whole design
+budget preventing in code: describing a thing by a record taken of some earlier
+thing, without re-deriving it. The check inventory in a handback is re-read at
+the head being described, and the count is taken from that reading.
+
+No workflow file was inspected or modified in establishing this, and none is
+authorised for modification. Why `tripwire` runs on one head and not another is
+a property of the repository's workflow triggers and is not investigated here.
