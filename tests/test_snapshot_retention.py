@@ -1047,13 +1047,26 @@ def test_the_manifest_schema_is_closed_and_bounded(tmp_path):
 
 def test_the_manifest_records_quarantine_time_not_the_files_mtime(tmp_path):
     """A rename preserves mtime, so the moved file cannot say when quarantine
-    began. That is why this pass is journalled rather than stateless."""
-    _populate(tmp_path, snapshots=2)
-    _run(tmp_path)
+    began. That is why this pass is journalled rather than stateless.
+
+    The fixture must be large enough for the reserve to SUCCEED. With only two
+    snapshots the reserve needs three admissible archives, finds two, blocks
+    every snapshot action, and the pass writes an empty manifest -- whereupon
+    the assertion loop below runs zero times and proves nothing at all. The
+    non-vacuity guards are therefore load-bearing, not decoration.
+    """
+    _populate(tmp_path, snapshots=5)
+    report = _run(tmp_path)
+    assert report.reserve_ok is True
+    assert report.snapshot_actions_blocked is False
+    assert report.moved >= 1
     manifest = (_quarantine_root(tmp_path) / "p20260101T000000"
                 / retention.MANIFEST_NAME)
-    for line in manifest.read_text(encoding="utf-8").splitlines():
-        record = json.loads(line)
+    records = [json.loads(line) for line
+               in manifest.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == report.moved
+    assert records
+    for record in records:
         assert record["quarantined_at"] != record["mtime_ns"]
 
 
