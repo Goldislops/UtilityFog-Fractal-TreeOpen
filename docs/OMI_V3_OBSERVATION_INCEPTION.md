@@ -1,8 +1,9 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected twice — after Jack's
-> first independent HOLD round (§ 11) and his second (§ 13). Each section lists
-> every defect that round found and what each one cost. Modules
+> **Status**: implemented, inert, and hermetic. Corrected three times — after
+> Jack's first independent HOLD round (§ 11), his second (§ 13), and his third
+> (§ 15). Each section lists every defect that round found and what each one
+> cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -150,15 +151,30 @@ put back through OMI-V2's own `plan_structured_request`, and the snapshot it
 returns is re-rendered canonically and compared byte-for-byte. A control
 asserts, by object identity, that all three consumers hold the same functions.
 
-### An accepted envelope holds none of the caller's carriers
+### Validation *returns* the detached carriers — there is no window
 
-Validation is followed by **detachment**: the accepted primitive values are
-copied into fresh package-owned `EvidenceItem` and `ResourceReservation`
-carriers, each recomputing its own digest. A caller who keeps a reference to
-what they passed in holds an object the envelope no longer contains, so
-mutating it afterwards reaches nothing. Controls assert this by *identity*, not
-equality — equality would pass while the envelope still held the very object
-the caller could reach.
+`_envelope_semantics` does not validate and then hand back a verdict for
+somebody else to act on. It returns `(refusal, snapshot)`, where the snapshot is
+a three-part structure built **during the same pass**: a tuple of fresh
+package-owned `EvidenceItem` carriers, a fresh `ResourceReservation`, and the
+canonical digest document. Every value in it was placed there at the moment that
+value was proved acceptable.
+
+That ordering is Jack's third-round first finding. The previous revision
+validated the caller's carriers, *returned*, and then walked them a second time
+to copy them — and a third time to hash them. Each extra walk was an instant in
+which something could change and be installed unchecked. The window was small
+and it was real: `object.__setattr__` needs no cooperation from anyone, and
+another thread needs no cooperation at all.
+
+Now the constructor installs exactly what validation returned and hashes exactly
+the document validation built. **Nothing re-reads an envelope after validation
+— not the constructor, not the executor, not even to compute its digest.**
+
+A caller who keeps a reference to what they passed in holds an object the
+envelope no longer contains. Controls assert this by *identity*, not equality —
+equality would pass while the envelope still held the very object the caller
+could reach.
 
 **Exact integers only.** Every declared limit is checked with
 `type(value) is int` **before** any comparison or representation, so `True`,
@@ -301,14 +317,19 @@ The order is fixed:
 7. the second clock reading, then the deadline again. A deadline crossed while
    the exchange ran voids the observation **even when the exchange succeeded**,
    and the value is discarded;
-8. the exchange result's exact type **and every one of its fields**, then
-   OMI-V2's own three-state outcome. OMI-V2's carrier is frozen, not sealed: a
-   tampered `ok` ran a `__bool__` hook, and a tampered `dialect` carried
-   secret-shaped text as far as receipt construction and raised there. Both
-   vocabularies and the dialect predicate are imported, so OMI-V2 remains the
-   authority on what those values may be;
-9. the result size, measured on the canonical rendering of what OMI-V2
-   accepted.
+8. the exchange result: exactly an `ObservationExchange` — the V3A-owned
+   carrier described in § 6a — and then **OMI-V2's entire state machine**, not
+   merely field types and vocabulary membership. Success implies a value, a sent
+   request, a named dialect and no failure token; failure implies no value and
+   *exactly one* token; a request refusal implies nothing was sent while a
+   response failure implies something was; the dialect phase follows OMI-V2's
+   own `is_pre_dialect_refusal`; missing indices exist exactly when the failure
+   is `missing-required-key`, and increase. An *exact but incoherent* carrier —
+   every field legal, the combination impossible — previously reached receipt
+   construction, where the receipt correctly refused it and raised `ValueError`
+   out of a function documented as total;
+9. the result size — **read as an integer off the carrier**, not measured
+   here. See § 6a.
 
 **The digest re-derivation covers content, not claims about content.** Every
 stored digest is written beside one recomputed from the bytes themselves, and
@@ -331,7 +352,43 @@ and no loop of any kind.
 `execute_observation` is total over every input **except an exception raised by
 the injected `exchange`**, which propagates — because it matches OMI-V2, and
 because OMI-V1's `HermeticViolation` must stay loud. That is the only
-exception it lets past; a raising clock does not qualify (§ 4a).
+exception it lets past; a raising clock does not qualify (§ 4a). Removing the
+executor's mapping walk (§ 6a) removed its last broad `except`, which is what
+makes that statement unconditional rather than nearly true.
+
+## 6a. Where the result is measured, and why not in the executor
+
+Round two left one residual: when an exchange reported success, its `value` was
+a `MappingProxyType`, and a proxy can wrap an *arbitrary foreign mapping*.
+OMI-V2's own carrier records that there is no hook-free way to inspect what a
+proxy wraps — so the executor, measuring the result, ran that mapping's
+`keys`/`__getitem__`. It was bounded but not closed, and it was offered as a
+trade against dropping the byte bound.
+
+Jack rejected the trade, and he was right to: it was a false choice. The
+measurement does not have to happen where the value is untrusted.
+
+`structured_exchange_adapter` now measures it **immediately after OMI-V2
+returns**, which is the one place in this package where a proxy's provenance is
+knowable: it demonstrably wraps a `dict` OMI-V2 itself built from `json.loads`
+under a hook that returns exact dicts. `_result_snapshot_bytes` copies that
+once, walks it under bounds accepting only exact built-in JSON types, and
+renders the canonical bytes. It returns `None` — never raises — for anything it
+will not vouch for.
+
+The adapter then hands back an `ObservationExchange`: OMI-V2's result paired
+with those bytes. `result_bytes` is not an init field; it is `len(snapshot)`, so
+a carrier cannot claim a size its own bytes do not have.
+
+**The executor therefore never walks a mapping.** It compares an `int`. A caller
+who substitutes a proxy over a hostile mapping after the carrier is built has
+substituted something nothing will ever read — a control asserts the mapping's
+hooks fire *zero* times on the accepted path, where round two could only assert
+that nothing leaked. The byte bound is kept in full.
+
+`_result_snapshot_bytes` guards only its encoder, with named exceptions, so a
+`HermeticViolation` raised by a mapping — or by anything else the exchange
+touches — stays loud instead of becoming `result-not-serializable`.
 
 ## 7. The receipt
 
@@ -376,14 +433,22 @@ without an attestation, or an unevaluated one with one; or — using OMI-V2's ow
 `is_pre_dialect_refusal` — a pre-dialect refusal that names a dialect or a
 post-dialect refusal that does not.
 
-`serialize_receipt` **re-runs the full coherence check before writing
-anything**. Freezing is not sealing, and serialisation is exactly where that
-matters: a receipt built honestly and then given a secret-shaped `worker` wrote
-that secret into stored evidence, and one given a 5000-digit `elapsed_ns` raised
-out of the serialiser instead of refusing. The check is reached through the
-*class*, not the instance, because an instance attribute shadows a class method
-— a caller able to mutate a receipt could otherwise install a `__post_init__`
-that does nothing. It is deterministic and bounded: sorted keys, fixed
+`serialize_receipt` **writes the document its own validation produced**.
+`_check_receipt` validates and builds the serialization document in one
+traversal, placing each value in the document at the moment it is proved
+acceptable; the serialiser renders that document and never reads the receipt
+again.
+
+Two rounds shaped this. Round two found that a receipt built honestly and then
+given a secret-shaped `worker` wrote that secret into stored evidence, and added
+re-validation. Round three found the re-validation was followed by a *second
+read* of every field to build the document — so the fix had left a window of its
+own. There is no second read now.
+
+The checker is reached as a captured function object, not through the receipt or
+even through the class's `__post_init__`: an instance attribute shadows a class
+method, so a caller able to mutate a receipt could otherwise install one that
+does nothing. Serialisation is deterministic and bounded: sorted keys, fixed
 separators, ASCII output, refused for anything that is not exactly a receipt.
 Because every field is bounded, **every accepted receipt serialises inside
 `RECEIPT_MAX_BYTES`** — proved by a control that constructs the largest receipt
@@ -392,7 +457,8 @@ identifiers OMI-V1's secret matcher will actually admit.
 
 ## 8. What was tested
 
-Two suites, **869 controls**, all passing under normal Python, `-O`, and `-OO`.
+Two suites, **1027 controls** (728 + 299), all passing under normal Python,
+`-O`, and `-OO`.
 
 - [`tests/test_omi_v3_observation_envelope.py`](../tests/test_omi_v3_observation_envelope.py)
   — identity, provenance, limits, duration, the clock ceiling, reservation
@@ -454,17 +520,14 @@ names V3A imports.
 11. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
     the OMI-V1 and OMI-V2 modules.** The authority for this work limited that
     file to exports. Recorded here rather than closed outside the fence.
-12. **A foreign mapping behind a proxy** — when an exchange reports success,
-    `value` must be exactly a `MappingProxyType`, but a proxy can wrap an
-    arbitrary mapping and there is no hook-free way to inspect what it wraps.
-    Measuring the result can run that mapping's hooks. Bounded, not closed:
-    see § 13's residual note.
-13. **The result-byte bound and that residual are the same trade** — the value
-    is the only place the size can be measured, so closing the residual means
-    dropping the bound. Recorded as a decision for review rather than taken.
-14. **Same-author evidence** — every control cited was written by the agent
+12. **Same-author evidence** — every control cited was written by the agent
     that wrote the code under test. Internal consistency, not independent
     acceptance.
+
+> Limitations 12 and 13 of the previous revision — the foreign-mapping residual
+> and the trade it was said to imply against the result-byte bound — are
+> **closed**, not carried forward. § 6a says how, and § 15 says why the trade
+> was a false choice in the first place.
 
 ## 10. What OMI-V3A deliberately does not do
 
@@ -647,6 +710,14 @@ willing to recompute it.
 
 ### The one residual, stated rather than closed
 
+> **Superseded by round three (§ 6a), and kept as written rather than
+> rewritten.** The paragraphs below described the residual accurately and
+> framed closing it as a trade against the result-byte bound. That framing was
+> wrong: the measurement simply did not have to happen where the value was
+> untrusted. Moving it to the canonical adapter path closed the residual *and*
+> kept the bound. The text stands as the record of a limitation stated more
+> confidently than it had been examined.
+
 When an exchange reports success its `value` must be exactly a
 `MappingProxyType`, which closes every substitution of a different type. A
 proxy can still wrap an arbitrary foreign mapping, and **OMI-V2's own carrier
@@ -683,3 +754,93 @@ the head being described, and the count is taken from that reading.
 No workflow file was inspected or modified in establishing this, and none is
 authorised for modification. Why `tripwire` runs on one head and not another is
 a property of the repository's workflow triggers and is not investigated here.
+
+## 15. Jack's third independent HOLD round (2026-08-24)
+
+Five gates, and one of them was a rejection rather than a defect: the residual
+round two had *offered* as a trade was refused, correctly, because it was not a
+trade at all.
+
+**Gate 1 — the validation-to-detachment window.** Validation walked the
+caller's carriers, returned, and then the constructor walked them again to
+detach them and a third time to hash them. Anything that changed between those
+walks was installed unchecked. **Corrected**: `_envelope_semantics` returns the
+detached carriers and the digest document it built during the one pass, and
+every consumer works from that snapshot. Nothing re-reads an envelope after
+validation — a structural control asserts, from the AST with comments and
+docstrings stripped, that no attribute of `self` is touched after the snapshot
+comes back.
+
+**Gate 2 — the receipt revalidation-to-rendering window.** The same shape one
+layer over: `serialize_receipt` re-validated and then re-read every field to
+build the document it wrote. **Corrected**: `_check_receipt` validates *and*
+builds the document, and the serialiser renders that. A structural control
+asserts nothing is read off the receipt afterwards.
+
+**Gate 3 — the exchange state machine.** Field types and vocabulary membership
+were checked; coherence was not. A carrier reporting success with no dialect, or
+failure carrying both tokens or neither, or a response failure claiming no
+request was sent, is not a thing OMI-V2 can produce — yet each was accepted, and
+reached receipt construction, where the receipt refused it and raised
+`ValueError` out of a function documented as total. **Corrected**:
+`_exchange_state_ok` enforces the whole machine, reusing OMI-V2's vocabularies
+and its `is_pre_dialect_refusal` so OMI-V2 remains the authority on every value.
+
+> Why not re-run OMI-V2's own `__post_init__`? Because it *normalises* on the
+> way through — it requires an exact `dict` value and installs a proxy — so it
+> cannot be re-run against a carrier it has already normalised. Only the
+> traversal is this module's; every value it consults is OMI-V2's.
+
+**Gate 4 — the foreign-mapping residual, rejected.** Round two reported that
+measuring a successful result ran an untrusted proxy's hooks, and framed
+closing it as a trade against dropping the result-byte bound. That framing was
+wrong, and Jack said so. The measurement never had to happen where the value was
+untrusted. **Corrected**: it happens on the canonical adapter path, where the
+proxy demonstrably wraps a dict OMI-V2 just built, and the executor consumes a
+V3A-owned `ObservationExchange` carrying the measured bytes. See § 6a. The
+executor no longer walks a mapping at all; the byte bound is kept in full; and a
+control now asserts a substituted hostile mapping's hooks fire **zero** times,
+where round two could only assert that nothing leaked.
+
+**Gate 5 — hermeticity must stay loud.** Removing the executor's mapping walk
+removed the broad `except Exception` that guarded it, which is what had made
+`result-not-serializable` capable of swallowing a `HermeticViolation`.
+`_result_snapshot_bytes` guards only its encoder, with named exceptions. A
+control drives a mapping that reaches for a socket inside `hermetic_guard` and
+asserts the violation propagates rather than becoming an ordinary receipt.
+
+**What this round is evidence for.** Round one: *a docstring is not a control.*
+Round two: *a checksum is not an authorisation.* Round three's is about the
+shape of a fix rather than the shape of a claim — **closing a window by adding a
+second check leaves the gap between the two checks.** Gates 1 and 2 were both
+introduced *by round two's own corrections*: re-validating before use was right,
+and re-reading afterwards put the window back a few instructions further along.
+The only way to close that class of gap is for validation to *produce* the thing
+that gets used, so there is no interval to exploit.
+
+Gate 4 carries a second lesson, and it is the more uncomfortable one. A
+limitation I had documented carefully, bounded honestly, and offered for review
+was simply not a limitation — it was an artefact of having put the measurement
+in the wrong place. Documenting a constraint well is not the same as
+establishing that it exists.
+
+## 16. Correction to the previous handback's `.gitignore` claim
+
+The round-two handback described `.claude/settings.local.json` as *"ignored by
+`.gitignore`"*. That was wrong about the source. `git check-ignore -v` reports
+the match as:
+
+```
+C:\Users\kevin/.config/git/ignore:3:**/.claude/settings.local.json
+```
+
+— Kev's **user-global Git exclude file**, not this repository's `.gitignore`,
+which does not mention the path at all. The operative facts were right (the file
+is untracked, never appears in `git status`, and cannot be captured by a commit
+of explicit paths) but the mechanism was misattributed, and a receipt that names
+the wrong mechanism is a receipt somebody could act on wrongly — for instance by
+looking for the rule in the repository and concluding it had been removed.
+
+Recorded here for the same reason § 14 records the check-count error: the
+failures worth writing down are the ones where the evidence was stated more
+confidently than it had been checked.

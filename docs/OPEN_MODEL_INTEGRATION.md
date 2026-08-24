@@ -1372,7 +1372,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected twice, after two independent HOLD rounds (2026-08-24).**
+**Corrected three times, after three independent HOLD rounds (2026-08-24).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1390,8 +1390,15 @@ authority for validity**, so that an envelope resealed after a tamper executed
 normally. Every semantic constraint is now revalidated before execution, the
 returned OMI-V2 carrier is revalidated field by field before any of it is read,
 and the receipt re-checks itself at serialisation. Sections 11 and 13 of the
-inception document list each finding and its correction; section 14 records a
-reporting error in this work's own earlier evidence.
+inception document list each finding and its correction. The third round closed
+two windows that round two's own corrections had introduced - validation
+followed by a second read of the thing just validated, in the envelope and in
+the receipt - required OMI-V2's full exchange state machine to be enforced
+before a result is consumed, and rejected as a false choice the residual round
+two had offered as a trade: the result is now measured on the canonical adapter
+path, where a mapping proxy's provenance is knowable, so the executor never
+walks a mapping and the byte bound is kept. Sections 15, 14 and 16 record the
+findings and two reporting errors in this work's own earlier evidence.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,
