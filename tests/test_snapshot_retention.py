@@ -3143,3 +3143,168 @@ def test_a_nonempty_quarantine_pass_still_creates_its_state(tmp_path):
     assert root.is_dir()
     assert (root / "p20260101T000000").is_dir()
     assert (root / "p20260101T000000" / retention.MANIFEST_NAME).is_file()
+
+
+# ---------------------------------------------------------------------------
+# A manifest close failure must be a refusal, not an escaping exception
+# ---------------------------------------------------------------------------
+#
+# `_quarantine` closes the journal in a `finally`. If that close raises -- an
+# underlying storage error is the obvious way -- the exception escapes AFTER
+# files have already moved, so the caller loses the whole aggregate: how many
+# were moved, how many skipped, how many are now evidence without a record.
+# The CLI prints a traceback instead of the fixed, path-free line.
+#
+# The fault is injected against the MANIFEST DESCRIPTOR SPECIFICALLY. A blanket
+# `os.close` failure would break unrelated descriptors and pytest's own
+# cleanup, and would prove nothing about this path. The injector releases the
+# descriptor for real before raising, so nothing leaks.
+
+
+class _ManifestCloseFault:
+    """Fail the close of the quarantine manifest, and only that descriptor."""
+
+    def __init__(self, monkeypatch, *, fail=True):
+        self.fail = fail
+        self.target_fd = None
+        self.close_attempts = []
+        self.opened = 0
+        real_open_manifest = retention._open_manifest
+        real_close = os.close
+
+        def _open_manifest(pass_directory):
+            fd = real_open_manifest(pass_directory)
+            self.opened += 1
+            self.target_fd = fd
+            return fd
+
+        def _close(fd):
+            if self.target_fd is not None and fd == self.target_fd:
+                self.close_attempts.append(fd)
+                real_close(fd)          # release for real: never leak an fd
+                if self.fail:
+                    raise OSError(errno.EIO, "injected manifest close failure")
+                return None
+            return real_close(fd)
+
+        monkeypatch.setattr(retention, "_open_manifest", _open_manifest)
+        monkeypatch.setattr(retention.os, "close", _close)
+
+
+def _identity_breaking_mover(source, destination):
+    """Move, then replace the arrival with a distinct object.
+
+    That makes the post-move identity comparison fail, which is a DIFFERENT
+    and more specific refusal than a close failure -- exactly what a close
+    failure must not overwrite.
+    """
+    _injected_mover(source, destination)
+    os.unlink(destination)
+    with open(destination, "wb") as handle:
+        handle.write(b"\x00" * 7)
+
+
+def test_a_manifest_close_failure_does_not_escape_run_pass(tmp_path,
+                                                           monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path)                       # must not raise
+    assert isinstance(report, retention.PassReport)
+    assert fault.close_attempts
+
+
+def test_a_close_failure_after_a_recorded_move_reports_a_halted_refusal(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.MANIFEST_RECORD_FAILED)
+    assert report.halted is True
+    assert report.moved == 4                      # every eligible entry moved
+    assert report.skipped == 0
+    assert report.planned_actions_count == 4
+    assert fault.opened == 1
+
+
+def test_a_close_failure_alone_never_increments_unmanifested(tmp_path,
+                                                             monkeypatch):
+    """Each record completed its bounded write and `fsync` before the close,
+    so nothing is evidence-without-a-record."""
+    _populate(tmp_path, snapshots=5)
+    _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path)
+    assert report.unmanifested == 0
+
+
+def test_a_close_failure_does_not_overwrite_an_earlier_refusal(tmp_path,
+                                                               monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path, mover=_identity_breaking_mover)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_MISMATCH_AFTER_MOVE)
+    assert report.halted is True
+    assert report.unmanifested == 1
+
+
+def test_the_manifest_descriptor_receives_exactly_one_close_attempt(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+    _run(tmp_path)
+    assert len(fault.close_attempts) == 1
+
+
+def test_a_successful_manifest_close_keeps_the_successful_report(tmp_path,
+                                                                 monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch, fail=False)
+    report = _run(tmp_path)
+    assert report.refused is None
+    assert report.halted is False
+    assert report.moved == 4
+    assert report.unmanifested == 0
+    assert len(fault.close_attempts) == 1
+
+
+def test_an_empty_action_pass_never_opens_or_closes_a_manifest(tmp_path,
+                                                               monkeypatch):
+    _populate(tmp_path, snapshots=4)
+    fault = _ManifestCloseFault(monkeypatch)
+    report = _no_action_run(tmp_path)
+    assert report.planned_actions == ()
+    assert fault.opened == 0
+    assert fault.close_attempts == []
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_record_failure_then_a_close_failure_stays_one_halted_refusal(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+
+    def _boom(fd, action, now_ns):
+        raise OSError(errno.EIO, "injected record failure")
+
+    monkeypatch.setattr(retention, "_record", _boom)
+    report = _run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.MANIFEST_RECORD_FAILED)
+    assert report.halted is True
+    assert report.moved == 1                # stopped at the first record
+    assert report.unmanifested == 1         # that one object, not the close
+    assert len(fault.close_attempts) == 1
+
+
+def test_a_close_failure_report_leaks_no_path_or_exception_text(tmp_path,
+                                                                monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path)
+    line = retention.format_report(report)
+    assert "manifest_record_failed" in line
+    assert "halted=True" in line
+    for leak in ("injected", "EIO", "Errno", "Traceback", "manifest.jsonl",
+                 str(tmp_path), tmp_path.name, "\\\\", "/"):
+        assert leak not in line, leak
