@@ -3520,3 +3520,89 @@ def test_an_exactly_full_directory_with_a_valid_root_stays_exactly_full(
     assert second.refused is None
     assert second.processed == count
     assert len(list(tmp_path.iterdir())) == count
+
+
+# ---------------------------------------------------------------------------
+# The manifest close fault must bind to ONE descriptor lifetime
+# ---------------------------------------------------------------------------
+#
+# `_ManifestCloseFault` patches `retention.os.close`, and `retention.os` IS the
+# process-global `os` module -- so the patch is global for the test. That is
+# tolerable only while the injector matches exactly one descriptor lifetime.
+# It matches on the fd NUMBER and never clears `target_fd`, and the operating
+# system recycles fd numbers freely: once the manifest descriptor is released,
+# the very next `os.open` can hand the same integer to something unrelated,
+# and closing THAT would take the injected failure and inflate the
+# exactly-one-close-attempt counter the close controls depend on.
+#
+# These assert the invariant directly rather than waiting for the platform to
+# recycle a number, so they are deterministic on every OS.
+
+
+def test_the_manifest_close_fault_retires_its_target_after_one_lifetime(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+    report = _run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.MANIFEST_RECORD_FAILED)
+    assert len(fault.close_attempts) == 1
+    assert fault.target_fd is None
+
+
+def test_a_successful_manifest_close_also_retires_the_target(tmp_path,
+                                                             monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch, fail=False)
+    report = _run(tmp_path)
+    assert report.refused is None
+    assert len(fault.close_attempts) == 1
+    assert fault.target_fd is None
+
+
+def test_a_recycled_descriptor_number_is_not_treated_as_the_manifest(
+        tmp_path, monkeypatch):
+    """The decisive control: reopen until the released number comes back, then
+    close it. A live injector would fail that close and count it twice."""
+    _populate(tmp_path, snapshots=5)
+    fault = _ManifestCloseFault(monkeypatch)
+    _run(tmp_path)
+    assert len(fault.close_attempts) == 1
+    released = fault.close_attempts[0]
+
+    spare = tmp_path / "recycled_probe"
+    spare.write_bytes(b"x")
+    handles = []
+    recycled = None
+    try:
+        for _ in range(64):
+            handle = os.open(spare, os.O_RDONLY)
+            if handle == released:
+                recycled = handle
+                break
+            handles.append(handle)
+    finally:
+        for handle in handles:
+            os.close(handle)
+
+    if recycled is not None:
+        os.close(recycled)                    # must NOT raise the injection
+    assert len(fault.close_attempts) == 1
+
+
+def test_the_manifest_close_fault_leaks_no_descriptor(tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=5)
+    probe = tmp_path / "watermark"
+    probe.write_bytes(b"x")
+
+    def _watermark():
+        handle = os.open(probe, os.O_RDONLY)
+        os.close(handle)
+        return handle
+
+    before = _watermark()
+    fault = _ManifestCloseFault(monkeypatch)
+    _run(tmp_path)
+    after = _watermark()
+    assert len(fault.close_attempts) == 1
+    assert after <= before + 1
