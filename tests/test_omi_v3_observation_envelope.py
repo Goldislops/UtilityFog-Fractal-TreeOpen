@@ -318,11 +318,26 @@ def test_new_task_id_produces_a_canonical_identifier_the_predicate_accepts():
         assert rc.is_canonical_uuid4(ob.new_task_id())
 
 
+def envelope_digest_of(envelope):
+    """Re-derive an envelope's digest the way the executor does.
+
+    Round three moved the digest onto the **document** validation produces, so
+    there is no longer a function that takes an envelope and walks it. That is
+    the point: nothing re-reads an envelope after validation, not even to hash
+    it. Tests that want the digest go the same way the executor does - validate,
+    then hash what validation returned.
+    """
+    refusal, snapshot = ob._envelope_semantics(envelope)
+    if refusal is not None:
+        return None
+    return ob._envelope_digest(snapshot[2])
+
+
 def test_the_envelope_digest_is_stable_and_covers_every_content_field():
     envelope = good_envelope()
-    baseline = ob._envelope_digest(envelope)
+    baseline = envelope_digest_of(envelope)
     assert baseline == envelope.envelope_digest
-    assert ob._envelope_digest(envelope) == baseline
+    assert envelope_digest_of(envelope) == baseline
 
 
 def test_two_envelopes_differing_only_in_evidence_bytes_differ_in_digest():
@@ -2531,11 +2546,8 @@ def test_the_receipts_pre_dialect_rule_is_omi_v2s_own_predicate():
     """Not a second copy of the rule - the same predicate, in a cell."""
     cells = dict(
         zip(
-            rc.ObservationReceipt.__post_init__.__code__.co_freevars,
-            (
-                cell.cell_contents
-                for cell in rc.ObservationReceipt.__post_init__.__closure__ or ()
-            ),
+            rc._check_receipt.__code__.co_freevars,
+            (cell.cell_contents for cell in rc._check_receipt.__closure__ or ()),
         )
     )
     assert cells["_pre_dialect"] is sr.is_pre_dialect_refusal
@@ -2817,7 +2829,7 @@ def test_an_accepted_envelope_holds_none_of_the_callers_carriers():
     assert envelope.evidence[0].content == b"mine"
     assert envelope.reservation.cpu_cores == 2
     assert envelope.envelope_digest == digest_before
-    assert ob._envelope_digest(envelope) == digest_before
+    assert envelope_digest_of(envelope) == digest_before
 
 
 def test_direct_construction_detaches_too():
@@ -2837,7 +2849,7 @@ def test_detached_carriers_recompute_their_own_digests():
     assert envelope.evidence[0].digest == hashlib.sha256(b"mine").hexdigest()
     assert envelope.reservation.digest == reservation.digest
     assert ob._evidence_state(envelope.evidence, 65536)[0] is None
-    assert ob._reservation_state(envelope.reservation) is None
+    assert ob._reservation_state(envelope.reservation)[0] is None
 
 
 # -- finding 3: an unkeyed digest is not authority for validity ---------------
@@ -2851,7 +2863,9 @@ def reseal(envelope):
     so anyone who can mutate a field can repair the digest. Nothing about that
     is exotic - it is what "unkeyed" means.
     """
-    object.__setattr__(envelope, "envelope_digest", ob._envelope_digest(envelope))
+    digest = envelope_digest_of(envelope)
+    if digest is not None:
+        object.__setattr__(envelope, "envelope_digest", digest)
     return envelope
 
 
@@ -2889,9 +2903,10 @@ def test_a_resealed_envelope_is_still_refused_on_its_semantics(field, value):
     envelope = fixed_envelope()
     object.__setattr__(envelope, field, value)
     reseal(envelope)
-    # The digest now agrees with the fields - that is the premise, not the test.
-    assert ob._envelope_digest(envelope) == envelope.envelope_digest
-    assert ob._envelope_semantics(envelope) is not None
+    # Semantics refuses, so no document exists to hash from - which is itself
+    # the strongest form of the correction: after round three an invalid
+    # envelope cannot even be resealed with this package's own function.
+    assert ob._envelope_semantics(envelope)[0] is not None
 
 
 def test_a_resealed_envelope_with_substituted_evidence_is_refused():
@@ -2901,8 +2916,7 @@ def test_a_resealed_envelope_with_substituted_evidence_is_refused():
         envelope.evidence[0], "digest", hashlib.sha256(b"\xff\xfe").hexdigest()
     )
     reseal(envelope)
-    assert ob._envelope_digest(envelope) == envelope.envelope_digest
-    assert ob._envelope_semantics(envelope) == "evidence-not-utf8"
+    assert ob._envelope_semantics(envelope)[0] == "evidence-not-utf8"
 
 
 def test_a_resealed_envelope_with_an_over_limit_reservation_is_refused():
@@ -2918,19 +2932,23 @@ def test_a_resealed_envelope_with_an_over_limit_reservation_is_refused():
         ),
     )
     reseal(envelope)
-    assert ob._envelope_digest(envelope) == envelope.envelope_digest
-    assert ob._envelope_semantics(envelope) == "reservation-field-out-of-range"
+    assert ob._envelope_semantics(envelope)[0] == "reservation-field-out-of-range"
 
 
 def test_the_semantics_function_is_total_and_returns_only_closed_tokens():
     envelope = fixed_envelope()
-    assert ob._envelope_semantics(envelope) is None
+    refusal, snapshot = ob._envelope_semantics(envelope)
+    assert refusal is None
+    detached_evidence, detached_reservation, document = snapshot
+    assert type(detached_evidence) is tuple
+    assert type(document) is dict
     for field, value in RESEALED_TAMPERS:
         tampered = fixed_envelope()
         object.__setattr__(tampered, field, value)
-        token = ob._envelope_semantics(tampered)
+        token, refused_snapshot = ob._envelope_semantics(tampered)
         assert token in rc.PLAN_REFUSALS
         assert SECRET not in token
+        assert refused_snapshot is None
 
 
 # -- finding 5: a mutated receipt must not serialise -------------------------

@@ -229,15 +229,28 @@ def _called_names(module) -> set[str]:
     return names
 
 
-def ok_exchange(value=None, dialect="ollama"):
-    return CountingExchange(
-        StructuredExchange(
-            ok=True,
-            value=dict(value if value is not None else {"summary": "seen"}),
-            dialect=dialect,
-            response_format_sent=True,
-        )
+def observation_exchange(value=None, dialect="ollama"):
+    """A V3A carrier holding a successful OMI-V2 result, measured as the
+    adapter measures it.
+
+    Round three moved the result measurement onto the adapter, where the value's
+    provenance is knowable, and made the executor consume a V3A-owned carrier.
+    Doubles build the same carrier the adapter would.
+    """
+    completed = StructuredExchange(
+        ok=True,
+        value=dict(value if value is not None else {"summary": "seen"}),
+        dialect=dialect,
+        response_format_sent=True,
     )
+    return ob.ObservationExchange(
+        exchange=completed,
+        result_snapshot=ob._result_snapshot_bytes(completed.value),
+    )
+
+
+def ok_exchange(value=None, dialect="ollama"):
+    return CountingExchange(observation_exchange(value, dialect))
 
 
 # ============================================================================
@@ -1180,9 +1193,13 @@ def test_only_a_successful_result_refuses_to_pickle_and_the_receipt_never_does()
 def test_the_success_value_is_a_read_only_view_over_a_fresh_copy():
     supplied = {"summary": "x"}
     envelope = build_envelope()
+    completed = StructuredExchange(
+        ok=True, value=supplied, dialect="ollama", response_format_sent=True
+    )
     exchange = CountingExchange(
-        StructuredExchange(
-            ok=True, value=supplied, dialect="ollama", response_format_sent=True
+        ob.ObservationExchange(
+            exchange=completed,
+            result_snapshot=ob._result_snapshot_bytes(completed.value),
         )
     )
     result = run(envelope, exchange, [1000, 1100])
@@ -1261,6 +1278,8 @@ def _execution_signature():
 EXECUTION_TRUST_NAMES = [
     "ObservationEnvelope", "ObservationReceipt", "ObservationResult",
     "ReservationDecision", "StructuredExchange", "_envelope_digest",
+    "ObservationExchange", "_exchange_state_ok", "_result_snapshot_bytes",
+    "_exchange_carrier_intact", "_envelope_semantics",
     "request_structured_json", "StructuredOutputRequest", "Message",
     "json", "hashlib", "uuid", "type", "int", "len", "sum", "dict", "tuple",
     "callable", "OBSERVER_SYSTEM_PROMPT", "OBSERVATION_LIMITS",
@@ -1974,19 +1993,30 @@ class HostileMapping:
 
 
 def ok_exchange_carrier(value=None, dialect="ollama"):
-    return StructuredExchange(
-        ok=True,
-        value=dict(value if value is not None else {"summary": "x"}),
-        dialect=dialect,
-        response_format_sent=True,
-    )
+    """A VALID V3A carrier, for controls that then tamper with it.
+
+    Tampering has to happen after construction, because the carrier's own
+    ``__post_init__`` now refuses an incoherent OMI-V2 state outright - which is
+    exactly gate 3. A control that built an incoherent carrier directly would be
+    testing the constructor, not the executor.
+    """
+    return observation_exchange(value, dialect)
 
 
 # -- finding 3, executor half: resealed envelopes are refused ----------------
 
 
 def reseal(envelope):
-    object.__setattr__(envelope, "envelope_digest", ob._envelope_digest(envelope))
+    """Reseal only if the envelope is still semantically valid.
+
+    After round three an *invalid* envelope cannot be resealed with this
+    package's function at all: validation refuses, so no document exists to
+    hash. That is stronger than the round-two behaviour and the controls below
+    assert the consequence rather than the mechanism.
+    """
+    refusal, snapshot = ob._envelope_semantics(envelope)
+    if refusal is None:
+        object.__setattr__(envelope, "envelope_digest", ob._envelope_digest(snapshot[2]))
     return envelope
 
 
@@ -2016,7 +2046,7 @@ def test_a_resealed_envelope_never_reaches_the_exchange(field, value):
     envelope = build_envelope()
     object.__setattr__(envelope, field, value)
     reseal(envelope)
-    assert ob._envelope_digest(envelope) == envelope.envelope_digest
+    assert ob._envelope_semantics(envelope)[0] is not None
 
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100])
@@ -2085,7 +2115,7 @@ def test_the_semantics_gate_runs_before_the_digest_gate():
 def test_a_tampered_exchange_ok_never_runs_its_bool_hook():
     envelope = build_envelope()
     carrier = ok_exchange_carrier()
-    object.__setattr__(carrier, "ok", HookedOk())
+    object.__setattr__(carrier.exchange, "ok", HookedOk())
     HookedOk.fired = []
     result = run(envelope, CountingExchange(carrier), [1000, 1100])
     assert HookedOk.fired == []
@@ -2104,7 +2134,7 @@ def test_a_tampered_exchange_dialect_is_refused_rather_than_recorded(value):
     """A secret-shaped dialect reached receipt construction and raised there."""
     envelope = build_envelope()
     carrier = ok_exchange_carrier()
-    object.__setattr__(carrier, "dialect", value)
+    object.__setattr__(carrier.exchange, "dialect", value)
     result = run(envelope, CountingExchange(carrier), [1000, 1100])
     if value == "ollama":
         assert result.ok is True
@@ -2129,7 +2159,7 @@ def test_a_tampered_exchange_value_of_the_wrong_type_is_refused(value):
     """Everything but a proxy is closed by an exact-type check."""
     envelope = build_envelope()
     carrier = ok_exchange_carrier()
-    object.__setattr__(carrier, "value", value)
+    object.__setattr__(carrier.exchange, "value", value)
     result = run(envelope, CountingExchange(carrier), [1000, 1100])
     assert result.refusal == "exchange-result-field-invalid"
     assert result.exchange is None
@@ -2143,64 +2173,102 @@ class NonJsonMapping(HostileMapping):
         return object()
 
 
-def test_a_proxy_over_a_foreign_mapping_cannot_smuggle_a_non_json_result():
-    """The residual, stated exactly - and bounded to what it really is.
+def test_substituting_a_foreign_mapping_after_measurement_runs_no_hook_at_all():
+    """Gate 4, and the residual round two could only bound is now gone.
 
-    ``value`` must be exactly a ``MappingProxyType``, which closes every
-    substitution of a different type. A proxy can still wrap an arbitrary
-    foreign mapping, and OMI-V2's own carrier records that there is **no
-    hook-free way to inspect what a proxy wraps** - so measuring the result runs
-    that mapping's ``keys``/``__getitem__``.
-
-    What that is NOT is a way to smuggle something past the contract. The
-    exchange is injected: a caller who can substitute a proxy could equally have
-    returned the same JSON legitimately, so a foreign mapping yielding
-    well-formed JSON is *indistinguishable from a real answer* and is treated as
-    one. What it cannot do is yield a non-JSON result, escape as an exception,
-    or put any of its content into the receipt - and those are what this pins.
+    The result is measured on the **adapter path**, where the value is
+    demonstrably the dict OMI-V2 just built - and the executor then reads an
+    ``int`` off a V3A carrier. So a caller who substitutes a proxy over an
+    arbitrary mapping afterwards has substituted something nothing will ever
+    walk. Round two could only promise that such a mapping could not smuggle a
+    non-JSON result or escape as an exception; it *did* run the mapping's hooks.
+    It no longer runs anything.
     """
     envelope = build_envelope()
 
-    # A foreign mapping yielding non-JSON gets one fixed refusal, not a crash.
-    broken = ok_exchange_carrier()
-    object.__setattr__(broken, "value", MappingProxyType(NonJsonMapping()))
-    NonJsonMapping.fired = []
-    result = run(envelope, CountingExchange(broken), [1000, 1100])
-    assert result.ok is False
-    assert result.refusal == "result-not-serializable"
-    assert result.exchange is None
-    assert result.receipt.result_bytes == 0
-    rendered = rc.serialize_receipt(result.receipt)
-    assert len(rendered) <= rc.RECEIPT_MAX_BYTES
-    assert b"object" not in rendered
+    for hostile in (HostileMapping, NonJsonMapping):
+        carrier = ok_exchange_carrier()
+        measured = carrier.result_bytes
+        object.__setattr__(carrier.exchange, "value", MappingProxyType(hostile()))
+        hostile.fired = []
+        result = run(envelope, CountingExchange(carrier), [1000, 1100])
 
-    # A foreign mapping yielding JSON is accepted - and its content still
-    # reaches nothing but a byte count.
-    plausible = ok_exchange_carrier()
-    object.__setattr__(plausible, "value", MappingProxyType(HostileMapping()))
-    accepted = run(envelope, CountingExchange(plausible), [1000, 1100])
-    assert accepted.ok is True
-    written = rc.serialize_receipt(accepted.receipt)
-    assert b"sk-" not in written
-    assert b"summary" not in written
-    assert accepted.receipt.result_bytes > 0
-    assert len(written) <= rc.RECEIPT_MAX_BYTES
+        assert hostile.fired == [], "no hook may run on the accepted path"
+        assert result.ok is True
+        # The recorded size is the one measured where provenance was known -
+        # never a figure derived from the substituted mapping.
+        assert result.receipt.result_bytes == measured
+        rendered = rc.serialize_receipt(result.receipt)
+        assert b"sk-" not in rendered
+        assert b"object" not in rendered
+        assert len(rendered) <= rc.RECEIPT_MAX_BYTES
 
 
-def test_a_hostile_mapping_cannot_make_the_executor_raise():
-    """Whatever the walk does, the function stays total."""
+def test_a_hostile_mapping_can_no_longer_reach_the_executor_at_all():
+    """Even one that raises: the executor never touches it."""
 
     class Exploding(HostileMapping):
         def keys(self):
             raise RuntimeError("mapping said no")
 
+        def __getitem__(self, key):
+            raise RuntimeError("mapping said no")
+
     envelope = build_envelope()
     carrier = ok_exchange_carrier()
-    object.__setattr__(carrier, "value", MappingProxyType(Exploding()))
+    object.__setattr__(carrier.exchange, "value", MappingProxyType(Exploding()))
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert result.ok is True
+    assert rc.serialize_receipt(result.receipt)
+
+
+def test_an_unmeasurable_successful_result_is_one_fixed_refusal():
+    """The adapter reports "could not detach" as ``None``, never as an escape."""
+    envelope = build_envelope()
+    completed = StructuredExchange(
+        ok=True, value={"summary": "x"}, dialect="ollama", response_format_sent=True
+    )
+    carrier = ob.ObservationExchange(exchange=completed, result_snapshot=None)
+    assert carrier.result_bytes == 0
     result = run(envelope, CountingExchange(carrier), [1000, 1100])
     assert result.ok is False
     assert result.refusal == "result-not-serializable"
+    assert result.receipt.result_bytes == 0
     assert rc.serialize_receipt(result.receipt)
+
+
+def test_the_snapshot_builder_refuses_non_json_without_raising():
+    """It is total, and it reports refusal as ``None``."""
+    assert ob._result_snapshot_bytes(MappingProxyType({"a": 1})) == b'{"a":1}'
+    assert ob._result_snapshot_bytes({"a": 1}) is None
+    assert ob._result_snapshot_bytes(None) is None
+    assert ob._result_snapshot_bytes(MappingProxyType({"a": object()})) is None
+    assert ob._result_snapshot_bytes(MappingProxyType({"a": float("nan")})) is None
+    deep = {"leaf": 1}
+    for _ in range(64):
+        deep = {"n": deep}
+    assert ob._result_snapshot_bytes(MappingProxyType(deep)) is None
+    wide = {"k%d" % i: i for i in range(8192)}
+    assert ob._result_snapshot_bytes(MappingProxyType(wide)) is None
+
+
+def test_a_hermetic_breach_from_the_snapshot_path_stays_loud():
+    """Gate 5: no broad catch may turn a breach into an ordinary refusal.
+
+    The snapshot builder guards only its encoder, with named exceptions. A
+    mapping that reaches for a socket therefore raises ``HermeticViolation``
+    out of the adapter and out of the executor, rather than becoming
+    ``result-not-serializable``.
+    """
+
+    class Breaching(dict):
+        def keys(self):
+            socket.socket()
+            return []
+
+    with hermetic_guard():
+        with pytest.raises(HermeticViolation):
+            ob._result_snapshot_bytes(MappingProxyType(Breaching()))
 
 
 @pytest.mark.parametrize(
@@ -2220,7 +2288,7 @@ def test_a_hostile_mapping_cannot_make_the_executor_raise():
 def test_every_tampered_exchange_field_is_refused(field, value):
     envelope = build_envelope()
     carrier = ok_exchange_carrier()
-    object.__setattr__(carrier, field, value)
+    object.__setattr__(carrier.exchange, field, value)
     result = run(envelope, CountingExchange(carrier), [1000, 1100])
     assert result.refusal == "exchange-result-field-invalid"
     assert result.receipt.exchange_invocations == 1
@@ -2229,11 +2297,8 @@ def test_every_tampered_exchange_field_is_refused(field, value):
 def test_the_exchange_checker_holds_omi_v2s_vocabularies_by_identity():
     cells = dict(
         zip(
-            ob._exchange_fields_intact.__code__.co_freevars,
-            (
-                cell.cell_contents
-                for cell in ob._exchange_fields_intact.__closure__ or ()
-            ),
+            ob._exchange_state_ok.__code__.co_freevars,
+            (cell.cell_contents for cell in ob._exchange_state_ok.__closure__ or ()),
         )
     )
     assert cells["_refusals"] is sx.EXCHANGE_REFUSALS
@@ -2352,3 +2417,271 @@ def test_every_executor_path_yields_a_receipt_that_serialises_or_none_at_all():
 
     assert seen_outcomes == {"observed", "unusable", "void", "refused"}
     assert seen_receiptless == rc.UNDESCRIBABLE_REFUSALS
+
+
+# ============================================================================
+# Jack's third independent round - regressions for every named gate
+# ============================================================================
+
+
+def failed_carrier(**tampers):
+    """A VALID failed-exchange carrier, then tampered post-construction.
+
+    Post-construction is the only way: :class:`ObservationExchange` refuses an
+    incoherent OMI-V2 state at the door, which is gate 3 working. A control that
+    tried to build one directly would be testing the constructor.
+    """
+    completed = StructuredExchange(
+        ok=False, response_failure="invalid-json", dialect="ollama",
+        response_format_sent=True,
+    )
+    carrier = ob.ObservationExchange(exchange=completed)
+    for field, value in tampers.items():
+        object.__setattr__(carrier.exchange, field, value)
+    return carrier
+
+
+def ok_carrier(**tampers):
+    carrier = ok_exchange_carrier()
+    for field, value in tampers.items():
+        object.__setattr__(carrier.exchange, field, value)
+    return carrier
+
+
+# -- gate 3: the whole state machine, not just field types -------------------
+
+
+INCOHERENT_SUCCESS = [
+    ("no dialect", dict(dialect=None)),
+    ("nothing sent", dict(response_format_sent=False)),
+    ("success carrying a request refusal", dict(request_refusal="schema-empty")),
+    ("success carrying a response failure", dict(response_failure="invalid-json")),
+    ("success with no value", dict(value=None)),
+]
+
+
+@pytest.mark.parametrize(("label", "tampers"), INCOHERENT_SUCCESS)
+def test_an_exact_but_incoherent_success_is_refused(label, tampers):
+    """Every field legal, the combination impossible - and previously executed.
+
+    An exact-but-incoherent carrier reached receipt construction, where the
+    receipt correctly refused it and raised ``ValueError`` out of a function
+    documented as total. It is refused here now, with a fixed token.
+    """
+    envelope = build_envelope()
+    result = run(envelope, CountingExchange(ok_carrier(**tampers)), [1000, 1100])
+    assert result.ok is False, label
+    assert result.refusal == "exchange-result-field-invalid", label
+    assert result.exchange is None
+    assert result.receipt.exchange_invocations == 1
+    assert rc.serialize_receipt(result.receipt)
+
+
+INCOHERENT_FAILURE = [
+    ("neither token", dict(response_failure=None)),
+    ("both tokens", dict(request_refusal="schema-empty")),
+    ("failure carrying a value", dict(value=MappingProxyType({"a": 1}))),
+    ("response failure claiming nothing was sent",
+     dict(response_format_sent=False)),
+    ("response failure naming no dialect", dict(dialect=None)),
+]
+
+
+@pytest.mark.parametrize(("label", "tampers"), INCOHERENT_FAILURE)
+def test_an_exact_but_incoherent_failure_is_refused(label, tampers):
+    envelope = build_envelope()
+    result = run(envelope, CountingExchange(failed_carrier(**tampers)), [1000, 1100])
+    assert result.ok is False, label
+    assert result.refusal == "exchange-result-field-invalid", label
+    assert result.exchange is None
+
+
+def test_request_versus_response_failure_coherence_is_enforced():
+    """A request refusal means nothing was sent; a response failure means it was."""
+    envelope = build_envelope()
+
+    # A request refusal that claims a request WAS sent.
+    carrier = failed_carrier(
+        response_failure=None,
+        request_refusal="backend-not-structured-capable",
+        dialect=None,
+        response_format_sent=True,
+    )
+    assert run(envelope, CountingExchange(carrier), [1000, 1100]).refusal == (
+        "exchange-result-field-invalid"
+    )
+
+    # ...and the coherent version of the same refusal is accepted.
+    good = failed_carrier(
+        response_failure=None,
+        request_refusal="backend-not-structured-capable",
+        dialect=None,
+        response_format_sent=False,
+    )
+    result = run(envelope, CountingExchange(good), [1000, 1100])
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == "backend-not-structured-capable"
+    assert result.receipt.dialect is None
+
+
+@pytest.mark.parametrize("token", sorted(sx.EXCHANGE_REFUSALS))
+def test_the_dialect_phase_is_enforced_for_every_request_refusal(token):
+    """OMI-V2's own phase predicate decides, and both errors are refused."""
+    envelope = build_envelope()
+    pre = token == "backend-not-structured-capable" or sr.is_pre_dialect_refusal(token)
+
+    wrong = failed_carrier(
+        response_failure=None,
+        request_refusal=token,
+        response_format_sent=False,
+        dialect="ollama" if pre else None,
+    )
+    assert run(envelope, CountingExchange(wrong), [1000, 1100]).refusal == (
+        "exchange-result-field-invalid"
+    )
+
+    right = failed_carrier(
+        response_failure=None,
+        request_refusal=token,
+        response_format_sent=False,
+        dialect=None if pre else "ollama",
+    )
+    result = run(envelope, CountingExchange(right), [1000, 1100])
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == token
+
+
+@pytest.mark.parametrize(
+    "indices",
+    [
+        pytest.param((0,), id="indices-without-the-failure"),
+        pytest.param((1, 1), id="not-increasing"),
+        pytest.param((2, 0), id="decreasing"),
+        pytest.param((-1,), id="negative"),
+        pytest.param((True,), id="bool-not-int"),
+        pytest.param(("0",), id="str-not-int"),
+        pytest.param([0], id="list-not-tuple"),
+    ],
+)
+def test_invalid_missing_key_indices_on_the_exchange_are_refused(indices):
+    envelope = build_envelope()
+    carrier = failed_carrier(missing_key_indices=indices)
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert result.refusal == "exchange-result-field-invalid"
+
+
+def test_a_missing_required_key_failure_must_carry_indices():
+    envelope = build_envelope()
+    carrier = failed_carrier(
+        response_failure="missing-required-key", missing_key_indices=()
+    )
+    assert run(envelope, CountingExchange(carrier), [1000, 1100]).refusal == (
+        "exchange-result-field-invalid"
+    )
+    good = failed_carrier(
+        response_failure="missing-required-key", missing_key_indices=(0,)
+    )
+    result = run(envelope, CountingExchange(good), [1000, 1100])
+    assert result.receipt.response_failure == "missing-required-key"
+    assert result.receipt.missing_key_indices == (0,)
+
+
+def test_a_tampered_carrier_snapshot_or_count_is_refused():
+    """The V3A carrier is revalidated too - its own fields are not trusted."""
+    envelope = build_envelope()
+    for field, value in (
+        ("result_snapshot", b"{}"),      # count no longer matches the bytes
+        ("result_snapshot", "not bytes"),
+        ("result_bytes", 999),
+        ("result_bytes", "12"),
+        ("exchange", "not an exchange"),
+    ):
+        carrier = ok_exchange_carrier()
+        object.__setattr__(carrier, field, value)
+        result = run(envelope, CountingExchange(carrier), [1000, 1100])
+        assert result.ok is False, (field, value)
+        assert result.refusal in (
+            "exchange-result-field-invalid",
+            "exchange-result-not-exact-type",
+        ), (field, value)
+
+
+# -- gates 1 and 2: the windows are structurally gone ------------------------
+
+
+def test_validation_returns_the_detached_carriers_it_installed():
+    """Gate 1: one traversal produces the snapshot, and the envelope holds it.
+
+    Not "validation then a second walk to copy" - the copies come *out of*
+    validation, so there is no instant between proving a value and installing it.
+    """
+    item = ob.EvidenceItem(evidence_id="e1", content=b"mine")
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    envelope = build_envelope(evidence=[item], reservation=reservation)
+
+    refusal, snapshot = ob._envelope_semantics(envelope)
+    assert refusal is None
+    detached_evidence, detached_reservation, document = snapshot
+
+    # What validation returns is detached from what it was given...
+    assert detached_evidence[0] is not item
+    assert detached_reservation is not reservation
+    # ...and the envelope holds carriers detached from the caller's too.
+    assert envelope.evidence[0] is not item
+    assert envelope.reservation is not reservation
+    assert envelope.evidence[0].content == b"mine"
+    # ...and the digest is over the document, not over a re-read of the envelope.
+    assert ob._envelope_digest(document) == envelope.envelope_digest
+
+
+def test_nothing_is_read_off_the_envelope_after_validation():
+    """Gate 1, structurally: no attribute of ``self`` survives the snapshot.
+
+    Read from the AST with docstrings and comments gone, so prose can neither
+    satisfy nor defeat it. After ``_semantics(self)`` returns, the only names
+    the constructor touches are the snapshot's own parts.
+    """
+    source = _code_only(inspect.getsource(ob.ObservationEnvelope.__post_init__))
+    tail = source.split("_semantics(self)", 1)[1]
+    assert "self.evidence" not in tail
+    assert "self.reservation" not in tail
+    assert "self.schema" not in tail
+    assert "self.task_id" not in tail
+    assert "_digest_of(document)" in tail
+
+
+def test_nothing_is_read_off_the_receipt_after_revalidation():
+    """Gate 2, structurally: the serialiser writes the checker's document."""
+    source = _code_only(inspect.getsource(rc.serialize_receipt))
+    tail = source.split("_check(receipt)", 1)[1]
+    assert "receipt." not in tail
+    assert "document" in tail
+
+
+def test_the_checker_returns_the_document_the_serialiser_writes():
+    """The bytes written are a rendering of what validation proved, exactly."""
+    result = run(
+        build_envelope(),
+        ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}')),
+        [1000, 1100],
+    )
+    receipt = result.receipt
+    document = rc._check_receipt(receipt)
+    assert type(document) is dict
+    assert json.loads(rc.serialize_receipt(receipt).decode('ascii')) == document
+    # The document is detached: mutating it cannot reach the receipt.
+    document['worker'] = 'someone-else'
+    assert receipt.worker == 'observer-1'
+    assert json.loads(rc.serialize_receipt(receipt).decode('ascii'))['worker'] == (
+        'observer-1'
+    )
+
+
+def test_the_serialiser_holds_the_checker_function_itself():
+    cells = dict(
+        zip(
+            rc.serialize_receipt.__code__.co_freevars,
+            (cell.cell_contents for cell in rc.serialize_receipt.__closure__ or ()),
+        )
+    )
+    assert cells["_check"] is rc._check_receipt

@@ -467,19 +467,20 @@ RESERVATION_ATTESTATIONS: Final[frozenset[str]] = frozenset(
 # -- the receipt -------------------------------------------------------------
 
 
-def _build_receipt_class():
-    """Build :class:`ObservationReceipt` with its authorities in closure cells.
+def _closed_receipt_checker():
+    """Build :func:`_check_receipt`, every authority bound in a closure cell.
 
-    Every vocabulary, predicate, bound and builtin the coherence check consults
-    is filled into a cell when the class is defined. Nothing is looked up when
-    an instance is built, so rebinding any of them - on this module, or on the
-    ``scripts.open_model`` package that mirrors them - cannot widen what a
-    receipt accepts.
+    Validation and document construction are **one traversal**, and that is the
+    correction for Jack's third-round second finding. The previous revision
+    re-validated a receipt inside ``serialize_receipt`` and then *re-read every
+    field* to build the document it wrote - so anything that changed between the
+    check and the read was serialised unchecked. The window was small and it was
+    real: a frozen dataclass is not sealed, and ``object.__setattr__`` needs no
+    cooperation from anyone.
 
-    ``__post_init__`` takes ``self`` and nothing else. OMI-V2's fourth round
-    established why that matters: an authority bound as a defaulted parameter is
-    not captured at all, because any caller willing to pass a keyword can
-    replace it.
+    Now the checker returns the document. Every value in it was placed there at
+    the moment that value was proved acceptable, and the serialiser writes that
+    document and never touches the receipt again.
     """
     _outcomes = OBSERVATION_OUTCOMES
     _deadlines = DEADLINE_RESULTS
@@ -508,7 +509,343 @@ def _build_receipt_class():
     _tuple = tuple
     _set = set
     _len = len
+    _getattr = getattr
     _ValueError = ValueError
+
+    def _check_receipt(receipt: Any) -> dict:
+        """Validate one receipt and return its detached serialization document.
+
+        Raises ``ValueError`` for any incoherence; never repairs. The returned
+        document holds only ``str``, ``int``, ``None`` and freshly built
+        ``list`` objects - nothing that can change afterwards, and nothing that
+        shares an object with the receipt.
+        """
+        # -- identity, provenance, and closed tokens -----------------------
+        task_id = receipt.task_id
+        if not _uuid4_ok(task_id):
+            raise _ValueError("task_id must be a canonical lowercase UUIDv4")
+        outcome = receipt.outcome
+        if _type(outcome) is not _str or outcome not in _outcomes:
+            raise _ValueError("outcome must be a token from the closed vocabulary")
+        envelope_digest = receipt.envelope_digest
+        if not _digest_ok(envelope_digest):
+            raise _ValueError("envelope_digest must be 64 lowercase hex characters")
+        schema_digest = receipt.schema_digest
+        if not _digest_ok(schema_digest):
+            raise _ValueError("schema_digest must be 64 lowercase hex characters")
+        principal = receipt.authorizing_principal
+        if not _safe_token(principal):
+            raise _ValueError("authorizing_principal must be a safe token")
+        worker = receipt.worker
+        if not _safe_token(worker):
+            raise _ValueError("worker must be a safe token")
+        deadline_result = receipt.deadline_result
+        if _type(deadline_result) is not _str or deadline_result not in _deadlines:
+            raise _ValueError("deadline_result must be a token from the closed set")
+        reservation_result = receipt.reservation_result
+        if (
+            _type(reservation_result) is not _str
+            or reservation_result not in _reservations
+        ):
+            raise _ValueError("reservation_result must be a token from the closed set")
+        request_outcome = receipt.request_outcome
+        if _type(request_outcome) is not _str or request_outcome not in _requests:
+            raise _ValueError("request_outcome must be a token from the closed set")
+        response_outcome = receipt.response_outcome
+        if _type(response_outcome) is not _str or response_outcome not in _responses:
+            raise _ValueError("response_outcome must be a token from the closed set")
+        conformance = receipt.schema_conformance
+        if _type(conformance) is not _str or conformance != "unverified":
+            raise _ValueError(
+                "schema conformance is never established by this package"
+            )
+        # -- counts: exact ints, non-negative, and within their ceilings ----
+        counts = {}
+        for name, ceiling in (
+            ("evidence_bytes", _max_evidence_bytes),
+            ("exchange_invocations", 1),
+            ("elapsed_ns", _max_clock),
+            ("result_bytes", _max_result_bytes),
+            ("context_ceiling_tokens", _max_context),
+            ("required_key_count", _max_keys),
+        ):
+            value = _getattr(receipt, name)
+            if _type(value) is not _int:
+                raise _ValueError("every count must be an exact non-negative int")
+            if value < 0:
+                raise _ValueError("every count must be an exact non-negative int")
+            if value > ceiling:
+                raise _ValueError("a count exceeds its bound: " + name)
+            counts[name] = value
+        if counts["context_ceiling_tokens"] < 1:
+            raise _ValueError("context_ceiling_tokens must be at least one")
+        # -- optional closed tokens -----------------------------------------
+        dialect = receipt.dialect
+        if dialect is not None and not _dialect_ok(dialect):
+            raise _ValueError("dialect must be a verified dialect token or None")
+        attestation = receipt.reservation_attestation
+        if attestation is not None and (
+            _type(attestation) is not _str or attestation not in _attestations
+        ):
+            raise _ValueError(
+                "reservation_attestation must be a token from the closed set"
+            )
+        refusal = receipt.refusal
+        if refusal is not None and (
+            _type(refusal) is not _str or refusal not in _exec_refusals
+        ):
+            raise _ValueError("refusal must be a token from the closed vocabulary")
+        request_refusal = receipt.request_refusal
+        if request_refusal is not None and (
+            _type(request_refusal) is not _str
+            or request_refusal not in _request_refusals
+        ):
+            raise _ValueError(
+                "request_refusal must be a token from OMI-V2's closed vocabulary"
+            )
+        response_failure = receipt.response_failure
+        if response_failure is not None and (
+            _type(response_failure) is not _str
+            or response_failure not in _response_failures
+        ):
+            raise _ValueError(
+                "response_failure must be a token from OMI-V2's closed vocabulary"
+            )
+        # -- evidence identity: paired, distinct, bounded, safe -------------
+        ids = receipt.evidence_ids
+        digests = receipt.evidence_digests
+        if _type(ids) is not _tuple:
+            raise _ValueError("evidence_ids must be exactly a tuple")
+        if _type(digests) is not _tuple:
+            raise _ValueError("evidence_digests must be exactly a tuple")
+        count = _len(ids)
+        if count != _len(digests):
+            raise _ValueError("every evidence id must carry exactly one digest")
+        if not count or count > _max_items:
+            raise _ValueError("evidence count is empty or over the bound")
+        seen = _set()
+        id_document = []
+        for identifier in ids:
+            if not _safe_token(identifier):
+                raise _ValueError("every evidence id must be a safe token")
+            if identifier in seen:
+                raise _ValueError(
+                    "evidence ids must be distinct, as they are in an envelope"
+                )
+            seen.add(identifier)
+            id_document.append(identifier)
+        digest_document = []
+        for digest in digests:
+            if not _digest_ok(digest):
+                raise _ValueError("every evidence digest must be 64 lowercase hex")
+            digest_document.append(digest)
+        if counts["evidence_bytes"] < count:
+            raise _ValueError(
+                "evidence_bytes is below the minimum its item count implies"
+            )
+        # -- missing indices: coherent, increasing, inside the key count ----
+        indices = receipt.missing_key_indices
+        if _type(indices) is not _tuple:
+            raise _ValueError("missing_key_indices must be exactly a tuple")
+        if _len(indices) > _max_indices:
+            raise _ValueError("missing_key_indices exceeds the bound")
+        index_document = []
+        if indices:
+            if response_failure != "missing-required-key":
+                raise _ValueError(
+                    "missing_key_indices belong only to a missing-required-key "
+                    "failure"
+                )
+            if _len(indices) > counts["required_key_count"]:
+                raise _ValueError(
+                    "more keys are reported missing than were ever required"
+                )
+            previous = -1
+            for index in indices:
+                if _type(index) is not _int or index <= previous:
+                    raise _ValueError(
+                        "missing_key_indices must be increasing non-negative ints"
+                    )
+                if index >= counts["required_key_count"]:
+                    raise _ValueError(
+                        "a missing-key index must fall inside required_key_count"
+                    )
+                previous = index
+                index_document.append(index)
+        elif response_failure == "missing-required-key":
+            raise _ValueError(
+                "a missing-required-key failure must report which indices"
+            )
+        # -- cross-field coherence -------------------------------------------
+        attempted = request_outcome == "attempted"
+        if attempted != (counts["exchange_invocations"] == 1):
+            raise _ValueError("request_outcome and exchange_invocations must agree")
+        if response_outcome != "none" and not attempted:
+            raise _ValueError(
+                "a response outcome requires that the exchange was invoked"
+            )
+        if not attempted and counts["elapsed_ns"] != 0:
+            raise _ValueError(
+                "an elapsed duration requires that the exchange was invoked"
+            )
+        if deadline_result == "not-evaluated" and counts["elapsed_ns"] != 0:
+            raise _ValueError(
+                "an elapsed duration requires a completed deadline determination"
+            )
+        evaluated = reservation_result != "not-evaluated"
+        if evaluated != (attestation is not None):
+            raise _ValueError(
+                "an evaluated reservation names its attestation, and only then"
+            )
+        if not evaluated and attempted:
+            raise _ValueError(
+                "the exchange cannot run before the reservation was decided"
+            )
+        if attempted != (reservation_result == "satisfied"):
+            raise _ValueError(
+                "a satisfied reservation and an attempted request imply one another"
+            )
+        if reservation_result == "not-satisfied" and (
+            outcome != "refused" or refusal != "reservation-not-satisfied"
+        ):
+            raise _ValueError(
+                "an unsatisfied reservation is recorded as its own refusal"
+            )
+        if deadline_result == "exceeded-before-request" and attempted:
+            raise _ValueError(
+                "a deadline exceeded before the request cannot have invoked it"
+            )
+        if deadline_result == "exceeded-during-request" and not attempted:
+            raise _ValueError(
+                "a deadline exceeded during the request requires an invocation"
+            )
+        if (refusal is not None) != (outcome == "refused"):
+            raise _ValueError(
+                "a refusal token and the refused outcome imply one another"
+            )
+        if (counts["result_bytes"] > 0) != (outcome == "observed"):
+            raise _ValueError(
+                "only an observed outcome carries a non-zero result size"
+            )
+        if deadline_result == "not-evaluated" and outcome != "refused":
+            raise _ValueError(
+                "an unevaluated deadline is only ever recorded on a refusal"
+            )
+        carries_v2_token = request_refusal is not None or response_failure is not None
+        if outcome == "observed":
+            if deadline_result != "within-deadline":
+                raise _ValueError("an observed outcome met its deadline")
+            if response_outcome != "ok":
+                raise _ValueError("an observed outcome carries an ok response")
+            if carries_v2_token:
+                raise _ValueError("an observed outcome carries no failure token")
+            if dialect is None:
+                raise _ValueError("an observed outcome must name its dialect")
+        elif outcome == "unusable":
+            if deadline_result != "within-deadline":
+                raise _ValueError("an unusable outcome met its deadline")
+            if response_outcome not in ("request-refused", "response-unusable"):
+                raise _ValueError(
+                    "an unusable outcome names which half of OMI-V2 failed"
+                )
+            if (request_refusal is None) == (response_failure is None):
+                raise _ValueError(
+                    "an unusable outcome carries exactly one OMI-V2 token"
+                )
+            if (response_outcome == "request-refused") != (request_refusal is not None):
+                raise _ValueError("response_outcome and the OMI-V2 token disagree")
+            # OMI-V2's own dialect coherence, imported rather than re-derived.
+            if response_failure is not None:
+                if dialect is None:
+                    raise _ValueError(
+                        "a response failure must name the dialect it was sent to"
+                    )
+            elif request_refusal == "backend-not-structured-capable" or (
+                _pre_dialect(request_refusal)
+            ):
+                if dialect is not None:
+                    raise _ValueError(
+                        "a refusal taken before the dialect gate cannot name a "
+                        "dialect"
+                    )
+            elif dialect is None:
+                raise _ValueError(
+                    "a refusal taken after the dialect gate must name its dialect"
+                )
+        else:
+            if response_outcome != "none":
+                raise _ValueError(
+                    "a void or refused outcome retains no response outcome"
+                )
+            if carries_v2_token:
+                raise _ValueError("a void or refused outcome carries no OMI-V2 token")
+            if dialect is not None:
+                raise _ValueError("a void or refused outcome names no dialect")
+            if outcome == "void" and deadline_result not in (
+                "exceeded-before-request",
+                "exceeded-during-request",
+            ):
+                raise _ValueError("a void outcome must name how it blew the deadline")
+            if outcome == "refused" and deadline_result not in (
+                "within-deadline",
+                "not-evaluated",
+            ):
+                raise _ValueError(
+                    "a blown deadline is recorded as void, never as refused"
+                )
+        # -- the detached document, built from what was just proved ---------
+        return {
+            "contract": "omi-v3a-observation-receipt",
+            "task_id": task_id,
+            "outcome": outcome,
+            "envelope_digest": envelope_digest,
+            "schema_digest": schema_digest,
+            "authorizing_principal": principal,
+            "worker": worker,
+            "evidence_ids": id_document,
+            "evidence_digests": digest_document,
+            "evidence_bytes": counts["evidence_bytes"],
+            "deadline_result": deadline_result,
+            "reservation_result": reservation_result,
+            "reservation_attestation": attestation,
+            "request_outcome": request_outcome,
+            "response_outcome": response_outcome,
+            "exchange_invocations": counts["exchange_invocations"],
+            "elapsed_ns": counts["elapsed_ns"],
+            "result_bytes": counts["result_bytes"],
+            "context_ceiling_tokens": counts["context_ceiling_tokens"],
+            "required_key_count": counts["required_key_count"],
+            "dialect": dialect,
+            "refusal": refusal,
+            "request_refusal": request_refusal,
+            "response_failure": response_failure,
+            "missing_key_indices": index_document,
+            "schema_conformance": conformance,
+        }
+
+    return _check_receipt
+
+
+_check_receipt = _restore_identity(
+    _closed_receipt_checker(), "_check_receipt", __name__
+)
+
+
+def _build_receipt_class():
+    """Build :class:`ObservationReceipt` with its authorities in closure cells.
+
+    Every vocabulary, predicate, bound and builtin the coherence check consults
+    is filled into a cell when the class is defined. Nothing is looked up when
+    an instance is built, so rebinding any of them - on this module, or on the
+    ``scripts.open_model`` package that mirrors them - cannot widen what a
+    receipt accepts.
+
+    ``__post_init__`` takes ``self`` and nothing else. OMI-V2's fourth round
+    established why that matters: an authority bound as a defaulted parameter is
+    not captured at all, because any caller willing to pass a keyword can
+    replace it.
+    """
+    _check = _check_receipt
 
     @dataclass(frozen=True)
     class ObservationReceipt:
@@ -582,306 +919,15 @@ def _build_receipt_class():
         """
 
         def __post_init__(self) -> None:
-            """Validate the receipt's own coherence. Raises; never repairs."""
-            # -- identity, provenance, and closed tokens ---------------------
-            if not _uuid4_ok(self.task_id):
-                raise _ValueError("task_id must be a canonical lowercase UUIDv4")
-            if _type(self.outcome) is not _str or self.outcome not in _outcomes:
-                raise _ValueError("outcome must be a token from the closed vocabulary")
-            if not _digest_ok(self.envelope_digest):
-                raise _ValueError("envelope_digest must be 64 lowercase hex characters")
-            if not _digest_ok(self.schema_digest):
-                raise _ValueError("schema_digest must be 64 lowercase hex characters")
-            if not _safe_token(self.authorizing_principal):
-                raise _ValueError("authorizing_principal must be a safe token")
-            if not _safe_token(self.worker):
-                raise _ValueError("worker must be a safe token")
-            if (
-                _type(self.deadline_result) is not _str
-                or self.deadline_result not in _deadlines
-            ):
-                raise _ValueError("deadline_result must be a token from the closed set")
-            if (
-                _type(self.reservation_result) is not _str
-                or self.reservation_result not in _reservations
-            ):
-                raise _ValueError(
-                    "reservation_result must be a token from the closed set"
-                )
-            if (
-                _type(self.request_outcome) is not _str
-                or self.request_outcome not in _requests
-            ):
-                raise _ValueError("request_outcome must be a token from the closed set")
-            if (
-                _type(self.response_outcome) is not _str
-                or self.response_outcome not in _responses
-            ):
-                raise _ValueError("response_outcome must be a token from the closed set")
-            if (
-                _type(self.schema_conformance) is not _str
-                or self.schema_conformance != "unverified"
-            ):
-                raise _ValueError(
-                    "schema conformance is never established by this package"
-                )
-            # -- counts: exact ints, non-negative, AND within their ceilings --
-            #
-            # Each ceiling is the one the envelope layer enforces, imported
-            # rather than restated. A count this carrier accepts is therefore a
-            # count some accepted envelope or execution could actually produce.
-            for value, ceiling, what in (
-                (self.evidence_bytes, _max_evidence_bytes, "evidence_bytes"),
-                (self.exchange_invocations, 1, "exchange_invocations"),
-                (self.elapsed_ns, _max_clock, "elapsed_ns"),
-                (self.result_bytes, _max_result_bytes, "result_bytes"),
-                (self.context_ceiling_tokens, _max_context, "context_ceiling_tokens"),
-                (self.required_key_count, _max_keys, "required_key_count"),
-            ):
-                if _type(value) is not _int:
-                    raise _ValueError("every count must be an exact non-negative int")
-                if value < 0:
-                    raise _ValueError("every count must be an exact non-negative int")
-                if value > ceiling:
-                    raise _ValueError("a count exceeds its bound: " + what)
-            # A declared context ceiling of zero is not something any accepted
-            # envelope can carry, so it is not something a receipt may record.
-            if self.context_ceiling_tokens < 1:
-                raise _ValueError("context_ceiling_tokens must be at least one")
-            # -- optional closed tokens --------------------------------------
-            if self.dialect is not None and not _dialect_ok(self.dialect):
-                raise _ValueError("dialect must be a verified dialect token or None")
-            if self.reservation_attestation is not None and (
-                _type(self.reservation_attestation) is not _str
-                or self.reservation_attestation not in _attestations
-            ):
-                raise _ValueError(
-                    "reservation_attestation must be a token from the closed set"
-                )
-            if self.refusal is not None and (
-                _type(self.refusal) is not _str or self.refusal not in _exec_refusals
-            ):
-                raise _ValueError("refusal must be a token from the closed vocabulary")
-            if self.request_refusal is not None and (
-                _type(self.request_refusal) is not _str
-                or self.request_refusal not in _request_refusals
-            ):
-                raise _ValueError(
-                    "request_refusal must be a token from OMI-V2's closed vocabulary"
-                )
-            if self.response_failure is not None and (
-                _type(self.response_failure) is not _str
-                or self.response_failure not in _response_failures
-            ):
-                raise _ValueError(
-                    "response_failure must be a token from OMI-V2's closed vocabulary"
-                )
-            # -- evidence identity: paired, distinct, bounded, and safe -------
-            if _type(self.evidence_ids) is not _tuple:
-                raise _ValueError("evidence_ids must be exactly a tuple")
-            if _type(self.evidence_digests) is not _tuple:
-                raise _ValueError("evidence_digests must be exactly a tuple")
-            count = _len(self.evidence_ids)
-            if count != _len(self.evidence_digests):
-                raise _ValueError("every evidence id must carry exactly one digest")
-            if not count or count > _max_items:
-                raise _ValueError("evidence count is empty or over the bound")
-            seen = _set()
-            for identifier in self.evidence_ids:
-                if not _safe_token(identifier):
-                    raise _ValueError("every evidence id must be a safe token")
-                if identifier in seen:
-                    raise _ValueError(
-                        "evidence ids must be distinct, as they are in an envelope"
-                    )
-                seen.add(identifier)
-            for digest in self.evidence_digests:
-                if not _digest_ok(digest):
-                    raise _ValueError("every evidence digest must be 64 lowercase hex")
-            # Every evidence item carries at least one byte and at most the
-            # per-item ceiling, so the total is bracketed by the count. A
-            # receipt reporting zero bytes for two items describes nothing an
-            # envelope could hold.
-            if self.evidence_bytes < count:
-                raise _ValueError(
-                    "evidence_bytes is below the minimum its item count implies"
-                )
-            # -- missing indices: coherent, increasing, and inside the keys ---
-            if _type(self.missing_key_indices) is not _tuple:
-                raise _ValueError("missing_key_indices must be exactly a tuple")
-            if _len(self.missing_key_indices) > _max_indices:
-                raise _ValueError("missing_key_indices exceeds the bound")
-            if self.missing_key_indices:
-                if self.response_failure != "missing-required-key":
-                    raise _ValueError(
-                        "missing_key_indices belong only to a missing-required-key "
-                        "failure"
-                    )
-                if _len(self.missing_key_indices) > self.required_key_count:
-                    raise _ValueError(
-                        "more keys are reported missing than were ever required"
-                    )
-                previous = -1
-                for index in self.missing_key_indices:
-                    if _type(index) is not _int or index <= previous:
-                        raise _ValueError(
-                            "missing_key_indices must be increasing non-negative ints"
-                        )
-                    # An index is a position in the caller's own required-key
-                    # tuple. One at or past the end of that tuple names nothing,
-                    # and OMI-V2's validator cannot produce it.
-                    if index >= self.required_key_count:
-                        raise _ValueError(
-                            "a missing-key index must fall inside required_key_count"
-                        )
-                    previous = index
-            elif self.response_failure == "missing-required-key":
-                raise _ValueError(
-                    "a missing-required-key failure must report which indices"
-                )
-            # -- cross-field coherence ---------------------------------------
-            attempted = self.request_outcome == "attempted"
-            if attempted != (self.exchange_invocations == 1):
-                raise _ValueError("request_outcome and exchange_invocations must agree")
-            if self.response_outcome != "none" and not attempted:
-                raise _ValueError(
-                    "a response outcome requires that the exchange was invoked"
-                )
-            if not attempted and self.elapsed_ns != 0:
-                raise _ValueError(
-                    "an elapsed duration requires that the exchange was invoked"
-                )
-            if self.deadline_result == "not-evaluated" and self.elapsed_ns != 0:
-                raise _ValueError(
-                    "an elapsed duration requires a completed deadline determination"
-                )
-            evaluated = self.reservation_result != "not-evaluated"
-            if evaluated != (self.reservation_attestation is not None):
-                raise _ValueError(
-                    "an evaluated reservation names its attestation, and only then"
-                )
-            if not evaluated and attempted:
-                raise _ValueError(
-                    "the exchange cannot run before the reservation was decided"
-                )
-            # Satisfied and attempted imply one another, in BOTH directions.
-            # The executor goes straight from the satisfied gate to the latched
-            # invocation - there is no path between them that can refuse - so a
-            # receipt reporting a satisfied reservation with nothing attempted
-            # describes a state the executor cannot produce. The previous
-            # revision checked only the forward direction.
-            if attempted != (self.reservation_result == "satisfied"):
-                raise _ValueError(
-                    "a satisfied reservation and an attempted request imply "
-                    "one another"
-                )
-            if self.reservation_result == "not-satisfied" and (
-                self.outcome != "refused" or self.refusal != "reservation-not-satisfied"
-            ):
-                raise _ValueError(
-                    "an unsatisfied reservation is recorded as its own refusal"
-                )
-            if self.deadline_result == "exceeded-before-request" and attempted:
-                raise _ValueError(
-                    "a deadline exceeded before the request cannot have invoked it"
-                )
-            if self.deadline_result == "exceeded-during-request" and not attempted:
-                raise _ValueError(
-                    "a deadline exceeded during the request requires an invocation"
-                )
-            if (self.refusal is not None) != (self.outcome == "refused"):
-                raise _ValueError(
-                    "a refusal token and the refused outcome imply one another"
-                )
-            if (self.result_bytes > 0) != (self.outcome == "observed"):
-                raise _ValueError(
-                    "only an observed outcome carries a non-zero result size"
-                )
-            if self.deadline_result == "not-evaluated" and self.outcome != "refused":
-                raise _ValueError(
-                    "an unevaluated deadline is only ever recorded on a refusal"
-                )
-            carries_v2_token = (
-                self.request_refusal is not None or self.response_failure is not None
-            )
-            if self.outcome == "observed":
-                if self.deadline_result != "within-deadline":
-                    raise _ValueError("an observed outcome met its deadline")
-                if self.response_outcome != "ok":
-                    raise _ValueError("an observed outcome carries an ok response")
-                if carries_v2_token:
-                    raise _ValueError("an observed outcome carries no failure token")
-                if self.dialect is None:
-                    raise _ValueError("an observed outcome must name its dialect")
-            elif self.outcome == "unusable":
-                if self.deadline_result != "within-deadline":
-                    raise _ValueError("an unusable outcome met its deadline")
-                if self.response_outcome not in (
-                    "request-refused",
-                    "response-unusable",
-                ):
-                    raise _ValueError(
-                        "an unusable outcome names which half of OMI-V2 failed"
-                    )
-                if (self.request_refusal is None) == (self.response_failure is None):
-                    raise _ValueError(
-                        "an unusable outcome carries exactly one OMI-V2 token"
-                    )
-                if (self.response_outcome == "request-refused") != (
-                    self.request_refusal is not None
-                ):
-                    raise _ValueError("response_outcome and the OMI-V2 token disagree")
-                # OMI-V2's own dialect coherence, applied to the receipt. A
-                # refusal taken before the dialect gate has none to name; a
-                # response failure by definition follows a sent request and must
-                # name the runtime it concerns. This is the backend carrier's
-                # rule, imported rather than re-derived, so the two cannot drift.
-                if self.response_failure is not None:
-                    if self.dialect is None:
-                        raise _ValueError(
-                            "a response failure must name the dialect it was sent to"
-                        )
-                elif self.request_refusal == "backend-not-structured-capable" or (
-                    _pre_dialect(self.request_refusal)
-                ):
-                    if self.dialect is not None:
-                        raise _ValueError(
-                            "a refusal taken before the dialect gate cannot name a "
-                            "dialect"
-                        )
-                elif self.dialect is None:
-                    raise _ValueError(
-                        "a refusal taken after the dialect gate must name its dialect"
-                    )
-            else:
-                # void and refused both discard whatever came back.
-                if self.response_outcome != "none":
-                    raise _ValueError(
-                        "a void or refused outcome retains no response outcome"
-                    )
-                if carries_v2_token:
-                    raise _ValueError("a void or refused outcome carries no OMI-V2 token")
-                # The executor names a dialect only on the two outcomes that
-                # retain an exchange result. Every refusal and every void
-                # discards what came back, so neither has a dialect to name.
-                if self.dialect is not None:
-                    raise _ValueError(
-                        "a void or refused outcome names no dialect"
-                    )
-                if self.outcome == "void" and self.deadline_result not in (
-                    "exceeded-before-request",
-                    "exceeded-during-request",
-                ):
-                    raise _ValueError(
-                        "a void outcome must name how it blew the deadline"
-                    )
-                if self.outcome == "refused" and self.deadline_result not in (
-                    "within-deadline",
-                    "not-evaluated",
-                ):
-                    raise _ValueError(
-                        "a blown deadline is recorded as void, never as refused"
-                    )
+            """Validate through the one checker. Raises; never repairs.
+
+            The checker also *builds* the serialization document, and
+            :func:`serialize_receipt` uses that document rather than re-reading
+            these fields. Construction discards it: nothing is stored, so a
+            receipt carries no second copy of itself that could fall out of step
+            with the fields.
+            """
+            _check(self)
 
     return ObservationReceipt
 
@@ -901,12 +947,12 @@ def _closed_receipt_serializer():
     than a name-rebinding one.
     """
     _receipt_type = ObservationReceipt
-    #: The coherence check, reached through the CLASS rather than the instance.
-    #: `receipt.__post_init__` would be an attribute lookup, and an instance
-    #: attribute shadows a class method - so a caller who can mutate a receipt
-    #: could also install a `__post_init__` that does nothing. Bound here, from
-    #: the class, at definition time, it cannot be shadowed or rebound.
-    _revalidate = ObservationReceipt.__post_init__
+    #: The checker itself, not the carrier's method. Reaching it through the
+    #: instance - or even through the class's `__post_init__` - would be an
+    #: attribute lookup on something a caller can mutate. Bound here as the
+    #: function object, it cannot be shadowed, rebound, or made to return a
+    #: different document.
+    _check = _check_receipt
     _max_bytes = RECEIPT_MAX_BYTES
     _json = json
     _type = type
@@ -936,46 +982,16 @@ def _closed_receipt_serializer():
         """
         if _type(receipt) is not _receipt_type:
             raise _ValueError("serialize_receipt accepts exactly an ObservationReceipt")
-        # Re-validated here, not merely at construction. Freezing a dataclass
-        # does not stop `object.__setattr__`, and Jack's second round walked
-        # straight through the gap: a receipt built honestly, then given a
-        # secret-shaped `worker`, serialised that secret into stored evidence -
-        # and one given a 5000-digit `elapsed_ns` raised out of this function
-        # instead of refusing. Re-running the full coherence check makes the
-        # serialised bytes describe a receipt that is coherent *now*, which is
-        # the only moment that matters for something about to be written down.
+        # Validated and rendered in ONE traversal. The checker returns a detached
+        # document built from the values it proved acceptable, and that document
+        # is what gets written - the receipt is never read again.
         #
-        # Every exact-type check inside runs before any comparison, so a
-        # hostile replacement is refused without its hooks being reached.
-        _revalidate(receipt)
-        document = {
-            "contract": "omi-v3a-observation-receipt",
-            "task_id": receipt.task_id,
-            "outcome": receipt.outcome,
-            "envelope_digest": receipt.envelope_digest,
-            "schema_digest": receipt.schema_digest,
-            "authorizing_principal": receipt.authorizing_principal,
-            "worker": receipt.worker,
-            "evidence_ids": _list(receipt.evidence_ids),
-            "evidence_digests": _list(receipt.evidence_digests),
-            "evidence_bytes": receipt.evidence_bytes,
-            "deadline_result": receipt.deadline_result,
-            "reservation_result": receipt.reservation_result,
-            "reservation_attestation": receipt.reservation_attestation,
-            "request_outcome": receipt.request_outcome,
-            "response_outcome": receipt.response_outcome,
-            "exchange_invocations": receipt.exchange_invocations,
-            "elapsed_ns": receipt.elapsed_ns,
-            "result_bytes": receipt.result_bytes,
-            "context_ceiling_tokens": receipt.context_ceiling_tokens,
-            "required_key_count": receipt.required_key_count,
-            "dialect": receipt.dialect,
-            "refusal": receipt.refusal,
-            "request_refusal": receipt.request_refusal,
-            "response_failure": receipt.response_failure,
-            "missing_key_indices": _list(receipt.missing_key_indices),
-            "schema_conformance": receipt.schema_conformance,
-        }
+        # Jack's third round named the window this closes: the previous revision
+        # re-validated the receipt and then re-read every field to build the
+        # document, so anything that changed in between was serialised
+        # unchecked. Small window, real window - `object.__setattr__` needs no
+        # cooperation from anyone.
+        document = _check(receipt)
         encoded = _json.dumps(
             document,
             sort_keys=True,
