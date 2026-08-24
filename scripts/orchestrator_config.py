@@ -129,6 +129,21 @@ class OrchestratorConfig:
     openai_api_key: Optional[str] = None
     openai_extra_headers: Optional[dict] = None
 
+    def __post_init__(self) -> None:
+        """Normalize `mode` through the single mode authority.
+
+        `from_env` already routed the environment variable through
+        `resolve_mode`, but a config constructed directly -
+        `OrchestratorConfig(mode=<anything>)` - bypassed it entirely and then
+        handed that value to `ToolRouter`, `Orchestrator` and
+        `tools_for_mode` in `create_orchestrator`. Normalizing here closes the
+        configuration-to-constructor path, so a config object cannot carry a
+        foreign, subclassed or malformed mode to any consumer. Absent,
+        unknown or foreign values become exact `"observe"`, and nothing is
+        invoked on a refused value.
+        """
+        self.mode = resolve_mode(self.mode)
+
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
         # Parse extra_headers as JSON if present; tolerate malformed input.
