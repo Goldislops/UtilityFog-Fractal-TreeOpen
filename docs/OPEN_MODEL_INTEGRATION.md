@@ -1,7 +1,10 @@
 # OPEN_MODEL_INTEGRATION.md — OMI-V1 and OMI-V2
 
 > **Status**: implemented foundation + dated source matrix (OMI-V1, §§1–15),
-> plus a closed structured-output request contract (OMI-V2, §16). Packages
+> plus a closed structured-output request contract (OMI-V2, §16), plus an
+> inert observation envelope built on top of it (OMI-V3A, §17 — full contract
+> in [`OMI_V3_OBSERVATION_INCEPTION.md`](OMI_V3_OBSERVATION_INCEPTION.md)).
+> Packages
 > [`scripts/open_model/`](../scripts/open_model/) and, for OMI-V2 only,
 > [`scripts/agent_backends/structured_request.py`](../scripts/agent_backends/structured_request.py).
 >
@@ -1325,3 +1328,50 @@ by a guard rather than by care.
 **Same-author evidence.** Everything above was written by the agent that wrote
 the code under test. It demonstrates internal consistency, not independent
 acceptance.
+
+## 17. OMI-V3A — the observation envelope (2026-08-24)
+
+**Status: implemented, inert, hermetic.** The full contract, every limitation,
+and the complete control inventory live in
+[`OMI_V3_OBSERVATION_INCEPTION.md`](OMI_V3_OBSERVATION_INCEPTION.md). This
+section exists so a reader of §§1–16 knows the layer is there and knows where
+its boundary is drawn; it deliberately does not restate the contract.
+
+**What was added.** Two modules —
+[`scripts/open_model/observation.py`](../scripts/open_model/observation.py) and
+[`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py)
+— carrying the task envelope that
+[`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](LOCAL_MODEL_DEPLOYMENT_INCEPTION.md)
+§ 7 specified as a design requirement: immutable task identity, input hashes,
+bounded context and result, a monotonic deadline, provenance, plus a declared
+loopback endpoint and an explicit resource reservation. Nothing in §§1–16
+changed.
+
+**What it reuses rather than reinventing.** OMI-V3A adds **no** second schema
+validator, dialect map, refusal vocabulary, or network guard. The dialect and
+the schema are decided end to end by §16's `plan_structured_request`, whose
+refusal token travels through unchanged; the response is validated by §16's
+`request_structured_json`; the two refusal vocabularies and the response-failure
+vocabulary are imported; `hermetic_guard` is OMI-V1's. `schema_conformance`
+stays closed to `"unverified"` — §16.4 is unaffected, and OMI-V3A adds nothing
+that could establish conformance.
+
+**The boundary, stated exactly.** OMI-V3A contacts no endpoint, resolves no
+name, opens no socket, downloads nothing, starts no runtime, registers no
+backend, and inspects no process, service, port, credential, or hardware or
+workload state. §8's "no live backend is registered anywhere in this
+repository" remains true. §7's four deliberate steps for adding a real backend
+are unchanged and uncleared. The read-only inventory probe of
+`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md` § 5 remains gated behind its own
+authorization and was not run.
+
+Two things OMI-V3A validates are **declarations**, not facts about the world,
+and the receipt records them as such: the loopback endpoint is validated as
+text with no name resolved and no socket opened, and the resource reservation
+is gated on an injected checker or operator **attestation** rather than on any
+measurement. Both limits, and eight more, are enumerated in § 9 of the
+inception document.
+
+**Same-author evidence.** As with §16, everything above was written by the
+agent that wrote the code under test. It demonstrates internal consistency,
+not independent acceptance.
