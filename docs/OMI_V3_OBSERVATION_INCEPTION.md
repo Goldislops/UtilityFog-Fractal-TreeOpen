@@ -1,10 +1,11 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected five times — after
+> **Status**: implemented, inert, and hermetic. Corrected six times — after
 > Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), a fourth
-> adversarial review (§ 17), and a fifth (§ 18) whose production correction is
-> upstream in ``scripts/open_model/structured_exchange.py``. Each section lists
-> every defect that round found and what each one cost. Modules
+> adversarial review (§ 17), a fifth (§ 18) whose production correction is
+> upstream in ``scripts/open_model/structured_exchange.py``, and a sixth
+> (§ 19), documentation-only. Each section lists every defect that round found
+> and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -493,8 +494,9 @@ identifiers OMI-V1's secret matcher will actually admit.
 
 ## 8. What was tested
 
-Two suites, **1050 controls** (728 + 322), all passing under normal Python,
-`-O`, and `-OO`.
+Two suites, **1065 controls** (728 + 337), all passing under normal Python,
+`-O`, and `-OO`. The figure is re-collected under each of the three modes
+rather than incremented; it was found stale once (§ 19).
 
 - [`tests/test_omi_v3_observation_envelope.py`](../tests/test_omi_v3_observation_envelope.py)
   — identity, provenance, limits, duration, the clock ceiling, reservation
@@ -1074,3 +1076,80 @@ correction log.
 Findings supplied by Jack as evidence and reproduced independently before any
 change, in a fresh Kev seat, by the same agent lineage that wrote the code.
 Not independent acceptance.
+
+## 19. Sixth round (2026-08-25)
+
+One finding, documentation-only. No implementation file was touched and no
+behaviour was altered.
+
+### The finding
+
+§ 3 still opened: *"`plan_observation` is keyword-only, **total over every input
+including a clock that raises**, and never raises."* That is false.
+`_read_clock` catches `Exception` and deliberately not `BaseException`, so a
+clock raising `KeyboardInterrupt` or `SystemExit` propagates.
+
+The sentence contradicted three things at once: the function's own docstring in
+[`observation.py`](../scripts/open_model/observation.py), which round five had
+already narrowed; § 18's record of that narrowing; and the controls that had
+been pinning the behaviour at both entry points since the first round. Round
+five corrected the docstring and did not read the document describing it.
+
+### What the reproduction added
+
+Reproducing from the current bytes before changing anything turned up a
+**second live instance** the finding had not named: § 6, under the heading
+*"Totality, stated exactly"*, asserting `plan_observation` is total over every
+input with no boundary at all. A line-scoped reading does not reach it, and a
+regression written to pass while it survived elsewhere in the same file would
+have been a control blind to its own subject. Both live instances were
+corrected in `c377fcd`, and Kev accepted the second on review.
+
+The earned boundary, now stated in both sections as well as in the docstring:
+`plan_observation` returns a plan for every ordinary input and for a `clock`
+raising `Exception`, which it records as the closed token `clock-raised`; it
+does **not** catch `BaseException`; `KeyboardInterrupt` and `SystemExit`
+propagate.
+
+The historical sections still quote the obsolete wording on purpose. A
+correction log that edits its own past is not a correction log.
+
+### The two controls
+
+Both live in
+[`tests/test_omi_v3_observation_rehearsal.py`](../tests/test_omi_v3_observation_rehearsal.py):
+
+- `test_the_document_states_the_planner_totality_boundary` demonstrates **both
+  halves before pinning any wording** — an ordinary exception becomes
+  `clock-raised`, a `BaseException` propagates — and only then requires the live
+  contract sections to carry the boundary. It scans the text before § 11 alone,
+  because the correction log quotes the obsolete claim deliberately, and it
+  anchors on both section headings so that a rename fails the control rather
+  than silently emptying what it reads.
+- `test_the_planner_totality_control_is_not_vacuous` feeds the predicate the
+  exact bytes of both obsolete paragraphs as they stood at `cca8182` and
+  requires it to reject each, then feeds it qualified wording and requires it to
+  accept — so it is a detector rather than a blanket refusal of the word
+  "total". Run against the document at `cca8182` the predicate returns **two**
+  offending paragraphs; against this revision, **none**.
+
+### Evidence
+
+Collection was verified freshly at this revision rather than carried across:
+**728 + 337 = 1065**, identical under normal Python, `-O` and `-OO`, with 1065
+passing in each mode. The baseline before the round was 1063. The full
+repository suite went 7280 → 7282 — exactly the two controls added — with its
+two pre-existing Windows path-length failures in
+`tests/test_observatory_cli_errors.py` unchanged in number and name.
+
+§ 8's control count is corrected in the same round. It read *"1050 controls
+(728 + 322)"* and was already stale before this round began: the true figure at
+`cca8182` was 728 + 335 = 1063. It is set here from the fresh verification, not
+from arithmetic on the old figure.
+
+### Provenance
+
+The finding was supplied by Jack as evidence and reproduced from the current
+bytes before any change, in a fresh Kev seat, by the same agent lineage that
+wrote the code, the controls, and this section. It is internal consistency.
+**Not independent acceptance.**
