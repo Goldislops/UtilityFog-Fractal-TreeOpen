@@ -755,9 +755,20 @@ def test_tampering_with_a_reservations_fields_is_caught():
     assert result.refusal == "envelope-digest-mismatch"
 
 
-def test_an_envelope_field_that_no_longer_renders_is_a_mismatch_not_a_crash():
+def test_an_envelope_field_that_no_longer_renders_is_refused_before_it_is_read():
+    """The field-type check runs first, so the hostile ``__len__`` never fires.
+
+    An earlier revision reached this object with ``hashlib.sha256`` and
+    ``len()`` inside the digest walk, and relied on catching the exception. The
+    shape check now refuses it by type identity before anything touches it, so
+    the refusal names what is actually wrong and no supplied hook runs at all.
+    """
+
     class Unrenderable:
-        def __len__(self):
+        fired = []
+
+        def __len__(self):  # pragma: no cover - must never be reached
+            Unrenderable.fired.append("__len__")
             raise TypeError("no length here")
 
     envelope = build_envelope()
@@ -765,8 +776,9 @@ def test_an_envelope_field_that_no_longer_renders_is_a_mismatch_not_a_crash():
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100])
     assert exchange.calls == 0
-    assert result.refusal == "envelope-digest-mismatch"
+    assert result.refusal == "envelope-field-not-exact-type"
     assert result.receipt is None
+    assert Unrenderable.fired == []
 
 
 # ============================================================================
@@ -1246,3 +1258,633 @@ def test_a_former_hidden_authority_cannot_be_injected_into_the_executor(keyword)
         ob.structured_exchange_adapter(
             FakeBackend('{"summary": "x"}'), **{keyword: Betrayer()}
         )
+
+
+# ============================================================================
+# Jack's first independent round - execution-path regressions
+# ============================================================================
+
+
+class Tripwire:
+    """Records every hook the code under test runs on a tampered field."""
+
+    fired: list = []
+
+    @classmethod
+    def clear(cls):
+        cls.fired = []
+
+
+class HookedDigest:
+    """Something put where an envelope digest belongs. Every hook reports."""
+
+    def __eq__(self, other):  # pragma: no cover - must never be reached
+        Tripwire.fired.append("digest.__eq__")
+        return False
+
+    def __ne__(self, other):  # pragma: no cover
+        Tripwire.fired.append("digest.__ne__")
+        return True
+
+    def __hash__(self):  # pragma: no cover
+        Tripwire.fired.append("digest.__hash__")
+        return 0
+
+    def __len__(self):  # pragma: no cover
+        Tripwire.fired.append("digest.__len__")
+        return 64
+
+    def __iter__(self):  # pragma: no cover
+        Tripwire.fired.append("digest.__iter__")
+        return iter(())
+
+
+class HookedEvidence:
+    """Something put where an evidence tuple belongs."""
+
+    def __iter__(self):  # pragma: no cover
+        Tripwire.fired.append("evidence.__iter__")
+        return iter(())
+
+    def __len__(self):  # pragma: no cover
+        Tripwire.fired.append("evidence.__len__")
+        return 0
+
+
+class HookedBool:
+    """Something put where a ``satisfied`` bool belongs."""
+
+    def __bool__(self):  # pragma: no cover
+        Tripwire.fired.append("satisfied.__bool__")
+        return True
+
+
+class HookedStrValue(str):
+    """A str subclass put where an attestation or a digest belongs."""
+
+    def __eq__(self, other):  # pragma: no cover
+        Tripwire.fired.append("str.__eq__")
+        return True
+
+    def __hash__(self):  # pragma: no cover
+        Tripwire.fired.append("str.__hash__")
+        return 0
+
+
+# -- finding 3, executor half: a clock that raises ---------------------------
+
+
+def test_a_raising_first_clock_read_refuses_without_invoking_the_exchange():
+    """The executor says only an exchange exception propagates. It is now true."""
+    marker = "CLOCKSECRET-sk-OMIV3A"
+
+    def raising_clock():
+        raise RuntimeError(marker)
+
+    envelope = build_envelope()
+    exchange = ok_exchange()
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=exchange,
+            clock=raising_clock,
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert exchange.calls == 0
+    assert result.ok is False
+    assert result.refusal == "clock-raised"
+    assert result.receipt.outcome == "refused"
+    assert result.receipt.deadline_result == "not-evaluated"
+    assert result.receipt.reservation_result == "not-evaluated"
+    assert result.receipt.reservation_attestation is None
+    assert result.receipt.exchange_invocations == 0
+    assert result.receipt.elapsed_ns == 0
+    rendered = rc.serialize_receipt(result.receipt)
+    assert marker.encode("ascii") not in rendered
+    assert b"RuntimeError" not in rendered
+    assert b"CLOCKSECRET" not in rendered
+
+
+def test_a_raising_second_clock_read_refuses_after_exactly_one_invocation():
+    calls = []
+
+    def clock_that_dies_second():
+        if calls:
+            raise ValueError("second read exploded")
+        calls.append(1)
+        return 1000
+
+    envelope = build_envelope()
+    exchange = ok_exchange()
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=exchange,
+            clock=clock_that_dies_second,
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert exchange.calls == 1
+    assert result.refusal == "clock-raised"
+    assert result.receipt.exchange_invocations == 1
+    assert result.receipt.deadline_result == "not-evaluated"
+    assert result.receipt.reservation_result == "satisfied"
+    assert result.receipt.reservation_attestation == "operator-asserted"
+    assert result.receipt.elapsed_ns == 0
+    assert result.exchange is None
+    assert rc.serialize_receipt(result.receipt)
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [RuntimeError("x"), ValueError("x"), TypeError("x"), OSError("x"), MemoryError()],
+)
+def test_a_clock_raising_anything_produces_the_same_fixed_token(exception):
+    def raising_clock():
+        raise exception
+
+    envelope = build_envelope()
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=ok_exchange(),
+            clock=raising_clock,
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert result.refusal == "clock-raised"
+
+
+def test_a_clock_that_breaches_hermeticity_is_refused_and_the_exchange_is_not():
+    """The one narrowing, pinned in both directions.
+
+    A clock is not permitted to perform I/O, so a ``HermeticViolation`` raised
+    by one is treated as a caller error and refused like any other clock
+    failure. The guarantee that matters - a breach on the **exchange** path
+    failing the run loudly - is unaffected, and this control asserts both halves
+    together so neither can drift without the other being noticed.
+    """
+    envelope = build_envelope()
+
+    def breaching_clock():
+        socket.socket()
+        raise AssertionError("unreachable while the guard is active")
+
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=ok_exchange(),
+            clock=breaching_clock,
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert result.refusal == "clock-raised"
+
+    # ...and the exchange path is still loud.
+    with pytest.raises(HermeticViolation):
+        run(envelope, ob.structured_exchange_adapter(NetworkReachingBackend()),
+            [1000, 1100])
+
+
+def test_a_clock_raising_a_base_exception_still_propagates_from_the_executor():
+    def interrupting_clock():
+        raise KeyboardInterrupt()
+
+    envelope = build_envelope()
+    with pytest.raises(KeyboardInterrupt):
+        with hermetic_guard():
+            ob.execute_observation(
+                envelope,
+                exchange=ok_exchange(),
+                clock=interrupting_clock,
+                reservation_decision=satisfied_for(envelope),
+            )
+
+
+# -- finding 3, executor half: magnitude -------------------------------------
+
+
+ENORMOUS = [
+    pytest.param(rc.MAX_CLOCK_NS + 1, id="one-past-the-ceiling"),
+    pytest.param(10 ** 50, id="ten-to-the-50"),
+    pytest.param(10 ** 5000, id="ten-to-the-5000"),
+]
+
+
+@pytest.mark.parametrize("reading", ENORMOUS)
+def test_an_enormous_first_reading_refuses_with_a_bounded_serialisable_receipt(
+    reading,
+):
+    envelope = build_envelope()
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [reading])
+    assert exchange.calls == 0
+    assert result.refusal == "clock-reading-out-of-range"
+    assert result.receipt.elapsed_ns == 0
+    assert len(rc.serialize_receipt(result.receipt)) <= rc.RECEIPT_MAX_BYTES
+
+
+@pytest.mark.parametrize("reading", ENORMOUS)
+def test_an_enormous_second_reading_refuses_with_a_bounded_serialisable_receipt(
+    reading,
+):
+    """The failure Jack found: a huge elapsed value that could not be written.
+
+    The previous revision accepted the reading, subtracted, and produced a
+    receipt holding a 5000-digit integer - which ``json.dumps`` then refused to
+    render at all. The reading is refused where it enters, and the receipt that
+    comes back is ordinary.
+    """
+    envelope = build_envelope(clock=make_clock([0]), duration_ns=1000000)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [10, reading])
+    assert exchange.calls == 1
+    assert result.refusal == "clock-reading-out-of-range"
+    assert result.receipt.exchange_invocations == 1
+    assert result.receipt.elapsed_ns == 0
+    assert result.receipt.deadline_result == "not-evaluated"
+    assert len(rc.serialize_receipt(result.receipt)) <= rc.RECEIPT_MAX_BYTES
+    assert result.exchange is None
+
+
+def test_a_negative_reading_shares_the_out_of_range_token():
+    envelope = build_envelope()
+    result = run(envelope, ok_exchange(), [-1])
+    assert result.refusal == "clock-reading-out-of-range"
+
+
+def test_the_largest_legal_elapsed_duration_still_produces_a_bounded_receipt():
+    """At the ceiling, not merely below it."""
+    envelope = ob.plan_observation(
+        **{
+            **dict(
+                task_id=FIXED_TASK_ID,
+                authorizing_principal="kev",
+                worker="observer-1",
+                evidence=[ob.EvidenceItem(evidence_id="e1", content=b"x")],
+                dialect="ollama",
+                schema=dict(SCHEMA),
+                endpoint=ENDPOINT,
+                reservation=ob.ResourceReservation(cpu_cores=2, memory_mib=4096),
+                required_keys=("summary",),
+            ),
+            "clock": make_clock([0]),
+            "duration_ns": ob.OBSERVATION_LIMITS["duration_ns"],
+        }
+    ).envelope
+    # A reading inside the deadline, then one at the clock ceiling would blow
+    # the deadline; use the largest elapsed that still lands inside it.
+    inside = envelope.deadline_ns - 1
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [0, inside])
+    assert result.ok is True
+    assert result.receipt.elapsed_ns == inside
+    assert result.receipt.elapsed_ns <= rc.MAX_CLOCK_NS
+    assert len(rc.serialize_receipt(result.receipt)) <= rc.RECEIPT_MAX_BYTES
+
+
+# -- finding 4: execution-time revalidation invokes no supplied hook ----------
+
+
+def test_a_hostile_envelope_digest_is_refused_before_it_is_compared():
+    """``!=`` on a tampered digest ran the object's ``__ne__``. It cannot now."""
+    envelope = build_envelope()
+    object.__setattr__(envelope, "envelope_digest", HookedDigest())
+    Tripwire.clear()
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100])
+    assert Tripwire.fired == []
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-field-not-exact-type"
+    assert result.receipt is None
+
+
+def test_a_malformed_but_string_envelope_digest_is_refused_before_comparison():
+    envelope = build_envelope()
+    for value in ("short", "A" * 64, "z" * 64, ""):
+        object.__setattr__(envelope, "envelope_digest", value)
+        exchange = ok_exchange()
+        result = run(envelope, exchange, [1000, 1100])
+        assert exchange.calls == 0
+        assert result.refusal == "envelope-field-not-exact-type"
+        assert result.receipt is None
+
+
+def test_a_hostile_evidence_container_is_refused_before_it_is_traversed():
+    envelope = build_envelope()
+    object.__setattr__(envelope, "evidence", HookedEvidence())
+    Tripwire.clear()
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100])
+    assert Tripwire.fired == []
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-field-not-exact-type"
+    assert result.receipt is None
+
+
+FIELD_TYPE_TAMPERS = [
+    ("task_id", 5),
+    ("authorizing_principal", None),
+    ("worker", b"worker"),
+    ("dialect", 5),
+    ("endpoint", None),
+    ("schema_digest", 5),
+    ("schema_bytes", "not bytes"),
+    ("context_ceiling_tokens", "8192"),
+    ("max_evidence_bytes", None),
+    ("max_result_bytes", 1.0),
+    ("max_output_tokens", True),
+    ("issued_ns", "1000"),
+    ("deadline_ns", None),
+    ("evidence", [1, 2]),
+    ("required_keys", ["summary"]),
+    ("reservation", None),
+]
+
+
+@pytest.mark.parametrize(("field", "value"), FIELD_TYPE_TAMPERS)
+def test_every_envelope_field_type_substitution_is_refused_with_no_receipt(
+    field, value
+):
+    envelope = build_envelope()
+    # The decision is built from the intact envelope, before the tamper: a
+    # helper that read the reservation afterwards would be testing its own
+    # bookkeeping rather than the executor.
+    decision = satisfied_for(envelope)
+    object.__setattr__(envelope, field, value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-field-not-exact-type"
+    assert result.receipt is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("evidence_id", 5),
+        ("content", "not bytes"),
+        ("content", bytearray(b"abc")),
+        ("digest", 5),
+        ("digest", None),
+    ],
+)
+def test_an_evidence_item_field_substitution_is_refused_before_traversal(
+    field, value
+):
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(envelope.evidence[0], field, value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-field-not-exact-type"
+    assert result.receipt is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("cpu_cores", "2"), ("memory_mib", None), ("gpu_memory_mib", "8"), ("digest", 5)],
+)
+def test_a_reservation_field_type_substitution_is_refused_before_traversal(
+    field, value
+):
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(envelope.reservation, field, value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-field-not-exact-type"
+    assert result.receipt is None
+
+
+# -- finding 4: the reservation decision is revalidated, then bound ----------
+
+
+def test_a_tampered_decision_satisfied_never_runs_its_bool_hook():
+    """The worst of the set: an unsatisfied gate walked straight to the exchange.
+
+    The previous revision read ``decision.satisfied`` in a boolean context
+    without re-checking its type, so an object with a ``__bool__`` returning
+    True passed the gate and the exchange ran.
+    """
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(decision, "satisfied", HookedBool())
+    Tripwire.clear()
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert Tripwire.fired == []
+    assert exchange.calls == 0
+    assert result.refusal == "reservation-decision-field-invalid"
+    assert result.receipt.reservation_result == "not-evaluated"
+    assert result.receipt.reservation_attestation is None
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", "", None, [], HookedBool()])
+def test_a_tampered_decision_satisfied_of_any_type_is_refused(value):
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(decision, "satisfied", value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "reservation-decision-field-invalid"
+
+
+@pytest.mark.parametrize(
+    "value", ["short", "A" * 64, 5, None, HookedStrValue("a" * 64)]
+)
+def test_a_tampered_decision_digest_is_refused_before_it_is_compared(value):
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(decision, "reservation_digest", value)
+    Tripwire.clear()
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert Tripwire.fired == []
+    assert exchange.calls == 0
+    assert result.refusal == "reservation-decision-field-invalid"
+
+
+@pytest.mark.parametrize(
+    "value", ["assumed", "sk-OMIV3ASECRET123456789", "", 5, None, True]
+)
+def test_a_tampered_decision_attestation_is_refused(value):
+    """A tampered attestation was previously copied straight into the outcome."""
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(decision, "attestation", value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "reservation-decision-field-invalid"
+    assert result.receipt.reservation_attestation is None
+
+
+def test_a_secret_shaped_attestation_never_reaches_a_serialised_receipt():
+    secret = "sk-OMIV3ASECRET123456789"
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    object.__setattr__(decision, "attestation", secret)
+    result = run(envelope, ok_exchange(), [1000, 1100], decision=decision)
+    rendered = rc.serialize_receipt(result.receipt)
+    assert secret.encode("ascii") not in rendered
+    assert b"sk-" not in rendered
+
+
+def test_the_decision_is_bound_to_the_recomputed_reservation_digest():
+    """Not to the digest the reservation happens to be storing.
+
+    A reservation whose fields were altered fails the envelope digest first, so
+    the pairing can never be established against a stale value at all.
+    """
+    envelope = build_envelope()
+    honest = satisfied_for(envelope)
+    object.__setattr__(envelope.reservation, "cpu_cores", 4)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=honest)
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-digest-mismatch"
+    assert result.receipt is None
+
+
+def test_a_decision_for_a_different_reservation_is_still_refused():
+    envelope = build_envelope()
+    other = ob.ResourceReservation(cpu_cores=8, memory_mib=1024)
+    decision = ob.ReservationDecision(
+        reservation_digest=other.digest,
+        satisfied=True,
+        attestation="checker-asserted",
+    )
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "reservation-decision-mismatch"
+    assert result.receipt.reservation_result == "not-evaluated"
+    assert result.receipt.reservation_attestation is None
+
+
+# -- the attestation travels into every receipt that evaluated one -----------
+
+
+@pytest.mark.parametrize("attestation", sorted(rc.RESERVATION_ATTESTATIONS))
+def test_the_attestation_reaches_the_receipt_on_every_evaluated_path(attestation):
+    envelope = build_envelope()
+    decision = satisfied_for(envelope, attestation=attestation)
+
+    observed = run(
+        envelope,
+        ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}')),
+        [1000, 1100],
+        decision=decision,
+    )
+    assert observed.receipt.reservation_attestation == attestation
+
+    unusable = run(
+        envelope,
+        ob.structured_exchange_adapter(FakeBackend("not json")),
+        [1000, 1100],
+        decision=decision,
+    )
+    assert unusable.receipt.reservation_attestation == attestation
+
+    refused = run(
+        envelope,
+        ok_exchange(),
+        [1000],
+        decision=satisfied_for(envelope, False, attestation=attestation),
+    )
+    assert refused.receipt.reservation_result == "not-satisfied"
+    assert refused.receipt.reservation_attestation == attestation
+
+    voided = run(
+        build_envelope(clock=make_clock([0]), duration_ns=1000),
+        ok_exchange(),
+        [10, 5000],
+        decision=decision,
+    )
+    assert voided.receipt.reservation_attestation == attestation
+
+
+def test_a_path_that_never_reached_the_decision_records_no_attestation():
+    envelope = build_envelope(clock=make_clock([0]), duration_ns=100)
+    voided = run(envelope, ok_exchange(), [5000], decision=satisfied_for(envelope))
+    assert voided.receipt.reservation_result == "not-evaluated"
+    assert voided.receipt.reservation_attestation is None
+
+
+def test_two_observations_differing_only_in_attestation_differ_in_evidence():
+    envelope = build_envelope()
+    first = run(
+        envelope,
+        ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}')),
+        [1000, 1100],
+        decision=satisfied_for(envelope, attestation="operator-asserted"),
+    )
+    second = run(
+        envelope,
+        ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}')),
+        [1000, 1100],
+        decision=satisfied_for(envelope, attestation="checker-asserted"),
+    )
+    assert first.receipt != second.receipt
+    assert rc.serialize_receipt(first.receipt) != rc.serialize_receipt(second.receipt)
+
+
+# -- every receipt the executor can emit serialises inside the bound ---------
+
+
+def test_every_receipt_the_executor_emits_serialises_within_the_documented_bound():
+    """Not a sample: one execution per reachable receipt-bearing outcome."""
+    envelope = build_envelope()
+    short = build_envelope(clock=make_clock([0]), duration_ns=1000)
+    results = [
+        run(envelope, ob.structured_exchange_adapter(
+            FakeBackend('{"summary": "x"}')), [1000, 1100]),
+        run(envelope, ob.structured_exchange_adapter(
+            FakeBackend("not json")), [1000, 1100]),
+        run(envelope, ob.structured_exchange_adapter(
+            NonStructuredBackend()), [1000, 1100]),
+        run(short, ok_exchange(), [9999]),
+        run(short, ok_exchange(), [10, 5000]),
+        run(envelope, ok_exchange(), [1000],
+            decision=satisfied_for(envelope, False)),
+        run(envelope, CountingExchange(None), [1000, 1100]),
+        run(envelope, ok_exchange(), [rc.MAX_CLOCK_NS + 1]),
+        run(envelope, "not callable", [1000]),
+        run(envelope, ok_exchange(), [999]),
+        run(build_envelope(max_result_bytes=12, required_keys=("a",)),
+            ob.structured_exchange_adapter(FakeBackend('{"a":"é"}')), [1000, 1100]),
+    ]
+    outcomes = set()
+    for result in results:
+        assert result.receipt is not None
+        rendered = rc.serialize_receipt(result.receipt)
+        assert len(rendered) <= rc.RECEIPT_MAX_BYTES
+        assert pickle.loads(pickle.dumps(result.receipt)) == result.receipt
+        outcomes.add(result.receipt.outcome)
+    assert outcomes == {"observed", "unusable", "void", "refused"}
+
+
+def test_the_undescribable_refusals_are_exactly_the_receiptless_ones():
+    assert rc.UNDESCRIBABLE_REFUSALS <= rc.EXECUTION_REFUSALS
+    assert rc.UNDESCRIBABLE_REFUSALS == {
+        "envelope-not-exact-type",
+        "envelope-field-not-exact-type",
+        "envelope-digest-mismatch",
+    }
+    envelope = build_envelope()
+    for target, token in (
+        ("not an envelope", "envelope-not-exact-type"),
+        (envelope, "envelope-digest-mismatch"),
+    ):
+        if token == "envelope-digest-mismatch":
+            object.__setattr__(envelope, "worker", "someone-else")
+        with hermetic_guard():
+            result = ob.execute_observation(
+                target,
+                exchange=ok_exchange(),
+                clock=make_clock([1000]),
+                reservation_decision=satisfied_for(build_envelope()),
+            )
+        assert result.refusal == token
+        assert result.receipt is None

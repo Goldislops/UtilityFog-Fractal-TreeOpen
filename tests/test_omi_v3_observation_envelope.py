@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import inspect
 import json
 import pickle
@@ -33,6 +34,7 @@ from scripts.agent_backends import structured_request as sr
 from scripts.open_model import observation as ob
 from scripts.open_model import observation_receipt as rc
 from scripts.open_model import registry as reg
+from scripts.open_model.redaction import is_safe_token
 from scripts.open_model import structured_exchange as sx
 import scripts.open_model as package
 
@@ -246,6 +248,7 @@ def receipt_kwargs(**overrides):
         evidence_bytes=12,
         deadline_result="within-deadline",
         reservation_result="satisfied",
+        reservation_attestation="operator-asserted",
         request_outcome="attempted",
         response_outcome="ok",
         exchange_invocations=1,
@@ -1263,6 +1266,7 @@ def test_a_receipt_cannot_record_a_deadline_determination_it_did_not_make():
             refusal="clock-not-callable",
             deadline_result="not-evaluated",
             reservation_result="not-evaluated",
+            reservation_attestation=None,
             request_outcome="not-attempted",
             response_outcome="none",
             exchange_invocations=0,
@@ -1285,6 +1289,7 @@ def test_a_missing_required_key_failure_must_report_increasing_indices():
         response_outcome="response-unusable",
         response_failure="missing-required-key",
         result_bytes=0,
+        required_key_count=3,
     )
     assert rc.ObservationReceipt(**base, missing_key_indices=(0, 2)).missing_key_indices
     for indices in [(), (1, 1), (2, 0), (-1,), (True,), ("0",), [0]]:
@@ -1328,30 +1333,76 @@ def test_receipt_serialisation_is_deterministic_and_ascii():
     assert rc.serialize_receipt(twin) == first
 
 
-def test_receipt_serialisation_is_bounded():
-    ceiling = ob.OBSERVATION_LIMITS["evidence_items"]
-    envelope = plan(
-        evidence=[
-            ob.EvidenceItem(evidence_id="evidence-item-%d" % index, content=b"x")
-            for index in range(ceiling)
-        ]
-    ).envelope
+def _longest_safe_id(index: int) -> str:
+    """The longest evidence id OMI-V1 will actually accept, ending in ``index``.
+
+    64 characters is the ``is_safe_token`` length ceiling, but a 64-character
+    run of letters and digits is exactly what OMI-V1's long-opaque-run secret
+    rule matches - so the longest *acceptable* identifier has to break that run.
+    Hyphens every twenty characters do it, and the result is still a real id an
+    envelope could carry, which is what makes the ceiling proof honest rather
+    than hypothetical.
+    """
+    body = ("e" * 19 + "-") * 4
+    identifier = body[:61] + "%03d" % index
+    if not is_safe_token(identifier) or len(identifier) != 64:
+        raise AssertionError("the worst-case identifier must itself be acceptable")
+    return identifier
+
+
+def test_the_largest_receipt_the_carrier_accepts_serialises_inside_the_ceiling():
+    """Every accepted receipt fits - proved at the ceiling, not assumed.
+
+    The carrier bounds every field it holds, so the largest document
+    ``serialize_receipt`` can ever be asked to produce is constructible: the
+    most evidence items, the longest identifiers those items may carry, the
+    most missing-key indices, and every count at its maximum. If that fits, all
+    of them fit, and the ceiling check inside ``serialize_receipt`` is
+    unreachable rather than load-bearing.
+    """
+    items = ob.OBSERVATION_LIMITS["evidence_items"]
+    keys = ob.OBSERVATION_LIMITS["required_keys"]
+    ids = tuple(_longest_safe_id(index) for index in range(items))
+    for identifier in ids:
+        assert len(identifier) == 64
+        # Constructible as a real evidence id, so this is not a hypothetical
+        # worst case but one an envelope could genuinely produce.
+        ob.EvidenceItem(evidence_id=identifier, content=b"x")
     receipt = rc.ObservationReceipt(
         **receipt_kwargs(
-            task_id=envelope.task_id,
-            envelope_digest=envelope.envelope_digest,
-            schema_digest=envelope.schema_digest,
-            evidence_ids=tuple(item.evidence_id for item in envelope.evidence),
-            evidence_digests=tuple(item.digest for item in envelope.evidence),
-            required_key_count=ob.OBSERVATION_LIMITS["required_keys"],
+            evidence_ids=ids,
+            evidence_digests=tuple("f" * 64 for _ in range(items)),
+            evidence_bytes=ob.OBSERVATION_LIMITS["evidence_total_bytes"],
+            elapsed_ns=rc.MAX_CLOCK_NS,
+            context_ceiling_tokens=ob.OBSERVATION_LIMITS["context_ceiling_tokens"],
+            required_key_count=keys,
             outcome="unusable",
             response_outcome="response-unusable",
             response_failure="missing-required-key",
-            missing_key_indices=tuple(range(64)),
+            missing_key_indices=tuple(range(keys)),
             result_bytes=0,
         )
     )
-    assert len(rc.serialize_receipt(receipt)) <= 16384
+    rendered = rc.serialize_receipt(receipt)
+    assert len(rendered) <= rc.RECEIPT_MAX_BYTES
+    # And with real headroom, so an added field cannot silently overrun it.
+    assert len(rendered) < rc.RECEIPT_MAX_BYTES
+
+
+def test_an_observed_receipt_at_every_ceiling_also_serialises():
+    items = ob.OBSERVATION_LIMITS["evidence_items"]
+    receipt = rc.ObservationReceipt(
+        **receipt_kwargs(
+            evidence_ids=tuple(_longest_safe_id(i) for i in range(items)),
+            evidence_digests=tuple("f" * 64 for _ in range(items)),
+            evidence_bytes=ob.OBSERVATION_LIMITS["evidence_total_bytes"],
+            elapsed_ns=rc.MAX_CLOCK_NS,
+            result_bytes=ob.OBSERVATION_LIMITS["result_bytes"],
+            context_ceiling_tokens=ob.OBSERVATION_LIMITS["context_ceiling_tokens"],
+            required_key_count=ob.OBSERVATION_LIMITS["required_keys"],
+        )
+    )
+    assert len(rc.serialize_receipt(receipt)) <= rc.RECEIPT_MAX_BYTES
 
 
 @pytest.mark.parametrize("value", [None, "receipt", 5, object()])
@@ -1592,6 +1643,9 @@ PACKAGE_MIRRORS = [
     "OBSERVATION_OUTCOMES", "DEADLINE_RESULTS", "RESERVATION_RESULTS",
     "RESERVATION_ATTESTATIONS", "REQUEST_OUTCOMES", "RESPONSE_OUTCOMES",
     "MAX_EVIDENCE_ITEMS", "MAX_REQUIRED_KEYS", "OBSERVATION_LIMITS",
+    "MAX_CLOCK_NS", "MAX_CONTEXT_CEILING_TOKENS", "MAX_EVIDENCE_ITEM_BYTES",
+    "MAX_EVIDENCE_TOTAL_BYTES", "MAX_RESULT_BYTES", "RECEIPT_MAX_BYTES",
+    "UNDESCRIBABLE_REFUSALS",
     "is_safe_token", "request_structured_json", "StructuredExchange",
 ]
 
@@ -1743,24 +1797,41 @@ def test_v3a_defines_no_second_validator_dialect_map_or_transport():
         assert "def _validated_snapshot" not in source
 
 
+def _cells(function):
+    """The closure cells a factory-built function actually holds, by name."""
+    return dict(
+        zip(
+            function.__code__.co_freevars,
+            (cell.cell_contents for cell in function.__closure__ or ()),
+        )
+    )
+
+
 def test_v3a_reuses_omi_v2s_planner_validator_and_carriers_by_identity():
     """The reuse points are the actual OMI-V2 objects, not lookalikes."""
-    planner_cells = dict(
-        zip(
-            ob.plan_observation.__code__.co_freevars,
-            (cell.cell_contents for cell in ob.plan_observation.__closure__),
-        )
-    )
-    assert planner_cells["_plan_request"] is sr.plan_structured_request
-    assert planner_cells["_request_type"] is sr.StructuredOutputRequest
+    canonical = _cells(ob._canonical_schema)
+    assert canonical["_plan_request"] is sr.plan_structured_request
+    assert canonical["_request_type"] is sr.StructuredOutputRequest
 
-    adapter_cells = dict(
-        zip(
-            ob.structured_exchange_adapter.__code__.co_freevars,
-            (cell.cell_contents for cell in ob.structured_exchange_adapter.__closure__),
-        )
-    )
-    assert adapter_cells["_request"] is sx.request_structured_json
+    planner = _cells(ob.plan_observation)
+    assert planner["_canonical"] is ob._canonical_schema
+
+    adapter = _cells(ob.structured_exchange_adapter)
+    assert adapter["_request"] is sx.request_structured_json
+
+
+def test_the_single_schema_authority_is_reached_from_both_the_planner_and_carrier():
+    """One canonicaliser, called from both places that must agree.
+
+    A directly constructed envelope is held to the planner's standard by calling
+    the *same* function the planner calls, not a second implementation of it.
+    """
+    assert _cells(ob.plan_observation)["_canonical"] is ob._canonical_schema
+    # The carrier is built inside a factory, so its cells are read from the
+    # class's own __post_init__ rather than from a module-level function.
+    post_init_cells = _cells(ob.ObservationEnvelope.__post_init__)
+    assert post_init_cells["_canonical"] is ob._canonical_schema
+    assert post_init_cells["_dialect_ok"] is sr.is_supported_dialect
 
 
 def _imported_modules(module) -> set[str]:
@@ -1833,3 +1904,776 @@ def test_schema_conformance_stays_closed_to_the_single_unverified_token():
         rc.ObservationReceipt(**receipt_kwargs(schema_conformance="verified"))
     with pytest.raises(ValueError):
         rc.ObservationReceipt(**receipt_kwargs(schema_conformance=None))
+
+
+# ============================================================================
+# Jack's first independent round - a regression for every reproduced finding
+# ============================================================================
+#
+# Each control below reproduces, at this layer, exactly one case Jack's audit
+# demonstrated against head e53b98f, and asserts the corrected refusal. Every
+# one of them failed before the correction; the reproduction is recorded in
+# section 11 of docs/OMI_V3_OBSERVATION_INCEPTION.md.
+
+
+# -- finding 1: exact type is not unaltered, before planning ------------------
+
+
+def test_pre_plan_equal_length_evidence_substitution_is_refused():
+    """The case that started the round: same length, stale digest, accepted.
+
+    ``object.__setattr__`` replaces the bytes of a frozen ``EvidenceItem``
+    without disturbing the digest computed at construction. The previous
+    revision adopted the item as an envelope's *initial* state, so the envelope
+    digest - which does recompute - described the substituted bytes while the
+    receipt reported the digest of bytes that were never sent.
+    """
+    item = ob.EvidenceItem(evidence_id="e1", content=b"AAAAAAAA")
+    original_digest = item.digest
+    object.__setattr__(item, "content", b"BBBBBBBB")
+    assert len(item.content) == 8
+    assert item.digest == original_digest, "the stale digest is the whole point"
+
+    result = plan(evidence=[item])
+    assert result.ok is False
+    assert result.refusal == "evidence-digest-not-recomputable"
+    assert result.envelope is None
+
+
+@pytest.mark.parametrize(
+    "replacement", [b"short", b"a much longer replacement payload", b"x"]
+)
+def test_pre_plan_evidence_substitution_of_any_length_is_refused(replacement):
+    item = ob.EvidenceItem(evidence_id="e1", content=b"AAAAAAAA")
+    object.__setattr__(item, "content", replacement)
+    result = plan(evidence=[item])
+    assert result.ok is False
+    assert result.refusal == "evidence-digest-not-recomputable"
+
+
+def test_pre_plan_evidence_digest_substitution_is_refused():
+    item = ob.EvidenceItem(evidence_id="e1", content=b"abc")
+    object.__setattr__(item, "digest", "0" * 64)
+    result = plan(evidence=[item])
+    assert result.ok is False
+    assert result.refusal == "evidence-digest-not-recomputable"
+
+
+@pytest.mark.parametrize("value", [SECRET, "has space", "", 42, "a/b"])
+def test_pre_plan_evidence_id_substitution_is_refused(value):
+    item = ob.EvidenceItem(evidence_id="e1", content=b"abc")
+    object.__setattr__(item, "evidence_id", value)
+    result = plan(evidence=[item])
+    assert result.ok is False
+    assert result.refusal == "evidence-id-not-safe-token"
+    assert SECRET not in result.refusal
+
+
+@pytest.mark.parametrize(
+    "value", [bytearray(b"abc"), memoryview(b"abc"), HookedBytes(b"abc"), "abc", None]
+)
+def test_pre_plan_evidence_content_type_substitution_is_refused(value):
+    HOOK_CALLS.clear()
+    item = ob.EvidenceItem(evidence_id="e1", content=b"abc")
+    object.__setattr__(item, "content", value)
+    result = plan(evidence=[item])
+    fired = list(HOOK_CALLS)
+    assert result.ok is False
+    assert result.refusal == "evidence-content-not-exact-bytes"
+    assert fired == []
+
+
+def test_pre_plan_empty_evidence_content_substitution_is_refused():
+    item = ob.EvidenceItem(evidence_id="e1", content=b"abc")
+    object.__setattr__(item, "content", b"")
+    result = plan(evidence=[item])
+    assert result.ok is False
+    assert result.refusal == "evidence-item-empty"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cpu_cores", ob.OBSERVATION_LIMITS["cpu_cores"] + 1),
+        pytest.param("cpu_cores", 10 ** 9, id="cpu-a-billion"),
+        ("cpu_cores", 0),
+        ("cpu_cores", -1),
+        ("memory_mib", ob.OBSERVATION_LIMITS["memory_mib"] + 1),
+        ("memory_mib", 0),
+        ("gpu_memory_mib", ob.OBSERVATION_LIMITS["gpu_memory_mib"] + 1),
+        ("gpu_memory_mib", 0),
+        ("gpu_memory_mib", -5),
+    ],
+)
+def test_pre_plan_reservation_field_beyond_every_ceiling_is_refused(field, value):
+    """A reservation altered past any ceiling is refused, digest or not.
+
+    The range check runs before the digest check, so the refusal names the
+    field's magnitude rather than the digest that no longer describes it -
+    which is the more useful of the two facts to an operator.
+    """
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096, gpu_memory_mib=8)
+    object.__setattr__(reservation, field, value)
+    result = plan(reservation=reservation)
+    assert result.ok is False
+    assert result.refusal == "reservation-field-out-of-range"
+
+
+#: gpu_memory_mib=None is excluded deliberately rather than skipped: None
+#: is the documented "no GPU reservation declared" value, so substituting it is
+#: not a type substitution at all.
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in ("cpu_cores", "memory_mib", "gpu_memory_mib")
+        for value in (True, HookedInt(4), "4", 4.0, None)
+        if not (field == "gpu_memory_mib" and value is None)
+    ],
+)
+def test_pre_plan_reservation_field_type_substitution_is_refused(field, value):
+    HOOK_CALLS.clear()
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096, gpu_memory_mib=8)
+    object.__setattr__(reservation, field, value)
+    result = plan(reservation=reservation)
+    fired = list(HOOK_CALLS)
+    assert result.ok is False
+    assert result.refusal == "reservation-field-not-exact-int"
+    assert fired == []
+
+
+def test_pre_plan_reservation_digest_substitution_is_refused():
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    object.__setattr__(reservation, "digest", "0" * 64)
+    result = plan(reservation=reservation)
+    assert result.ok is False
+    assert result.refusal == "reservation-digest-not-recomputable"
+
+
+def test_a_reservation_altered_inside_its_range_still_fails_its_digest():
+    """The subtle half: a legal value that the stored digest does not describe."""
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    object.__setattr__(reservation, "cpu_cores", 4)
+    result = plan(reservation=reservation)
+    assert result.ok is False
+    assert result.refusal == "reservation-digest-not-recomputable"
+
+
+def test_the_planner_revalidation_recomputes_rather_than_trusting():
+    """Positive guard: an untouched carrier still plans, and its digests hold."""
+    item = ob.EvidenceItem(evidence_id="e1", content=b"the evidence")
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    envelope = plan(evidence=[item], reservation=reservation).envelope
+    assert envelope.evidence[0].digest == hashlib.sha256(b"the evidence").hexdigest()
+    assert envelope.reservation.digest == reservation.digest
+
+
+# -- finding 2: direct construction is held to the planner's standard --------
+
+
+def direct_kwargs(**overrides):
+    """The field set of an accepted envelope, for direct construction."""
+    envelope = fixed_envelope()
+    kwargs = dict(
+        task_id=envelope.task_id,
+        authorizing_principal="kev",
+        worker="observer-1",
+        evidence=envelope.evidence,
+        dialect="ollama",
+        schema_bytes=envelope.schema_bytes,
+        schema_digest=envelope.schema_digest,
+        required_keys=envelope.required_keys,
+        endpoint=ENDPOINT,
+        reservation=envelope.reservation,
+        context_ceiling_tokens=8192,
+        max_evidence_bytes=65536,
+        max_result_bytes=8192,
+        max_output_tokens=1024,
+        issued_ns=1000,
+        deadline_ns=1000 + 30000000000,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_a_directly_constructed_envelope_matches_the_planned_one():
+    """Positive guard: the documented claim is true in the accepting direction."""
+    planned = fixed_envelope()
+    direct = ob.ObservationEnvelope(**direct_kwargs())
+    assert direct.envelope_digest == planned.envelope_digest
+    assert direct == planned
+
+
+@pytest.mark.parametrize(
+    "dialect",
+    [SECRET, "not-a-runtime", "OLLAMA", "", "ollama ", 5, None, HookedStr("ollama")],
+)
+def test_direct_construction_refuses_a_dialect_omi_v2_did_not_verify(dialect):
+    """The claim that direct construction re-runs every check, made true.
+
+    The previous revision checked only ``type(dialect) is str``, so a
+    secret-shaped dialect constructed an envelope and would have travelled into
+    a receipt. OMI-V2's ``is_supported_dialect`` is the authority now, called
+    from a closure cell.
+    """
+    HOOK_CALLS.clear()
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(dialect=dialect))
+    assert HOOK_CALLS == []
+
+
+@pytest.mark.parametrize("dialect", sorted(sr.SUPPORTED_DIALECTS))
+def test_direct_construction_accepts_every_dialect_omi_v2_verified(dialect):
+    planned = plan(dialect=dialect, task_id=FIXED_TASK_ID, clock=make_clock([1000]))
+    assert planned.ok is True
+    direct = ob.ObservationEnvelope(
+        **direct_kwargs(
+            dialect=dialect,
+            schema_bytes=planned.envelope.schema_bytes,
+            schema_digest=planned.envelope.schema_digest,
+        )
+    )
+    assert direct.dialect == dialect
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"not json at all",
+        b"",
+        b"[]",
+        b"null",
+        b"{}",
+        b"{",
+        b'{"type": "object"',
+        b"\xff\xfe",
+        json.dumps(SCHEMA, separators=(",", ":")).encode("ascii"),  # unsorted keys
+        json.dumps(SCHEMA, sort_keys=True).encode("ascii"),  # spaces
+        # Explicit id: a 65537-byte parameter would otherwise become a
+        # 65537-character test id, and Windows caps an environment variable at
+        # 32767 - pytest writes the current test id into one.
+        pytest.param(
+            b"a" * (ob.OBSERVATION_LIMITS["schema_bytes"] + 1),
+            id="one-byte-past-the-schema-ceiling",
+        ),
+        "not bytes",
+        None,
+        bytearray(b"{}"),
+    ],
+)
+def test_direct_construction_refuses_schema_bytes_that_are_not_canonical(raw):
+    """Bytes must be provably the canonical rendering of a schema OMI-V2 takes.
+
+    Not merely "some bytes", which is all the previous revision checked. The
+    unsorted and spaced renderings matter as much as the malformed ones: both
+    parse, both describe the same schema, and neither is the form the digest was
+    taken over - so accepting either would make two envelopes for one schema.
+    """
+    digest = (
+        hashlib.sha256(raw).hexdigest() if type(raw) is bytes else "0" * 64
+    )
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(schema_bytes=raw, schema_digest=digest))
+
+
+def test_direct_construction_refuses_a_schema_digest_that_hashes_nothing():
+    for digest in ("0" * 64, "a" * 64, "short", None, 5, "A" * 64):
+        with pytest.raises(ValueError):
+            ob.ObservationEnvelope(**direct_kwargs(schema_digest=digest))
+
+
+def test_direct_construction_refuses_a_schema_from_another_dialect_shape():
+    """A schema OMI-V2 refuses for this dialect cannot be smuggled in as bytes."""
+    empty = json.dumps({}, sort_keys=True, separators=(",", ":")).encode("ascii")
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(
+            **direct_kwargs(
+                schema_bytes=empty, schema_digest=hashlib.sha256(empty).hexdigest()
+            )
+        )
+
+
+def test_direct_construction_refuses_stale_evidence_and_reservation_digests():
+    stale_item = ob.EvidenceItem(evidence_id="e1", content=b"AAAAAAAA")
+    object.__setattr__(stale_item, "content", b"BBBBBBBB")
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(evidence=(stale_item,)))
+
+    stale_reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    object.__setattr__(stale_reservation, "cpu_cores", 200)
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(reservation=stale_reservation))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        dict(context_ceiling_tokens=ob.OBSERVATION_LIMITS["context_ceiling_tokens"] + 1),
+        dict(context_ceiling_tokens=0),
+        dict(max_result_bytes=ob.OBSERVATION_LIMITS["result_bytes"] + 1),
+        dict(max_output_tokens=ob.OBSERVATION_LIMITS["output_tokens"] + 1),
+        dict(max_evidence_bytes=ob.OBSERVATION_LIMITS["evidence_total_bytes"] + 1),
+        dict(required_keys=("has space",)),
+        dict(required_keys=(SECRET,)),
+        dict(required_keys=["summary"]),
+        dict(required_keys=tuple("k%d" % i for i in range(
+            ob.OBSERVATION_LIMITS["required_keys"] + 1))),
+        dict(issued_ns=rc.MAX_CLOCK_NS + 1),
+        dict(deadline_ns=rc.MAX_CLOCK_NS + 1),
+        dict(endpoint="http://localhost:11434/v1"),
+        dict(task_id="nope"),
+        dict(authorizing_principal=SECRET),
+    ],
+)
+def test_direct_construction_refuses_over_limit_or_incoherent_fields(override):
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(**override))
+
+
+def test_direct_construction_refuses_duplicate_evidence_ids():
+    item = ob.EvidenceItem(evidence_id="same", content=b"one")
+    other = ob.EvidenceItem(evidence_id="same", content=b"two")
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(evidence=(item, other)))
+
+
+def test_no_directly_constructed_invalid_envelope_exists_to_reach_an_exchange():
+    """The structural statement: an invalid envelope is never an object at all.
+
+    Because every rejection above is a ``ValueError`` from ``__post_init__``,
+    there is no half-built envelope left behind for a caller to hand to
+    ``execute_observation``. The control asserts that directly rather than
+    inferring it: for each rejected field set, no instance escapes.
+    """
+    escaped = []
+    for override in (
+        dict(dialect=SECRET),
+        dict(schema_bytes=b"not json"),
+        dict(schema_digest="0" * 64),
+        dict(endpoint="http://localhost:11434/v1"),
+    ):
+        try:
+            escaped.append(ob.ObservationEnvelope(**direct_kwargs(**override)))
+        except ValueError:
+            pass
+    assert escaped == []
+
+
+# -- finding 3, planner half: a clock that raises, and one that is enormous ---
+
+
+def test_a_raising_clock_refuses_the_plan_and_discloses_nothing():
+    """The planner says it is total. It is now."""
+    marker = "CLOCKSECRET" + SECRET
+
+    def raising_clock():
+        raise RuntimeError(marker)
+
+    result = ob.plan_observation(**plan_kwargs(clock=raising_clock))
+    assert result.ok is False
+    assert result.refusal == "clock-raised"
+    assert marker not in result.refusal
+    assert "RuntimeError" not in result.refusal
+    assert result.refusal in rc.PLAN_REFUSALS
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [RuntimeError("x"), ValueError("x"), TypeError("x"), ZeroDivisionError("x"),
+     OSError("x"), MemoryError()],
+)
+def test_a_clock_raising_anything_at_all_refuses_the_plan(exception):
+    def raising_clock():
+        raise exception
+
+    result = ob.plan_observation(**plan_kwargs(clock=raising_clock))
+    assert result.ok is False
+    assert result.refusal == "clock-raised"
+
+
+def test_a_clock_raising_a_base_exception_still_propagates():
+    """``except Exception`` is deliberate: an interrupt is not a clock failure."""
+
+    def interrupting_clock():
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        ob.plan_observation(**plan_kwargs(clock=interrupting_clock))
+
+
+#: 10 ** 5000 is passed with an explicit id because pytest builds parameter
+#: ids with str(value) - and CPython refuses to render an integer that long,
+#: which is the exact failure this control exists to pin. The collection error
+#: it produced without an id is itself a demonstration of the defect.
+@pytest.mark.parametrize(
+    "reading",
+    [
+        pytest.param(rc.MAX_CLOCK_NS + 1, id="one-past-the-ceiling"),
+        pytest.param(10 ** 50, id="ten-to-the-50"),
+        pytest.param(10 ** 5000, id="ten-to-the-5000"),
+        pytest.param(2 ** 64, id="two-to-the-64"),
+    ],
+)
+def test_an_enormous_clock_reading_is_refused_by_the_planner(reading):
+    """An exact int has no width; the receipt's serialiser does.
+
+    A reading of ``10**5000`` is a perfectly ordinary Python integer and made a
+    perfectly ordinary envelope. It then produced a receipt CPython refuses to
+    render at all - ``Exceeds the limit (4300 digits) for integer string
+    conversion``. The magnitude is refused where it enters.
+    """
+    result = plan(clock=make_clock([reading]))
+    assert result.ok is False
+    assert result.refusal == "clock-reading-too-large"
+
+
+def test_the_clock_ceiling_itself_is_accepted_when_the_deadline_fits():
+    at_ceiling = rc.MAX_CLOCK_NS - 30000000000
+    envelope = plan(clock=make_clock([at_ceiling])).envelope
+    assert envelope.issued_ns == at_ceiling
+    assert envelope.deadline_ns == rc.MAX_CLOCK_NS
+
+
+def test_a_deadline_past_the_clock_ceiling_is_refused():
+    result = plan(clock=make_clock([rc.MAX_CLOCK_NS]), duration_ns=1)
+    assert result.ok is False
+    assert result.refusal == "deadline-beyond-clock-ceiling"
+
+
+def test_the_clock_ceiling_is_the_documented_one_and_is_off_the_trust_path():
+    assert rc.MAX_CLOCK_NS == 2 ** 63 - 1
+    assert ob.OBSERVATION_LIMITS["clock_ns"] == rc.MAX_CLOCK_NS
+    baseline = plan(clock=make_clock([rc.MAX_CLOCK_NS + 1])).refusal
+    original = rc.MAX_CLOCK_NS
+    rc.MAX_CLOCK_NS = 10 ** 6000
+    try:
+        assert plan(clock=make_clock([rc.MAX_CLOCK_NS])).refusal == baseline
+    finally:
+        rc.MAX_CLOCK_NS = original
+
+
+# -- finding 5: the receipt enforces every bound it documents -----------------
+
+
+@pytest.mark.parametrize(
+    ("field", "over"),
+    [
+        ("evidence_bytes", rc.MAX_EVIDENCE_TOTAL_BYTES + 1),
+        pytest.param("evidence_bytes", 10 ** 40, id="evidence-ten-to-the-40"),
+        pytest.param("elapsed_ns", rc.MAX_CLOCK_NS + 1, id="elapsed-one-past"),
+        pytest.param("elapsed_ns", 10 ** 5000, id="elapsed-ten-to-the-5000"),
+        ("result_bytes", rc.MAX_RESULT_BYTES + 1),
+        ("context_ceiling_tokens", rc.MAX_CONTEXT_CEILING_TOKENS + 1),
+        ("required_key_count", rc.MAX_REQUIRED_KEYS + 1),
+    ],
+)
+def test_every_receipt_count_is_refused_past_its_ceiling(field, over):
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(**{field: over}))
+
+
+def test_a_receipt_requires_distinct_evidence_ids():
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                evidence_ids=("e1", "e1"),
+                evidence_digests=("c" * 64, "d" * 64),
+                evidence_bytes=2,
+            )
+        )
+
+
+def test_a_receipt_refuses_fewer_evidence_bytes_than_its_item_count_implies():
+    """Every evidence item carries at least one byte, so the total is bracketed."""
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(evidence_bytes=0))
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                evidence_ids=("e1", "e2"),
+                evidence_digests=("c" * 64, "d" * 64),
+                evidence_bytes=1,
+            )
+        )
+    assert rc.ObservationReceipt(
+        **receipt_kwargs(
+            evidence_ids=("e1", "e2"),
+            evidence_digests=("c" * 64, "d" * 64),
+            evidence_bytes=2,
+        )
+    ).evidence_bytes == 2
+
+
+@pytest.mark.parametrize("index", [1, 2, 63])
+def test_a_missing_key_index_at_or_above_the_key_count_is_refused(index):
+    """An index names a position in the caller's own required-key tuple.
+
+    One at or past the end names nothing, and OMI-V2's validator - which reports
+    indices precisely so key *text* never travels - cannot produce it.
+    """
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="unusable",
+                response_outcome="response-unusable",
+                response_failure="missing-required-key",
+                missing_key_indices=(index,),
+                required_key_count=1,
+                result_bytes=0,
+            )
+        )
+
+
+def test_the_last_valid_missing_key_index_is_accepted():
+    receipt = rc.ObservationReceipt(
+        **receipt_kwargs(
+            outcome="unusable",
+            response_outcome="response-unusable",
+            response_failure="missing-required-key",
+            missing_key_indices=(0, 2),
+            required_key_count=3,
+            result_bytes=0,
+        )
+    )
+    assert receipt.missing_key_indices == (0, 2)
+
+
+def test_more_missing_indices_than_required_keys_is_refused():
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="unusable",
+                response_outcome="response-unusable",
+                response_failure="missing-required-key",
+                missing_key_indices=(0, 1),
+                required_key_count=1,
+                result_bytes=0,
+            )
+        )
+
+
+PRE_DIALECT_REFUSALS = [
+    token
+    for token in sorted(sx.EXCHANGE_REFUSALS)
+    if token == "backend-not-structured-capable" or sr.is_pre_dialect_refusal(token)
+]
+POST_DIALECT_REFUSALS = [
+    token for token in sorted(sx.EXCHANGE_REFUSALS) if token not in PRE_DIALECT_REFUSALS
+]
+
+
+@pytest.mark.parametrize("token", PRE_DIALECT_REFUSALS)
+def test_a_pre_dialect_refusal_may_not_name_a_dialect_on_a_receipt(token):
+    """OMI-V2's own dialect coherence, imported rather than re-derived."""
+    base = dict(
+        outcome="unusable",
+        response_outcome="request-refused",
+        request_refusal=token,
+        result_bytes=0,
+    )
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(dialect="ollama", **base))
+    assert rc.ObservationReceipt(**receipt_kwargs(dialect=None, **base)).dialect is None
+
+
+@pytest.mark.parametrize("token", POST_DIALECT_REFUSALS)
+def test_a_post_dialect_refusal_must_name_its_dialect_on_a_receipt(token):
+    base = dict(
+        outcome="unusable",
+        response_outcome="request-refused",
+        request_refusal=token,
+        result_bytes=0,
+    )
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(dialect=None, **base))
+    assert rc.ObservationReceipt(**receipt_kwargs(dialect="ollama", **base)).dialect
+
+
+@pytest.mark.parametrize("failure", sorted(sx.RESPONSE_FAILURES))
+def test_a_response_failure_must_always_name_its_dialect_on_a_receipt(failure):
+    base = dict(
+        outcome="unusable",
+        response_outcome="response-unusable",
+        response_failure=failure,
+        result_bytes=0,
+        required_key_count=3,
+        missing_key_indices=(0,) if failure == "missing-required-key" else (),
+    )
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(dialect=None, **base))
+    assert rc.ObservationReceipt(**receipt_kwargs(dialect="ollama", **base)).dialect
+
+
+def test_the_receipts_pre_dialect_rule_is_omi_v2s_own_predicate():
+    """Not a second copy of the rule - the same predicate, in a cell."""
+    cells = dict(
+        zip(
+            rc.ObservationReceipt.__post_init__.__code__.co_freevars,
+            (
+                cell.cell_contents
+                for cell in rc.ObservationReceipt.__post_init__.__closure__ or ()
+            ),
+        )
+    )
+    assert cells["_pre_dialect"] is sr.is_pre_dialect_refusal
+    assert cells["_request_refusals"] is sx.EXCHANGE_REFUSALS
+    assert cells["_response_failures"] is sx.RESPONSE_FAILURES
+
+
+# -- finding 5: the attestation is carried, and is not collapsed --------------
+
+
+@pytest.mark.parametrize("attestation", sorted(rc.RESERVATION_ATTESTATIONS))
+def test_an_evaluated_reservation_carries_the_attestation_that_produced_it(
+    attestation,
+):
+    receipt = rc.ObservationReceipt(
+        **receipt_kwargs(reservation_attestation=attestation)
+    )
+    assert receipt.reservation_attestation == attestation
+    assert attestation.encode("ascii") in rc.serialize_receipt(receipt)
+
+
+def test_the_two_attestations_are_not_collapsed_into_one_satisfied_claim():
+    """Whose claim it is survives into the serialised evidence."""
+    operator = rc.ObservationReceipt(
+        **receipt_kwargs(reservation_attestation="operator-asserted")
+    )
+    checker = rc.ObservationReceipt(
+        **receipt_kwargs(reservation_attestation="checker-asserted")
+    )
+    assert operator != checker
+    assert rc.serialize_receipt(operator) != rc.serialize_receipt(checker)
+
+
+def test_an_evaluated_reservation_without_an_attestation_is_refused():
+    for result in ("satisfied", "not-satisfied"):
+        with pytest.raises(ValueError):
+            rc.ObservationReceipt(
+                **receipt_kwargs(
+                    reservation_result=result, reservation_attestation=None
+                )
+            )
+
+
+def test_an_unevaluated_reservation_with_an_attestation_is_refused():
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="refused",
+                refusal="clock-not-callable",
+                deadline_result="not-evaluated",
+                reservation_result="not-evaluated",
+                reservation_attestation="operator-asserted",
+                request_outcome="not-attempted",
+                response_outcome="none",
+                exchange_invocations=0,
+                elapsed_ns=0,
+                result_bytes=0,
+                dialect=None,
+            )
+        )
+
+
+@pytest.mark.parametrize("value", ["assumed", "", 5, True, "OPERATOR-ASSERTED"])
+def test_an_attestation_outside_the_closed_vocabulary_is_refused(value):
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(**receipt_kwargs(reservation_attestation=value))
+
+
+def test_an_unsatisfied_reservation_is_recorded_only_as_its_own_refusal():
+    """The state the executor emits, and no other."""
+    receipt = rc.ObservationReceipt(
+        **receipt_kwargs(
+            outcome="refused",
+            refusal="reservation-not-satisfied",
+            reservation_result="not-satisfied",
+            request_outcome="not-attempted",
+            response_outcome="none",
+            exchange_invocations=0,
+            elapsed_ns=0,
+            result_bytes=0,
+            dialect=None,
+        )
+    )
+    assert receipt.reservation_result == "not-satisfied"
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="refused",
+                refusal="result-too-large",
+                reservation_result="not-satisfied",
+                request_outcome="not-attempted",
+                response_outcome="none",
+                exchange_invocations=0,
+                elapsed_ns=0,
+                result_bytes=0,
+                dialect=None,
+            )
+        )
+
+
+def test_an_elapsed_duration_requires_an_invocation_and_a_deadline_verdict():
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="refused",
+                refusal="reservation-not-satisfied",
+                reservation_result="not-satisfied",
+                request_outcome="not-attempted",
+                response_outcome="none",
+                exchange_invocations=0,
+                elapsed_ns=5,
+                result_bytes=0,
+                dialect=None,
+            )
+        )
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="refused",
+                refusal="clock-reading-not-exact-int",
+                deadline_result="not-evaluated",
+                reservation_result="satisfied",
+                request_outcome="attempted",
+                response_outcome="none",
+                exchange_invocations=1,
+                elapsed_ns=5,
+                result_bytes=0,
+                dialect=None,
+            )
+        )
+
+
+def test_the_schema_byte_mirror_agrees_with_omi_v2s_own_ceiling():
+    """The one number this layer restates, pinned to its source.
+
+    _MAX_SCHEMA_BYTES exists so the envelope carrier can bound a decode
+    before handing the document to OMI-V2, rather than decoding an arbitrarily
+    large buffer first. OMI-V2 remains the authority on what a schema may be,
+    and this asserts the two cannot drift into disagreeing about which one
+    refuses.
+    """
+    assert ob.OBSERVATION_LIMITS["schema_bytes"] == sr._SCHEMA_MAX_CHARS
+
+
+def test_every_shared_bound_has_exactly_one_definition():
+    """The bounds the two V3A modules share are imported, never restated."""
+    for name in (
+        "MAX_EVIDENCE_ITEMS",
+        "MAX_EVIDENCE_ITEM_BYTES",
+        "MAX_EVIDENCE_TOTAL_BYTES",
+        "MAX_RESULT_BYTES",
+        "MAX_CONTEXT_CEILING_TOKENS",
+        "MAX_REQUIRED_KEYS",
+        "MAX_CLOCK_NS",
+    ):
+        assert getattr(ob, name) is getattr(rc, name)
+    assert ob.OBSERVATION_LIMITS["evidence_items"] == rc.MAX_EVIDENCE_ITEMS
+    assert ob.OBSERVATION_LIMITS["evidence_item_bytes"] == rc.MAX_EVIDENCE_ITEM_BYTES
+    assert ob.OBSERVATION_LIMITS["evidence_total_bytes"] == rc.MAX_EVIDENCE_TOTAL_BYTES
+    assert ob.OBSERVATION_LIMITS["result_bytes"] == rc.MAX_RESULT_BYTES
+    assert ob.OBSERVATION_LIMITS["context_ceiling_tokens"] == rc.MAX_CONTEXT_CEILING_TOKENS
+    assert ob.OBSERVATION_LIMITS["required_keys"] == rc.MAX_REQUIRED_KEYS
+    assert ob.OBSERVATION_LIMITS["clock_ns"] == rc.MAX_CLOCK_NS
+    assert ob.OBSERVATION_LIMITS["receipt_bytes"] == rc.RECEIPT_MAX_BYTES
