@@ -1344,6 +1344,7 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
     unmanifested = 0
     halted = False
     refused = None
+    close_failed = False
     quiescence_ns = policy.quiescence_seconds * _NANOSECONDS
 
     try:
@@ -1425,7 +1426,27 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                 halted = True
                 break
     finally:
-        os.close(manifest_fd)
+        # EXACTLY ONE close attempt, on every path. A failure here is caught
+        # rather than allowed to escape: objects may already have moved, and
+        # letting an OSError out would cost the caller the entire aggregate --
+        # how many moved, how many were skipped, how many are evidence without
+        # a record -- and would print a traceback where the operator expects
+        # one fixed, path-free line. It is never retried: a failed close leaves
+        # the descriptor state ambiguous, and a second attempt could close a
+        # descriptor the runtime has already reissued to something else.
+        try:
+            os.close(manifest_fd)
+        except OSError:
+            close_failed = True
+
+    if close_failed:
+        # Every record already completed its bounded write and `fsync`, so
+        # nothing is unmanifested merely because the descriptor did not release
+        # cleanly; the count is left exactly as the loop set it. An earlier
+        # refusal is more specific than this one and is preserved.
+        if refused is None:
+            refused = RetentionFailureReason.MANIFEST_RECORD_FAILED
+        halted = True
 
     return _report(mode, refused=refused, scan=scan, plan=plan,
                    actions=plan_actions, moved=moved, skipped=skipped,
