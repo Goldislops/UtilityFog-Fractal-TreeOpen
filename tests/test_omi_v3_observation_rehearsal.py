@@ -3156,3 +3156,188 @@ def test_the_canonical_adapter_measures_the_value_it_actually_received():
         ).encode("ascii")
     )
     assert result.receipt.result_bytes == expected
+
+
+# ============================================================================
+# Fifth round - a hostile backend reaching V3A through the canonical adapter
+# ============================================================================
+
+
+class MutatingBackend:
+    """Builds a VALID exact StructuredCompletion, then alters one field.
+
+    The defect this pins was in OMI-V2, but it was *reachable from here*: the
+    canonical adapter calls ``request_structured_json``, which checked only the
+    returned object's outer type before truth-testing ``.ok`` and reading
+    ``.response.text``. A backend could therefore run its own hooks inside
+    OMI-V2 and make raw ``RuntimeError`` or ``ValueError`` escape the adapter -
+    and so escape ``execute_observation``, which promises a result.
+    """
+
+    def __init__(self, field, value):
+        self.field = field
+        self.value = value
+        self.calls = 0
+
+    def complete_structured(self, messages, tools, **kwargs):
+        self.calls += 1
+        completion = StructuredCompletion(
+            ok=True,
+            response=AgentResponse.from_content(
+                [TextBlock(text='{"summary": "x"}')]
+            ),
+            dialect="ollama",
+            response_format_sent=True,
+        )
+        object.__setattr__(completion, self.field, self.value)
+        return completion
+
+
+class _AdapterBoolHook:
+    fired: list = []
+
+    def __bool__(self):  # pragma: no cover - must never be reached
+        _AdapterBoolHook.fired.append("ok.__bool__")
+        raise RuntimeError("the __bool__ hook ran")
+
+
+class _AdapterTextHook:
+    fired: list = []
+
+    @property
+    def text(self):  # pragma: no cover - must never be reached
+        _AdapterTextHook.fired.append("response.text")
+        raise RuntimeError("the text property ran")
+
+
+def test_a_backend_hook_never_runs_through_the_canonical_adapter():
+    envelope = build_envelope()
+    _AdapterBoolHook.fired = []
+    backend = MutatingBackend("ok", _AdapterBoolHook())
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+    assert _AdapterBoolHook.fired == []
+    assert backend.calls == 1
+    assert result.ok is False
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == "backend-not-structured-capable"
+    assert result.receipt.dialect is None
+    assert rc.serialize_receipt(result.receipt)
+
+
+def test_a_backend_response_property_never_runs_through_the_canonical_adapter():
+    envelope = build_envelope()
+    _AdapterTextHook.fired = []
+    backend = MutatingBackend("response", _AdapterTextHook())
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+    assert _AdapterTextHook.fired == []
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == "backend-not-structured-capable"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dialect", "sk-OMIV3ASECRET123456789"),
+        ("dialect", "not-a-runtime"),
+        ("dialect", None),
+        ("ok", 1),
+        ("ok", False),
+        ("response_format_sent", False),
+        ("refusal", "schema-empty"),
+        ("response", None),
+    ],
+    ids=["dialect-secret", "dialect-unsupported", "dialect-none", "ok-int",
+         "ok-false-no-refusal", "sent-false", "refusal-on-success",
+         "response-none"],
+)
+def test_a_mutated_completion_becomes_a_closed_refusal_not_an_escape(field, value):
+    envelope = build_envelope()
+    backend = MutatingBackend(field, value)
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+    assert result.ok is False
+    assert result.receipt.outcome == "unusable"
+    assert result.receipt.request_refusal == "backend-not-structured-capable"
+    rendered = rc.serialize_receipt(result.receipt)
+    assert b"sk-" not in rendered
+    assert b"not-a-runtime" not in rendered
+    assert len(rendered) <= rc.RECEIPT_MAX_BYTES
+
+
+def test_a_backend_that_breaches_hermeticity_is_still_loud_through_the_adapter():
+    """No broad catch was added upstream, and this asserts it from V3A's side."""
+
+    class Breaching:
+        def complete_structured(self, messages, tools, **kwargs):
+            socket.socket()
+            raise AssertionError("unreachable while the guard is active")
+
+    envelope = build_envelope()
+    with pytest.raises(HermeticViolation):
+        run(envelope, ob.structured_exchange_adapter(Breaching()), [1000, 1100])
+
+
+# -- finding 2: what the receipt does NOT attest -----------------------------
+
+
+def test_the_receipt_cannot_attest_what_a_backend_actually_transmitted():
+    """The claim this replaces was too strong, and a double demonstrates why.
+
+    The canonical adapter hands the backend values derived from the validated
+    snapshot. What the backend then does with them is not observable from here:
+    it may transmit something else, or nothing, or contact a different endpoint
+    entirely. The receipt records what the executor validated. It does not, and
+    cannot, attest transmission.
+    """
+
+    class DivergentBackend:
+        def __init__(self):
+            self.received = None
+            self.chose_to_send = None
+
+        def complete_structured(self, messages, tools, **kwargs):
+            self.received = [m.content for m in messages]
+            # Nothing obliges a backend to send what it was handed, and nothing
+            # in V3A can observe what it does send.
+            self.chose_to_send = ["OTHER EVIDENCE"]
+            return StructuredCompletion(
+                ok=True,
+                response=AgentResponse.from_content(
+                    [TextBlock(text='{"summary": "x"}')]
+                ),
+                dialect="ollama",
+                response_format_sent=True,
+            )
+
+    envelope = build_envelope()
+    backend = DivergentBackend()
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+
+    # The adapter handed over exactly the validated evidence...
+    assert backend.received == ["the evidence"]
+    # ...the backend chose otherwise...
+    assert backend.chose_to_send == ["OTHER EVIDENCE"]
+    # ...and the receipt records what was VALIDATED, making no transmission
+    # claim either way.
+    assert result.ok is True
+    assert result.receipt.evidence_ids == ("e1",)
+    assert result.receipt.evidence_digests == (envelope.evidence[0].digest,)
+
+
+def test_no_transmission_claim_survives_in_the_tree():
+    """The wording itself, pinned so it cannot creep back."""
+    import pathlib
+
+    # This file is deliberately NOT scanned: it has to contain the phrases as
+    # data in order to look for them, and a control that fails on its own
+    # subject matter proves nothing. The claim could only ever live in the
+    # document or the module, and those are scanned.
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for relative in (
+        "docs/OMI_V3_OBSERVATION_INCEPTION.md",
+        "scripts/open_model/observation.py",
+        "scripts/open_model/structured_exchange.py",
+    ):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert "what is transmitted is what was recorded" not in text, relative
+        assert "what is sent is what was recorded" not in text, relative
+        assert "the two coincide" not in text, relative

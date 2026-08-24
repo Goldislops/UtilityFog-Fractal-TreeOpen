@@ -1,9 +1,10 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected four times — after
-> Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), and a
-> fourth adversarial review (§ 17). Each section lists every defect that round
-> found and what each one cost. Modules
+> **Status**: implemented, inert, and hermetic. Corrected five times — after
+> Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), a fourth
+> adversarial review (§ 17), and a fifth (§ 18) whose production correction is
+> upstream in ``scripts/open_model/structured_exchange.py``. Each section lists
+> every defect that round found and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -540,10 +541,12 @@ names V3A imports.
 11. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
     the OMI-V1 and OMI-V2 modules.** The authority for this work limited that
     file to exports. Recorded here rather than closed outside the fence.
-12. **An injected exchange may send anything at all** — it receives an
-    envelope and is free to ignore it. The receipt therefore attests *what the
-    executor validated*, never *what a third-party callable transmitted*. On
-    the canonical adapter path the two coincide, and § 17 says why.
+12. **Nothing here attests transmission.** An injected exchange receives an
+    envelope and may ignore it entirely. And on the canonical adapter path, the
+    adapter hands *validated snapshot values* to a caller-supplied backend whose
+    actual sending — and whose choice of endpoint — this package cannot observe.
+    The receipt attests **what the executor validated**, never what any callable
+    transmitted or contacted. § 18 records the double that demonstrated it.
 13. **An injected exchange supplies its own measurement** — `result_bytes` is
     bound to the carrier's own snapshot bytes, not to the exchange's value.
     Truthful on the canonical adapter path; a self-report otherwise.
@@ -625,7 +628,8 @@ exchange*; a tampered `attestation` was accepted and would have been recorded.
 **Corrected**: `_envelope_shape_intact` and `_decision_fields_intact` prove
 every field's exact runtime type by identity check before anything is iterated,
 compared, hashed or truth-tested, with a new `envelope-field-not-exact-type`
-refusal (receiptless, like the other two undescribable ones) and a new
+refusal (receiptless, like the other two undescribable ones — there were
+three at this checkpoint; a fourth joined in round three, see § 18) and a new
 `reservation-decision-field-invalid`. The decision is bound to the reservation
 digest **recomputed from current fields**, never the stored one.
 
@@ -936,8 +940,9 @@ it was *invoked* — after the clock had run. Demonstrated:
 and sends only values from that validation, refusing an invalid one with a fixed
 non-disclosing message. And the executor hands the exchange a **package-owned
 envelope rebuilt from the snapshot**, not the caller's object — so on the
-canonical path what is transmitted is what was recorded, and a control asserts
-the caller's envelope never appears in the executor's tail at all.
+the adapter cannot be desynchronised from what was validated, and a control
+asserts the caller's envelope never appears in the executor's tail at all. What
+that does **not** establish is transmission — see finding 2 in § 18.
 
 > An *injected* exchange may still ignore the envelope and send whatever it
 > likes. That is what injecting one means, and no receipt can claim otherwise.
@@ -973,3 +978,84 @@ adding a regression for every demonstrated defect. It was **not** independent
 acceptance: the same agent lineage wrote the code, the controls, and this
 section. It is stronger internal evidence than a re-run of existing controls,
 and it is still internal evidence.
+
+## 18. Fifth round (2026-08-25)
+
+Three findings, reproduced independently with in-process doubles before any
+change: one code defect upstream in OMI-V2, one overclaim, and three narrower
+claim/code contradictions.
+
+### Finding 1 — OMI-V2 trusted a mutated exact completion
+
+`request_structured_json` checked that the backend returned an exact
+`StructuredCompletion` and then **read its fields without re-checking them**. A
+backend is caller-supplied code, `StructuredCompletion` is frozen, and freezing
+is not sealing. Reproduced through the canonical V3A adapter:
+
+- `ok` replaced with an object whose `__bool__` raises → **the hook ran** inside
+  `request_structured_json`, and `RuntimeError` escaped the adapter;
+- `response` replaced with an object whose `.text` is a raising property → **the
+  property ran**, and `RuntimeError` escaped;
+- `dialect` replaced with a secret-shaped string → `StructuredExchange`
+  construction raised `ValueError`, which escaped;
+- `ok = 1` and `response_format_sent = False` on a success → **silently
+  accepted**, producing an `observed` result from an incoherent completion.
+
+**Corrected** in `scripts/open_model/structured_exchange.py`.
+`_completion_state_ok` mirrors the carrier's own coherence rules — using the
+carrier's own imported vocabulary and both of its predicates — and is applied
+before any field is read. All four hook and escape cases, and every incoherent
+state, now land on the existing closed token
+`backend-not-structured-capable`. No new token was invented, and **no exception
+is caught**: a raising backend still raises, and `HermeticViolation` still
+propagates, both pinned by controls.
+
+This is the fifth appearance of one pattern: *a frozen carrier's exact outer
+type is not evidence that its fields remain as constructed.* It has now been
+found in the envelope, the reservation decision, the receipt, the OMI-V2
+exchange result, and the OMI-V2 completion.
+
+### Finding 2 — canonical transmission faithfulness was overclaimed
+
+Round four wrote that "on the canonical path what is transmitted is what was
+recorded". That is not establishable. The adapter hands **validated snapshot
+values** to a caller-supplied backend; what that backend transmits, and which
+endpoint it contacts, is not observable from here. A double demonstrated it:
+received `the evidence`, chose to send `OTHER EVIDENCE`, returned a valid
+completion, and the receipt still recorded the original digest.
+
+The earned claim, and the one now made everywhere: **the canonical adapter hands
+the backend values derived from the validated snapshot; the receipt attests what
+the executor validated, and cannot attest what any backend actually transmitted
+or contacted.** Limitation 12 covers both the injected exchange and the injected
+backend behind the canonical adapter. A control asserts the too-strong wording
+is absent from the document, the module, and the suite.
+
+### Finding 3 — three claims that outran the code
+
+1. `plan_observation` said "never raises". `_read_clock` catches `Exception`
+   deliberately and not `BaseException`, so a clock raising `KeyboardInterrupt`
+   propagates. The claim is narrowed to ordinary exceptions and the boundary is
+   stated. `BaseException` is **not** caught, and should not be.
+2. `_envelope_semantics` said "total over any envelope" while
+   `_envelope_semantics(None)` raises `AttributeError`. Its contract is now
+   qualified — total over any *validated exact* `ObservationEnvelope` — and the
+   control renamed to match. Deliberately **no** exact-type refusal was added:
+   both public callers already gate on type, and a second gate here would be a
+   second authority on what an envelope is.
+3. `ObservationResult` said "the three" receiptless failures while
+   `UNDESCRIBABLE_REFUSALS` holds four. Corrected, with a note saying when the
+   fourth joined.
+
+### On historical text
+
+§ 13's "receiptless, like the other two undescribable ones" was **true when it
+was written**, at a checkpoint where there were three. It is annotated in place
+rather than rewritten. A correction log that edits its own past is not a
+correction log.
+
+### Provenance
+
+Findings supplied by Jack as evidence and reproduced independently before any
+change, in a fresh Kev seat, by the same agent lineage that wrote the code.
+Not independent acceptance.

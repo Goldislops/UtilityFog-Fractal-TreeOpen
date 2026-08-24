@@ -983,8 +983,19 @@ def _closed_envelope_semantics():
         the caller could still change. One pass in, one snapshot out; every
         consumer works from the snapshot.
 
-        Total over any envelope: nothing raises, and every value is checked by
-        exact-type identity before it is read, iterated, hashed or compared.
+        **Total over any validated exact** :class:`ObservationEnvelope`: for one
+        of those, nothing here raises, and every value is checked by exact-type
+        identity before it is read, iterated, hashed or compared.
+
+        It is **not** total over arbitrary objects, and does not try to be:
+        ``_envelope_semantics(None)`` raises ``AttributeError``. That is the
+        correct shape rather than a gap. Both public callers gate on exact type
+        first - :meth:`ObservationEnvelope.__post_init__` because it is running
+        on an instance, and :func:`execute_observation` through
+        :func:`_envelope_shape_intact` - so adding a type refusal here would
+        create a *second* authority on what an envelope is, next to the one that
+        already exists. Two authorities on one question is the drift this
+        package has spent four rounds removing.
 
         Deliberately does **not** check ``envelope_digest``. The digest is a
         pure function of this document, so checking it here would be circular -
@@ -1839,9 +1850,16 @@ def _closed_planner():
     ) -> ObservationPlan:
         """Validate an observation and produce its immutable envelope.
 
-        **Total: returns a plan for every input and never raises**, including
-        for a ``clock`` that raises. Keyword-only, because an envelope has
-        fifteen inputs and a positional mistake among fifteen is a silent one.
+        **Total over every input for ordinary exceptions**: it returns a plan
+        rather than raising, including for a ``clock`` that raises ``Exception``.
+        Keyword-only, because an envelope has fifteen inputs and a positional
+        mistake among fifteen is a silent one.
+
+        The boundary is deliberate and it is exactly ``Exception``.
+        :func:`_read_clock` does not catch ``BaseException``, so a clock raising
+        ``KeyboardInterrupt`` or ``SystemExit`` propagates - and should, because
+        neither is a result to be reported. An earlier revision said "never
+        raises", which was one word too strong.
 
         The order is fixed and the first refusal wins:
 
@@ -2000,10 +2018,13 @@ def _build_result_class():
     class ObservationResult:
         """What one execution produced: a receipt, and possibly a value.
 
-        ``receipt`` is present for every execution **except** the three in which
+        ``receipt`` is present for every execution **except** the four in which
         no envelope could be trusted to be described: the object handed in was
         not exactly an envelope, one of its fields no longer held its accepted
-        type, or its digest did not re-derive. A receipt is a record about an
+        type, its semantics did not hold, or its digest did not re-derive. The
+        count was three until ``envelope-semantics-invalid`` joined them; the
+        prose did not follow, and this is that correction. A receipt is a record
+        about an
         envelope, so an envelope whose integrity failed gets no record rather
         than a record that might be wrong about it.
 
@@ -2429,12 +2450,14 @@ def _closed_executor():
         # the evidence tuple made the canonical adapter transmit one payload
         # while the receipt recorded the digest of another. Rebuilding severs
         # that: the adapter validates an object the caller has no reference to,
-        # so on the canonical path what is sent is what was recorded.
+        # so the adapter cannot be desynchronised from what was validated.
         #
-        # An INJECTED exchange may still ignore this envelope and send anything
-        # it likes - that is what injecting one means - so the receipt attests
-        # what this executor validated, never what a third-party callable
-        # transmitted. See the note on the receipt assembler below.
+        # What NEITHER of those establishes is transmission. An injected
+        # exchange may ignore this envelope entirely; and even on the canonical
+        # path, the adapter hands validated values to a caller-supplied backend
+        # whose actual sending this package cannot observe. The receipt attests
+        # what this executor validated - never what any callable transmitted, or
+        # which endpoint it contacted. See the note on the receipt assembler.
         validated = _Envelope(
             task_id=document["task_id"],
             authorizing_principal=document["authorizing_principal"],

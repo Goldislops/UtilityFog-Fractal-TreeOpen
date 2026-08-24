@@ -2935,7 +2935,15 @@ def test_a_resealed_envelope_with_an_over_limit_reservation_is_refused():
     assert ob._envelope_semantics(envelope)[0] == "reservation-field-out-of-range"
 
 
-def test_the_semantics_function_is_total_and_returns_only_closed_tokens():
+def test_the_semantics_function_is_total_over_envelopes_and_closed_in_tokens():
+    """Total over *validated exact envelopes*, which is the contract it has.
+
+    Renamed after the fifth round: the old name claimed totality without
+    qualification while ``_envelope_semantics(None)`` raises ``AttributeError``.
+    Both public callers gate on exact type first, so the qualified contract is
+    the right one - and adding a type refusal here would put a second authority
+    on what an envelope is beside ``_envelope_shape_intact``.
+    """
     envelope = fixed_envelope()
     refusal, snapshot = ob._envelope_semantics(envelope)
     assert refusal is None

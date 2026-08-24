@@ -1372,7 +1372,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected four times (2026-08-24 / 25).**
+**Corrected five times (2026-08-24 / 25).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1403,7 +1403,12 @@ fourth adversarial review then found that the executor and the canonical
 adapter both went on reading the envelope *after* validation - with
 caller-supplied callables running in between, which is how a hostile clock
 could shrink a bound mid-flight and a hostile exchange could make receipt
-construction raise. Section 17 records it.
+construction raise. Section 17 records it. A fifth round then found the same
+pattern one layer upstream - `request_structured_json` read the fields of a
+returned `StructuredCompletion` without re-checking them, so a backend that
+mutated one could run its own hooks inside OMI-V2 - and corrected it there;
+section 18 records that, together with a transmission claim that was withdrawn
+because no receipt can attest what a caller-supplied backend actually sends.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,
