@@ -3308,3 +3308,215 @@ def test_a_close_failure_report_leaks_no_path_or_exception_text(tmp_path,
     for leak in ("injected", "EIO", "Errno", "Traceback", "manifest.jsonl",
                  str(tmp_path), tmp_path.name, "\\\\", "/"):
         assert leak not in line, leak
+
+
+# ---------------------------------------------------------------------------
+# An idle pass must still refuse an unusable quarantine root
+# ---------------------------------------------------------------------------
+#
+# The no-action return deliberately skips `_quarantine`, which is what stops a
+# zero-action pass creating quarantine state. But `_quarantine` was also the
+# only place an EXISTING `.retention_quarantine` was validated, so skipping it
+# silently dropped that refusal: a root that is a plain file, a reparse point,
+# identity-less, or on another volume produced a clean `refused=none` while
+# being unusable for the very next action-bearing pass.
+#
+# The distinction the correction must draw is three-way, not two-way:
+#   absent                      -> valid no-op, and create nothing
+#   present and usable, same volume -> valid no-op
+#   present and unusable        -> QUARANTINE_ROOT_INVALID
+#
+# Reparse, device and identity cases use CONTROLLED METADATA rather than real
+# symlinks or mount points: those need privileges CI does not have, and the
+# suite already establishes this seam for the action-bearing path.
+
+
+def _fake_quarantine_root_metadata(monkeypatch, directory, *, replace=None,
+                                   raise_with=None):
+    """Fake `.retention_quarantine`'s metadata ONLY, leaving all else real."""
+    real_lstat = os.lstat
+    target = os.path.normcase(os.fspath(_quarantine_root(directory)))
+
+    def _lstat(path, *args, **kwargs):
+        if os.path.normcase(os.fspath(path)) == target:
+            if raise_with is not None:
+                raise raise_with
+            return replace(real_lstat(path, *args, **kwargs))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _lstat)
+
+
+def _idle_dir(directory, snapshots=4):
+    """A directory whose entries are all protected, so no action is planned."""
+    return _populate(directory, snapshots=snapshots)
+
+
+def test_an_idle_pass_refuses_a_quarantine_root_that_is_a_plain_file(tmp_path):
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).write_bytes(b"x")
+    report = _no_action_run(tmp_path)
+    assert report.planned_actions == ()
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+    assert report.moved == 0
+
+
+def test_an_idle_pass_refuses_a_reparse_point_quarantine_root(tmp_path,
+                                                              monkeypatch):
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).mkdir()
+    reparse = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    _fake_quarantine_root_metadata(
+        monkeypatch, tmp_path,
+        replace=lambda info: _Stat(mode=info.st_mode, size=info.st_size,
+                                   mtime_ns=info.st_mtime_ns, nlink=1,
+                                   dev=info.st_dev, ino=info.st_ino,
+                                   file_attributes=reparse))
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+
+
+def test_an_idle_pass_refuses_a_quarantine_root_on_another_device(tmp_path,
+                                                                  monkeypatch):
+    """A same-volume rename is the entire basis for the move being a
+    directory-entry operation, so a root that has become a mount point
+    elsewhere is unusable even when nothing is being moved today."""
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).mkdir()
+    _fake_quarantine_root_metadata(
+        monkeypatch, tmp_path,
+        replace=lambda info: _Stat(mode=info.st_mode, size=info.st_size,
+                                   mtime_ns=info.st_mtime_ns, nlink=1,
+                                   dev=info.st_dev + 1, ino=info.st_ino))
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+
+
+def test_an_idle_pass_refuses_a_quarantine_root_without_identity(tmp_path,
+                                                                 monkeypatch):
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).mkdir()
+    _fake_quarantine_root_metadata(
+        monkeypatch, tmp_path,
+        replace=lambda info: _Stat(mode=info.st_mode, size=info.st_size,
+                                   mtime_ns=info.st_mtime_ns, nlink=1,
+                                   dev=0, ino=0))
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+
+
+def test_an_idle_pass_refuses_an_unreadable_quarantine_root(tmp_path,
+                                                            monkeypatch):
+    """Only `FileNotFoundError` means absent. Any other metadata failure is a
+    root that exists and cannot be proved, which fails closed."""
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).mkdir()
+    _fake_quarantine_root_metadata(
+        monkeypatch, tmp_path,
+        raise_with=OSError(errno.EACCES, "injected metadata failure"))
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+
+
+def test_an_idle_pass_accepts_an_absent_quarantine_root_and_creates_nothing(
+        tmp_path):
+    made = _idle_dir(tmp_path)
+    before = sorted(path.name for path in tmp_path.iterdir())
+    report = _no_action_run(tmp_path)
+    assert report.refused is None
+    assert report.planned_actions == ()
+    assert not _quarantine_root(tmp_path).exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+    assert all(path.exists() for path in made)
+
+
+def test_an_idle_pass_accepts_a_valid_existing_quarantine_root(tmp_path):
+    _idle_dir(tmp_path)
+    root = _quarantine_root(tmp_path)
+    root.mkdir()
+    report = _no_action_run(tmp_path)
+    assert report.refused is None
+    assert report.planned_actions == ()
+    assert root.is_dir()
+    assert list(root.iterdir()) == []          # no pass directory, no manifest
+
+
+def test_an_invalid_data_root_still_outranks_the_quarantine_root_check(
+        tmp_path):
+    """The data root is proved first: a target that is not a directory can
+    have no meaningful quarantine root to judge."""
+    plain = tmp_path / "not_a_directory"
+    plain.write_bytes(b"x")
+    report = _no_action_run(plain)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+
+
+def test_timestamp_ambiguity_still_outranks_an_unusable_quarantine_root(
+        tmp_path):
+    _idle_dir(tmp_path, snapshots=3)
+    _write(tmp_path, _snap_name(900, 900), age_days=-5)      # future-dated
+    _quarantine_root(tmp_path).write_bytes(b"x")
+    report = _no_action_run(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.TIMESTAMP_AMBIGUOUS)
+
+
+def test_an_invalid_pass_identifier_still_outranks_an_unusable_root(tmp_path):
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).write_bytes(b"x")
+    report = _no_action_run(tmp_path, pass_id="../escape")
+    assert report.refused is retention.RetentionFailureReason.PASS_ID_INVALID
+
+
+def test_the_platform_gate_still_outranks_an_unusable_quarantine_root(
+        tmp_path):
+    _idle_dir(tmp_path)
+    _quarantine_root(tmp_path).write_bytes(b"x")
+    report = _no_action_run(tmp_path, mover=None)
+    if os.name == "nt":
+        assert report.refused is (
+            retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+    else:
+        assert report.refused is (
+            retention.RetentionFailureReason.QUARANTINE_PLATFORM_UNSUPPORTED)
+
+
+def test_an_action_bearing_pass_is_unchanged_by_the_idle_root_check(tmp_path):
+    _populate(tmp_path, snapshots=4)
+    report = retention.run_pass(
+        tmp_path, policy=_quarantine_policy(),
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id="p20260101T000000", admit=_Admit({0, 1, 2}),
+        mover=_injected_mover)
+    assert report.refused is None
+    assert report.planned_actions
+    assert report.moved == len(report.planned_actions)
+    root = _quarantine_root(tmp_path)
+    assert (root / "p20260101T000000" / retention.MANIFEST_NAME).is_file()
+
+
+def test_an_exactly_full_directory_with_a_valid_root_stays_exactly_full(
+        tmp_path):
+    count = 6
+    for index in range(count - 1):
+        _write(tmp_path, _snap_name(index, index), age_days=400 + index)
+    _quarantine_root(tmp_path).mkdir()          # the sixth entry
+    policy = _no_action_policy(entries=count)
+
+    first = _no_action_run(tmp_path, policy=policy)
+    assert first.refused is None
+    assert first.planned_actions == ()
+    assert first.processed == count
+    assert len(list(tmp_path.iterdir())) == count
+
+    second = _no_action_run(tmp_path, policy=policy,
+                            pass_id="p20260101T000001")
+    assert second.refused is None
+    assert second.processed == count
+    assert len(list(tmp_path.iterdir())) == count
