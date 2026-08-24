@@ -298,10 +298,12 @@ class RetentionPolicy:
         raise ValueError("retention_policy_invalid")
 
 
-#: The one production instance. Provisional: the horizons still require an
-#: aggregate-only dry-run on the target host, under separate authority, before
-#: any enforcement. The scanner limits reuse the audited discovery calibration
-#: so retention refuses exactly where discovery refuses.
+#: The one production instance. The horizons have been measured: a separately
+#: authorized aggregate-only `PLAN` reported the present age distribution, so
+#: they are no longer provisional pending that measurement. Enforcement is a
+#: different question -- `QUARANTINE` remains separately authorized and is not
+#: implied by the measurement. The scanner limits reuse the audited discovery
+#: calibration so retention refuses exactly where discovery refuses.
 PRODUCTION_RETENTION_POLICY = RetentionPolicy(
     snapshot=ClassRetentionPolicy(
         max_age_seconds=30 * 86_400,
