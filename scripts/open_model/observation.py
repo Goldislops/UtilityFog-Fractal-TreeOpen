@@ -147,6 +147,8 @@ from scripts.open_model.observation_receipt import (
 )
 from scripts.open_model.redaction import is_safe_token
 from scripts.open_model.structured_exchange import (
+    EXCHANGE_REFUSALS,
+    RESPONSE_FAILURES,
     StructuredExchange,
     _restore_identity,
     request_structured_json,
@@ -754,6 +756,365 @@ _canonical_schema = _restore_identity(
 )
 
 
+# -- the one semantic authority ----------------------------------------------
+#
+# Jack's second round found the planner and the envelope carrier disagreeing
+# about what an acceptable envelope is - the planner required strict UTF-8
+# evidence and the carrier did not - and found the executor treating digest
+# equality as a proof of validity it cannot be. All three now consult the same
+# functions, so there is one definition of "acceptable" and it cannot drift.
+
+
+class _EnvelopeRefused(ValueError):
+    """Raised by :class:`ObservationEnvelope` with the token that refused it.
+
+    A ``ValueError`` subclass, so every caller that already expected a
+    ``ValueError`` from a bad direct construction still gets one. The ``token``
+    attribute is what lets :func:`plan_observation` stay total: it catches this
+    and returns the token rather than letting an exception escape.
+
+    The token is always a member of the closed ``PLAN_REFUSALS`` set, so it is
+    safe to log, safe to compare, and carries nothing of the caller's input.
+    """
+
+    def __init__(self, token: str) -> None:
+        super().__init__(token)
+        self.token = token
+
+
+def _closed_evidence_state():
+    """Build :func:`_evidence_state`, every dependency bound in a cell."""
+    _EvidenceItem = EvidenceItem
+    _safe_token = is_safe_token
+    _hashlib = hashlib
+    _max_items = MAX_EVIDENCE_ITEMS
+    _max_item_bytes = MAX_EVIDENCE_ITEM_BYTES
+    _max_total_bytes = MAX_EVIDENCE_TOTAL_BYTES
+    _type = type
+    _str = str
+    _int = int
+    _bytes = bytes
+    _tuple = tuple
+    _set = set
+    _len = len
+    _UnicodeDecodeError = UnicodeDecodeError
+
+    def _evidence_state(items: Any, declared_max: Any):
+        """Validate an evidence tuple; return ``(refusal, total_bytes)``.
+
+        Total over any input. Every value is checked by ``type(x) is T``
+        identity before it is read, so no supplied ``__len__``, ``__eq__``,
+        ``__hash__``, ``__iter__`` or ``decode`` runs on caller data, and no
+        rejected value's text, size, position or type name reaches the token.
+
+        Each item's digest is **recomputed from the bytes actually present**,
+        and strict UTF-8 decodability is settled here - the check the envelope
+        carrier was missing, which let invalid bytes reach the adapter and raise
+        ``UnicodeDecodeError`` out of a function documented as total.
+        """
+        if _type(items) is not _tuple:
+            return "evidence-not-exact-sequence", 0
+        if not items:
+            return "evidence-empty", 0
+        if _len(items) > _max_items:
+            return "evidence-too-many-items", 0
+        bounded = declared_max if _type(declared_max) is _int else _max_total_bytes
+        seen = _set()
+        total = 0
+        for item in items:
+            if _type(item) is not _EvidenceItem:
+                return "evidence-item-not-exact-type", 0
+            if _type(item.evidence_id) is not _str or not _safe_token(
+                item.evidence_id
+            ):
+                return "evidence-id-not-safe-token", 0
+            if item.evidence_id in seen:
+                return "evidence-id-duplicated", 0
+            seen.add(item.evidence_id)
+            if _type(item.content) is not _bytes:
+                return "evidence-content-not-exact-bytes", 0
+            size = _len(item.content)
+            if size == 0:
+                return "evidence-item-empty", 0
+            if size > _max_item_bytes or size > bounded:
+                return "evidence-item-too-large", 0
+            if _type(item.digest) is not _str or (
+                _hashlib.sha256(item.content).hexdigest() != item.digest
+            ):
+                return "evidence-digest-not-recomputable", 0
+            total += size
+            if total > _max_total_bytes or total > bounded:
+                return "evidence-total-too-large", 0
+            try:
+                item.content.decode("utf-8")
+            except _UnicodeDecodeError:
+                return "evidence-not-utf8", 0
+        return None, total
+
+    return _evidence_state
+
+
+_evidence_state = _restore_identity(
+    _closed_evidence_state(), "_evidence_state", __name__
+)
+
+
+def _closed_reservation_state():
+    """Build :func:`_reservation_state`, every dependency bound in a cell."""
+    _ResourceReservation = ResourceReservation
+    _digest_of = _reservation_digest
+    _max_cpu = _MAX_CPU_CORES
+    _max_memory = _MAX_MEMORY_MIB
+    _max_gpu = _MAX_GPU_MEMORY_MIB
+    _type = type
+    _str = str
+    _int = int
+
+    def _reservation_state(reservation: Any) -> Optional[EnvelopeRefusal]:
+        """Validate a reservation carrier and its digest. Total over any input."""
+        if _type(reservation) is not _ResourceReservation:
+            return "reservation-not-exact-type"
+        if _type(reservation.cpu_cores) is not _int or (
+            _type(reservation.memory_mib) is not _int
+        ):
+            return "reservation-field-not-exact-int"
+        if reservation.gpu_memory_mib is not None and (
+            _type(reservation.gpu_memory_mib) is not _int
+        ):
+            return "reservation-field-not-exact-int"
+        if reservation.cpu_cores < 1 or reservation.cpu_cores > _max_cpu:
+            return "reservation-field-out-of-range"
+        if reservation.memory_mib < 1 or reservation.memory_mib > _max_memory:
+            return "reservation-field-out-of-range"
+        if reservation.gpu_memory_mib is not None and (
+            reservation.gpu_memory_mib < 1 or reservation.gpu_memory_mib > _max_gpu
+        ):
+            return "reservation-field-out-of-range"
+        if _type(reservation.digest) is not _str or _digest_of(
+            reservation.cpu_cores, reservation.memory_mib, reservation.gpu_memory_mib
+        ) != reservation.digest:
+            return "reservation-digest-not-recomputable"
+        return None
+
+    return _reservation_state
+
+
+_reservation_state = _restore_identity(
+    _closed_reservation_state(), "_reservation_state", __name__
+)
+
+
+def _closed_envelope_semantics():
+    """Build :func:`_envelope_semantics`, every dependency bound in a cell."""
+    _evidence_ok = _evidence_state
+    _reservation_ok = _reservation_state
+    _safe_token = is_safe_token
+    _uuid4_ok = is_canonical_uuid4
+    _endpoint_ok = validate_loopback_endpoint
+    _dialect_ok = is_supported_dialect
+    _canonical = _canonical_schema
+    _hashlib = hashlib
+    _json = json
+    _max_keys = MAX_REQUIRED_KEYS
+    _max_total_bytes = MAX_EVIDENCE_TOTAL_BYTES
+    _max_result = MAX_RESULT_BYTES
+    _max_context = MAX_CONTEXT_CEILING_TOKENS
+    _max_output = _MAX_OUTPUT_TOKENS
+    _max_duration = _MAX_DURATION_NS
+    _max_clock = MAX_CLOCK_NS
+    _max_schema = _MAX_SCHEMA_BYTES
+    _type = type
+    _str = str
+    _int = int
+    _bytes = bytes
+    _tuple = tuple
+    _len = len
+    _getattr = getattr
+    _Exception = Exception
+
+    def _envelope_semantics(envelope: Any) -> Optional[Any]:
+        """Every constraint an accepted envelope must satisfy, in one place.
+
+        Returns ``None`` when the envelope is acceptable, else one token from
+        the closed ``PLAN_REFUSALS`` set. Total over any envelope: nothing here
+        raises, and every value is checked by exact-type identity before it is
+        read, iterated, hashed or compared.
+
+        Deliberately does **not** check ``envelope_digest``. The digest is a
+        pure function of these fields, so checking it here would be circular -
+        and, because it is unkeyed, it is checked *in addition to* this function
+        rather than instead of it. That distinction is Jack's third second-round
+        finding: **digest equality is self-consistency, never validity.** Anyone
+        able to mutate a field can recompute the digest with this package's own
+        exported function, so an envelope that agrees with its digest has proved
+        only that nobody was careless.
+
+        Called by :meth:`ObservationEnvelope.__post_init__` (which raises the
+        token), by :func:`plan_observation` (through construction), and by
+        :func:`execute_observation` (which refuses with one fixed token). One
+        definition, three consumers, no drift.
+        """
+        if not _uuid4_ok(envelope.task_id):
+            return "task-id-not-canonical-uuid4"
+        if not _safe_token(envelope.authorizing_principal):
+            return "principal-not-safe-token"
+        if not _safe_token(envelope.worker):
+            return "worker-not-safe-token"
+        # OMI-V2 owns the dialect decision, and its token travels through.
+        if not _dialect_ok(envelope.dialect):
+            return "dialect-unsupported"
+        # -- declared limits, before anything is measured against them --------
+        for name, ceiling in (
+            ("context_ceiling_tokens", _max_context),
+            ("max_evidence_bytes", _max_total_bytes),
+            ("max_result_bytes", _max_result),
+            ("max_output_tokens", _max_output),
+        ):
+            number = _getattr(envelope, name)
+            if _type(number) is not _int:
+                return "limit-not-exact-int"
+            if number < 1 or number > ceiling:
+                return "limit-out-of-range"
+        # -- evidence ----------------------------------------------------------
+        refusal, _total = _evidence_ok(envelope.evidence, envelope.max_evidence_bytes)
+        if refusal is not None:
+            return refusal
+        # -- the stored schema -------------------------------------------------
+        if _type(envelope.schema_bytes) is not _bytes:
+            return "schema-bytes-not-exact-bytes"
+        if not envelope.schema_bytes or _len(envelope.schema_bytes) > _max_schema:
+            return "schema-bytes-not-canonical"
+        try:
+            parsed = _json.loads(envelope.schema_bytes.decode("ascii"))
+        except _Exception:
+            # Fixed token. Neither the decoder's message, nor a byte value, nor
+            # any fragment of the stored bytes reaches it.
+            return "schema-bytes-not-canonical"
+        schema_refusal, canonical = _canonical(envelope.dialect, parsed)
+        if schema_refusal is not None:
+            return schema_refusal
+        if canonical != envelope.schema_bytes:
+            return "schema-bytes-not-canonical"
+        if _type(envelope.schema_digest) is not _str or (
+            _hashlib.sha256(envelope.schema_bytes).hexdigest() != envelope.schema_digest
+        ):
+            return "schema-digest-not-recomputable"
+        # -- required keys -----------------------------------------------------
+        if _type(envelope.required_keys) is not _tuple:
+            return "required-keys-not-exact-sequence"
+        if _len(envelope.required_keys) > _max_keys:
+            return "required-keys-too-many"
+        for key in envelope.required_keys:
+            if not _safe_token(key):
+                return "required-key-not-safe-token"
+        # -- the declared endpoint ---------------------------------------------
+        endpoint_refusal = _endpoint_ok(envelope.endpoint)
+        if endpoint_refusal is not None:
+            return endpoint_refusal
+        # -- the reservation ---------------------------------------------------
+        reservation_refusal = _reservation_ok(envelope.reservation)
+        if reservation_refusal is not None:
+            return reservation_refusal
+        # -- the clock figures -------------------------------------------------
+        if _type(envelope.issued_ns) is not _int or envelope.issued_ns < 0:
+            return "clock-reading-not-exact-int"
+        if envelope.issued_ns > _max_clock:
+            return "clock-reading-too-large"
+        if _type(envelope.deadline_ns) is not _int:
+            return "clock-reading-not-exact-int"
+        if envelope.deadline_ns > _max_clock:
+            return "deadline-beyond-clock-ceiling"
+        duration = envelope.deadline_ns - envelope.issued_ns
+        if duration < 1 or duration > _max_duration:
+            return "duration-out-of-range"
+        return None
+
+    return _envelope_semantics
+
+
+_envelope_semantics = _restore_identity(
+    _closed_envelope_semantics(), "_envelope_semantics", __name__
+)
+
+
+def _closed_exchange_check():
+    """Build :func:`_exchange_fields_intact`, every dependency in a cell."""
+    _exchange_type = StructuredExchange
+    _refusals = EXCHANGE_REFUSALS
+    _failures = RESPONSE_FAILURES
+    _dialect_ok = is_supported_dialect
+    _proxy = MappingProxyType
+    _type = type
+    _str = str
+    _bool = bool
+    _int = int
+    _tuple = tuple
+
+    def _exchange_fields_intact(completed: Any) -> bool:
+        """True only if OMI-V2's carrier still holds its accepted field types.
+
+        Freezing does not stop ``object.__setattr__``, and the previous revision
+        checked only the carrier's outer type before reading ``ok`` in a boolean
+        context, copying ``value``, and copying ``dialect`` into a receipt. Jack
+        demonstrated all three: a ``__bool__`` hook ran, a substituted mapping's
+        ``keys``/``__getitem__`` ran, and a secret-shaped ``dialect`` reached
+        receipt construction and raised ``ValueError`` out of a function
+        documented as total.
+
+        OMI-V2 remains the authority on what these values may be: the two
+        vocabularies and the dialect predicate are imported, never restated.
+
+        **One residual, stated rather than hidden.** When ``ok`` is true the
+        value must be exactly a ``MappingProxyType``, which closes every
+        substitution of a different type - but a proxy can wrap an arbitrary
+        foreign mapping, and OMI-V2's own carrier records that there is no
+        hook-free way to inspect what a proxy wraps. Walking such a proxy to
+        measure the result therefore can still run its hooks. What that cannot
+        do is put anything in the receipt: the receipt receives a byte count and
+        nothing else from the value, and the walk is bounded by a catch that
+        turns any failure into one fixed refusal.
+        """
+        if _type(completed) is not _exchange_type:
+            return False
+        if _type(completed.ok) is not _bool:
+            return False
+        if _type(completed.response_format_sent) is not _bool:
+            return False
+        if _type(completed.schema_conformance) is not _str or (
+            completed.schema_conformance != "unverified"
+        ):
+            return False
+        if completed.dialect is not None and not _dialect_ok(completed.dialect):
+            return False
+        if completed.request_refusal is not None and (
+            _type(completed.request_refusal) is not _str
+            or completed.request_refusal not in _refusals
+        ):
+            return False
+        if completed.response_failure is not None and (
+            _type(completed.response_failure) is not _str
+            or completed.response_failure not in _failures
+        ):
+            return False
+        if _type(completed.missing_key_indices) is not _tuple:
+            return False
+        previous = -1
+        for index in completed.missing_key_indices:
+            if _type(index) is not _int or index <= previous:
+                return False
+            previous = index
+        if completed.ok:
+            return _type(completed.value) is _proxy
+        return completed.value is None
+
+    return _exchange_fields_intact
+
+
+_exchange_fields_intact = _restore_identity(
+    _closed_exchange_check(), "_exchange_fields_intact", __name__
+)
+
+
 # -- the envelope ------------------------------------------------------------
 
 
@@ -836,42 +1197,13 @@ _envelope_digest = _restore_identity(
 
 def _build_envelope_class():
     """Build :class:`ObservationEnvelope` with its authorities in cells."""
-    _evidence_type = EvidenceItem
-    _reservation_type = ResourceReservation
-    _safe_token = is_safe_token
-    _uuid4_ok = is_canonical_uuid4
-    _digest_ok = is_sha256_digest
-    _endpoint_ok = validate_loopback_endpoint
-    _dialect_ok = is_supported_dialect
-    _canonical = _canonical_schema
+    _semantics = _envelope_semantics
     _digest_of = _envelope_digest
-    _reservation_digest_of = _reservation_digest
-    _hashlib = hashlib
-    _json = json
-    _max_items = MAX_EVIDENCE_ITEMS
-    _max_keys = MAX_REQUIRED_KEYS
-    _max_item_bytes = MAX_EVIDENCE_ITEM_BYTES
-    _max_total_bytes = MAX_EVIDENCE_TOTAL_BYTES
-    _max_result = MAX_RESULT_BYTES
-    _max_context = MAX_CONTEXT_CEILING_TOKENS
-    _max_output = _MAX_OUTPUT_TOKENS
-    _max_duration = _MAX_DURATION_NS
-    _max_clock = MAX_CLOCK_NS
-    _max_schema = _MAX_SCHEMA_BYTES
-    _max_cpu = _MAX_CPU_CORES
-    _max_memory = _MAX_MEMORY_MIB
-    _max_gpu = _MAX_GPU_MEMORY_MIB
-    _type = type
-    _str = str
-    _int = int
-    _bytes = bytes
+    _EvidenceItem = EvidenceItem
+    _ResourceReservation = ResourceReservation
+    _Refused = _EnvelopeRefused
     _tuple = tuple
-    _set = set
-    _len = len
-    _getattr = getattr
     _object = object
-    _ValueError = ValueError
-    _Exception = Exception
 
     @dataclass(frozen=True)
     class ObservationEnvelope:
@@ -931,143 +1263,49 @@ def _build_envelope_class():
         envelope_digest: str = field(init=False, default="")
 
         def __post_init__(self) -> None:
-            if not _uuid4_ok(self.task_id):
-                raise _ValueError("task_id must be a canonical lowercase UUIDv4")
-            if not _safe_token(self.authorizing_principal):
-                raise _ValueError("authorizing_principal must be a safe token")
-            if not _safe_token(self.worker):
-                raise _ValueError("worker must be a safe token")
-            # -- the dialect, decided by OMI-V2 and nobody else ---------------
-            if not _dialect_ok(self.dialect):
-                raise _ValueError(
-                    "dialect must be a runtime dialect OMI-V2 verified"
-                )
-            # -- evidence: shape, bounds, distinctness, and live digests ------
-            if _type(self.evidence) is not _tuple:
-                raise _ValueError("evidence must be exactly a tuple")
-            if not self.evidence or _len(self.evidence) > _max_items:
-                raise _ValueError("evidence is empty or over the item bound")
-            seen = _set()
-            total = 0
-            for item in self.evidence:
-                if _type(item) is not _evidence_type:
-                    raise _ValueError("every evidence entry must be an EvidenceItem")
-                if _type(item.evidence_id) is not _str or not _safe_token(
-                    item.evidence_id
-                ):
-                    raise _ValueError("every evidence id must be a safe token")
-                if item.evidence_id in seen:
-                    raise _ValueError("evidence ids must be distinct")
-                seen.add(item.evidence_id)
-                if _type(item.content) is not _bytes:
-                    raise _ValueError("evidence content must be exactly bytes")
-                size = _len(item.content)
-                if size == 0:
-                    raise _ValueError("evidence content must not be empty")
-                if size > _max_item_bytes:
-                    raise _ValueError("an evidence item exceeds the per-item bound")
-                if _type(item.digest) is not _str or (
-                    _hashlib.sha256(item.content).hexdigest() != item.digest
-                ):
-                    raise _ValueError(
-                        "an evidence digest does not describe its own content"
-                    )
-                total += size
-            if total > _max_total_bytes:
-                raise _ValueError("evidence exceeds the total byte bound")
-            # -- the schema, decided by OMI-V2 and re-rendered here ------------
-            if _type(self.schema_bytes) is not _bytes:
-                raise _ValueError("schema_bytes must be exactly built-in bytes")
-            if not self.schema_bytes or _len(self.schema_bytes) > _max_schema:
-                raise _ValueError("schema_bytes is empty or over the bound")
-            try:
-                parsed = _json.loads(self.schema_bytes.decode("ascii"))
-            except _Exception:
-                # Fixed message. Neither the decoder's text, nor a byte value,
-                # nor any fragment of the caller's bytes reaches this carrier's
-                # exception - the same discipline the refusal tokens follow.
-                raise _ValueError(
-                    "schema_bytes must be canonical ASCII JSON"
-                ) from None
-            schema_refusal, canonical = _canonical(self.dialect, parsed)
-            if schema_refusal is not None or canonical is None:
-                raise _ValueError("schema_bytes must carry a schema OMI-V2 accepts")
-            if canonical != self.schema_bytes:
-                raise _ValueError(
-                    "schema_bytes must be the canonical rendering of its snapshot"
-                )
-            if _type(self.schema_digest) is not _str or (
-                _hashlib.sha256(self.schema_bytes).hexdigest() != self.schema_digest
-            ):
-                raise _ValueError("schema_digest must hash exactly the schema bytes")
-            # -- required keys -------------------------------------------------
-            if _type(self.required_keys) is not _tuple:
-                raise _ValueError("required_keys must be exactly a tuple")
-            if _len(self.required_keys) > _max_keys:
-                raise _ValueError("required_keys exceeds the bound")
-            for key in self.required_keys:
-                if not _safe_token(key):
-                    raise _ValueError("every required key must be a safe token")
-            # -- endpoint ------------------------------------------------------
-            if _endpoint_ok(self.endpoint) is not None:
-                raise _ValueError(
-                    "endpoint must be a declared numeric loopback http /v1 endpoint"
-                )
-            # -- the reservation, with its digest re-derived --------------------
-            if _type(self.reservation) is not _reservation_type:
-                raise _ValueError("reservation must be exactly a ResourceReservation")
-            reservation = self.reservation
-            if _type(reservation.cpu_cores) is not _int or _type(
-                reservation.memory_mib
-            ) is not _int:
-                raise _ValueError("reservation figures must be exact ints")
-            if reservation.gpu_memory_mib is not None and (
-                _type(reservation.gpu_memory_mib) is not _int
-            ):
-                raise _ValueError("gpu_memory_mib must be an exact int or None")
-            if reservation.cpu_cores < 1 or reservation.cpu_cores > _max_cpu:
-                raise _ValueError("cpu_cores is out of range")
-            if reservation.memory_mib < 1 or reservation.memory_mib > _max_memory:
-                raise _ValueError("memory_mib is out of range")
-            if reservation.gpu_memory_mib is not None and (
-                reservation.gpu_memory_mib < 1
-                or reservation.gpu_memory_mib > _max_gpu
-            ):
-                raise _ValueError("gpu_memory_mib is out of range")
-            if _type(reservation.digest) is not _str or _reservation_digest_of(
-                reservation.cpu_cores,
-                reservation.memory_mib,
-                reservation.gpu_memory_mib,
-            ) != reservation.digest:
-                raise _ValueError(
-                    "the reservation digest does not describe its own fields"
-                )
-            # -- declared limits -----------------------------------------------
-            for name, ceiling in (
-                ("context_ceiling_tokens", _max_context),
-                ("max_evidence_bytes", _max_total_bytes),
-                ("max_result_bytes", _max_result),
-                ("max_output_tokens", _max_output),
-            ):
-                number = _getattr(self, name)
-                if _type(number) is not _int:
-                    raise _ValueError("every declared limit must be an exact int")
-                if number < 1 or number > ceiling:
-                    raise _ValueError("a declared limit is out of range")
-            if total > self.max_evidence_bytes:
-                raise _ValueError("evidence exceeds the declared evidence bound")
-            # -- the clock figures ---------------------------------------------
-            if _type(self.issued_ns) is not _int or self.issued_ns < 0:
-                raise _ValueError("issued_ns must be an exact non-negative int")
-            if self.issued_ns > _max_clock:
-                raise _ValueError("issued_ns exceeds the clock ceiling")
-            if _type(self.deadline_ns) is not _int:
-                raise _ValueError("deadline_ns must be an exact int")
-            if self.deadline_ns > _max_clock:
-                raise _ValueError("deadline_ns exceeds the clock ceiling")
-            duration = self.deadline_ns - self.issued_ns
-            if duration < 1 or duration > _max_duration:
-                raise _ValueError("the derived duration is out of range")
+            """Validate through the one semantic authority, then detach.
+
+            Every constraint lives in :func:`_envelope_semantics`, which the
+            planner and the executor also consult - so "what the planner
+            accepts" and "what direct construction accepts" are the same set by
+            construction rather than by two authors agreeing. Jack's first round
+            found them disagreeing about the dialect and the schema; his second
+            found them still disagreeing about strict UTF-8 evidence. They
+            cannot disagree now: there is one function.
+
+            The refusal is raised as :class:`_EnvelopeRefused`, a ``ValueError``
+            carrying the closed token, so :func:`plan_observation` stays total by
+            translating it back into a plan refusal.
+
+            **Detachment.** After validation the accepted primitive values are
+            copied into fresh package-owned carriers. A caller who keeps a
+            reference to the ``EvidenceItem`` or ``ResourceReservation`` they
+            passed in holds an object this envelope no longer contains, so
+            mutating it afterwards reaches nothing here. The values copied
+            across are exact ``str``, ``bytes`` and ``int`` - all immutable -
+            and each fresh carrier recomputes its own digest from them, so
+            detaching cannot itself introduce a stale one.
+            """
+            refusal = _semantics(self)
+            if refusal is not None:
+                raise _Refused(refusal)
+            _object.__setattr__(
+                self,
+                "evidence",
+                _tuple(
+                    _EvidenceItem(evidence_id=item.evidence_id, content=item.content)
+                    for item in self.evidence
+                ),
+            )
+            _object.__setattr__(
+                self,
+                "reservation",
+                _ResourceReservation(
+                    cpu_cores=self.reservation.cpu_cores,
+                    memory_mib=self.reservation.memory_mib,
+                    gpu_memory_mib=self.reservation.gpu_memory_mib,
+                ),
+            )
             _object.__setattr__(self, "envelope_digest", _digest_of(self))
 
         @property
@@ -1273,8 +1511,9 @@ def _closed_planner():
     """Build :func:`plan_observation`, every dependency bound in a cell."""
     _Plan = ObservationPlan
     _Envelope = ObservationEnvelope
-    _evidence_type = EvidenceItem
-    _reservation_type = ResourceReservation
+    _Refused = _EnvelopeRefused
+    _evidence_ok = _evidence_state
+    _reservation_ok = _reservation_state
     _safe_token = is_safe_token
     _uuid4_ok = is_canonical_uuid4
     _endpoint_ok = validate_loopback_endpoint
@@ -1410,29 +1649,10 @@ def _closed_planner():
         if duration_ns < 1 or duration_ns > _max_duration:
             return _Plan(ok=False, refusal="duration-out-of-range")
 
-        # -- the reservation, revalidated field by field ----------------------
-        if _type(reservation) is not _reservation_type:
-            return _Plan(ok=False, refusal="reservation-not-exact-type")
-        if _type(reservation.cpu_cores) is not _int or (
-            _type(reservation.memory_mib) is not _int
-        ):
-            return _Plan(ok=False, refusal="reservation-field-not-exact-int")
-        if reservation.gpu_memory_mib is not None and (
-            _type(reservation.gpu_memory_mib) is not _int
-        ):
-            return _Plan(ok=False, refusal="reservation-field-not-exact-int")
-        if reservation.cpu_cores < 1 or reservation.cpu_cores > _max_cpu:
-            return _Plan(ok=False, refusal="reservation-field-out-of-range")
-        if reservation.memory_mib < 1 or reservation.memory_mib > _max_memory:
-            return _Plan(ok=False, refusal="reservation-field-out-of-range")
-        if reservation.gpu_memory_mib is not None and (
-            reservation.gpu_memory_mib < 1 or reservation.gpu_memory_mib > _max_gpu
-        ):
-            return _Plan(ok=False, refusal="reservation-field-out-of-range")
-        if _type(reservation.digest) is not _str or _reservation_digest_of(
-            reservation.cpu_cores, reservation.memory_mib, reservation.gpu_memory_mib
-        ) != reservation.digest:
-            return _Plan(ok=False, refusal="reservation-digest-not-recomputable")
+        # -- the reservation, through the one shared checker -------------------
+        reservation_refusal = _reservation_ok(reservation)
+        if reservation_refusal is not None:
+            return _Plan(ok=False, refusal=reservation_refusal)
 
         endpoint_refusal = _endpoint_ok(endpoint)
         if endpoint_refusal is not None:
@@ -1449,41 +1669,12 @@ def _closed_planner():
             return _Plan(ok=False, refusal="evidence-empty")
         if _len(items) > _max_items:
             return _Plan(ok=False, refusal="evidence-too-many-items")
-        seen = _set()
-        total = 0
-        for item in items:
-            if _type(item) is not _evidence_type:
-                return _Plan(ok=False, refusal="evidence-item-not-exact-type")
-            # Exact type is not unaltered. Every field is revalidated here, and
-            # the digest is recomputed from the bytes actually present.
-            if _type(item.evidence_id) is not _str or not _safe_token(
-                item.evidence_id
-            ):
-                return _Plan(ok=False, refusal="evidence-id-not-safe-token")
-            if item.evidence_id in seen:
-                return _Plan(ok=False, refusal="evidence-id-duplicated")
-            seen.add(item.evidence_id)
-            if _type(item.content) is not _bytes:
-                return _Plan(ok=False, refusal="evidence-content-not-exact-bytes")
-            size = _len(item.content)
-            if size == 0:
-                return _Plan(ok=False, refusal="evidence-item-empty")
-            if size > _max_item_bytes or size > max_evidence_bytes:
-                return _Plan(ok=False, refusal="evidence-item-too-large")
-            if _type(item.digest) is not _str or (
-                _hashlib.sha256(item.content).hexdigest() != item.digest
-            ):
-                return _Plan(ok=False, refusal="evidence-digest-not-recomputable")
-            total += size
-            if total > _max_total_bytes or total > max_evidence_bytes:
-                return _Plan(ok=False, refusal="evidence-total-too-large")
-            # Decodability is settled here so a refusal is possible while one
-            # still is. The bytes are immutable, so decoding them again at
-            # exchange time cannot produce anything else.
-            try:
-                item.content.decode("utf-8")
-            except _UnicodeDecodeError:
-                return _Plan(ok=False, refusal="evidence-not-utf8")
+        # One traversal, through the same checker the envelope carrier and the
+        # executor use - so strict UTF-8, the recomputed digests, distinctness
+        # and every bound mean exactly one thing across all three.
+        evidence_refusal, _total = _evidence_ok(items, max_evidence_bytes)
+        if evidence_refusal is not None:
+            return _Plan(ok=False, refusal=evidence_refusal)
 
         if _type(required_keys) is not _tuple and _type(required_keys) is not _list:
             return _Plan(ok=False, refusal="required-keys-not-exact-sequence")
@@ -1505,9 +1696,11 @@ def _closed_planner():
         if issued_ns + duration_ns > _max_clock:
             return _Plan(ok=False, refusal="deadline-beyond-clock-ceiling")
 
-        return _Plan(
-            ok=True,
-            envelope=_Envelope(
+        # The carrier is the authority, so its refusal is translated rather
+        # than pre-empted. This is what keeps the planner total while leaving
+        # exactly one definition of an acceptable envelope.
+        try:
+            envelope = _Envelope(
                 task_id=task_id,
                 authorizing_principal=authorizing_principal,
                 worker=worker,
@@ -1524,8 +1717,10 @@ def _closed_planner():
                 max_output_tokens=max_output_tokens,
                 issued_ns=issued_ns,
                 deadline_ns=issued_ns + duration_ns,
-            ),
-        )
+            )
+        except _Refused as refused:
+            return _Plan(ok=False, refusal=refused.token)
+        return _Plan(ok=True, envelope=envelope)
 
     return plan_observation
 
@@ -1626,6 +1821,8 @@ def _closed_executor():
     """Build :func:`execute_observation`, every dependency bound in a cell."""
     _Envelope = ObservationEnvelope
     _Decision = ReservationDecision
+    _semantics = _envelope_semantics
+    _exchange_intact = _exchange_fields_intact
     _Receipt = ObservationReceipt
     _Result = ObservationResult
     _exchange_type = StructuredExchange
@@ -1642,9 +1839,7 @@ def _closed_executor():
     _tuple = tuple
     _callable = callable
     _RuntimeError = RuntimeError
-    _ValueError = ValueError
-    _TypeError = TypeError
-    _RecursionError = RecursionError
+    _Exception = Exception
 
     #: Neutral clock codes mapped into the execution vocabulary. ``negative``
     #: and ``too-large`` share one token because both say the same operative
@@ -1805,6 +2000,15 @@ def _closed_executor():
                     else "envelope-field-not-exact-type"
                 ),
             )
+        # Semantics BEFORE the digest, and in addition to it. The digest is
+        # unkeyed - a pure function of these fields, computed by a function this
+        # package exports - so an envelope agreeing with its own digest has
+        # proved only that nobody was careless, never that it is valid. Jack's
+        # second round resealed envelopes carrying an unsupported dialect, a DNS
+        # endpoint, an over-limit reservation and non-UTF-8 evidence, and the
+        # previous revision ran all of them.
+        if _semantics(envelope) is not None:
+            return _Result(ok=False, refusal="envelope-semantics-invalid")
         if _digest_of(envelope) != envelope.envelope_digest:
             return _Result(ok=False, refusal="envelope-digest-mismatch")
         # The reservation's own digest must describe its own fields before it
@@ -1979,6 +2183,19 @@ def _closed_executor():
                 elapsed_ns=elapsed,
                 attestation=attestation,
             )
+        # ...and every field of it, before any of them is read. OMI-V2's carrier
+        # is frozen, not sealed; a tampered `ok` ran a `__bool__` hook here, and
+        # a tampered `dialect` reached receipt construction and raised.
+        if not _exchange_intact(completed):
+            return _refuse(
+                envelope,
+                "exchange-result-field-invalid",
+                deadline_result="within-deadline",
+                reservation_result="satisfied",
+                invocations=1,
+                elapsed_ns=elapsed,
+                attestation=attestation,
+            )
 
         if not completed.ok:
             refused = completed.request_refusal is not None
@@ -2016,10 +2233,15 @@ def _closed_executor():
                 ensure_ascii=True,
                 allow_nan=False,
             ).encode("ascii")
-        except (_ValueError, _TypeError, _RecursionError):
-            # Unreachable for a value OMI-V2's validator accepted, which is
-            # always exact built-in JSON types. A refusal rather than an assert,
-            # so behaviour is identical under -O and -OO.
+        except _Exception:
+            # Two cases land here. For a value OMI-V2's validator produced this
+            # is unreachable - it is always exact built-in JSON types. For a
+            # `value` a caller substituted with a proxy over a foreign mapping,
+            # the walk above may run that mapping's hooks and they may raise
+            # anything; the catch is broad so the outcome is still one fixed
+            # refusal rather than an exception escaping a total function.
+            # Nothing from the walk reaches the receipt, which takes a byte
+            # count and nothing else.
             return _refuse(
                 envelope,
                 "result-not-serializable",

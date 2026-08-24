@@ -30,6 +30,7 @@ import pickle
 import socket
 import textwrap
 import urllib.request
+from types import MappingProxyType
 
 import pytest
 
@@ -677,28 +678,72 @@ def test_an_object_that_is_not_an_envelope_yields_no_receipt(value):
     assert result.exchange is None
 
 
-MUTATIONS = [
+#: Mutations that leave the envelope SEMANTICALLY VALID. Nothing is wrong with
+#: the resulting envelope except that it is not the one that was planned, so the
+#: unkeyed digest is the only thing that can notice - which is exactly what a
+#: digest is for, and exactly the limit of what it can do.
+DIGEST_ONLY_MUTATIONS = [
     ("task_id", "11111111-1111-4111-8111-111111111111"),
     ("authorizing_principal", "someone-else"),
     ("worker", "someone-else"),
-    ("dialect", "vllm"),
     ("endpoint", "http://127.0.0.1:1/v1"),
-    ("max_result_bytes", 4),
-    ("max_evidence_bytes", 4),
-    ("max_output_tokens", 4),
-    ("context_ceiling_tokens", 4),
-    ("issued_ns", 0),
+    ("dialect", "vllm"),
+    ("max_result_bytes", 4096),
+    ("max_output_tokens", 512),
+    ("context_ceiling_tokens", 4096),
+    ("issued_ns", 999),
     ("deadline_ns", 99999999),
+    ("required_keys", ()),
     ("required_keys", ("other",)),
+]
+
+#: Mutations that make the envelope INVALID. The semantics gate catches these
+#: first, and - as the resealing controls below show - would still catch them
+#: with a perfectly recomputed digest.
+SEMANTIC_MUTATIONS = [
+    ("task_id", "not-a-uuid"),
+    ("authorizing_principal", "sk-OMIV3ASECRET123456789"),
+    ("worker", "has space"),
+    ("dialect", "not-a-runtime"),
+    ("endpoint", "http://localhost:11434/v1"),
+    ("endpoint", "http://evil.example.com:11434/v1"),
+    ("max_evidence_bytes", 4),
+    ("max_result_bytes", 0),
+    ("max_result_bytes", 10 ** 9),
+    ("context_ceiling_tokens", 10 ** 9),
     ("schema_digest", "0" * 64),
-    ("envelope_digest", "0" * 64),
+    ("schema_bytes", b"not json at all"),
+    ("required_keys", ("has space",)),
+    ("issued_ns", -1),
+    ("deadline_ns", 1000),
 ]
 
 
-@pytest.mark.parametrize(("field", "value"), MUTATIONS)
-def test_a_mutation_between_planning_and_execution_is_refused(field, value):
+@pytest.mark.parametrize(("field", "value"), DIGEST_ONLY_MUTATIONS)
+def test_a_semantically_valid_mutation_is_caught_by_the_digest(field, value):
     envelope = build_envelope()
     object.__setattr__(envelope, field, value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100])
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-digest-mismatch"
+    assert result.receipt is None
+
+
+@pytest.mark.parametrize(("field", "value"), SEMANTIC_MUTATIONS)
+def test_a_semantically_invalid_mutation_is_caught_before_the_digest(field, value):
+    envelope = build_envelope()
+    object.__setattr__(envelope, field, value)
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100])
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-semantics-invalid"
+    assert result.receipt is None
+
+
+def test_a_tampered_envelope_digest_field_is_refused():
+    envelope = build_envelope()
+    object.__setattr__(envelope, "envelope_digest", "0" * 64)
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100])
     assert exchange.calls == 0
@@ -728,7 +773,7 @@ def test_substituting_evidence_bytes_of_the_same_length_is_still_caught():
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100])
     assert exchange.calls == 0
-    assert result.refusal == "envelope-digest-mismatch"
+    assert result.refusal == "envelope-semantics-invalid"
     assert result.receipt is None
 
 
@@ -743,7 +788,7 @@ def test_substituting_the_schema_bytes_is_caught():
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100])
     assert exchange.calls == 0
-    assert result.refusal == "envelope-digest-mismatch"
+    assert result.refusal == "envelope-semantics-invalid"
 
 
 def test_tampering_with_a_reservations_fields_is_caught():
@@ -752,7 +797,7 @@ def test_tampering_with_a_reservations_fields_is_caught():
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100], decision=satisfied_for(envelope))
     assert exchange.calls == 0
-    assert result.refusal == "envelope-digest-mismatch"
+    assert result.refusal == "envelope-semantics-invalid"
 
 
 def test_an_envelope_field_that_no_longer_renders_is_refused_before_it_is_read():
@@ -1743,7 +1788,7 @@ def test_the_decision_is_bound_to_the_recomputed_reservation_digest():
     exchange = ok_exchange()
     result = run(envelope, exchange, [1000, 1100], decision=honest)
     assert exchange.calls == 0
-    assert result.refusal == "envelope-digest-mismatch"
+    assert result.refusal == "envelope-semantics-invalid"
     assert result.receipt is None
 
 
@@ -1870,6 +1915,7 @@ def test_the_undescribable_refusals_are_exactly_the_receiptless_ones():
     assert rc.UNDESCRIBABLE_REFUSALS == {
         "envelope-not-exact-type",
         "envelope-field-not-exact-type",
+        "envelope-semantics-invalid",
         "envelope-digest-mismatch",
     }
     envelope = build_envelope()
@@ -1888,3 +1934,421 @@ def test_the_undescribable_refusals_are_exactly_the_receiptless_ones():
             )
         assert result.refusal == token
         assert result.receipt is None
+
+
+# ============================================================================
+# Jack's second independent round - execution-path regressions
+# ============================================================================
+
+
+class HookedOk:
+    """Something put where a ``StructuredExchange.ok`` bool belongs."""
+
+    fired: list = []
+
+    def __bool__(self):  # pragma: no cover - must never be reached
+        HookedOk.fired.append("ok.__bool__")
+        return True
+
+
+class HostileMapping:
+    """A foreign mapping, wrapped in a proxy and substituted for a value."""
+
+    fired: list = []
+
+    def keys(self):
+        HostileMapping.fired.append("keys")
+        return ["summary"]
+
+    def __getitem__(self, key):
+        HostileMapping.fired.append("getitem")
+        return "sk-OMIV3ASECRET123456789"
+
+    def __iter__(self):
+        HostileMapping.fired.append("iter")
+        return iter(["summary"])
+
+    def __len__(self):
+        HostileMapping.fired.append("len")
+        return 1
+
+
+def ok_exchange_carrier(value=None, dialect="ollama"):
+    return StructuredExchange(
+        ok=True,
+        value=dict(value if value is not None else {"summary": "x"}),
+        dialect=dialect,
+        response_format_sent=True,
+    )
+
+
+# -- finding 3, executor half: resealed envelopes are refused ----------------
+
+
+def reseal(envelope):
+    object.__setattr__(envelope, "envelope_digest", ob._envelope_digest(envelope))
+    return envelope
+
+
+RESEALED_EXECUTION_TAMPERS = [
+    ("authorizing_principal", "sk-OMIV3ASECRET123456789"),
+    ("worker", "sk-OMIV3ASECRET123456789"),
+    ("task_id", "not-a-uuid"),
+    ("dialect", "not-a-runtime"),
+    ("endpoint", "http://evil.example.com:11434/v1"),
+    ("max_result_bytes", 10 ** 9),
+    ("context_ceiling_tokens", 10 ** 9),
+    ("max_evidence_bytes", 1),
+    ("schema_bytes", b"not json at all"),
+    ("required_keys", ("has space",)),
+]
+
+
+@pytest.mark.parametrize(("field", "value"), RESEALED_EXECUTION_TAMPERS)
+def test_a_resealed_envelope_never_reaches_the_exchange(field, value):
+    """The digest is unkeyed, so agreeing with it proves nothing about validity.
+
+    Each of these executed on the previous head - several of them all the way
+    to a successful observation, and several others as far as receipt
+    construction, which then raised ``ValueError`` out of a function documented
+    as total.
+    """
+    envelope = build_envelope()
+    object.__setattr__(envelope, field, value)
+    reseal(envelope)
+    assert ob._envelope_digest(envelope) == envelope.envelope_digest
+
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100])
+    assert exchange.calls == 0
+    assert result.ok is False
+    assert result.refusal == "envelope-semantics-invalid"
+    assert result.receipt is None
+
+
+def test_a_resealed_envelope_with_invalid_utf8_evidence_never_reaches_the_adapter():
+    envelope = build_envelope()
+    object.__setattr__(envelope.evidence[0], "content", b"\xff\xfe")
+    object.__setattr__(
+        envelope.evidence[0], "digest", hashlib.sha256(b"\xff\xfe").hexdigest()
+    )
+    reseal(envelope)
+    backend = FakeBackend('{"summary": "x"}')
+    result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+    assert backend.calls == 0
+    assert result.refusal == "envelope-semantics-invalid"
+    assert result.receipt is None
+
+
+def test_a_resealed_over_limit_reservation_never_reaches_the_exchange():
+    envelope = build_envelope()
+    object.__setattr__(envelope.reservation, "cpu_cores", 10 ** 9)
+    object.__setattr__(
+        envelope.reservation,
+        "digest",
+        ob._reservation_digest(
+            10 ** 9,
+            envelope.reservation.memory_mib,
+            envelope.reservation.gpu_memory_mib,
+        ),
+    )
+    reseal(envelope)
+    decision = ob.ReservationDecision(
+        reservation_digest=envelope.reservation.digest,
+        satisfied=True,
+        attestation="operator-asserted",
+    )
+    exchange = ok_exchange()
+    result = run(envelope, exchange, [1000, 1100], decision=decision)
+    assert exchange.calls == 0
+    assert result.refusal == "envelope-semantics-invalid"
+
+
+def test_the_semantics_gate_runs_before_the_digest_gate():
+    """Both tokens stay reachable, and each names what actually went wrong."""
+    invalid = build_envelope()
+    object.__setattr__(invalid, "dialect", "not-a-runtime")
+    assert run(invalid, ok_exchange(), [1000, 1100]).refusal == (
+        "envelope-semantics-invalid"
+    )
+
+    inconsistent = build_envelope()
+    object.__setattr__(inconsistent, "worker", "someone-else")
+    assert run(inconsistent, ok_exchange(), [1000, 1100]).refusal == (
+        "envelope-digest-mismatch"
+    )
+
+
+# -- finding 4: the returned exchange carrier is revalidated ------------------
+
+
+def test_a_tampered_exchange_ok_never_runs_its_bool_hook():
+    envelope = build_envelope()
+    carrier = ok_exchange_carrier()
+    object.__setattr__(carrier, "ok", HookedOk())
+    HookedOk.fired = []
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert HookedOk.fired == []
+    assert result.ok is False
+    assert result.refusal == "exchange-result-field-invalid"
+    assert result.receipt.exchange_invocations == 1
+    assert result.exchange is None
+    assert rc.serialize_receipt(result.receipt)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["ollama", "not-a-runtime", "sk-OMIV3ASECRET123456789", 5, "", "OLLAMA"],
+)
+def test_a_tampered_exchange_dialect_is_refused_rather_than_recorded(value):
+    """A secret-shaped dialect reached receipt construction and raised there."""
+    envelope = build_envelope()
+    carrier = ok_exchange_carrier()
+    object.__setattr__(carrier, "dialect", value)
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    if value == "ollama":
+        assert result.ok is True
+        return
+    assert result.refusal == "exchange-result-field-invalid"
+    rendered = rc.serialize_receipt(result.receipt)
+    assert b"sk-" not in rendered
+    assert b"not-a-runtime" not in rendered
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"summary": "x"},
+        None,
+        "not a mapping",
+        5,
+        [("summary", "x")],
+    ],
+)
+def test_a_tampered_exchange_value_of_the_wrong_type_is_refused(value):
+    """Everything but a proxy is closed by an exact-type check."""
+    envelope = build_envelope()
+    carrier = ok_exchange_carrier()
+    object.__setattr__(carrier, "value", value)
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert result.refusal == "exchange-result-field-invalid"
+    assert result.exchange is None
+
+
+class NonJsonMapping(HostileMapping):
+    """A foreign mapping whose values are not JSON at all."""
+
+    def __getitem__(self, key):
+        NonJsonMapping.fired.append("getitem")
+        return object()
+
+
+def test_a_proxy_over_a_foreign_mapping_cannot_smuggle_a_non_json_result():
+    """The residual, stated exactly - and bounded to what it really is.
+
+    ``value`` must be exactly a ``MappingProxyType``, which closes every
+    substitution of a different type. A proxy can still wrap an arbitrary
+    foreign mapping, and OMI-V2's own carrier records that there is **no
+    hook-free way to inspect what a proxy wraps** - so measuring the result runs
+    that mapping's ``keys``/``__getitem__``.
+
+    What that is NOT is a way to smuggle something past the contract. The
+    exchange is injected: a caller who can substitute a proxy could equally have
+    returned the same JSON legitimately, so a foreign mapping yielding
+    well-formed JSON is *indistinguishable from a real answer* and is treated as
+    one. What it cannot do is yield a non-JSON result, escape as an exception,
+    or put any of its content into the receipt - and those are what this pins.
+    """
+    envelope = build_envelope()
+
+    # A foreign mapping yielding non-JSON gets one fixed refusal, not a crash.
+    broken = ok_exchange_carrier()
+    object.__setattr__(broken, "value", MappingProxyType(NonJsonMapping()))
+    NonJsonMapping.fired = []
+    result = run(envelope, CountingExchange(broken), [1000, 1100])
+    assert result.ok is False
+    assert result.refusal == "result-not-serializable"
+    assert result.exchange is None
+    assert result.receipt.result_bytes == 0
+    rendered = rc.serialize_receipt(result.receipt)
+    assert len(rendered) <= rc.RECEIPT_MAX_BYTES
+    assert b"object" not in rendered
+
+    # A foreign mapping yielding JSON is accepted - and its content still
+    # reaches nothing but a byte count.
+    plausible = ok_exchange_carrier()
+    object.__setattr__(plausible, "value", MappingProxyType(HostileMapping()))
+    accepted = run(envelope, CountingExchange(plausible), [1000, 1100])
+    assert accepted.ok is True
+    written = rc.serialize_receipt(accepted.receipt)
+    assert b"sk-" not in written
+    assert b"summary" not in written
+    assert accepted.receipt.result_bytes > 0
+    assert len(written) <= rc.RECEIPT_MAX_BYTES
+
+
+def test_a_hostile_mapping_cannot_make_the_executor_raise():
+    """Whatever the walk does, the function stays total."""
+
+    class Exploding(HostileMapping):
+        def keys(self):
+            raise RuntimeError("mapping said no")
+
+    envelope = build_envelope()
+    carrier = ok_exchange_carrier()
+    object.__setattr__(carrier, "value", MappingProxyType(Exploding()))
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert result.ok is False
+    assert result.refusal == "result-not-serializable"
+    assert rc.serialize_receipt(result.receipt)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("response_format_sent", 1),
+        ("schema_conformance", "verified"),
+        ("schema_conformance", 5),
+        ("request_refusal", "not-a-token"),
+        ("request_refusal", "sk-OMIV3ASECRET123456789"),
+        ("response_failure", "not-a-token"),
+        ("missing_key_indices", [0]),
+        ("missing_key_indices", (1, 1)),
+        ("missing_key_indices", ("0",)),
+    ],
+)
+def test_every_tampered_exchange_field_is_refused(field, value):
+    envelope = build_envelope()
+    carrier = ok_exchange_carrier()
+    object.__setattr__(carrier, field, value)
+    result = run(envelope, CountingExchange(carrier), [1000, 1100])
+    assert result.refusal == "exchange-result-field-invalid"
+    assert result.receipt.exchange_invocations == 1
+
+
+def test_the_exchange_checker_holds_omi_v2s_vocabularies_by_identity():
+    cells = dict(
+        zip(
+            ob._exchange_fields_intact.__code__.co_freevars,
+            (
+                cell.cell_contents
+                for cell in ob._exchange_fields_intact.__closure__ or ()
+            ),
+        )
+    )
+    assert cells["_refusals"] is sx.EXCHANGE_REFUSALS
+    assert cells["_failures"] is sx.RESPONSE_FAILURES
+    assert cells["_dialect_ok"] is sr.is_supported_dialect
+    assert cells["_exchange_type"] is StructuredExchange
+
+
+def test_an_untampered_exchange_still_passes_every_state():
+    """Positive guard: the checker does not reject what OMI-V2 legitimately makes."""
+    envelope = build_envelope()
+    for backend in (
+        FakeBackend('{"summary": "x"}'),
+        FakeBackend("not json"),
+        FakeBackend('{"other": 1}'),
+        NonStructuredBackend(),
+    ):
+        result = run(envelope, ob.structured_exchange_adapter(backend), [1000, 1100])
+        assert result.refusal != "exchange-result-field-invalid"
+        assert result.receipt is not None
+        assert rc.serialize_receipt(result.receipt)
+
+
+# -- every executor path builds and serialises a coherent bounded receipt -----
+
+
+def test_every_executor_path_yields_a_receipt_that_serialises_or_none_at_all():
+    """One execution per reachable path, checked end to end.
+
+    For each: the result is coherent, the receipt either exists and serialises
+    inside the bound or is absent for one of the four undescribable refusals,
+    and no path raises.
+    """
+    short = build_envelope(clock=make_clock([0]), duration_ns=1000)
+    resealed = build_envelope()
+    object.__setattr__(resealed, "dialect", "not-a-runtime")
+    reseal(resealed)
+    field_broken = build_envelope()
+    object.__setattr__(field_broken, "evidence", "not a tuple")
+    digest_broken = build_envelope()
+    object.__setattr__(digest_broken, "worker", "someone-else")
+    tampered_carrier = ok_exchange_carrier()
+    object.__setattr__(tampered_carrier, "ok", HookedOk())
+
+    cases = [
+        ("observed", build_envelope(), ob.structured_exchange_adapter(
+            FakeBackend('{"summary": "x"}')), [1000, 1100], None),
+        ("unusable-response", build_envelope(), ob.structured_exchange_adapter(
+            FakeBackend("not json")), [1000, 1100], None),
+        ("unusable-request", build_envelope(), ob.structured_exchange_adapter(
+            NonStructuredBackend()), [1000, 1100], None),
+        ("void-before", short, ok_exchange(), [9999], None),
+        ("void-during", short, ok_exchange(), [10, 5000], None),
+        ("reservation-unsatisfied", build_envelope(), ok_exchange(), [1000],
+         "unsatisfied"),
+        ("reservation-mismatch", build_envelope(), ok_exchange(), [1000],
+         "mismatch"),
+        ("decision-wrong-type", build_envelope(), ok_exchange(), [1000], "none"),
+        ("exchange-not-callable", build_envelope(), "nope", [1000], None),
+        ("clock-raised", build_envelope(), ok_exchange(), "raise", None),
+        ("clock-bad-first", build_envelope(), ok_exchange(), ["x"], None),
+        ("clock-backwards", build_envelope(), ok_exchange(), [999], None),
+        ("clock-huge", build_envelope(), ok_exchange(), [rc.MAX_CLOCK_NS + 1], None),
+        ("exchange-wrong-type", build_envelope(), CountingExchange(None),
+         [1000, 1100], None),
+        ("exchange-field-invalid", build_envelope(),
+         CountingExchange(tampered_carrier), [1000, 1100], None),
+        ("result-too-large", build_envelope(max_result_bytes=12,
+                                            required_keys=("a",)),
+         ob.structured_exchange_adapter(FakeBackend('{"a":"é"}')), [1000, 1100],
+         None),
+        ("envelope-wrong-type", "not an envelope", ok_exchange(), [1000], None),
+        ("envelope-field", field_broken, ok_exchange(), [1000], None),
+        ("envelope-semantics", resealed, ok_exchange(), [1000], None),
+        ("envelope-digest", digest_broken, ok_exchange(), [1000], None),
+    ]
+
+    seen_outcomes = set()
+    seen_receiptless = set()
+    for label, envelope, exchange, readings, decision_kind in cases:
+        reference = envelope if type(envelope) is ob.ObservationEnvelope else (
+            build_envelope()
+        )
+        if decision_kind == "unsatisfied":
+            decision = satisfied_for(reference, False)
+        elif decision_kind == "mismatch":
+            decision = ob.ReservationDecision(
+                reservation_digest="b" * 64, satisfied=True,
+                attestation="checker-asserted")
+        elif decision_kind == "none":
+            decision = None
+        else:
+            decision = satisfied_for(reference)
+
+        if readings == "raise":
+            def clock():
+                raise RuntimeError("boom")
+        else:
+            clock = make_clock(readings)
+
+        with hermetic_guard():
+            result = ob.execute_observation(
+                envelope, exchange=exchange, clock=clock,
+                reservation_decision=decision)
+
+        assert type(result) is ob.ObservationResult, label
+        if result.receipt is None:
+            assert result.refusal in rc.UNDESCRIBABLE_REFUSALS, label
+            seen_receiptless.add(result.refusal)
+            continue
+        rendered = rc.serialize_receipt(result.receipt)
+        assert len(rendered) <= rc.RECEIPT_MAX_BYTES, label
+        assert pickle.loads(pickle.dumps(result.receipt)) == result.receipt, label
+        assert b"sk-" not in rendered, label
+        seen_outcomes.add(result.receipt.outcome)
+
+    assert seen_outcomes == {"observed", "unusable", "void", "refused"}
+    assert seen_receiptless == rc.UNDESCRIBABLE_REFUSALS

@@ -1150,10 +1150,24 @@ def test_no_v3a_vocabulary_restates_an_omi_v2_one():
     assert rc.EXECUTION_REFUSALS.isdisjoint(sx.EXCHANGE_REFUSALS)
     assert rc.EXECUTION_REFUSALS.isdisjoint(sx.RESPONSE_FAILURES)
     assert rc.ENVELOPE_REFUSALS.isdisjoint(sx.RESPONSE_FAILURES)
-    # No dialect or schema token was re-spelled at this layer.
+    # No dialect token exists at this layer at all: when the envelope layer
+    # needs to say a stored dialect is unacceptable it returns OMI-V2's own
+    # `dialect-unsupported`, which PLAN_REFUSALS already composes in.
     for token in rc.ENVELOPE_REFUSALS | rc.EXECUTION_REFUSALS:
         assert not token.startswith("dialect-")
-        assert not token.startswith("schema-")
+    # Three `schema-*` tokens DO exist here, and they describe the envelope's
+    # own STORAGE of a schema - whether the stored bytes are exactly bytes,
+    # whether they are the canonical rendering, and whether the stored digest
+    # hashes them. None re-spells an OMI-V2 token, which the disjointness
+    # assertions above already establish, and none decides whether a schema is
+    # acceptable at all - that stays entirely OMI-V2's.
+    storage = {t for t in rc.ENVELOPE_REFUSALS if t.startswith("schema-")}
+    assert storage == {
+        "schema-bytes-not-exact-bytes",
+        "schema-bytes-not-canonical",
+        "schema-digest-not-recomputable",
+    }
+    assert storage.isdisjoint(sr.REFUSAL_TOKENS)
 
 
 def test_the_envelope_carrier_revalidates_everything_the_planner_checked():
@@ -1826,12 +1840,21 @@ def test_the_single_schema_authority_is_reached_from_both_the_planner_and_carrie
     A directly constructed envelope is held to the planner's standard by calling
     the *same* function the planner calls, not a second implementation of it.
     """
-    assert _cells(ob.plan_observation)["_canonical"] is ob._canonical_schema
-    # The carrier is built inside a factory, so its cells are read from the
-    # class's own __post_init__ rather than from a module-level function.
-    post_init_cells = _cells(ob.ObservationEnvelope.__post_init__)
-    assert post_init_cells["_canonical"] is ob._canonical_schema
-    assert post_init_cells["_dialect_ok"] is sr.is_supported_dialect
+    # After Jack's second round there is ONE definition of an acceptable
+    # envelope, and all three consumers - planner, carrier, executor - hold the
+    # same object in a closure cell. That is the anti-drift guarantee, asserted
+    # by identity rather than by comparing behaviour and hoping.
+    semantics = _cells(ob._envelope_semantics)
+    assert semantics["_canonical"] is ob._canonical_schema
+    assert semantics["_dialect_ok"] is sr.is_supported_dialect
+    assert semantics["_evidence_ok"] is ob._evidence_state
+    assert semantics["_reservation_ok"] is ob._reservation_state
+    assert _cells(ob.ObservationEnvelope.__post_init__)["_semantics"] is (
+        ob._envelope_semantics
+    )
+    assert _cells(ob.execute_observation)["_semantics"] is ob._envelope_semantics
+    assert _cells(ob.plan_observation)["_evidence_ok"] is ob._evidence_state
+    assert _cells(ob.plan_observation)["_reservation_ok"] is ob._reservation_state
 
 
 def _imported_modules(module) -> set[str]:
@@ -2677,3 +2700,384 @@ def test_every_shared_bound_has_exactly_one_definition():
     assert ob.OBSERVATION_LIMITS["required_keys"] == rc.MAX_REQUIRED_KEYS
     assert ob.OBSERVATION_LIMITS["clock_ns"] == rc.MAX_CLOCK_NS
     assert ob.OBSERVATION_LIMITS["receipt_bytes"] == rc.RECEIPT_MAX_BYTES
+
+
+# ============================================================================
+# Jack's second independent round - a regression for every reproduced case
+# ============================================================================
+#
+# Twenty-one cases were demonstrated against head 310e28d and all twenty-one
+# reproduced. Section 13 of docs/OMI_V3_OBSERVATION_INCEPTION.md records them.
+
+
+# -- finding 1: direct construction skipped the strict-UTF-8 gate ------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff\xfe", b"\x80", b"\xc3", b"\xed\xa0\x80", b"ok\xffbad"],
+)
+def test_direct_construction_refuses_evidence_that_is_not_strict_utf8(content):
+    """The planner refused these; the carrier did not, and the gap was live.
+
+    An envelope built directly with invalid bytes reached the adapter, whose
+    ``decode("utf-8")`` then raised ``UnicodeDecodeError`` straight out of
+    ``execute_observation`` - a function documented as total. Both gates are now
+    the same function, so the carrier cannot fall behind the planner again.
+    """
+    item = ob.EvidenceItem(evidence_id="e1", content=content)
+    with pytest.raises(ValueError):
+        ob.ObservationEnvelope(**direct_kwargs(evidence=(item,)))
+    # ...and the planner still refuses it, with its precise token.
+    assert plan(evidence=[item]).refusal == "evidence-not-utf8"
+
+
+def test_the_planner_and_direct_construction_refuse_exactly_the_same_inputs():
+    """The anti-drift control, stated as a property rather than a sample.
+
+    For every defective field set below, the planner must return a refusal and
+    direct construction must raise - and for the accepted one, both must
+    succeed. Two rounds of this audit found the two gates disagreeing; they now
+    share one function, and this asserts the consequence.
+    """
+    bad_item = ob.EvidenceItem(evidence_id="e1", content=b"\xff\xfe")
+    stale = ob.EvidenceItem(evidence_id="e1", content=b"AAAA")
+    object.__setattr__(stale, "content", b"BBBB")
+    stale_reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    object.__setattr__(stale_reservation, "cpu_cores", 200)
+
+    cases = [
+        dict(task_id="not-a-uuid"),
+        dict(authorizing_principal=SECRET),
+        dict(worker="has space"),
+        dict(dialect="not-a-runtime"),
+        dict(dialect=SECRET),
+        dict(endpoint="http://localhost:11434/v1"),
+        dict(endpoint="http://0.0.0.0:11434/v1"),
+        dict(evidence=(bad_item,)),
+        dict(evidence=(stale,)),
+        dict(evidence=()),
+        dict(reservation=stale_reservation),
+        dict(required_keys=("has space",)),
+        dict(required_keys=(SECRET,)),
+        dict(context_ceiling_tokens=0),
+        dict(max_result_bytes=ob.OBSERVATION_LIMITS["result_bytes"] + 1),
+        dict(max_output_tokens=0),
+    ]
+    for override in cases:
+        with pytest.raises(ValueError):
+            ob.ObservationEnvelope(**direct_kwargs(**override))
+        planner_override = dict(override)
+        if "evidence" in planner_override:
+            planner_override["evidence"] = list(planner_override["evidence"])
+        result = plan(**planner_override)
+        assert result.ok is False, override
+        assert result.refusal in rc.PLAN_REFUSALS, override
+    # ...and the accepted set is accepted by both.
+    assert ob.ObservationEnvelope(**direct_kwargs()).envelope_digest
+    assert plan(task_id=FIXED_TASK_ID, clock=make_clock([1000])).ok is True
+
+
+def test_the_refusal_raised_by_direct_construction_carries_the_closed_token():
+    """``_EnvelopeRefused`` is a ValueError, and its token is in the closed set."""
+    try:
+        ob.ObservationEnvelope(**direct_kwargs(dialect=SECRET))
+    except ValueError as exc:
+        assert isinstance(exc, ob._EnvelopeRefused)
+        assert exc.token == "dialect-unsupported"
+        assert exc.token in rc.PLAN_REFUSALS
+        assert SECRET not in exc.token
+    else:  # pragma: no cover
+        raise AssertionError("direct construction must refuse a secret dialect")
+
+
+# -- finding 2: caller-owned carriers must not survive into an envelope -------
+
+
+def test_an_accepted_envelope_holds_none_of_the_callers_carriers():
+    """Detachment, asserted by identity rather than by equality.
+
+    Equality would pass while the caller still held the very object the envelope
+    contains. What matters is that they are different objects, so a later
+    ``object.__setattr__`` on the caller's copy reaches nothing here.
+    """
+    item = ob.EvidenceItem(evidence_id="e1", content=b"mine")
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    envelope = plan(evidence=[item], reservation=reservation).envelope
+
+    assert envelope.evidence[0] is not item
+    assert envelope.reservation is not reservation
+    assert envelope.evidence[0] == item
+    assert envelope.reservation == reservation
+
+    # Mutating what the caller kept changes nothing the envelope reports.
+    digest_before = envelope.envelope_digest
+    object.__setattr__(item, "content", b"nine")
+    object.__setattr__(reservation, "cpu_cores", 200)
+    assert envelope.evidence[0].content == b"mine"
+    assert envelope.reservation.cpu_cores == 2
+    assert envelope.envelope_digest == digest_before
+    assert ob._envelope_digest(envelope) == digest_before
+
+
+def test_direct_construction_detaches_too():
+    item = ob.EvidenceItem(evidence_id="e1", content=b"mine")
+    reservation = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    envelope = ob.ObservationEnvelope(
+        **direct_kwargs(evidence=(item,), reservation=reservation)
+    )
+    assert envelope.evidence[0] is not item
+    assert envelope.reservation is not reservation
+
+
+def test_detached_carriers_recompute_their_own_digests():
+    item = ob.EvidenceItem(evidence_id="e1", content=b"mine")
+    reservation = ob.ResourceReservation(cpu_cores=3, memory_mib=2048)
+    envelope = plan(evidence=[item], reservation=reservation).envelope
+    assert envelope.evidence[0].digest == hashlib.sha256(b"mine").hexdigest()
+    assert envelope.reservation.digest == reservation.digest
+    assert ob._evidence_state(envelope.evidence, 65536)[0] is None
+    assert ob._reservation_state(envelope.reservation) is None
+
+
+# -- finding 3: an unkeyed digest is not authority for validity ---------------
+
+
+def reseal(envelope):
+    """Recompute and reinstall the envelope digest after a tamper.
+
+    This is the whole of finding 3: the digest is a pure function of the
+    envelope's own public fields, computed by a function this package exports,
+    so anyone who can mutate a field can repair the digest. Nothing about that
+    is exotic - it is what "unkeyed" means.
+    """
+    object.__setattr__(envelope, "envelope_digest", ob._envelope_digest(envelope))
+    return envelope
+
+
+RESEALED_TAMPERS = [
+    ("task_id", "not-a-uuid"),
+    ("authorizing_principal", SECRET),
+    ("worker", SECRET),
+    ("dialect", SECRET),
+    ("dialect", "not-a-runtime"),
+    ("endpoint", "http://evil.example.com:11434/v1"),
+    ("endpoint", "http://localhost:11434/v1"),
+    ("endpoint", "http://0.0.0.0:11434/v1"),
+    ("max_result_bytes", 10 ** 9),
+    ("max_result_bytes", 0),
+    ("context_ceiling_tokens", 10 ** 9),
+    ("max_output_tokens", 10 ** 9),
+    ("max_evidence_bytes", 1),
+    ("required_keys", (SECRET,)),
+    ("required_keys", ("has space",)),
+    ("schema_bytes", b"not json at all"),
+    ("issued_ns", -1),
+    ("deadline_ns", 10),
+]
+
+
+@pytest.mark.parametrize(("field", "value"), RESEALED_TAMPERS)
+def test_a_resealed_envelope_is_still_refused_on_its_semantics(field, value):
+    """Digest equality is self-consistency, never validity.
+
+    Each envelope below agrees perfectly with its own digest and is nonetheless
+    unfit: an unsupported dialect, a DNS endpoint, a secret-shaped principal, an
+    over-limit bound. The previous revision executed every one of them, and
+    several then raised out of receipt construction rather than refusing.
+    """
+    envelope = fixed_envelope()
+    object.__setattr__(envelope, field, value)
+    reseal(envelope)
+    # The digest now agrees with the fields - that is the premise, not the test.
+    assert ob._envelope_digest(envelope) == envelope.envelope_digest
+    assert ob._envelope_semantics(envelope) is not None
+
+
+def test_a_resealed_envelope_with_substituted_evidence_is_refused():
+    envelope = fixed_envelope()
+    object.__setattr__(envelope.evidence[0], "content", b"\xff\xfe")
+    object.__setattr__(
+        envelope.evidence[0], "digest", hashlib.sha256(b"\xff\xfe").hexdigest()
+    )
+    reseal(envelope)
+    assert ob._envelope_digest(envelope) == envelope.envelope_digest
+    assert ob._envelope_semantics(envelope) == "evidence-not-utf8"
+
+
+def test_a_resealed_envelope_with_an_over_limit_reservation_is_refused():
+    envelope = fixed_envelope()
+    object.__setattr__(envelope.reservation, "cpu_cores", 10 ** 9)
+    object.__setattr__(
+        envelope.reservation,
+        "digest",
+        ob._reservation_digest(
+            10 ** 9,
+            envelope.reservation.memory_mib,
+            envelope.reservation.gpu_memory_mib,
+        ),
+    )
+    reseal(envelope)
+    assert ob._envelope_digest(envelope) == envelope.envelope_digest
+    assert ob._envelope_semantics(envelope) == "reservation-field-out-of-range"
+
+
+def test_the_semantics_function_is_total_and_returns_only_closed_tokens():
+    envelope = fixed_envelope()
+    assert ob._envelope_semantics(envelope) is None
+    for field, value in RESEALED_TAMPERS:
+        tampered = fixed_envelope()
+        object.__setattr__(tampered, field, value)
+        token = ob._envelope_semantics(tampered)
+        assert token in rc.PLAN_REFUSALS
+        assert SECRET not in token
+
+
+# -- finding 5: a mutated receipt must not serialise -------------------------
+
+
+def test_a_receipt_mutated_after_construction_refuses_to_serialise():
+    """Freezing is not sealing, and serialisation is where it matters.
+
+    A receipt built honestly and then given a secret-shaped ``worker`` wrote
+    that secret into stored evidence. ``serialize_receipt`` now re-runs the full
+    coherence check, so the bytes it produces describe a receipt that is
+    coherent at the moment it is written down.
+    """
+    receipt = rc.ObservationReceipt(**receipt_kwargs())
+    assert rc.serialize_receipt(receipt)
+
+    object.__setattr__(receipt, "worker", SECRET)
+    with pytest.raises(ValueError):
+        rc.serialize_receipt(receipt)
+
+
+MUTATED_RECEIPT_FIELDS = [
+    ("worker", SECRET),
+    ("authorizing_principal", SECRET),
+    ("task_id", "not-a-uuid"),
+    ("envelope_digest", SECRET),
+    ("schema_digest", "short"),
+    ("evidence_ids", (SECRET,)),
+    ("evidence_digests", ("nope",)),
+    ("dialect", SECRET),
+    ("outcome", "succeeded"),
+    ("refusal", "not-a-token"),
+    ("request_refusal", "not-a-token"),
+    ("response_failure", "not-a-token"),
+    ("reservation_attestation", "assumed"),
+    ("deadline_result", "probably"),
+    ("evidence_bytes", 10 ** 40),
+    ("elapsed_ns", 10 ** 5000),
+    ("result_bytes", 10 ** 40),
+    ("context_ceiling_tokens", 10 ** 40),
+    ("required_key_count", 10 ** 6),
+    ("exchange_invocations", 7),
+    ("missing_key_indices", (0,)),
+]
+
+
+@pytest.mark.parametrize(("field", "value"), MUTATED_RECEIPT_FIELDS, ids=[
+    "worker", "principal", "task-id", "envelope-digest", "schema-digest",
+    "evidence-ids", "evidence-digests", "dialect", "outcome", "refusal",
+    "request-refusal", "response-failure", "attestation", "deadline-result",
+    "evidence-bytes", "elapsed-huge", "result-bytes", "context", "key-count",
+    "invocations", "missing-indices",
+])
+def test_no_mutated_receipt_field_can_enter_serialised_evidence(field, value):
+    receipt = rc.ObservationReceipt(**receipt_kwargs())
+    object.__setattr__(receipt, field, value)
+    with pytest.raises(ValueError):
+        rc.serialize_receipt(receipt)
+
+
+def test_a_hostile_container_on_a_receipt_is_refused_without_running_hooks():
+    HOOK_CALLS.clear()
+    receipt = rc.ObservationReceipt(**receipt_kwargs())
+    object.__setattr__(receipt, "evidence_ids", HookedTuple(("e1",)))
+    with pytest.raises(ValueError):
+        rc.serialize_receipt(receipt)
+    assert HOOK_CALLS == []
+
+    HOOK_CALLS.clear()
+    other = rc.ObservationReceipt(**receipt_kwargs())
+    object.__setattr__(other, "elapsed_ns", HookedInt(5))
+    with pytest.raises(ValueError):
+        rc.serialize_receipt(other)
+    assert HOOK_CALLS == []
+
+
+def test_the_serialiser_reaches_the_check_through_the_class_not_the_instance():
+    """An instance attribute shadows a class method; a cell does not.
+
+    If ``serialize_receipt`` looked the check up on the receipt, a caller who
+    could mutate a receipt could also install a ``__post_init__`` that does
+    nothing - and then serialise anything at all.
+    """
+    receipt = rc.ObservationReceipt(**receipt_kwargs())
+    object.__setattr__(receipt, "worker", SECRET)
+    object.__setattr__(receipt, "__post_init__", lambda *a, **k: None)
+    with pytest.raises(ValueError):
+        rc.serialize_receipt(receipt)
+
+
+# -- finding 6: receipt coherence must match what the executor can emit -------
+
+
+def test_a_satisfied_reservation_implies_an_attempted_request():
+    """The executor goes straight from the satisfied gate to the invocation.
+
+    There is no path between them that can refuse, so a receipt reporting a
+    satisfied reservation with nothing attempted describes a state that cannot
+    occur. The previous revision checked only the forward direction.
+    """
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome="refused",
+                refusal="result-too-large",
+                request_outcome="not-attempted",
+                response_outcome="none",
+                exchange_invocations=0,
+                elapsed_ns=0,
+                result_bytes=0,
+                dialect=None,
+            )
+        )
+    # ...and the converse, which was already enforced.
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                reservation_result="not-satisfied",
+                reservation_attestation="operator-asserted",
+            )
+        )
+
+
+@pytest.mark.parametrize("outcome", ["refused", "void"])
+def test_a_refused_or_void_receipt_names_no_dialect(outcome):
+    """Both discard whatever came back, so neither has a dialect to name."""
+    extra = (
+        dict(refusal="result-too-large")
+        if outcome == "refused"
+        else dict(deadline_result="exceeded-during-request")
+    )
+    with pytest.raises(ValueError):
+        rc.ObservationReceipt(
+            **receipt_kwargs(
+                outcome=outcome,
+                response_outcome="none",
+                result_bytes=0,
+                dialect="ollama",
+                **extra,
+            )
+        )
+    assert rc.ObservationReceipt(
+        **receipt_kwargs(
+            outcome=outcome,
+            response_outcome="none",
+            result_bytes=0,
+            dialect=None,
+            **extra,
+        )
+    ).dialect is None

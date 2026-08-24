@@ -258,6 +258,9 @@ EnvelopeRefusal = Literal[
     "evidence-total-too-large",
     "evidence-not-utf8",
     "evidence-digest-not-recomputable",
+    "schema-bytes-not-exact-bytes",
+    "schema-bytes-not-canonical",
+    "schema-digest-not-recomputable",
     "required-keys-not-exact-sequence",
     "required-keys-too-many",
     "required-key-not-safe-token",
@@ -293,10 +296,20 @@ concerns are decided by OMI-V2's ``plan_structured_request``, and its refusal
 travels through unchanged rather than being re-spelled here - see
 :data:`PlanRefusal`.
 
-The ``*-not-recomputable`` pair is the answer to Jack's first finding. A carrier
+The ``*-not-recomputable`` trio is the answer to Jack's first finding. A carrier
 whose stored digest does not hash its own current content has been altered
 since it was built, and the planner will not adopt it - "exact type" is not
-"unaltered", and the previous revision treated them as the same thing.
+"unaltered", and the first revision treated them as the same thing.
+
+The ``schema-bytes-*`` pair describes the envelope's own *storage* of a schema,
+not the schema's validity: whether the stored bytes are exactly ``bytes``, and
+whether they are exactly the canonical rendering of a snapshot OMI-V2 accepts.
+Whether a schema is acceptable at all remains entirely OMI-V2's decision, and
+its token travels through unchanged.
+
+There is still no dialect token here. When the envelope layer needs to say a
+stored dialect is unacceptable it returns OMI-V2's own ``dialect-unsupported``,
+which :data:`PlanRefusal` already composes in.
 """
 
 ENVELOPE_REFUSALS: Final[frozenset[str]] = frozenset(get_args(EnvelopeRefusal))
@@ -315,7 +328,9 @@ PLAN_REFUSALS: Final[frozenset[str]] = ENVELOPE_REFUSALS | REFUSAL_TOKENS
 ExecutionRefusal = Literal[
     "envelope-not-exact-type",
     "envelope-field-not-exact-type",
+    "envelope-semantics-invalid",
     "envelope-digest-mismatch",
+    "exchange-result-field-invalid",
     "exchange-not-callable",
     "clock-not-callable",
     "clock-raised",
@@ -352,9 +367,27 @@ UNDESCRIBABLE_REFUSALS: Final[frozenset[str]] = frozenset(
     {
         "envelope-not-exact-type",
         "envelope-field-not-exact-type",
+        "envelope-semantics-invalid",
         "envelope-digest-mismatch",
     }
 )
+"""The four refusals about an envelope that could not be trusted to be described.
+
+``envelope-semantics-invalid`` joined after Jack's second round. The envelope
+digest is **unkeyed**: it is a pure function of the envelope's own public
+fields, computed by a function this package exports, so anyone able to mutate a
+field can recompute and reinstall it. Digest equality therefore establishes
+*self-consistency*, never *validity* - and the previous revision treated the
+two as the same thing, admitting a resealed envelope carrying an unsupported
+dialect, a DNS endpoint, an over-limit reservation, or evidence that was no
+longer UTF-8.
+
+Deliberately **one** token rather than forty-two. The executor does not
+re-spell the envelope vocabulary into its own: a caller who wants to know
+*which* constraint failed re-plans the inputs, where the precise token is
+returned. Carrying forty-two envelope tokens into the execution vocabulary
+would double every closed set for no operational gain.
+"""
 
 ObservationOutcome = Literal["observed", "unusable", "void", "refused"]
 """What one execution amounted to.
@@ -731,9 +764,16 @@ def _build_receipt_class():
                 raise _ValueError(
                     "the exchange cannot run before the reservation was decided"
                 )
-            if attempted and self.reservation_result != "satisfied":
+            # Satisfied and attempted imply one another, in BOTH directions.
+            # The executor goes straight from the satisfied gate to the latched
+            # invocation - there is no path between them that can refuse - so a
+            # receipt reporting a satisfied reservation with nothing attempted
+            # describes a state the executor cannot produce. The previous
+            # revision checked only the forward direction.
+            if attempted != (self.reservation_result == "satisfied"):
                 raise _ValueError(
-                    "the exchange runs only on a satisfied reservation decision"
+                    "a satisfied reservation and an attempted request imply "
+                    "one another"
                 )
             if self.reservation_result == "not-satisfied" and (
                 self.outcome != "refused" or self.refusal != "reservation-not-satisfied"
@@ -821,6 +861,13 @@ def _build_receipt_class():
                     )
                 if carries_v2_token:
                     raise _ValueError("a void or refused outcome carries no OMI-V2 token")
+                # The executor names a dialect only on the two outcomes that
+                # retain an exchange result. Every refusal and every void
+                # discards what came back, so neither has a dialect to name.
+                if self.dialect is not None:
+                    raise _ValueError(
+                        "a void or refused outcome names no dialect"
+                    )
                 if self.outcome == "void" and self.deadline_result not in (
                     "exceeded-before-request",
                     "exceeded-during-request",
@@ -854,6 +901,12 @@ def _closed_receipt_serializer():
     than a name-rebinding one.
     """
     _receipt_type = ObservationReceipt
+    #: The coherence check, reached through the CLASS rather than the instance.
+    #: `receipt.__post_init__` would be an attribute lookup, and an instance
+    #: attribute shadows a class method - so a caller who can mutate a receipt
+    #: could also install a `__post_init__` that does nothing. Bound here, from
+    #: the class, at definition time, it cannot be shadowed or rebound.
+    _revalidate = ObservationReceipt.__post_init__
     _max_bytes = RECEIPT_MAX_BYTES
     _json = json
     _type = type
@@ -883,6 +936,18 @@ def _closed_receipt_serializer():
         """
         if _type(receipt) is not _receipt_type:
             raise _ValueError("serialize_receipt accepts exactly an ObservationReceipt")
+        # Re-validated here, not merely at construction. Freezing a dataclass
+        # does not stop `object.__setattr__`, and Jack's second round walked
+        # straight through the gap: a receipt built honestly, then given a
+        # secret-shaped `worker`, serialised that secret into stored evidence -
+        # and one given a 5000-digit `elapsed_ns` raised out of this function
+        # instead of refusing. Re-running the full coherence check makes the
+        # serialised bytes describe a receipt that is coherent *now*, which is
+        # the only moment that matters for something about to be written down.
+        #
+        # Every exact-type check inside runs before any comparison, so a
+        # hostile replacement is refused without its hooks being reached.
+        _revalidate(receipt)
         document = {
             "contract": "omi-v3a-observation-receipt",
             "task_id": receipt.task_id,
