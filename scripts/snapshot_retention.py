@@ -1493,8 +1493,26 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
                            scan=observed, plan=plan, reserve_ok=False)
 
     blocked = wants_snapshots and not reserve_ok
-    actions = tuple(action for action in plan.actions
-                    if not (blocked and action.klass == SNAPSHOT_CLASS))
+    if blocked:
+        # Re-plan from a telemetry-only view of the SAME observed scan, so the
+        # action cap is applied to what may actually be actioned. Filtering
+        # snapshots out of the already-capped batch instead would discard
+        # those positions rather than refill them: a directory whose oldest
+        # eligible entries are all snapshots takes no telemetry action at all,
+        # however much telemetry was eligible.
+        #
+        # The planner is unchanged and still owns ordering, the oldest-first
+        # merge and the action cap -- only its input is narrowed, and only on
+        # this branch. `plan` above remains the source of the reported
+        # eligibility counts, so those stay complete rather than selected.
+        telemetry_only = dataclasses.replace(observed, snapshots=())
+        actions = plan_retention(
+            telemetry_only,
+            policy=policy,
+            now_ns=captured_now,
+        ).actions
+    else:
+        actions = plan.actions
 
     if mode is RetentionMode.PLAN:
         return _report(mode, scan=observed, plan=plan, actions=actions,
