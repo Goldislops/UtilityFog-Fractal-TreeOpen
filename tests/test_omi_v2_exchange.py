@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.agent_backends.base import Message, ToolSpec
+from scripts.agent_backends.base import AgentResponse, Message, TextBlock, ToolSpec
 from scripts.agent_backends.openai_compat_backend import (
     OpenAICompatBackend,
     StructuredCompletion,
@@ -486,3 +486,267 @@ def test_mutating_the_schema_after_the_call_cannot_change_what_was_sent():
 
     assert sent == before
     assert "injected" not in sent["json_schema"]["schema"]
+
+
+# ============================================================================
+# Fifth round - a returned completion is revalidated before it is consumed
+# ============================================================================
+#
+# `StructuredCompletion` is frozen, and freezing is not sealing:
+# `object.__setattr__` replaces any field after construction, and a backend is
+# caller-supplied code. An earlier revision checked only that the returned
+# object was exactly a `StructuredCompletion`, then truth-tested `.ok` and read
+# `.response.text` - so a backend that built a valid completion and then altered
+# one field could run its own `__bool__` or its own property from inside this
+# module, and could make `StructuredExchange` construction raise `ValueError`.
+# Both escaped as raw incidental exceptions from a function that promises a
+# result for every reachable input.
+#
+# Same-author evidence: written by the agent that wrote the code under test.
+
+
+def _good_completion():
+    return StructuredCompletion(
+        ok=True,
+        response=AgentResponse.from_content([TextBlock(text='{"ok": true}')]),
+        dialect="ollama",
+        response_format_sent=True,
+    )
+
+
+class TamperingBackend:
+    """Builds a VALID exact completion, then alters one field before returning.
+
+    Post-construction is the only way to produce these: the carrier refuses
+    every one of them at the door. A control that built them directly would be
+    testing the carrier, not this module.
+    """
+
+    def __init__(self, field, value):
+        self.field = field
+        self.value = value
+        self.calls = 0
+
+    def complete_structured(self, messages, tools, **kwargs):
+        self.calls += 1
+        completion = _good_completion()
+        object.__setattr__(completion, self.field, self.value)
+        return completion
+
+
+class _BoolHook:
+    fired: list = []
+
+    def __bool__(self):  # pragma: no cover - must never be reached
+        _BoolHook.fired.append("ok.__bool__")
+        raise RuntimeError("the __bool__ hook ran")
+
+
+class _TextHook:
+    fired: list = []
+
+    @property
+    def text(self):  # pragma: no cover - must never be reached
+        _TextHook.fired.append("response.text")
+        raise RuntimeError("the text property ran")
+
+
+def _round5_exchange(backend):
+    return request_structured_json(
+        backend, _MESSAGES, [], structured=_REQUEST, required_keys=("ok",)
+    )
+
+
+def test_a_tampered_ok_never_runs_its_bool_hook():
+    _BoolHook.fired = []
+    backend = TamperingBackend("ok", _BoolHook())
+    result = _round5_exchange(backend)
+    assert _BoolHook.fired == []
+    assert backend.calls == 1
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.dialect is None
+    assert result.response_format_sent is False
+
+
+def test_a_tampered_response_never_runs_its_text_property():
+    _TextHook.fired = []
+    backend = TamperingBackend("response", _TextHook())
+    result = _round5_exchange(backend)
+    assert _TextHook.fired == []
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # Hook-free but incoherent: every one of these is a state the carrier
+        # itself refuses to construct, so none can come from OMI-V2.
+        ("ok", 1),
+        ("ok", 0),
+        ("ok", "yes"),
+        ("ok", False),
+        ("response_format_sent", False),
+        ("response_format_sent", 1),
+        ("dialect", None),
+        ("dialect", "not-a-runtime"),
+        ("dialect", "sk-OMIV2SECRET1234567890"),
+        ("dialect", 5),
+        ("refusal", "schema-empty"),
+        ("refusal", "not-a-token"),
+        ("response", None),
+        ("response", "not an AgentResponse"),
+        ("response", 5),
+    ],
+    ids=[
+        "ok-int-1", "ok-int-0", "ok-str", "ok-false-no-refusal",
+        "sent-false-on-success", "sent-int",
+        "dialect-none-on-success", "dialect-unsupported", "dialect-secret",
+        "dialect-int",
+        "refusal-on-success", "refusal-not-a-token",
+        "response-none-on-success", "response-wrong-type", "response-int",
+    ],
+)
+def test_every_incoherent_completion_lands_on_one_closed_refusal(field, value):
+    backend = TamperingBackend(field, value)
+    result = _round5_exchange(backend)
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.request_refusal in sx.EXCHANGE_REFUSALS
+    assert result.value is None
+    assert result.dialect is None
+    assert result.response_format_sent is False
+    # Nothing of the tampered value survives into the result.
+    assert "sk-" not in repr(result)
+    assert "not-a-runtime" not in repr(result)
+
+
+def test_the_state_checker_accepts_exactly_what_the_carrier_can_construct():
+    """A differential, so the re-check cannot drift from the carrier it mirrors.
+
+    Every combination is put to the carrier by construction and to
+    `_completion_state_ok` by inspection, and the two verdicts must agree. That
+    is stronger than asserting the checker holds the right vocabularies: it
+    shows the same boundary, not merely the same values.
+    """
+    import itertools
+
+    response = AgentResponse.from_content([TextBlock(text='{"ok": true}')])
+    space = itertools.product(
+        [True, False],
+        [None, response],
+        [None, "backend-not-structured-capable", "dialect-not-configured",
+         "schema-empty", "tools-with-structured-unsupported"],
+        [None, "ollama"],
+        [True, False],
+    )
+    constructible = 0
+    rejects_valid = []
+    accepts_invalid = []
+    for ok, resp, refusal, dialect, sent in space:
+        try:
+            built = StructuredCompletion(
+                ok=ok, response=resp, refusal=refusal, dialect=dialect,
+                response_format_sent=sent,
+            )
+            carrier_accepts = True
+        except ValueError:
+            built = None
+            carrier_accepts = False
+        if carrier_accepts:
+            constructible += 1
+            if not sx._completion_state_ok(built):
+                rejects_valid.append((ok, resp is not None, refusal, dialect, sent))
+            continue
+        victim = _good_completion()
+        object.__setattr__(victim, "ok", ok)
+        object.__setattr__(victim, "response", resp)
+        object.__setattr__(victim, "refusal", refusal)
+        object.__setattr__(victim, "dialect", dialect)
+        object.__setattr__(victim, "response_format_sent", sent)
+        if sx._completion_state_ok(victim):
+            accepts_invalid.append((ok, resp is not None, refusal, dialect, sent))
+
+    assert constructible > 0
+    assert rejects_valid == []
+    assert accepts_invalid == []
+
+
+def test_the_state_checker_holds_the_backend_packages_own_authorities():
+    cells = dict(
+        zip(
+            sx._completion_state_ok.__code__.co_freevars,
+            (cell.cell_contents for cell in sx._completion_state_ok.__closure__ or ()),
+        )
+    )
+    from scripts.agent_backends import structured_request as sr
+
+    assert cells["_completion_type"] is StructuredCompletion
+    assert cells["_agent_response"] is AgentResponse
+    assert cells["_tokens"] is sr.REFUSAL_TOKENS
+    assert cells["_dialect_ok"] is sr.is_supported_dialect
+    assert cells["_pre_dialect"] is sr.is_pre_dialect_refusal
+
+
+def test_an_untampered_backend_still_succeeds_and_still_refuses_normally():
+    """Positive guard: the re-check rejects nothing OMI-V2 legitimately makes."""
+
+    class Honest:
+        def __init__(self, completion):
+            self.completion = completion
+
+        def complete_structured(self, messages, tools, **kwargs):
+            return self.completion
+
+    ok = _round5_exchange(Honest(_good_completion()))
+    assert ok.ok is True
+    assert dict(ok.value) == {"ok": True}
+    assert ok.dialect == "ollama"
+
+    refused = _round5_exchange(
+        Honest(
+            StructuredCompletion(
+                ok=False, refusal="schema-empty", dialect="ollama",
+                response_format_sent=False,
+            )
+        )
+    )
+    assert refused.ok is False
+    assert refused.request_refusal == "schema-empty"
+    assert refused.dialect == "ollama"
+
+    pre_dialect = _round5_exchange(
+        Honest(
+            StructuredCompletion(
+                ok=False, refusal="dialect-not-configured", response_format_sent=False
+            )
+        )
+    )
+    assert pre_dialect.request_refusal == "dialect-not-configured"
+    assert pre_dialect.dialect is None
+
+
+def test_a_raising_backend_still_raises():
+    """The re-check catches nothing. Transport failures are still transport failures."""
+
+    class Exploding:
+        def complete_structured(self, messages, tools, **kwargs):
+            raise RuntimeError("transport said no")
+
+    with pytest.raises(RuntimeError):
+        _round5_exchange(Exploding())
+
+
+def test_a_backend_that_reaches_the_network_is_not_converted_into_a_refusal():
+    """`HermeticViolation` must stay loud; no broad catch was added."""
+    from scripts.open_model.evaluation import HermeticViolation, hermetic_guard
+
+    class Breaching:
+        def complete_structured(self, messages, tools, **kwargs):
+            socket.socket()
+            raise AssertionError("unreachable while the guard is active")
+
+    with hermetic_guard():
+        with pytest.raises(HermeticViolation):
+            _round5_exchange(Breaching())
