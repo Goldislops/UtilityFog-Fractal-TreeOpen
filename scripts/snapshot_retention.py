@@ -1525,6 +1525,29 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
                        scan=observed, plan=plan, actions=actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
+    if not actions:
+        # Nothing is actionable, so create nothing at all. `_quarantine` would
+        # otherwise make the quarantine root, a pass directory and an empty
+        # manifest while moving no entry -- and that is not merely untidy. The
+        # scan charges EVERY yielded root entry against `max_directory_entries`
+        # and refuses one entry past it, so a directory that scanned at exactly
+        # the limit would be pushed over it by the very pass meant to relieve
+        # it, after which no later pass could get far enough to help.
+        #
+        # The root is still PROVED here, because skipping `_quarantine` would
+        # otherwise skip the only check that catches an unusable target: the
+        # scan reports a missing or non-directory path as an empty SUCCESS, so
+        # without this the pass would report a clean no-op against something
+        # that is not a directory at all. Proving costs one read and creates
+        # nothing.
+        if directory_state(directory) is None:
+            return _report(mode,
+                           refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                           scan=observed, plan=plan, actions=actions,
+                           reserve_ok=reserve_ok, blocked=blocked)
+        return _report(mode, scan=observed, plan=plan, actions=actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
+
     return _quarantine(directory, actions, policy=policy, now_ns=captured_now,
                        pass_id=pass_id if pass_id is not None
                        else _default_pass_id(),
