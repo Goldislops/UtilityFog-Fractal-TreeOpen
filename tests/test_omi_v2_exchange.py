@@ -460,8 +460,12 @@ def test_the_package_ships_no_json_schema_validator(module_name):
             imported.add(node.module.split(".")[0])
 
     assert "jsonschema" not in imported
+    # `math` entered with the inbound non-finite correction: `math.isfinite`
+    # is the finiteness authority there, matching the outbound schema walk in
+    # `structured_request`. It is stdlib and validates no schema.
     assert imported <= {
-        "__future__", "dataclasses", "json", "types", "typing", "scripts",
+        "__future__", "dataclasses", "json", "math", "types", "typing",
+        "scripts",
     }, imported
 
 

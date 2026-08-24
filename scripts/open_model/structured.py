@@ -16,8 +16,9 @@ Two properties matter to an auditor:
 - **Total.** ``validate_structured_output`` never raises for any input of any
   type. Malformed JSON, a non-object top level, a hostile object passed in
   place of a string, a payload large enough to be a denial-of-service, a
-  ``NaN``, a duplicated key, or a nesting depth that exhausts the parser
-  stack all produce a *result* carrying a stable failure code.
+  ``NaN``, a numeric literal that overflows ``float`` into an infinity, a
+  duplicated key, or a nesting depth that exhausts the parser stack all
+  produce a *result* carrying a stable failure code.
 
 - **Non-disclosing.** A failure result never contains the payload, an excerpt
   of it, a character offset into it, or a parser message derived from it -
@@ -32,6 +33,7 @@ Two properties matter to an auditor:
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Optional
@@ -63,7 +65,12 @@ _MAX_REQUIRED_KEYS: Final[int] = 64
 
 
 class _NonFiniteNumber(ValueError):
-    """Raised by the ``parse_constant`` hook for NaN / Infinity / -Infinity."""
+    """Raised for any number that is not finite, however it was spelled.
+
+    Two decoder hooks raise it: ``_reject_constant`` for the ``NaN`` /
+    ``Infinity`` / ``-Infinity`` tokens, and ``_finite_float`` for a numeric
+    literal such as ``1e400`` that overflows ``float`` into an infinity.
+    """
 
 
 class _DuplicateKey(ValueError):
@@ -76,8 +83,34 @@ def _reject_constant(_token: str) -> Any:
     Python's decoder accepts those by default, which is valid JavaScript but
     not valid JSON and not something a downstream consumer should silently
     receive. The token itself is discarded rather than reported.
+
+    This hook sees the three constant tokens and nothing else. The overflow
+    spellings of the same values - ``1e400`` and kin - are numeric literals,
+    which the decoder routes through ``_finite_float`` below.
     """
     raise _NonFiniteNumber("non-finite")
+
+
+def _finite_float(token: str) -> float:
+    """``json.loads`` calls this for every number that is not an integer.
+
+    Python's decoder builds floats with ``float(token)``, which maps an
+    overflowing literal such as ``1e400`` or ``-1e309`` to an infinity rather
+    than raising. Audit reproduced exactly that: the constant-token hook above
+    never fires for those spellings, so a non-finite number reached a
+    *successful* outcome - and OMI-V2's success carrier - despite
+    ``non-finite-number`` sitting in the refusal vocabulary. The finiteness
+    decision therefore has to be made here, where the number is built.
+
+    The guard is written against non-finiteness itself, not against a list of
+    spellings, so it cannot be bypassed by an exponent this module never
+    anticipated. An underflow such as ``1e-400`` rounds to ``0.0``, which is
+    finite and accepted unchanged. The token is discarded, not reported.
+    """
+    value = float(token)
+    if not math.isfinite(value):
+        raise _NonFiniteNumber("non-finite")
+    return value
 
 
 def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -170,8 +203,14 @@ def validate_structured_output(
        ``__getitem__`` cannot influence the size guard below.
     2. ``payload-too-large``      - refused before parsing.
     3. ``non-finite-number`` / ``duplicate-key`` / ``invalid-json`` - raised
-       from the decoder. ``RecursionError`` from a deeply nested payload is
-       folded into ``invalid-json`` rather than escaping.
+       from the decoder. ``non-finite-number`` covers both spellings of a
+       non-finite number: the ``NaN`` / ``Infinity`` / ``-Infinity`` tokens
+       and a numeric literal such as ``1e400`` that overflows ``float`` into
+       an infinity, at any nesting depth. Because these are decoder failures,
+       they precede check 4: a bare ``1e400`` reports ``non-finite-number``,
+       exactly as a bare ``Infinity`` always did, while a bare finite number
+       still reports ``not-json-object``. ``RecursionError`` from a deeply
+       nested payload is folded into ``invalid-json`` rather than escaping.
     4. ``not-json-object``        - valid JSON, but an array, string, number,
        boolean, or null at the top level.
     5. ``required-key-not-safe``  - the caller's ``required_keys`` was the
@@ -193,6 +232,7 @@ def validate_structured_output(
         parsed = json.loads(
             payload,
             parse_constant=_reject_constant,
+            parse_float=_finite_float,
             object_pairs_hook=_pairs_hook,
         )
     except _NonFiniteNumber:
