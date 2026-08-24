@@ -47,6 +47,7 @@ from scripts.orchestrator import (
     MODE_OBSERVE,
     MODE_PROPOSE,
     OUTCOME_OK,
+    _validate_positive_limit,
     Orchestrator,
     OrchestratorClient,
     ToolRouter,
@@ -2858,3 +2859,371 @@ def test_bool_and_none_are_not_charged_against_scalar_budget():
     assert _valid_result_tree(False, 0, budget) is True
     assert _valid_result_tree(None, 0, budget) is True
     assert budget == [100, 5]  # untouched
+
+
+# == R/S/T post-merge audit corrections: mode and limit exactness =============
+#
+# Jack's independent post-merge audit of R/S/T (#328/#333/#334) reproduced two
+# findings under normal, -O and -OO. Both are closed here, and both are pinned
+# by controls that fail without their correction.
+#
+# FINDING 1 - the mode authority was not exact. `resolve_mode` used
+# `isinstance(raw, str)` and then called `.strip().lower()`, so a `str`
+# SUBCLASS whose `strip()` returned "propose" enabled proposal mode, and one
+# whose `strip()` raised escaped carrying caller-supplied text. Separately,
+# `tools_for_mode` and `ToolRouter` compared the mode with `==`, so an
+# arbitrary object claiming equality with "propose" was handed the proposal
+# tool and the proposal handler.
+#
+# FINDING 2 - `_validate_positive_limit` used `isinstance(value, int)`, which
+# excluded `bool` by name but accepted every other `int` subclass; a subclass
+# overriding `__lt__`/`__gt__` passed zero, negatives and values far above
+# MAX_LIMIT_CEILING. Its refusal text interpolated `{value!r}`, copying a
+# foreign object's representation into the exception - and a `__repr__` that
+# raised escaped the function entirely.
+#
+# Same-author evidence: written by the agent that wrote the corrections under
+# test. It demonstrates internal consistency, not independent acceptance.
+
+_RST_SECRET = "sk-RSTSECRET123456789"
+
+
+class _HookRecorder:
+    """Records every hook it is asked to run. Refused values must invoke none."""
+
+    def __init__(self) -> None:
+        self.invoked: list[str] = []
+
+    def _record(self, name):
+        self.invoked.append(name)
+
+    def __eq__(self, other):
+        self._record("__eq__")
+        return True
+
+    def __ne__(self, other):
+        self._record("__ne__")
+        return False
+
+    def __hash__(self):
+        self._record("__hash__")
+        return 0
+
+    def __bool__(self):
+        self._record("__bool__")
+        return True
+
+    def __len__(self):
+        self._record("__len__")
+        return 7
+
+    def __iter__(self):
+        self._record("__iter__")
+        return iter(())
+
+    def __str__(self):
+        self._record("__str__")
+        return "propose"
+
+    def __repr__(self):
+        self._record("__repr__")
+        return "'propose'"
+
+    def __lt__(self, other):
+        self._record("__lt__")
+        return False
+
+    def __gt__(self, other):
+        self._record("__gt__")
+        return False
+
+    def __int__(self):
+        self._record("__int__")
+        return 1
+
+    def __index__(self):
+        self._record("__index__")
+        return 1
+
+
+class _StripIsPropose(str):
+    """An exact-looking mode token whose normalization lies."""
+
+    def strip(self, *args):
+        return "propose"
+
+    def lower(self):
+        return "propose"
+
+
+class _RaisingStrip(str):
+    def strip(self, *args):
+        raise RuntimeError("leaked " + _RST_SECRET)
+
+    def lower(self):
+        raise RuntimeError("leaked " + _RST_SECRET)
+
+
+class _RaisingRepr:
+    def __repr__(self):
+        raise RuntimeError("repr leaked " + _RST_SECRET)
+
+
+class _SneakyInt(int):
+    """An int subclass that lies about every comparison."""
+
+    def __lt__(self, other):
+        return False
+
+    def __gt__(self, other):
+        return False
+
+    def __le__(self, other):
+        return True
+
+    def __ge__(self, other):
+        return True
+
+
+# -- Finding 1: only an exact built-in str can enable proposal mode ----------
+
+
+def test_resolve_mode_refuses_a_str_subclass_whose_strip_lies():
+    """The reproduced defect: strip() returning 'propose' enabled propose."""
+    assert resolve_mode(_StripIsPropose("observe")) == MODE_OBSERVE
+    assert resolve_mode(_StripIsPropose("propose")) == MODE_OBSERVE
+
+
+def test_resolve_mode_does_not_invoke_a_refused_values_hooks():
+    recorder = _HookRecorder()
+    assert resolve_mode(recorder) == MODE_OBSERVE
+    assert recorder.invoked == [], recorder.invoked
+
+
+def test_resolve_mode_never_raises_from_a_supplied_hook():
+    """A raising strip()/lower() previously escaped with caller text."""
+    assert resolve_mode(_RaisingStrip("x")) == MODE_OBSERVE
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, 1, 1.0, True, b"propose", ["propose"], {"propose": 1}, object(),
+     _RST_SECRET, "", "  ", "commit", "PROPOSE-ish", "proposex"],
+)
+def test_absent_unknown_or_foreign_modes_become_exact_observe(raw):
+    resolved = resolve_mode(raw)
+    assert resolved == MODE_OBSERVE
+    assert type(resolved) is str
+
+
+@pytest.mark.parametrize("raw", ["propose", " propose ", "PROPOSE", "Propose"])
+def test_ordinary_propose_still_resolves_to_propose(raw):
+    """Guard: a fix that refused everything would pass the controls above."""
+    assert resolve_mode(raw) is MODE_PROPOSE
+
+
+# -- Finding 1: no consumer can be talked into proposal capability -----------
+
+
+def test_tools_for_mode_refuses_a_foreign_mode_without_invoking_it():
+    recorder = _HookRecorder()
+    names = [t.name for t in tools_for_mode(recorder)]
+    assert "propose_tuning" not in names
+    assert recorder.invoked == [], recorder.invoked
+
+
+def test_tool_router_refuses_a_foreign_mode_without_invoking_it():
+    recorder = _HookRecorder()
+    router = ToolRouter(client=object(), mode=recorder)
+    assert "propose_tuning" not in router._handlers
+    assert router.mode == MODE_OBSERVE
+    assert recorder.invoked == [], recorder.invoked
+
+
+def test_orchestrator_refuses_a_foreign_mode_and_stays_coherent():
+    recorder = _HookRecorder()
+    orch = Orchestrator(
+        backend=MockBackend(responses=[]),
+        client=object(),
+        system_prompt="p",
+        mode=recorder,
+    )
+    assert orch.mode == MODE_OBSERVE
+    assert "propose_tuning" not in [t.name for t in orch.tools]
+    assert "propose_tuning" not in orch.router._handlers
+    assert orch.router.mode == MODE_OBSERVE
+    assert recorder.invoked == [], recorder.invoked
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [_StripIsPropose("observe"), _HookRecorder(), None, 1, object(), _RST_SECRET],
+)
+def test_every_consumer_agrees_on_the_resolved_mode(supplied):
+    """The four consumers cannot disagree, whatever they are handed."""
+    resolved = resolve_mode(supplied)
+    router = ToolRouter(client=object(), mode=supplied)
+    orch = Orchestrator(
+        backend=MockBackend(responses=[]),
+        client=object(),
+        system_prompt="p",
+        mode=supplied,
+    )
+    tool_names = {t.name for t in tools_for_mode(supplied)}
+    has_proposal = "propose_tuning" in tool_names
+    assert router.mode == resolved
+    assert orch.mode == resolved
+    assert orch.router.mode == resolved
+    assert has_proposal is (resolved is MODE_PROPOSE)
+    assert ("propose_tuning" in router._handlers) is (resolved is MODE_PROPOSE)
+
+
+def test_exact_propose_still_grants_the_proposal_tool_everywhere():
+    """Guard: ordinary behaviour is preserved end to end."""
+    router = ToolRouter(client=object(), mode="propose")
+    orch = Orchestrator(
+        backend=MockBackend(responses=[]),
+        client=object(),
+        system_prompt="p",
+        mode="propose",
+    )
+    assert "propose_tuning" in router._handlers
+    assert "propose_tuning" in [t.name for t in orch.tools]
+    assert "propose_tuning" in orch.router._handlers
+    assert orch.mode is MODE_PROPOSE
+
+
+@pytest.mark.parametrize(
+    "mode", [MODE_OBSERVE, MODE_PROPOSE, "propose", "observe", None, object()]
+)
+def test_no_mode_ever_exposes_a_commit_tool(mode):
+    router = ToolRouter(client=object(), mode=mode)
+    assert "commit_tuning" not in router._handlers
+    assert "commit_tuning" not in [t.name for t in tools_for_mode(mode)]
+
+
+def test_a_config_constructed_directly_cannot_carry_a_foreign_mode():
+    """Configuration-to-constructor coherence: from_env was not the only path."""
+    from scripts.orchestrator_config import OrchestratorConfig
+
+    recorder = _HookRecorder()
+    config = OrchestratorConfig(mode=recorder)
+    assert config.mode == MODE_OBSERVE
+    assert recorder.invoked == [], recorder.invoked
+    assert OrchestratorConfig(mode=_StripIsPropose("observe")).mode == MODE_OBSERVE
+    assert OrchestratorConfig(mode="propose").mode is MODE_PROPOSE
+
+
+def test_no_secret_shaped_mode_text_reaches_a_result_or_receipt():
+    orch = Orchestrator(
+        backend=MockBackend(responses=[]),
+        client=object(),
+        system_prompt="p",
+        mode=_RST_SECRET,
+    )
+    assert _RST_SECRET not in repr(orch.mode)
+    assert _RST_SECRET not in repr([t.name for t in orch.tools])
+    assert _RST_SECRET not in repr(sorted(orch.router._handlers))
+
+
+# -- Finding 2: only an exact built-in int is a valid limit ------------------
+
+
+@pytest.mark.parametrize("name", ["max_tool_depth", "max_total_tool_calls"])
+@pytest.mark.parametrize("value", [1, 2, 8, 24, MAX_LIMIT_CEILING])
+def test_exact_ints_in_range_are_accepted(name, value):
+    assert _validate_positive_limit(name, value) == value
+
+
+@pytest.mark.parametrize("name", ["max_tool_depth", "max_total_tool_calls"])
+@pytest.mark.parametrize(
+    "value", [0, -1, -1000, MAX_LIMIT_CEILING + 1, MAX_LIMIT_CEILING + 5000]
+)
+def test_out_of_range_exact_ints_are_refused(name, value):
+    with pytest.raises(ValueError):
+        _validate_positive_limit(name, value)
+
+
+@pytest.mark.parametrize("name", ["max_tool_depth", "max_total_tool_calls"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_SneakyInt(0), id="int-subclass-zero"),
+        pytest.param(_SneakyInt(-5), id="int-subclass-negative"),
+        pytest.param(_SneakyInt(MAX_LIMIT_CEILING + 5000), id="int-subclass-over"),
+        pytest.param(_SneakyInt(8), id="int-subclass-in-range"),
+        pytest.param(True, id="bool-true"),
+        pytest.param(False, id="bool-false"),
+        pytest.param(1.0, id="float"),
+        pytest.param("8", id="str"),
+        pytest.param(_RST_SECRET, id="secret-str"),
+        pytest.param(None, id="none"),
+        pytest.param([8], id="list"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_non_exact_ints_are_refused(name, value):
+    """The reproduced defect: an int subclass lying about comparisons passed."""
+    with pytest.raises(ValueError):
+        _validate_positive_limit(name, value)
+
+
+def test_a_refused_limit_invokes_no_supplied_hook():
+    recorder = _HookRecorder()
+    with pytest.raises(ValueError):
+        _validate_positive_limit("max_tool_depth", recorder)
+    assert recorder.invoked == [], recorder.invoked
+
+
+def test_a_raising_repr_produces_the_fixed_refusal_not_an_escape():
+    """The reproduced defect: a raising __repr__ escaped the function."""
+    with pytest.raises(ValueError) as caught:
+        _validate_positive_limit("max_tool_depth", _RaisingRepr())
+    assert "max_tool_depth" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "value", [_RST_SECRET, _RaisingRepr(), _HookRecorder(), _SneakyInt(0)]
+)
+def test_refusal_text_is_fixed_and_carries_no_supplied_value(value):
+    with pytest.raises(ValueError) as caught:
+        _validate_positive_limit("max_tool_depth", value)
+    message = str(caught.value)
+    assert message == (
+        "max_tool_depth must be an exact int in [1, %d]" % MAX_LIMIT_CEILING
+    )
+    assert _RST_SECRET not in message
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_tool_depth": _SneakyInt(0)},
+        {"max_total_tool_calls": _SneakyInt(MAX_LIMIT_CEILING + 5000)},
+        {"max_tool_depth": True},
+        {"max_total_tool_calls": _RST_SECRET},
+    ],
+)
+def test_both_budgets_keep_the_protection_at_construction(kwargs):
+    with pytest.raises(ValueError):
+        Orchestrator(
+            backend=MockBackend(responses=[]),
+            client=object(),
+            system_prompt="p",
+            **kwargs,
+        )
+
+
+def test_ordinary_budgets_still_construct():
+    """Guard: a fix that refused everything would pass the controls above."""
+    orch = Orchestrator(
+        backend=MockBackend(responses=[]),
+        client=object(),
+        system_prompt="p",
+        max_tool_depth=8,
+        max_total_tool_calls=24,
+    )
+    assert orch.max_tool_depth == 8
+    assert orch.max_total_tool_calls == 24
+    assert type(orch.max_tool_depth) is int
+    assert type(orch.max_total_tool_calls) is int
