@@ -1372,6 +1372,19 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
+**Corrected once, after Jack's first independent HOLD round (2026-08-24).**
+Twenty-four demonstrated cases all reproduced, in five findings — three of them
+one root cause: an exact outer type mistaken for an unaltered object, since
+`object.__setattr__` replaces any field on a frozen dataclass and the digest
+computed at construction does not follow. Carriers are now revalidated and
+their digests recomputed before planning, at construction, and again before
+execution; direct envelope construction is held to the planner's exact
+standard through OMI-V2's own dialect and schema authorities; a clock that
+raises is refused with a fixed token and every clock figure is bounded;
+execution-time revalidation proves field types before anything is iterated,
+compared or truth-tested; and the receipt enforces every bound it documents.
+Section 11 of the inception document lists each finding and its correction.
+
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,
 not independent acceptance.

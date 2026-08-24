@@ -1,6 +1,8 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Modules
+> **Status**: implemented, inert, and hermetic. Corrected once, after Jack's
+> first independent HOLD round — see § 11, which lists every defect that round
+> found and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -52,75 +54,104 @@ network guard. Concretely:
 
 | Concern | Whose code decides it |
 |---------|----------------------|
-| Is this dialect supported? | OMI-V2 `is_supported_dialect`, via `plan_structured_request` |
+| Is this dialect supported? | OMI-V2 `is_supported_dialect` |
 | Is this schema acceptable, and what is its detached snapshot? | OMI-V2 `_validated_snapshot`, via `plan_structured_request` |
 | What wire shape does this dialect need? | OMI-V2 `build_response_format` |
 | Did the response parse as a usable JSON object? | OMI-V1 `validate_structured_output`, via OMI-V2 `request_structured_json` |
 | What may a request refusal say? | OMI-V2 `REFUSAL_TOKENS` / `EXCHANGE_REFUSALS`, imported |
+| Is a request refusal pre- or post-dialect? | OMI-V2 `is_pre_dialect_refusal`, imported |
 | What may a response failure say? | OMI-V1/V2 `RESPONSE_FAILURES`, imported |
 | Is this identifier safe to store? | OMI-V1 `is_safe_token` |
 | Is the network blocked during a rehearsal? | OMI-V1 `hermetic_guard` |
 
 `PlanRefusal` is **composed** from OMI-V2's `StructuredRefusal` exactly as
 `ExchangeRefusal` is, so a dialect or schema token added to OMI-V2 arrives here
-without an edit. `tests/test_omi_v3_observation_envelope.py` asserts the two
-V3A vocabularies are disjoint from all three OMI-V2 vocabularies, that no V3A
-token begins `dialect-` or `schema-`, that the four dialect names appear
-nowhere in V3A source, and that the planner's captured `plan_structured_request`
-and the adapter's captured `request_structured_json` **are** OMI-V2's objects
-rather than lookalikes.
+without an edit. Controls assert the two V3A vocabularies are disjoint from all
+three OMI-V2 vocabularies, that no V3A token begins `dialect-` or `schema-`,
+that the four dialect names appear nowhere in V3A source, and that the objects
+V3A holds in its closure cells **are** OMI-V2's — `plan_structured_request`,
+`StructuredOutputRequest`, `request_structured_json`, `is_supported_dialect`,
+`is_pre_dialect_refusal`, `EXCHANGE_REFUSALS`, `RESPONSE_FAILURES`.
+
+The two V3A modules also share every numeric bound rather than each holding a
+copy: they live in `observation_receipt.py` and are imported by
+`observation.py`, and a control asserts each is the *same object* in both. A
+bound with two values is a bound with none.
 
 One helper is imported rather than copied: `_restore_identity`, the eight-line
 function that gives a factory-built class its module-level `__qualname__` back
-so it can pickle. A third verbatim copy was the alternative. The import is
-intra-package and pinned by a control asserting identity.
+so it can pickle. The import is intra-package and pinned by a control asserting
+identity. One number *is* restated — `_MAX_SCHEMA_BYTES`, so the envelope can
+bound a decode before handing the document to OMI-V2 — and a control asserts it
+still equals `structured_request._SCHEMA_MAX_CHARS`.
 
 `schema_conformance` remains closed to the single token `"unverified"`. Nothing
-in OMI-V3A compares a response against the schema that was sent, because
-nothing below it does and this layer adds nothing that could.
+in OMI-V3A compares a response against the schema that was sent.
 
 ## 3. The envelope contract
 
-`plan_observation` is keyword-only, total over every input, and never raises.
-It returns an `ObservationPlan` carrying either an `ObservationEnvelope` or one
-closed token. The order is fixed and the first refusal wins.
+`plan_observation` is keyword-only, **total over every input including a clock
+that raises**, and never raises. It returns an `ObservationPlan` carrying
+either an `ObservationEnvelope` or one closed token.
 
 | Property | How it is enforced |
 |----------|--------------------|
-| **Immutable task identity** | `new_task_id()` generates a canonical UUIDv4 from a closed factory; `is_canonical_uuid4` accepts only the lowercase hyphenated 36-character form with version nibble `4` and variant in `{8,9,a,b}`. Braced, URN, uppercase and unhyphenated spellings are refused rather than normalised. |
-| **Input hashes** | Every `EvidenceItem` holds exact built-in `bytes` and computes its own SHA-256 in `__post_init__`. `digest` is not an init field, so a caller cannot supply one, and there is no window between the check and the hash. `bytearray`, `memoryview` and `bytes` subclasses are all refused. |
-| **Bounded context** | Nothing ambient is read. Every evidence item is explicit, bounded per item and in total, against both a module ceiling and the caller's own declared bound, and must decode as strict UTF-8. |
+| **Immutable task identity** | `new_task_id()` generates a canonical UUIDv4 from a closed factory; `is_canonical_uuid4` accepts only the lowercase hyphenated 36-character form with version nibble `4` and variant in `{8,9,a,b}`. |
+| **Input hashes** | Every `EvidenceItem` holds exact built-in `bytes` and computes its own SHA-256 in `__post_init__`. `digest` is not an init field, so a caller cannot supply one. `bytearray`, `memoryview` and `bytes` subclasses are refused. |
+| **Bounded context** | Nothing ambient is read. Every evidence item is explicit, bounded per item and in total against both a module ceiling and the caller's declared bound, and must decode as strict UTF-8. |
 | **Bounded result** | `max_result_bytes` bounds the canonical rendering of the accepted structured object; OMI-V2's `max_chars` bounds the payload string before it parses. |
-| **Deadline** | Derived as `issued_ns + duration_ns` from an exact-`int` bounded duration and one reading of a caller-supplied monotonic clock. |
-| **Provenance** | An authorizing-principal token and a worker token, both `is_safe_token`, both copied into the receipt. |
+| **Deadline** | Derived as `issued_ns + duration_ns` from an exact-`int` bounded duration and one reading of a caller-supplied monotonic clock, with both figures and the derived deadline inside the clock ceiling (§ 4a). |
+| **Provenance** | An authorizing-principal token and a worker token, both `is_safe_token`. |
 | **Declared loopback endpoint** | § 4. |
 | **Resource reservation** | § 5. |
+
+### Exact type is not unaltered
+
+`object.__setattr__` will replace any field on a frozen dataclass, and the
+digest computed at construction does not follow. A carrier cannot defend its
+own past, so **every consumer re-derives**:
+
+- **Before planning**, `plan_observation` revalidates each `EvidenceItem`'s
+  identifier, byte payload, size and stored digest, and each
+  `ResourceReservation`'s three figures and stored digest — recomputing both
+  digests from the content actually present and requiring exact equality. All
+  of it happens in the one controlled traversal that also builds the envelope's
+  own tuple, so no caller container is read twice.
+- **At construction**, `ObservationEnvelope.__post_init__` does the same, so a
+  directly built envelope is held to the identical standard.
+- **Before executing**, `execute_observation` re-derives the whole digest tree
+  (§ 6).
+
+This is the correction for Jack's first finding; § 11 records what it cost.
+
+### Direct construction is held to the planner's standard
+
+`ObservationEnvelope` can be constructed directly, and doing so **re-runs every
+check the planner applies** — a claim the previous revision made and did not
+keep. A directly accepted envelope cannot carry an unsupported, arbitrary,
+subclassed or secret-shaped dialect; schema bytes that are not the canonical
+ASCII rendering of a snapshot OMI-V2 accepts *for that dialect*; a
+`schema_digest` that does not hash exactly those bytes; a stale evidence or
+reservation digest; an over-limit field; or incoherent required keys. Every
+rejection is a `ValueError` from `__post_init__`, so no half-built envelope
+exists for a caller to hand to the executor.
+
+The schema check is not a second validator: the bytes are decoded, parsed, and
+put back through OMI-V2's own `plan_structured_request`, and the snapshot it
+returns is re-rendered canonically and compared byte-for-byte. Both the planner
+and the carrier reach that logic through the *same* `_canonical_schema`
+function, and a control asserts it.
 
 **Exact integers only.** Every declared limit is checked with
 `type(value) is int` **before** any comparison or representation, so `True`,
 every `int` subclass, and every foreign object with `__index__`, `__lt__` or
-`__gt__` is refused without its hooks running. Zero, negatives and over-ceiling
-values are refused separately, with their own token.
+`__gt__` is refused without its hooks running.
 
 **No caller-owned mutable object survives into an accepted envelope.** Evidence
 is a tuple of frozen items over immutable `bytes`; the schema is immutable
-`bytes`; required keys are a tuple of `str`; the reservation is frozen. A
-caller who keeps a reference to the list, tuple or dict they passed in cannot
-reach through it afterwards. The sequences they pass are read exactly once,
-into a container this package owns, and their exact type is checked first so a
-subclass whose `__iter__` returns different elements on a second pass never
-gets a second pass.
-
-**The snapshot is built during the controlled traversal.** The schema the
-envelope carries is the canonical rendering of the detached snapshot OMI-V2's
-`_validated_snapshot` produced — a structure containing exactly the values it
-inspected, because validation and copying are one traversal there. Key order is
-canonicalised so the digest is comparable; JSON object member order is not
-semantically significant.
-
-**Refusal reasons carry no caller text.** Every token is an inlined literal
-from a closed set. A secret-shaped principal is refused as
-`principal-not-safe-token`, and the secret appears nowhere.
+`bytes`; required keys are a tuple of `str`; the reservation is frozen. The
+sequences a caller passes are read exactly once, into a container this package
+owns, and their exact type is checked first.
 
 ## 4. The declared loopback endpoint — validated, not resolved
 
@@ -140,8 +171,8 @@ non-ASCII digits; and any path but exactly `/v1`.
 
 Non-ASCII digits are worth naming. `int("١٢")` is `12`, and
 `str.isdigit()` returns `True` for those characters, so a port written in
-Arabic-Indic digits parses to an ordinary number. Every character is therefore
-checked against an explicit ASCII set before any conversion runs.
+Arabic-Indic digits parses to an ordinary number. Every character is checked
+against an explicit ASCII set before any conversion runs.
 
 The parser is hand-written string slicing, not `urllib.parse`, for the reason
 `registry._host_of` gives: this layer must keep importing nothing that can
@@ -151,39 +182,75 @@ module imports `socket`, `urllib`, `http`, `ssl`, `subprocess`, `os`, `sys`,
 
 **Two loopback checks now exist, and that is deliberate.** OMI-V1's
 `registry._is_loopback` classifies the host of an already-constructed backend
-and accepts `localhost` and lenient dotted quads, which is the right answer to
-the question it asks. OMI-V3A asks a stricter question about declared text. A
-control asserts the containment rather than duplicating either check: every
-endpoint V3A accepts has a host OMI-V1 also calls loopback, and the containment
-is strict.
+and accepts `localhost`; OMI-V3A asks a stricter question about declared text.
+A control asserts the containment rather than duplicating either check.
 
-> **This validates declared text and nothing more.** It is not a claim about
-> where a request goes. An opaque backend factory handed to
-> `structured_exchange_adapter` could target another host entirely. Proving
-> where a real adapter connects is live-adapter work under separate authority.
+> **This validates declared text and nothing more.** An opaque backend factory
+> handed to `structured_exchange_adapter` could target another host entirely.
+> Proving where a real adapter connects is live-adapter work under separate
+> authority.
+
+## 4a. The clock ceiling
+
+Every clock reading OMI-V3A accepts, every deadline it derives, and every
+elapsed duration it records must lie in `[0, MAX_CLOCK_NS]`, where
+**`MAX_CLOCK_NS = 2**63 − 1 = 9 223 372 036 854 775 807`** nanoseconds — the
+natural range of a 64-bit nanosecond clock, about 292 years. The value is
+imported from `observation_receipt.py` and captured into a closure cell by
+every check that uses it, so rebinding the name is inert.
+
+The bound exists for a specific failure. An exact `int` has no width in Python,
+so a clock returning `10**5000` produced a perfectly ordinary envelope and a
+perfectly ordinary receipt — and then `json.dumps` raised
+`ValueError: Exceeds the limit (4300 digits) for integer string conversion`
+when the receipt was serialised. A magnitude that cannot be represented inside
+the documented receipt bound is refused where it enters, not discovered where
+it is written.
+
+**A clock that raises is refused, not propagated.** `_read_clock` catches
+`Exception` and returns the fixed word `raised`, which the planner spells
+`clock-raised` and the executor spells the same. No exception text, class name,
+argument or representation is read, stored or rendered. `BaseException` is not
+caught, so `KeyboardInterrupt` and `SystemExit` still propagate.
+
+> **One narrowing, stated rather than hidden.** A clock that somehow performed
+> I/O and raised OMI-V1's `HermeticViolation` would be *refused* rather than
+> failing the run loudly. A clock is not permitted to perform I/O, so that is a
+> caller error rather than a breach of the boundary this package guards. The
+> hermetic guarantee that matters lives on the **exchange** path, which is not
+> caught anywhere. A single control pins both halves together.
 
 ## 5. Attested, not verified
 
 `ResourceReservation` declares CPU cores, memory, and optionally GPU memory —
 exact ints, bounded, positive, with `None` meaning *no GPU reservation is
 declared* and zero refused so the two cannot be confused. It computes its own
-digest.
+digest, and every consumer re-derives that digest rather than trusting it.
 
 `execute_observation` refuses unless an injected `ReservationDecision`
-(a) is exactly that type, (b) carries the digest of *this* reservation, and
-(c) reports `satisfied=True` as an exact `bool`. A decision about some other
-reservation is not a decision about this one, however satisfied it says it is.
+(a) is exactly that type, (b) still holds its accepted field types — checked
+before `satisfied` is read in a boolean context, so a tampered value's
+`__bool__` never runs — (c) carries the digest of *this* reservation **as
+recomputed from its current fields**, and (d) reports `satisfied=True` as an
+exact `bool`.
 
 > **OMI-V3A inspects nothing.** It reads no CPU count, no memory figure, no GPU
 > state, no process list, no service, and no concurrent workload. What it
 > verifies is a **checker's or operator's attestation** — `"operator-asserted"`
-> or `"checker-asserted"` — and what the receipt records is that a named party
-> made a claim. It is not evidence that the resources were available.
+> or `"checker-asserted"`. It is not evidence that the resources were
+> available.
 >
 > A control asserts this directly by planning an observation whose reservation
 > nothing on the machine could satisfy and watching it succeed. If that control
-> ever starts failing, something in this package has begun measuring the host,
-> which is outside its authority.
+> ever starts failing, something in this package has begun measuring the host.
+
+**Which party attested is carried into the receipt, not collapsed.**
+`ObservationReceipt.reservation_attestation` holds the exact token when a
+reservation was evaluated and `None` when it was not, and the two are enforced
+to imply one another. Rendering `operator-asserted` and `checker-asserted`
+identically would erase the only thing that says *whose* claim an operator is
+being asked to rely on; a control asserts two otherwise-identical receipts
+differ in their serialised bytes.
 
 Folding@home and BOINC remain senior per the inception note § 6. OMI-V3A cannot
 see them, cannot pause them, and cannot reprioritise them.
@@ -192,58 +259,49 @@ see them, cannot pause them, and cannot reprioritise them.
 
 The order is fixed:
 
-1. the envelope's **exact type**, then its **re-derived digest**. Both produce a
-   result with **no receipt** — nothing else may describe an envelope it could
-   not first trust;
-2. `exchange` and `clock` callability;
-3. the first clock reading: exact `int`, not earlier than `issued_ns`;
-4. the **deadline**. Already passed → the observation is `void`, the exchange is
-   never invoked, and the reservation is recorded `not-evaluated` because it
-   never was. The deadline instant itself counts as exceeded;
+1. the envelope's **exact type**, then **every field's exact runtime type**,
+   then its **re-derived digest tree**. All three produce a result with **no
+   receipt**. The field check comes first so that no foreign `__iter__`,
+   `__eq__`, `__ne__`, `__hash__` or `__len__` is ever reached: an earlier
+   revision compared the digest with `!=` and walked `envelope.evidence` before
+   knowing either was what it claimed;
+2. `exchange` callability;
+3. the first clock reading: callable, non-raising, exact `int`, in range, and
+   not earlier than `issued_ns`;
+4. the **deadline**. Already passed → `void`, the exchange never invoked, the
+   reservation recorded `not-evaluated`. The deadline instant itself counts as
+   exceeded;
 5. the **reservation decision** (§ 5);
 6. the **exchange, at most once**, through a latch;
 7. the second clock reading, then the deadline again. A deadline crossed while
    the exchange ran voids the observation **even when the exchange succeeded**,
-   and the value is discarded — a late answer is not an answer;
+   and the value is discarded;
 8. the exchange result's exact type, then OMI-V2's own three-state outcome;
-9. the result size, measured on the canonical rendering of what OMI-V2 accepted.
+9. the result size, measured on the canonical rendering of what OMI-V2
+   accepted.
 
-**The digest re-derivation covers content, not claims about content.** An
-earlier revision of `_envelope_digest` read each item's *stored* digest and
-`len(content)`, so replacing an item's bytes with different bytes of the same
-length changed nothing it looked at — and the re-derivation that exists to
-catch tampering would have agreed nothing had happened. The same held for
-`schema_bytes` against a stored `schema_digest`, and for a reservation's fields
-against its stored digest. Every stored digest is now written beside one
-recomputed from the bytes themselves, and every digest-bearing carrier beside
-its own fields. `tests/test_omi_v3_observation_rehearsal.py` carries the
-equal-length substitution control that would have caught the original defect.
+**The digest re-derivation covers content, not claims about content.** Every
+stored digest is written beside one recomputed from the bytes themselves, and
+every digest-bearing carrier beside its own fields, so an equal-length evidence
+substitution, a `schema_bytes` swap and a reservation-field tamper are all
+caught.
 
-**The exchange is invoked at most once, and there is no retry loop.** The
-latch enforces it rather than documenting it: a second call raises. A control
-reads the executor's own source — with docstrings and comments stripped by AST
-round-trip, so prose cannot satisfy or defeat it — and asserts exactly one call
-site, a latch guarding it, and no loop of any kind in the function.
+**The exchange is invoked at most once, and there is no retry loop.** The latch
+enforces it: a second call raises. A control reads the executor's own source —
+with docstrings and comments stripped by AST round-trip, so prose can neither
+satisfy nor defeat it — and asserts exactly one call site, a latch guarding it,
+and no loop of any kind.
 
 > **What one invocation does not prove.** This is a fact about *this module's*
-> call site. It is not a claim that an opaque SDK or HTTP client performs
-> exactly one network attempt; transports retry internally. Disabling and then
-> proving that is live-adapter work under separate authority.
+> call site, not a claim that an opaque SDK performs exactly one network
+> attempt. Disabling and proving that is live-adapter work under separate
+> authority.
 
-**An exception from the injected exchange propagates.** It is not caught into a
-receipt, for two reasons. It matches OMI-V2, where `request_structured_json`
-documents that transport errors propagate. And OMI-V1's `HermeticViolation`
-must stay loud: folding an exchange exception into a tidy receipt would turn a
-hermetic breach — a double that reached the network — into a record of a failed
-observation, which is exactly the failure mode the guard exists to prevent. A
-control asserts the propagation for both a socket attempt and a `urlopen`
-attempt.
-
-**Result sizing is honest about what it measured.** The byte bound is applied by
-OMI-V3A to the canonical rendering of the object OMI-V2 accepted; the char
-bound is applied by OMI-V2's validator to the payload string. Neither bounds
-how many bytes a transport read before either of them saw anything, and
-OMI-V3A has no transport to ask.
+**Totality, stated exactly.** `plan_observation` is total over every input.
+`execute_observation` is total over every input **except an exception raised by
+the injected `exchange`**, which propagates — because it matches OMI-V2, and
+because OMI-V1's `HermeticViolation` must stay loud. That is the only
+exception it lets past; a raising clock does not qualify (§ 4a).
 
 ## 7. The receipt
 
@@ -257,57 +315,73 @@ from a bad answer from a refused configuration cannot act on any of them:
 | `void` | the deadline was exceeded, before or during. OMI-V3A does not retry it |
 | `refused` | OMI-V3A refused, for a token in `ExecutionRefusal` |
 
-`DeadlineResult` carries a fourth token, `not-evaluated`. It is not a fourth
-place the deadline could fall — it records that **no determination was
-completed**, because the execution refused before a usable clock reading
-existed, or the reading after the exchange was unusable. It exists so a receipt
-never reports `within-deadline` on the strength of a check that did not happen.
+`DeadlineResult` carries a fourth token, `not-evaluated`, recording that **no
+determination was completed** — so a receipt never reports `within-deadline` on
+the strength of a check that did not happen.
 
 The receipt carries a task id, an envelope digest, a schema digest, evidence
-ids and digests, provenance tokens, a dialect, byte counts, an elapsed
-duration, a deadline result, a reservation result, request and response
-outcomes, an invocation count, missing-key **indices**, and the schema-
-conformance status. It carries no evidence bytes, no prompt, no model output,
-no schema content, no endpoint text, no header, no credential, no exception
-text, no object representation, and no type name — structurally, because there
-is no field one could occupy.
+ids and digests, provenance tokens, a dialect, a reservation attestation, byte
+counts, an elapsed duration, a deadline result, a reservation result, request
+and response outcomes, an invocation count, missing-key **indices**, and the
+schema-conformance status. It carries no evidence bytes, no prompt, no model
+output, no schema content, no endpoint text, no header, no credential, no
+exception text, no object representation, and no type name — structurally,
+because there is no field one could occupy.
 
-Its coherence rules are enforced, not documented: a receipt claiming a request
-was attempted while reporting zero invocations, or an observation that
-succeeded while carrying a refusal, will not construct. Evidence that can lie
-about itself is worse than no evidence.
+**Every bound it documents, it enforces.** `evidence_bytes`, `elapsed_ns`,
+`result_bytes`, `context_ceiling_tokens`, `required_key_count`,
+`exchange_invocations`, the evidence-item count and the missing-index count are
+each checked against the same ceiling the envelope layer enforces. The previous
+revision described them as bounded and checked only non-negativity.
+
+Its coherence rules encode **the states the executor can genuinely emit**, not
+merely field-by-field validity. A receipt will not construct if it claims an
+attempted request with zero invocations; a satisfied reservation on a path that
+never reached the decision; an elapsed duration without an invocation or
+without a completed deadline verdict; an evidence-byte total below what its
+item count implies; duplicate evidence ids; a missing-key index at or past
+`required_key_count`; more missing indices than required keys; an unsatisfied
+reservation recorded as anything but its own refusal; an evaluated reservation
+without an attestation, or an unevaluated one with one; or — using OMI-V2's own
+`is_pre_dialect_refusal` — a pre-dialect refusal that names a dialect or a
+post-dialect refusal that does not.
 
 `serialize_receipt` is deterministic and bounded: sorted keys, fixed
 separators, ASCII output, refused for anything that is not exactly a receipt.
-Determinism is a property of the function — `elapsed_ns` legitimately differs
-between runs.
+Because every field is bounded, **every accepted receipt serialises inside
+`RECEIPT_MAX_BYTES`** — proved by a control that constructs the largest receipt
+the carrier will accept, at every ceiling simultaneously, with the longest
+identifiers OMI-V1's secret matcher will actually admit.
 
 ## 8. What was tested
 
-Two suites, 633 controls, all passing under normal Python, `-O`, and `-OO`.
+Two suites, **869 controls**, all passing under normal Python, `-O`, and `-OO`.
 
 - [`tests/test_omi_v3_observation_envelope.py`](../tests/test_omi_v3_observation_envelope.py)
-  — identity, provenance, limits, duration, reservation carriers, the endpoint
-  parser table, evidence, required keys, schema delegation, carrier coherence,
-  receipt shape and serialisation, pickling, rebinding, and hidden-authority
-  keyword injection.
+  — identity, provenance, limits, duration, the clock ceiling, reservation
+  carriers, the endpoint parser table, evidence, required keys, schema
+  delegation, pre-plan carrier revalidation, direct-construction parity with the
+  planner, carrier coherence, receipt bounds and coherence, serialisation at the
+  ceiling, pickling, rebinding, and hidden-authority keyword injection.
 - [`tests/test_omi_v3_observation_rehearsal.py`](../tests/test_omi_v3_observation_rehearsal.py)
   — the whole execution path inside `hermetic_guard` against in-process
-  doubles: one successful observation, both deadline cases, the reservation
-  gate, envelope tampering, every invalid response OMI-V2 can report,
-  invocation counting, and the no-retry structural control.
+  doubles: one successful observation, both deadline cases, raising and
+  enormous clock readings at both reads, the reservation gate, decision-field
+  tampering with hook tripwires, envelope-field and digest tampering, every
+  invalid response OMI-V2 can report, attestation flow, invocation counting,
+  and the no-retry structural control.
 
 Both files carry a **non-vacuity control**: `-O` and `-OO` strip `assert`
-statements, so each suite proves that a false assertion in it would still fail,
-rather than trusting pytest's rewriting to have happened. A further control
-asserts the production modules contain **no `assert` statement at all**, so
-nothing they do changes under either flag.
+statements, so each suite proves that a false assertion in it would still fail.
+A further control asserts the production modules contain **no `assert`
+statement at all**.
 
 Hostile inputs are recorded rather than merely refused: the `str`, `int`,
 `bytes`, mapping and sequence subclasses used here append to a tripwire list
-when a hook runs, and the controls assert the list is **empty** — refusal by
-exact-type check, before any supplied `__len__`, `__eq__`, `__hash__`,
-`__iter__`, `__index__`, `keys`, `items`, `encode` or `decode` could execute.
+when a hook runs, and the controls assert the list is **empty**. The same
+technique covers tampered fields on the execution path — a digest with an
+`__ne__`, an evidence container with an `__iter__`, a `satisfied` with a
+`__bool__` — each asserted never to fire.
 
 Rebinding is checked exhaustively rather than by nomination: every non-dunder
 name in both modules is replaced in turn with an object that raises on call,
@@ -327,26 +401,23 @@ names V3A imports.
 5. **No tokenizer** — `context_ceiling_tokens` is carried and recorded. No
    token count is verified, and nothing here could verify one.
 6. **The clock is the caller's** — OMI-V3A never reads a clock ambiently. It
-   checks arithmetic, type and ordering against the readings it is handed; it
-   does not establish that they came from `time.monotonic_ns`.
-7. **No uniqueness claim for a task id** — `new_task_id` guarantees canonical
-   *form* and fixity for the life of an envelope. Not global non-reuse, and
-   not that any external system agrees the identifier names this task.
-8. **Arbitrary code replacement remains out of scope**, exactly as it has been
+   checks type, range, arithmetic and ordering against the readings it is
+   handed; it does not establish that they came from `time.monotonic_ns`.
+7. **A breaching clock is refused, not escalated** — the one narrowing in
+   § 4a, pinned by a control in both directions.
+8. **No uniqueness claim for a task id** — `new_task_id` guarantees canonical
+   *form* and fixity for the life of an envelope. Not global non-reuse.
+9. **Arbitrary code replacement remains out of scope**, exactly as it has been
    since OMI-V1's seventh round. Closure cells close *name rebinding*.
    Patching an attribute on a captured stdlib module, replacing a function
-   object, or swapping `sys.modules` is a different threat and is not defended
-   against here.
-9. **The hermetic guard is a guard, not a sandbox** — OMI-V1 says so, and it is
-   still true: a double holding a reference captured before entry, or reaching
-   for the OS another way, would not be stopped. It raises the cost of an
-   accidental live call from zero to loud.
-10. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
+   object, or swapping `sys.modules` is a different threat.
+10. **The hermetic guard is a guard, not a sandbox** — a double holding a
+    reference captured before entry would not be stopped. It raises the cost of
+    an accidental live call from zero to loud.
+11. **`scripts/open_model/__init__.py`'s module docstring still enumerates only
     the OMI-V1 and OMI-V2 modules.** The authority for this work limited that
-    file to exports, so the two V3A modules are exported but not listed in the
-    prose inventory there. It is a documentation gap, recorded here rather than
-    closed outside the fence.
-11. **Same-author evidence** — every control cited was written by the agent
+    file to exports. Recorded here rather than closed outside the fence.
+12. **Same-author evidence** — every control cited was written by the agent
     that wrote the code under test. Internal consistency, not independent
     acceptance.
 
@@ -356,13 +427,109 @@ names V3A imports.
   empty. `structured_exchange_adapter` binds whatever backend it is handed and
   is the boundary this package cannot see past.
 - **No inventory probe.** `GET /api/tags` and `GET /api/ps` remain gated behind
-  their own authorization per the inception note § 5, and nothing here touches
-  them.
+  their own authorization per the inception note § 5.
 - **No retry, no backoff, no queue.** A void observation is void.
 - **No controller.** No worker orchestrates another, allocates a resource, or
-  holds write authority. Composition of worker outputs remains a human-reviewed
-  step.
+  holds write authority.
 - **No proposal or commit path.** The R/S/T quarantine boundaries in
   [`LEGACY_ORCHESTRATOR_QUARANTINE.md`](LEGACY_ORCHESTRATOR_QUARANTINE.md) are
   untouched; OMI-V3A neither imports the legacy orchestrator nor is importable
-  by it, and adds no second route to the tuning API.
+  by it.
+
+## 11. Jack's first independent HOLD round (2026-08-24)
+
+Twenty-four cases were demonstrated against head `e53b98f` and **all twenty-four
+reproduced**. They fall into five findings, and the first three share one root
+cause worth naming on its own: *an exact outer type was repeatedly mistaken for
+an unaltered object.* `object.__setattr__` replaces any field on a frozen
+dataclass, and three separate places trusted a carrier because
+`type(x) is EvidenceItem` — or `ResourceReservation`, or `ReservationDecision` —
+held.
+
+**Finding 1 — carriers were adopted without revalidation.** An `EvidenceItem`
+whose bytes were swapped for *different bytes of the same length* kept a stale
+digest and was accepted as an envelope's initial state, so the receipt reported
+the digest of bytes that were never sent. A `ResourceReservation` altered to
+`cpu_cores=1 000 000 000` was accepted behind a digest describing two. An
+evidence identifier replaced with a secret-shaped string was copied into the
+envelope. **Corrected**: `plan_observation` revalidates every field and
+recomputes both digests inside its one controlled traversal, with four new
+refusal tokens (`evidence-id-not-safe-token`,
+`evidence-content-not-exact-bytes`, `evidence-digest-not-recomputable`,
+`reservation-field-not-exact-int`, `reservation-field-out-of-range`,
+`reservation-digest-not-recomputable`).
+
+**Finding 2 — direct construction did not keep its promise.** The class
+docstring said direct construction "re-runs every check". It checked
+`type(dialect) is str` and nothing more, so an envelope was constructible with
+a secret-shaped dialect, with `schema_bytes` of `b"not json at all"`, and with
+a `schema_digest` hashing nothing. **Corrected**: `__post_init__` now puts the
+dialect to OMI-V2's `is_supported_dialect`, decodes and re-plans the schema
+through OMI-V2 and requires the canonical re-rendering to match byte-for-byte,
+requires `schema_digest` to hash exactly those bytes, and re-derives every
+evidence and reservation digest. The claim is now true.
+
+**Finding 3 — the clock could raise, and could be astronomically large.** Both
+entry points documented totality; a clock raising `RuntimeError` escaped both.
+A clock returning `10**5000` produced an ordinary envelope and a receipt that
+`json.dumps` then refused to render. **Corrected**: `_read_clock` catches
+`Exception` and returns a fixed token; `MAX_CLOCK_NS = 2**63 − 1` bounds every
+reading, the derived deadline and the recorded elapsed duration. A detail worth
+recording: pytest builds parameter ids with `str(value)`, so the control for
+`10**5000` produced a *collection error* until given an explicit id — the
+defect demonstrating itself inside the test harness.
+
+**Finding 4 — execution-time revalidation ran supplied hooks.** Replacing
+`envelope_digest` with an object carrying `__ne__` ran that hook during the
+comparison; replacing `envelope.evidence` with an object carrying `__iter__`
+ran that one during the digest walk; replacing `decision.satisfied` with an
+object carrying `__bool__` ran that one *and let an unsatisfied gate reach the
+exchange*; a tampered `attestation` was accepted and would have been recorded.
+**Corrected**: `_envelope_shape_intact` and `_decision_fields_intact` prove
+every field's exact runtime type by identity check before anything is iterated,
+compared, hashed or truth-tested, with a new `envelope-field-not-exact-type`
+refusal (receiptless, like the other two undescribable ones) and a new
+`reservation-decision-field-invalid`. The decision is bound to the reservation
+digest **recomputed from current fields**, never the stored one.
+
+**Finding 5 — the receipt did not enforce what it documented.** Counts were
+checked for non-negativity only, so `elapsed_ns = 10**5000` constructed and
+then could not serialise; evidence ids were not required distinct; a
+missing-key index of 99 was accepted against a single required key; OMI-V2's
+pre/post-dialect coherence was not applied; and the attestation was not carried
+at all, collapsing `operator-asserted` and `checker-asserted` into an
+indistinguishable satisfied claim. **Corrected**: every count is bounded
+against the envelope layer's own ceiling, ids must be distinct, indices must
+fall inside `required_key_count`, OMI-V2's `is_pre_dialect_refusal` is imported
+and applied, and `reservation_attestation` is a carried field enforced to be
+present exactly when a reservation was evaluated.
+
+**What this round is evidence for.** Every one of the five is the same shape of
+mistake the OMI-V2 rounds kept finding: *a claim in prose that the code did not
+keep*. The lesson is not new and it is now recorded four times across this
+package — a docstring is not a control, and an assertion covering a subset while
+its wording covers the whole is worse than no assertion, because it reads as
+coverage.
+
+## 12. Repository-operations note: the `.git/HEAD` desync
+
+During the first round, after a loop that checked out each commit in turn to
+prove bisectability, `.git/HEAD` was found holding a raw SHA — detached at the
+third commit — while its own reflog's most recent entry recorded the checkout
+back to the branch. `.git/HEAD` and `.git/index` both carried mtimes from that
+minute.
+
+Nothing was lost: the index and the working tree both diffed empty against the
+branch head, `git fsck` was clean, every local ref was intact, and the remote
+ref and the PR head were already correct. It was repaired once with
+`git switch`.
+
+This is recorded as a fact about the seat rather than a theory about its cause.
+The repository lives inside a OneDrive-synced directory, and this working
+memory already carries a standing note that OneDrive's sync engine writes into
+`.git`. The operative consequence is that git state on this seat can silently
+rewind, so refs are re-verified after every GitHub write.
+
+**Per Jack's instruction, no further metadata repair will be performed if this
+recurs.** A recurrence is reported as a 🔴 stop with the exact Kev action
+required, and nothing is touched.
