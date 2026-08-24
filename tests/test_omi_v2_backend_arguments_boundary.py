@@ -26,6 +26,7 @@ import pytest
 
 from scripts.agent_backends.base import Message, ToolUseBlock
 from scripts.agent_backends.openai_compat_backend import OpenAICompatBackend
+from scripts.agent_backends.structured_request import StructuredOutputRequest
 
 
 @pytest.fixture(autouse=True)
@@ -288,6 +289,34 @@ def test_the_refusal_happens_before_any_transport():
     ]
     with pytest.raises(ValueError):
         backend.complete(poisoned, [])
+    assert client.requests == []
+
+
+def test_complete_structured_also_refuses_before_any_transport():
+    # `_message_to_wire` serializes the history for BOTH entry points, so the
+    # strict-JSON boundary holds on the structured path too - and that
+    # method's documented contract names the narrowing: the deterministic
+    # request-encoding error propagates before any transport, alongside SDK
+    # transport errors. Neither is a refusal; refusals stay values.
+    client = RecordingClient(content="{}")
+    backend = _backend(client)
+    poisoned = [
+        Message(role="user", content="hi"),
+        Message(
+            role="assistant",
+            content=[ToolUseBlock(id="i1", name="t", input={"x": float("inf")})],
+        ),
+    ]
+    with pytest.raises(ValueError) as caught:
+        backend.complete_structured(
+            poisoned,
+            [],
+            structured=StructuredOutputRequest(
+                schema={"type": "object", "properties": {"ok": {"type": "boolean"}}}
+            ),
+        )
+    assert str(caught.value) == _FIXED_ERROR
+    assert caught.value.__cause__ is None
     assert client.requests == []
 
 

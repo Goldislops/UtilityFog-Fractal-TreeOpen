@@ -531,8 +531,13 @@ def _build_backend_class():
 
             Returns a :class:`StructuredCompletion` for every input reachable
             through the contract; it never raises to signal a refused request.
-            Transport-level errors from the SDK still propagate, matching
-            `complete()`.
+            Two exception families still propagate, both shared with
+            `complete()`: transport-level errors from the SDK, and - raised
+            before any transport - the fixed, non-disclosing error for a
+            message whose tool-call arguments cannot be encoded as strict
+            JSON (`_message_to_wire` serializes the history for both entry
+            points). Neither is a refusal; refusals are values, and the
+            refusal vocabulary is untouched by either.
 
             The refusal gate runs to completion BEFORE `self._client` is read at
             all. That ordering is the point of the method, not an implementation
