@@ -1,11 +1,12 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected six times — after
+> **Status**: implemented, inert, and hermetic. Corrected seven times — after
 > Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), a fourth
 > adversarial review (§ 17), a fifth (§ 18) whose production correction is
-> upstream in ``scripts/open_model/structured_exchange.py``, and a sixth
-> (§ 19), documentation-only. Each section lists every defect that round found
-> and what each one cost. Modules
+> upstream in ``scripts/open_model/structured_exchange.py``, a sixth (§ 19),
+> documentation-only, and a seventh (§ 20) whose two findings came from an
+> **independent Opus 5 audit**. Each section lists every defect that round
+> found and what each one cost. Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -122,9 +123,10 @@ be reported.
 
 ### Exact type is not unaltered
 
-`object.__setattr__` will replace any field on a frozen dataclass, and the
-digest computed at construction does not follow. A carrier cannot defend its
-own past, so **every consumer re-derives**:
+`object.__setattr__` will replace any field on a frozen dataclass, and
+`object.__delattr__` will remove one outright. Neither needs the carrier's
+cooperation, and the digest computed at construction follows neither. A
+carrier cannot defend its own past, so **every consumer re-derives**:
 
 - **Before planning**, `plan_observation` revalidates each `EvidenceItem`'s
   identifier, byte payload, size and stored digest, and each
@@ -136,6 +138,12 @@ own past, so **every consumer re-derives**:
   directly built envelope is held to the identical standard.
 - **Before executing**, `execute_observation` re-derives the whole digest tree
   (§ 6).
+- **A field that is simply gone** is refused rather than raising. Every read
+  of a trusted carrier goes through one shared reader that consults the
+  instance dictionary, because `getattr` falls through to a dataclass
+  default and cannot tell a value that was set from one that never was.
+  § 20 records the round that found this and the refusal each deletion
+  produces.
 
 This is the correction for Jack's first finding; § 11 records what it cost.
 
@@ -377,7 +385,8 @@ matches OMI-V2, and because OMI-V1's `HermeticViolation` must stay loud. That
 is the only ordinary exception it lets past; a raising clock does not qualify
 (§ 4a). Removing the executor's mapping walk (§ 6a) removed its last broad
 `except`, which is what makes that statement unconditional rather than nearly
-true.
+true. A carrier with a **deleted** field is refused by both entry points
+rather than raising `AttributeError` out of them, which it did until § 20.
 
 ## 6a. Where the result is measured, and why not in the executor
 
@@ -474,7 +483,10 @@ post-dialect refusal that does not.
 `_check_receipt` validates and builds the serialization document in one
 traversal, placing each value in the document at the moment it is proved
 acceptable; the serialiser renders that document and never reads the receipt
-again.
+again. Before any of that, it requires every one of the receipt's twenty-five
+fields to still be **set on the instance** — a deleted field is a
+deterministic `ValueError`, never a raw `AttributeError`, and the message
+names no field (§ 20).
 
 Two rounds shaped this. Round two found that a receipt built honestly and then
 given a secret-shaped `worker` wrote that secret into stored evidence, and added
@@ -494,7 +506,7 @@ identifiers OMI-V1's secret matcher will actually admit.
 
 ## 8. What was tested
 
-Two suites, **1065 controls** (728 + 337), all passing under normal Python,
+Two suites, **1145 controls** (771 + 374), all passing under normal Python,
 `-O`, and `-OO`. The figure is re-collected under each of the three modes
 rather than incremented; it was found stale once (§ 19).
 
@@ -1153,3 +1165,139 @@ The finding was supplied by Jack as evidence and reproduced from the current
 bytes before any change, in a fresh Kev seat, by the same agent lineage that
 wrote the code, the controls, and this section. It is internal consistency.
 **Not independent acceptance.**
+
+## 20. Seventh round (2026-08-25)
+
+The first round whose findings came from an **independent Opus 5 audit** rather
+than from this lineage. Its verdict was `FAIL — MATERIAL DEFECT OR OVERCLAIM
+REPRODUCED`, and Jack reproduced both findings at the pinned head before any of
+this was written. Both reproduced here too, from the bytes at `3a37852`, before
+anything was changed.
+
+### Finding 1 — a deleted field is not a replaced field
+
+Six rounds attacked `object.__setattr__`. Not one had tried
+`object.__delattr__`. A frozen dataclass refuses assignment *and* deletion, so
+both need the same bypass — and the carriers had only ever been proved against
+the half that was tried.
+
+Deleting an instance field splits into two failures, and the quiet one is
+worse:
+
+- **No class default** — the next read raises **raw `AttributeError`**, out of
+  functions documented as total. Reproduced for **42 fields**: sixteen of
+  `ObservationEnvelope`'s seventeen out of `execute_observation`, all three of
+  `ReservationDecision`, two of `EvidenceItem` and two of `ResourceReservation`
+  out of `plan_observation`, `ObservationExchange.exchange` from an injected
+  exchange's return value, and eighteen of `ObservationReceipt`'s twenty-five
+  out of `serialize_receipt`.
+- **A class default** — the field simply reads as that default. `digest`
+  becomes `""`, `result_bytes` becomes `0`, `gpu_memory_mib` becomes `None`.
+  Nothing raises.
+
+**A sentinel-defaulted `getattr` is not a repair for the second case**, because
+`getattr` is precisely the thing that falls through to the class. Only the
+instance `__dict__` distinguishes a value that was *set* from a fallback to the
+class, so that is what the repair reads, through
+`object.__getattribute__` so that no `__getattr__`, property or descriptor can
+answer in its place.
+
+**One mechanism, in `observation_receipt.py` beside the shared bounds**, in two
+shapes. `_field_of(carrier, name)` returns the instance value or a private
+absent marker whose type no field is ever declared as — so it fails whatever
+exact-type check the caller *already* performs, and a deleted field produces
+the same closed refusal as a wrongly-typed one, naming the same field. No
+checker needed a new branch, and **no refusal token was invented**:
+
+| Deleted on | Refusal |
+|---|---|
+| `ObservationEnvelope` (any of 17) | `envelope-field-not-exact-type`, receiptless |
+| `ReservationDecision` (any of 3) | `reservation-decision-field-invalid` |
+| `EvidenceItem.evidence_id` / `.content` / `.digest` | `evidence-id-not-safe-token` / `evidence-content-not-exact-bytes` / `evidence-digest-not-recomputable` |
+| `ResourceReservation` figures / `.digest` | `reservation-field-not-exact-int` / `reservation-digest-not-recomputable` |
+| `ObservationExchange`, and the OMI-V2 carrier inside it | `exchange-result-field-invalid` |
+| `ObservationReceipt` (any of 25) | deterministic `ValueError`, never `AttributeError` |
+
+`_fields_present(carrier, names)` is the whole-carrier shape, used where a
+per-field marker would be less clear than one gate: `serialize_receipt`, which
+reads twenty-five fields; `ObservationResult`, which reads a receipt it did not
+build; and `structured_exchange_adapter`, which reaches `_envelope_semantics`
+without the executor's `_envelope_shape_intact` in front. The names come from
+`dataclasses.fields` at import time, so a field added later is covered without
+anyone remembering to extend a list.
+
+**Where the gate deliberately is not.** Not inside `_envelope_semantics`. Its
+contract is totality over a *validated* envelope, and its three callers each
+gate first; putting a presence check inside it would create a second authority
+on what an envelope is, beside the one that already answers that question. That
+is the drift this package has spent six rounds removing.
+
+**One behaviour changed rather than merely hardened.** A deleted
+`gpu_memory_mib` used to read as `None` — *no GPU reservation is declared* —
+and, when the caller's value had also been `None`, planned successfully. Absent
+and declared-`None` are now distinct: the first is
+`reservation-field-not-exact-int`, the second is still accepted. When the
+deleted value had differed from the default, the reservation digest already
+caught it.
+
+**No broad `except` was added.** Nothing here catches `AttributeError`,
+`Exception`, or anything else; the repair removes the reads that raised instead
+of wrapping them. A double that reaches for a socket still raises
+`HermeticViolation` out of the executor, pinned by a control in this round's
+own block.
+
+### Finding 2 — the adapter's return annotation was false
+
+`structured_exchange_adapter` was annotated
+`Callable[[ObservationEnvelope], StructuredExchange]`, and its inner callable
+`-> StructuredExchange`. It returns an `ObservationExchange` — which is also
+the only type `execute_observation` accepts, so a reader who believed the
+annotation would have built OMI-V2's carrier and been refused by the executor.
+Both annotations now name `ObservationExchange`, and a control ties them to the
+runtime contract: it resolves the hints, calls the adapter, asserts the produced
+object's exact type, and then feeds that object to `execute_observation`.
+
+### The controls
+
+**+80**, from 1065 to **1145** (771 + 374), re-collected under normal Python,
+`-O` and `-OO` rather than incremented. Every field of every trusted carrier is
+deleted and its refusal or `ValueError` asserted — parametrised from
+`dataclasses.fields`, so the coverage cannot fall behind the carriers.
+Alongside them:
+
+- a control proving `getattr(stripped, "digest", "SENTINEL")` returns `""`
+  while `_field_of` returns the absent marker — the precise reason a sentinel is
+  not a repair;
+- a control pinning *which* fields carry class defaults, so that if a default is
+  removed upstream this fails loudly instead of letting the deletion controls
+  quietly weaken;
+- a control proving a type-level `__getattr__` and a property cannot answer for
+  the reader;
+- **behavioural** totality sweeps for the planner, the executor and the
+  serialiser: every deletion is actually planned, executed or serialised, and a
+  result object or a `ValueError` is required back. A control that reads the
+  document proves what the document says; these prove what the code does.
+
+### Evidence
+
+1145 passing under normal Python, `-O` and `-OO`. The OMI-V2 suites
+(`test_omi_v2_exchange.py`, `test_omi_v2_jack_round5.py`) pass unchanged at 250,
+which matters because `_exchange_state_ok` reads an OMI-V2 carrier's fields and
+now reads them through the shared reader. `scripts/open_model/structured_exchange.py`
+was **not** modified: the reads were changed where they happen, in
+`observation.py`.
+
+### The two nonblocking auditor observations
+
+Neither is promoted to a defect here, and neither was re-reproduced. The OMI-V2
+post-check re-read has no demonstrated synchronous exploit, and the
+optimized-mode pytest limitation is already documented (§ 8). They are recorded
+as observations, not findings.
+
+### Provenance
+
+The findings are **independent**: an Opus 5 audit found them and Jack
+reproduced them. The reproduction, the repair, the controls and this section
+are the same agent lineage that wrote the code — so this round is the first
+whose *findings* are independent while its *corrections* are not.
+**Independent re-acceptance remains pending.**
