@@ -3870,3 +3870,200 @@ def test_the_headroom_refusal_introduces_no_deletion_primitive():
     for banned in ("os.unlink", "os.remove", "os.rmdir", "shutil.rmtree",
                    "shutil."):
         assert banned not in source, banned
+# ===========================================================================
+# D2 -- a LIVE `PLAN` must prove the data root's usable directory identity
+# ===========================================================================
+#
+# `scan_retention_candidates` reports a missing or non-directory target as an
+# EMPTY SUCCESSFUL scan -- correct in isolation, because there is nothing to
+# maintain -- and `os.scandir` FOLLOWS a reparse-point root, so a junction
+# scans its target while being somewhere no pass may act. `QUARANTINE` proves
+# the root on both its branches. `PLAN` proves nothing at all, so a live dry
+# run over any of the three prints a clean report and exits 0.
+#
+# The proof is taken ONLY when `scan is None`, i.e. when this invocation
+# actually read the live filesystem. An injected scan represents an object
+# this invocation did NOT read: validating the supplied path would prove the
+# wrong object and couple a synthetic analysis to the working directory.
+
+
+def _live_plan(directory, policy=None):
+    return retention.run_pass(
+        directory, policy=policy or _quarantine_policy(),
+        mode=retention.RetentionMode.PLAN, now_ns=NOW,
+        admit=_Admit({0, 1, 2}))
+
+
+def test_a_live_plan_over_a_missing_root_refuses_identity_unavailable(
+        tmp_path):
+    report = _live_plan(tmp_path / "gone")
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.planned_actions == ()
+    assert not (tmp_path / "gone").exists()
+
+
+def test_a_live_plan_over_a_plain_file_refuses_identity_unavailable(tmp_path):
+    plain = tmp_path / "not_a_directory"
+    plain.write_bytes(b"x")
+    report = _live_plan(plain)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.planned_actions == ()
+    assert plain.read_bytes() == b"x"
+
+
+def test_a_live_plan_over_a_reparse_root_refuses_identity_unavailable(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=4)
+    real_lstat = os.lstat
+    reparse = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def _junction(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(tmp_path):
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1,
+                         dev=info.st_dev or 41, ino=info.st_ino or 7,
+                         file_attributes=reparse)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _junction)
+    report = _live_plan(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+
+
+def test_a_live_plan_over_an_identityless_root_refuses(tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=4)
+    real_lstat = os.lstat
+
+    def _identityless(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(tmp_path):
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1, dev=0, ino=0)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _identityless)
+    report = _live_plan(tmp_path)
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+
+
+def test_a_live_plan_over_a_healthy_root_still_reports_cleanly(tmp_path):
+    _populate(tmp_path, snapshots=4)
+    report = _live_plan(tmp_path)
+    assert report.refused is None
+    assert report.planned_actions
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_live_plan_refusal_creates_nothing(tmp_path):
+    target = tmp_path / "gone"
+    _live_plan(target)
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_live_plan_never_inspects_or_creates_the_quarantine_root(
+        tmp_path, monkeypatch):
+    _populate(tmp_path, snapshots=4)
+    seen = []
+    real_lstat = os.lstat
+
+    def _watch(path, *args, **kwargs):
+        if retention.QUARANTINE_DIRNAME in os.fspath(path):
+            seen.append(os.fspath(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _watch)
+    report = _live_plan(tmp_path)
+    assert report.refused is None
+    assert seen == []
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_an_injected_scan_plan_is_not_coupled_to_the_working_directory(
+        tmp_path, monkeypatch):
+    """The justification for the bypass, made checkable. A synthetic analysis
+    names an object this invocation never read, so the report must not depend
+    on whether that name happens to resolve from the current directory."""
+    scan = _built_scan(snapshots=_aged_snapshots(600, age_days=400))
+    monkeypatch.chdir(tmp_path)
+    report = retention.run_pass(
+        "data", policy=retention.PRODUCTION_RETENTION_POLICY,
+        mode=retention.RetentionMode.PLAN, now_ns=NOW, scan=scan,
+        admit=_Admit({0, 1, 2}))
+    assert report.refused is None
+    assert report.planned_actions
+    assert not (tmp_path / "data").exists()
+
+
+def test_an_injected_scan_plan_over_a_missing_path_still_reports(tmp_path):
+    scan = _built_scan(snapshots=_aged_snapshots(600, age_days=400))
+    report = retention.run_pass(
+        tmp_path / "never_existed",
+        policy=retention.PRODUCTION_RETENTION_POLICY,
+        mode=retention.RetentionMode.PLAN, now_ns=NOW, scan=scan,
+        admit=_Admit({0, 1, 2}))
+    assert report.refused is None
+    assert report.planned_actions
+
+
+def test_standalone_scan_semantics_for_missing_and_plain_targets_are_kept(
+        tmp_path):
+    """The scan's own contract is unchanged: nothing to maintain is a clean,
+    successful, empty outcome. Only `run_pass` adds the proof."""
+    policy = _quarantine_policy()
+    missing = retention.scan_retention_candidates(tmp_path / "gone",
+                                                  policy=policy)
+    assert isinstance(missing, retention.ScanSucceeded)
+    assert (missing.processed, missing.inspected, missing.excluded) == (0, 0, 0)
+    plain = tmp_path / "plain"
+    plain.write_bytes(b"x")
+    result = retention.scan_retention_candidates(plain, policy=policy)
+    assert isinstance(result, retention.ScanSucceeded)
+    assert (result.processed, result.inspected, result.excluded) == (0, 0, 0)
+
+
+def test_the_cli_exits_nonzero_for_a_missing_target(tmp_path, capsys):
+    status = retention.main([str(tmp_path / "gone")])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.IDENTITY_UNAVAILABLE.value
+            in printed.out)
+    assert str(tmp_path) not in printed.out
+
+
+def test_the_cli_exits_nonzero_for_a_non_directory_target(tmp_path, capsys):
+    plain = tmp_path / "plain"
+    plain.write_bytes(b"x")
+    status = retention.main([str(plain)])
+    capsys.readouterr()
+    assert status == 1
+
+
+def test_the_cli_still_exits_zero_for_a_healthy_directory(tmp_path, capsys):
+    _populate(tmp_path, snapshots=3)
+    status = retention.main([str(tmp_path)])
+    printed = capsys.readouterr()
+    assert status == 0
+    assert "refused=none" in printed.out
+
+
+def test_quarantine_precedence_over_an_unusable_root_is_unchanged(tmp_path):
+    """`PLAN` gains a proof; `QUARANTINE` keeps the one it always had, in the
+    same place, with the same reason, and injection stays refused outright."""
+    missing = _headroom_run(tmp_path / "gone", _headroom_policy(1_000))
+    assert missing.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    plain = tmp_path / "plain"
+    plain.write_bytes(b"x")
+    assert _headroom_run(plain, _headroom_policy(1_000)).refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    with pytest.raises(ValueError):
+        retention.run_pass(tmp_path, policy=_headroom_policy(1_000),
+                           mode=retention.RetentionMode.QUARANTINE,
+                           now_ns=NOW, pass_id="p20260101T000000",
+                           scan=_built_scan())
