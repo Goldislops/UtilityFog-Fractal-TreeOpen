@@ -143,6 +143,9 @@ from scripts.open_model.observation_receipt import (
     ObservationReceipt,
     PlanRefusal,
     ReservationAttestation,
+    _declared_field_names,
+    _field_of,
+    _fields_present,
     is_canonical_uuid4,
     is_sha256_digest,
 )
@@ -790,6 +793,7 @@ class _EnvelopeRefused(ValueError):
 def _closed_evidence_state():
     """Build :func:`_evidence_state`, every dependency bound in a cell."""
     _EvidenceItem = EvidenceItem
+    _field = _field_of
     _safe_token = is_safe_token
     _hashlib = hashlib
     _max_items = MAX_EVIDENCE_ITEMS
@@ -842,13 +846,13 @@ def _closed_evidence_state():
         for item in items:
             if _type(item) is not _EvidenceItem:
                 return "evidence-item-not-exact-type", None, (), 0
-            identifier = item.evidence_id
+            identifier = _field(item, "evidence_id")
             if _type(identifier) is not _str or not _safe_token(identifier):
                 return "evidence-id-not-safe-token", None, (), 0
             if identifier in seen:
                 return "evidence-id-duplicated", None, (), 0
             seen.add(identifier)
-            content = item.content
+            content = _field(item, "content")
             if _type(content) is not _bytes:
                 return "evidence-content-not-exact-bytes", None, (), 0
             size = _len(content)
@@ -857,7 +861,8 @@ def _closed_evidence_state():
             if size > _max_item_bytes or size > bounded:
                 return "evidence-item-too-large", None, (), 0
             digest = _hashlib.sha256(content).hexdigest()
-            if _type(item.digest) is not _str or item.digest != digest:
+            stored = _field(item, "digest")
+            if _type(stored) is not _str or stored != digest:
                 return "evidence-digest-not-recomputable", None, (), 0
             total += size
             if total > _max_total_bytes or total > bounded:
@@ -885,6 +890,7 @@ _evidence_state = _restore_identity(
 def _closed_reservation_state():
     """Build :func:`_reservation_state`, every dependency bound in a cell."""
     _ResourceReservation = ResourceReservation
+    _field = _field_of
     _digest_of = _reservation_digest
     _max_cpu = _MAX_CPU_CORES
     _max_memory = _MAX_MEMORY_MIB
@@ -902,9 +908,9 @@ def _closed_reservation_state():
         """
         if _type(reservation) is not _ResourceReservation:
             return "reservation-not-exact-type", None, None
-        cpu = reservation.cpu_cores
-        memory = reservation.memory_mib
-        gpu = reservation.gpu_memory_mib
+        cpu = _field(reservation, "cpu_cores")
+        memory = _field(reservation, "memory_mib")
+        gpu = _field(reservation, "gpu_memory_mib")
         if _type(cpu) is not _int or _type(memory) is not _int:
             return "reservation-field-not-exact-int", None, None
         if gpu is not None and _type(gpu) is not _int:
@@ -916,7 +922,8 @@ def _closed_reservation_state():
         if gpu is not None and (gpu < 1 or gpu > _max_gpu):
             return "reservation-field-out-of-range", None, None
         digest = _digest_of(cpu, memory, gpu)
-        if _type(reservation.digest) is not _str or reservation.digest != digest:
+        stored = _field(reservation, "digest")
+        if _type(stored) is not _str or stored != digest:
             return "reservation-digest-not-recomputable", None, None
         detached = _ResourceReservation(
             cpu_cores=cpu, memory_mib=memory, gpu_memory_mib=gpu
@@ -1126,6 +1133,7 @@ _envelope_semantics = _restore_identity(
 def _closed_exchange_state():
     """Build :func:`_exchange_state_ok`, every dependency bound in a cell."""
     _exchange_type = StructuredExchange
+    _field = _field_of
     _refusals = EXCHANGE_REFUSALS
     _failures = RESPONSE_FAILURES
     _dialect_ok = is_supported_dialect
@@ -1167,28 +1175,29 @@ def _closed_exchange_state():
         """
         if _type(completed) is not _exchange_type:
             return False
-        if _type(completed.ok) is not _bool:
+        ok = _field(completed, "ok")
+        if _type(ok) is not _bool:
             return False
-        if _type(completed.response_format_sent) is not _bool:
+        format_sent = _field(completed, "response_format_sent")
+        if _type(format_sent) is not _bool:
             return False
-        if _type(completed.schema_conformance) is not _str or (
-            completed.schema_conformance != "unverified"
-        ):
+        conformance = _field(completed, "schema_conformance")
+        if _type(conformance) is not _str or conformance != "unverified":
             return False
-        dialect = completed.dialect
+        dialect = _field(completed, "dialect")
         if dialect is not None and not _dialect_ok(dialect):
             return False
-        request_refusal = completed.request_refusal
+        request_refusal = _field(completed, "request_refusal")
         if request_refusal is not None and (
             _type(request_refusal) is not _str or request_refusal not in _refusals
         ):
             return False
-        response_failure = completed.response_failure
+        response_failure = _field(completed, "response_failure")
         if response_failure is not None and (
             _type(response_failure) is not _str or response_failure not in _failures
         ):
             return False
-        indices = completed.missing_key_indices
+        indices = _field(completed, "missing_key_indices")
         if _type(indices) is not _tuple:
             return False
         previous = -1
@@ -1200,21 +1209,22 @@ def _closed_exchange_state():
             return False
         if response_failure == "missing-required-key" and not indices:
             return False
-        if completed.ok:
+        value = _field(completed, "value")
+        if ok:
             if request_refusal is not None or response_failure is not None:
                 return False
-            if _type(completed.value) is not _proxy:
+            if _type(value) is not _proxy:
                 return False
-            if not completed.response_format_sent:
+            if not format_sent:
                 return False
             return dialect is not None
-        if completed.value is not None:
+        if value is not None:
             return False
         if (request_refusal is None) == (response_failure is None):
             return False
-        if request_refusal is not None and completed.response_format_sent:
+        if request_refusal is not None and format_sent:
             return False
-        if response_failure is not None and not completed.response_format_sent:
+        if response_failure is not None and not format_sent:
             return False
         if response_failure is not None:
             return dialect is not None
@@ -1397,6 +1407,7 @@ ObservationExchange = _restore_identity(
 def _closed_carrier_check():
     """Build :func:`_exchange_carrier_intact`, dependencies bound in cells."""
     _carrier_type = ObservationExchange
+    _field = _field_of
     _state_ok = _exchange_state_ok
     _type = type
     _bytes = bytes
@@ -1414,17 +1425,19 @@ def _closed_carrier_check():
         """
         if _type(carrier) is not _carrier_type:
             return False
-        if not _state_ok(carrier.exchange):
+        inner = _field(carrier, "exchange")
+        if not _state_ok(inner):
             return False
-        snapshot = carrier.result_snapshot
+        snapshot = _field(carrier, "result_snapshot")
         if snapshot is not None and _type(snapshot) is not _bytes:
             return False
-        if not carrier.exchange.ok and snapshot is not None:
+        if not _field(inner, "ok") and snapshot is not None:
             return False
-        if _type(carrier.result_bytes) is not _int:
+        result_bytes = _field(carrier, "result_bytes")
+        if _type(result_bytes) is not _int:
             return False
         expected = _len(snapshot) if snapshot is not None else 0
-        return carrier.result_bytes == expected
+        return result_bytes == expected
 
     return _exchange_carrier_intact
 
@@ -1596,7 +1609,7 @@ def _closed_envelope_shape_check():
     _int = int
     _bytes = bytes
     _tuple = tuple
-    _getattr = getattr
+    _field = _field_of
 
     def _envelope_shape_intact(envelope: Any) -> bool:
         """True only if every field still holds its exact accepted type.
@@ -1624,9 +1637,9 @@ def _closed_envelope_shape_check():
             "schema_digest",
             "envelope_digest",
         ):
-            if _type(_getattr(envelope, name)) is not _str:
+            if _type(_field(envelope, name)) is not _str:
                 return False
-        if _type(envelope.schema_bytes) is not _bytes:
+        if _type(_field(envelope, "schema_bytes")) is not _bytes:
             return False
         for name in (
             "context_ceiling_tokens",
@@ -1636,40 +1649,41 @@ def _closed_envelope_shape_check():
             "issued_ns",
             "deadline_ns",
         ):
-            if _type(_getattr(envelope, name)) is not _int:
+            if _type(_field(envelope, name)) is not _int:
                 return False
-        if _type(envelope.evidence) is not _tuple:
+        evidence = _field(envelope, "evidence")
+        if _type(evidence) is not _tuple:
             return False
-        for item in envelope.evidence:
+        for item in evidence:
             if _type(item) is not _evidence_type:
                 return False
-            if _type(item.evidence_id) is not _str:
+            if _type(_field(item, "evidence_id")) is not _str:
                 return False
-            if _type(item.content) is not _bytes:
+            if _type(_field(item, "content")) is not _bytes:
                 return False
-            if _type(item.digest) is not _str:
+            if _type(_field(item, "digest")) is not _str:
                 return False
-        if _type(envelope.required_keys) is not _tuple:
+        required_keys = _field(envelope, "required_keys")
+        if _type(required_keys) is not _tuple:
             return False
-        for key in envelope.required_keys:
+        for key in required_keys:
             if _type(key) is not _str:
                 return False
-        reservation = envelope.reservation
+        reservation = _field(envelope, "reservation")
         if _type(reservation) is not _reservation_type:
             return False
-        if _type(reservation.cpu_cores) is not _int:
+        if _type(_field(reservation, "cpu_cores")) is not _int:
             return False
-        if _type(reservation.memory_mib) is not _int:
+        if _type(_field(reservation, "memory_mib")) is not _int:
             return False
-        if reservation.gpu_memory_mib is not None and (
-            _type(reservation.gpu_memory_mib) is not _int
-        ):
+        gpu = _field(reservation, "gpu_memory_mib")
+        if gpu is not None and _type(gpu) is not _int:
             return False
-        if _type(reservation.digest) is not _str:
+        if _type(_field(reservation, "digest")) is not _str:
             return False
         # The recorded digest must be a well-formed digest before it is compared
         # to anything, so the comparison below is str-to-str and runs no hook.
-        return _digest_ok(envelope.envelope_digest)
+        return _digest_ok(_field(envelope, "envelope_digest"))
 
     return _envelope_shape_intact
 
@@ -1682,6 +1696,7 @@ _envelope_shape_intact = _restore_identity(
 def _closed_decision_check():
     """Build :func:`_decision_fields_intact`, everything bound in cells."""
     _decision_type = ReservationDecision
+    _field = _field_of
     _attestations = RESERVATION_ATTESTATIONS
     _digest_ok = is_sha256_digest
     _type = type
@@ -1699,14 +1714,12 @@ def _closed_decision_check():
         """
         if _type(decision) is not _decision_type:
             return False
-        if not _digest_ok(decision.reservation_digest):
+        if not _digest_ok(_field(decision, "reservation_digest")):
             return False
-        if _type(decision.satisfied) is not _bool:
+        if _type(_field(decision, "satisfied")) is not _bool:
             return False
-        return (
-            _type(decision.attestation) is _str
-            and decision.attestation in _attestations
-        )
+        attestation = _field(decision, "attestation")
+        return _type(attestation) is _str and attestation in _attestations
 
     return _decision_fields_intact
 
@@ -2007,6 +2020,8 @@ plan_observation = _restore_identity(_closed_planner(), "plan_observation", __na
 def _build_result_class():
     """Build :class:`ObservationResult` with its authorities in cells."""
     _receipt_type = ObservationReceipt
+    _present = _fields_present
+    _RECEIPT_FIELDS = _declared_field_names(ObservationReceipt)
     _exchange_type = StructuredExchange
     _undescribable = UNDESCRIBABLE_REFUSALS
     _type = type
@@ -2050,8 +2065,13 @@ def _build_result_class():
         def __post_init__(self) -> None:
             if _type(self.ok) is not _bool:
                 raise _ValueError("ok must be exactly a bool")
-            if self.receipt is not None and _type(self.receipt) is not _receipt_type:
-                raise _ValueError("receipt must be exactly an ObservationReceipt")
+            if self.receipt is not None:
+                if _type(self.receipt) is not _receipt_type:
+                    raise _ValueError("receipt must be exactly an ObservationReceipt")
+                # This class reads `receipt.refusal` and `receipt.outcome`
+                # below, on a carrier it did not build.
+                if not _present(self.receipt, _RECEIPT_FIELDS):
+                    raise _ValueError("every receipt field must still be set")
             if self.exchange is not None and _type(self.exchange) is not _exchange_type:
                 raise _ValueError("exchange must be exactly a StructuredExchange")
             if self.receipt is None:
@@ -2668,6 +2688,8 @@ def _closed_adapter_factory():
     """Build :func:`structured_exchange_adapter`, dependencies in cells."""
     _Envelope = ObservationEnvelope
     _Carrier = ObservationExchange
+    _present = _fields_present
+    _ENVELOPE_FIELDS = _declared_field_names(ObservationEnvelope)
     _semantics = _envelope_semantics
     _snapshot = _result_snapshot_bytes
     _tuple = tuple
@@ -2682,7 +2704,7 @@ def _closed_adapter_factory():
 
     def structured_exchange_adapter(
         backend: Any,
-    ) -> Callable[[ObservationEnvelope], StructuredExchange]:
+    ) -> Callable[[ObservationEnvelope], ObservationExchange]:
         """Bind ``backend`` into the one exchange callable OMI-V3A supports.
 
         The returned callable takes an :class:`ObservationEnvelope` and calls
@@ -2716,8 +2738,18 @@ def _closed_adapter_factory():
         factory and registers no backend.
         """
 
-        def exchange(envelope: Any) -> StructuredExchange:
+        def exchange(envelope: Any) -> ObservationExchange:
             if _type(envelope) is not _Envelope:
+                raise _ValueError("the adapter accepts exactly an ObservationEnvelope")
+            # Exact type is not intactness. `object.__delattr__` removes an
+            # instance field without the carrier's cooperation, and
+            # `_semantics` is total over a *validated* envelope rather than
+            # a mutilated one. This is the caller that reaches it without
+            # the executor's `_envelope_shape_intact` gate in front, so the
+            # presence check belongs here rather than inside `_semantics`,
+            # which would put a second authority beside the one that
+            # already answers what an envelope is.
+            if not _present(envelope, _ENVELOPE_FIELDS):
                 raise _ValueError("the adapter accepts exactly an ObservationEnvelope")
             # Validated HERE, at the moment of invocation, and everything sent
             # comes from that validation. The executor hands this callable the

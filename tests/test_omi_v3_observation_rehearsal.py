@@ -3469,3 +3469,213 @@ def test_the_planner_totality_control_is_not_vacuous():
         "caller-supplied callable propagates."
     )
     assert _unqualified_planner_totality(corrected) == []
+
+
+# ============================================================================
+# round seven: deleted fields on the execution path, and the adapter's contract
+# ============================================================================
+
+
+def _deleted(carrier, name):
+    """A copy of ``carrier`` with one instance field removed."""
+    clone = copy.copy(carrier)
+    object.__delattr__(clone, name)
+    return clone
+
+
+def _field_names(carrier_type):
+    import dataclasses
+
+    return [f.name for f in dataclasses.fields(carrier_type)]
+
+
+@pytest.mark.parametrize("name", _field_names(ob.ObservationEnvelope))
+def test_a_deleted_envelope_field_refuses_the_execution(name):
+    """Every one of these raised a raw ``AttributeError`` before round seven."""
+    envelope = build_envelope()
+    decision = satisfied_for(envelope)
+    result = run(_deleted(envelope, name), ok_exchange(), [1000, 1100], decision)
+    assert result.ok is False
+    assert result.refusal == "envelope-field-not-exact-type"
+    # Receiptless, because an envelope this broken cannot be described.
+    assert result.receipt is None
+    assert result.refusal in rc.UNDESCRIBABLE_REFUSALS
+
+
+@pytest.mark.parametrize("name", _field_names(ob.ReservationDecision))
+def test_a_deleted_decision_field_refuses_the_execution(name):
+    envelope = build_envelope()
+    decision = _deleted(satisfied_for(envelope), name)
+    result = run(envelope, ok_exchange(), [1000, 1100], decision)
+    assert result.ok is False
+    assert result.refusal == "reservation-decision-field-invalid"
+
+
+@pytest.mark.parametrize("name", _field_names(ob.ObservationExchange))
+def test_a_deleted_exchange_carrier_field_refuses_the_execution(name):
+    """An injected exchange returning an otherwise exact carrier."""
+    envelope = build_envelope()
+    honest = ok_exchange()
+
+    def exchange(handed):
+        return _deleted(honest(handed), name)
+
+    result = run(envelope, exchange, [1000, 1100])
+    assert result.ok is False
+    assert result.refusal == "exchange-result-field-invalid"
+
+
+@pytest.mark.parametrize("name", _field_names(StructuredExchange))
+def test_a_deleted_inner_omi_v2_field_refuses_the_execution(name):
+    """The OMI-V2 carrier nested inside the V3A one, read by _exchange_state_ok."""
+    envelope = build_envelope()
+    honest = ok_exchange()
+
+    def exchange(handed):
+        carrier = honest(handed)
+        clone = copy.copy(carrier)
+        object.__setattr__(clone, "exchange", _deleted(carrier.exchange, name))
+        return clone
+
+    result = run(envelope, exchange, [1000, 1100])
+    assert result.ok is False
+    assert result.refusal == "exchange-result-field-invalid"
+
+
+def test_the_adapter_refuses_an_envelope_with_a_deleted_field():
+    """The adapter reaches ``_envelope_semantics`` without the executor's gate.
+
+    ``_envelope_semantics`` is total over a *validated* envelope, not over a
+    mutilated one, so the presence check belongs at this caller rather than
+    inside it - where it would become a second authority on what an envelope is.
+    """
+    envelope = build_envelope()
+    adapter = ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}'))
+    for name in ("task_id", "schema_bytes", "evidence", "envelope_digest"):
+        with pytest.raises(ValueError) as caught:
+            with hermetic_guard():
+                adapter(_deleted(envelope, name))
+        assert type(caught.value) is ValueError
+        assert "ObservationEnvelope" in str(caught.value)
+        # The fixed message names no field and carries no caller text.
+        assert name not in str(caught.value)
+
+
+def test_no_deletion_on_the_execution_path_produces_a_raw_attribute_error():
+    """The single claim round seven exists to make true, swept behaviourally."""
+    envelope = build_envelope()
+    swept = 0
+
+    for name in _field_names(ob.ObservationEnvelope):
+        result = run(
+            _deleted(envelope, name), ok_exchange(), [1000, 1100],
+            satisfied_for(envelope),
+        )
+        assert type(result) is ob.ObservationResult
+        swept += 1
+
+    for name in _field_names(ob.ReservationDecision):
+        result = run(
+            envelope, ok_exchange(), [1000, 1100],
+            _deleted(satisfied_for(envelope), name),
+        )
+        assert type(result) is ob.ObservationResult
+        swept += 1
+
+    for name in _field_names(ob.ObservationExchange):
+        honest = ok_exchange()
+        result = run(
+            envelope, lambda handed, n=name, h=honest: _deleted(h(handed), n),
+            [1000, 1100],
+        )
+        assert type(result) is ob.ObservationResult
+        swept += 1
+
+    assert swept == (
+        len(_field_names(ob.ObservationEnvelope))
+        + len(_field_names(ob.ReservationDecision))
+        + len(_field_names(ob.ObservationExchange))
+    )
+
+
+def test_a_deleted_field_never_lets_an_observation_run():
+    """No invalid object executes: the exchange is not invoked at all."""
+    envelope = build_envelope()
+    counter = ok_exchange()
+    result = run(_deleted(envelope, "task_id"), counter, [1000, 1100],
+                 satisfied_for(envelope))
+    assert result.ok is False
+    assert counter.calls == 0
+
+
+def test_the_deletion_gates_hide_no_hermetic_violation():
+    """No broad ``except`` was introduced: a breaching double is still loud."""
+    envelope = build_envelope()
+    with pytest.raises(HermeticViolation):
+        run(envelope, ob.structured_exchange_adapter(NetworkReachingBackend()),
+            [1000, 1100])
+
+
+def test_the_adapter_annotations_name_the_type_it_actually_returns():
+    """The annotation was part of the public contract, and it was false.
+
+    It promised OMI-V2's ``StructuredExchange`` while the callable returns
+    OMI-V3A's ``ObservationExchange`` - which is also the only type
+    ``execute_observation`` accepts. A reader who believed the annotation would
+    have built the wrong thing and been refused by the executor.
+    """
+    import typing
+
+    factory_return = typing.get_type_hints(ob.structured_exchange_adapter)["return"]
+    args = typing.get_args(factory_return)
+    assert args[0] == [ob.ObservationEnvelope]
+    assert args[1] is ob.ObservationExchange
+    assert args[1] is not StructuredExchange
+
+    adapter = ob.structured_exchange_adapter(FakeBackend('{"summary": "x"}'))
+    assert typing.get_type_hints(adapter)["return"] is ob.ObservationExchange
+
+    # ...and the annotation is tied to the runtime contract, not just to itself.
+    envelope = build_envelope()
+    with hermetic_guard():
+        produced = adapter(envelope)
+    assert type(produced) is ob.ObservationExchange
+    assert type(produced) is not StructuredExchange
+
+    with hermetic_guard():
+        result = ob.execute_observation(
+            envelope,
+            exchange=lambda handed: produced,
+            clock=make_clock([1000, 1100]),
+            reservation_decision=satisfied_for(envelope),
+        )
+    assert result.ok is True
+
+
+def test_the_readers_one_except_clause_hides_nothing():
+    """The repair added exactly one ``except AttributeError``, one expression wide.
+
+    It wraps ``object.__getattribute__(carrier, "__dict__")`` and means one
+    thing only: *this object has no instance dictionary*. A type that answers
+    that lookup by raising something else is not swallowed - which is the whole
+    difference between a narrow clause and a broad one, and the reason a
+    breaching double still fails the rehearsal loudly.
+    """
+
+    class Hostile:
+        @property
+        def __dict__(self):
+            raise HermeticViolation("reached for a socket")
+
+    with pytest.raises(HermeticViolation):
+        rc._field_of(Hostile(), "anything")
+    with pytest.raises(HermeticViolation):
+        rc._fields_present(Hostile(), ("anything",))
+
+    class NoInstanceDict:
+        __slots__ = ()
+
+    # ...while a genuinely dictionary-less object is simply absent, not an error.
+    assert rc._field_of(NoInstanceDict(), "x") is rc._ABSENT_FIELD
+    assert rc._fields_present(NoInstanceDict(), ("x",)) is False
+    assert rc._field_of(5, "x") is rc._ABSENT_FIELD

@@ -71,7 +71,7 @@ observation: ``elapsed_ns`` legitimately differs between runs.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Final, Literal, Optional, Union, get_args
 
 from scripts.agent_backends.structured_request import (
@@ -94,6 +94,113 @@ from scripts.open_model.structured_exchange import (
 # is the alternative, and OMI-V1's standing boundary is "reuse, don't reinvent".
 # A control asserts this module's binding IS the object ``structured_exchange``
 # binds, so the two cannot silently diverge.
+
+
+# -- the missing-field-safe reader -------------------------------------------
+#
+# One mechanism, shared by both V3A modules, for one question: **is this field
+# still set on this instance?**
+#
+# ``getattr`` cannot answer it, and that is the whole reason this exists. A
+# frozen dataclass is not sealed: ``object.__delattr__`` removes an instance
+# attribute without the carrier's cooperation. For a field declared *without* a
+# default, the next read raises ``AttributeError`` - loud, but raw, and out of
+# functions documented as total. For a field declared *with* a default the class
+# attribute is still there, so the read quietly returns that default: the empty
+# string for a digest, zero for a byte count, ``None`` for an optional. A
+# sentinel-defaulted ``getattr`` catches neither case, because ``getattr`` is
+# precisely what falls through to the class. Only the instance ``__dict__``
+# distinguishes a value that was set from a fallback to the class, so that is
+# what is read.
+
+
+def _closed_presence_reader():
+    """Build the missing-field-safe reader, every dependency bound in a cell."""
+    _dataclass_fields = fields
+    _instance_dict_of = object.__getattribute__
+    _type = type
+    _dict = dict
+    _tuple = tuple
+
+    class _AbsentField:
+        """The marker returned for a field that is not set on the instance.
+
+        A dedicated private type rather than ``None`` or a string, because every
+        consumer already decides by ``type(x) is T`` identity. An absent field
+        must fail *whatever* exact-type check the caller already applies, and
+        must never be mistakable for a value a carrier could legitimately hold -
+        so it is of a type no field is ever declared as.
+        """
+
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            return "<absent field>"
+
+    _absent = _AbsentField()
+
+    def _instance_values(carrier: Any):
+        """The carrier's own instance dictionary, or ``None`` if it has none.
+
+        Reached through ``object.__getattribute__`` so that a ``__getattr__``,
+        ``__getattribute__``, property or descriptor on the carrier's type
+        cannot answer in its place.
+        """
+        try:
+            instance = _instance_dict_of(carrier, "__dict__")
+        except AttributeError:
+            return None
+        return instance if _type(instance) is _dict else None
+
+    def _field_of(carrier: Any, name: str) -> Any:
+        """``carrier``'s own instance value for ``name``, or the absent marker.
+
+        Never falls back to a class attribute. Callers need no new branch: the
+        marker fails the exact-type check they already perform, so a deleted
+        field produces the same closed refusal as a wrongly-typed one, naming
+        the same field.
+        """
+        instance = _instance_values(carrier)
+        if instance is None or name not in instance:
+            return _absent
+        return instance[name]
+
+    def _fields_present(carrier: Any, names: Any) -> bool:
+        """True only if **every** name in ``names`` is set on the instance.
+
+        The whole-carrier form, for a checker that reads too many fields for a
+        per-field marker to be the clearer repair.
+        """
+        instance = _instance_values(carrier)
+        if instance is None:
+            return False
+        for name in names:
+            if name not in instance:
+                return False
+        return True
+
+    def _declared_field_names(carrier_type: Any) -> tuple:
+        """The declared field names of a dataclass, as an exact tuple.
+
+        Taken from the dataclass itself, at import time, so a field added later
+        is covered without anyone remembering to extend a hand-written list.
+        """
+        return _tuple(f.name for f in _dataclass_fields(carrier_type))
+
+    return _absent, _field_of, _fields_present, _declared_field_names
+
+
+(
+    _ABSENT_FIELD,
+    _field_of,
+    _fields_present,
+    _declared_field_names,
+) = _closed_presence_reader()
+_field_of = _restore_identity(_field_of, "_field_of", __name__)
+_fields_present = _restore_identity(_fields_present, "_fields_present", __name__)
+_declared_field_names = _restore_identity(
+    _declared_field_names, "_declared_field_names", __name__
+)
 
 
 # -- identity and digest formats ---------------------------------------------
@@ -953,6 +1060,8 @@ def _closed_receipt_serializer():
     #: function object, it cannot be shadowed, rebound, or made to return a
     #: different document.
     _check = _check_receipt
+    _present = _fields_present
+    _RECEIPT_FIELDS = _declared_field_names(ObservationReceipt)
     _max_bytes = RECEIPT_MAX_BYTES
     _json = json
     _type = type
@@ -982,6 +1091,17 @@ def _closed_receipt_serializer():
         """
         if _type(receipt) is not _receipt_type:
             raise _ValueError("serialize_receipt accepts exactly an ObservationReceipt")
+        # Presence, before any field is read. ``_check`` reads twenty-five
+        # fields, and freezing is not sealing: ``object.__delattr__`` removes
+        # an instance attribute, after which a field declared without a
+        # default raised raw ``AttributeError`` straight out of this
+        # function, and one declared with a default read quietly as that
+        # default. One gate is clearer here than twenty-five markers, and a
+        # receipt owes its caller the same deterministic ``ValueError`` it
+        # gives every other incoherence. Which field is missing is not
+        # disclosed - a receipt discloses nothing about what it was handed.
+        if not _present(receipt, _RECEIPT_FIELDS):
+            raise _ValueError("every receipt field must still be set")
         # Validated and rendered in ONE traversal. The checker returns a detached
         # document built from the values it proved acceptable, and that document
         # is what gets written - the receipt is never read again.

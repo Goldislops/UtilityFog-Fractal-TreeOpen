@@ -3112,3 +3112,239 @@ def test_a_refused_or_void_receipt_names_no_dialect(outcome):
             **extra,
         )
     ).dialect is None
+
+
+# ============================================================================
+# round seven: fields that were DELETED, not merely replaced
+# ============================================================================
+#
+# Every earlier round attacked ``object.__setattr__``. A frozen dataclass
+# refuses assignment *and* deletion, so both need the same bypass - and only
+# one of them had ever been tried. ``object.__delattr__`` removes the instance
+# attribute, after which a field declared without a default raises raw
+# ``AttributeError`` on the next read, and a field declared with one quietly
+# reads as the class default.
+
+
+def _deleted(carrier, name):
+    """A copy of ``carrier`` with one instance field removed."""
+    clone = copy.copy(carrier)
+    object.__delattr__(clone, name)
+    return clone
+
+
+def _field_names(carrier_type):
+    import dataclasses
+
+    return [f.name for f in dataclasses.fields(carrier_type)]
+
+
+#: The fields declared with a class-level default, and the value a deleted one
+#: falls back to. These are the silent half of the finding: a plausible value
+#: appears where the caller's value was, and nothing raises.
+DEFAULTED_FIELDS = {
+    (ob.EvidenceItem, "digest"): "",
+    (ob.ResourceReservation, "gpu_memory_mib"): None,
+    (ob.ResourceReservation, "digest"): "",
+    (ob.ObservationEnvelope, "envelope_digest"): "",
+    (ob.ObservationExchange, "result_snapshot"): None,
+    (ob.ObservationExchange, "result_bytes"): 0,
+}
+
+
+def test_the_defaulted_fields_named_here_really_do_carry_class_defaults():
+    """Pins the premise the deletion controls rest on.
+
+    If a default is ever removed upstream, this fails loudly rather than
+    letting the controls below quietly become weaker than they read.
+    """
+    for (carrier_type, name), expected in DEFAULTED_FIELDS.items():
+        assert hasattr(carrier_type, name), (carrier_type.__name__, name)
+        assert getattr(carrier_type, name) == expected, (carrier_type.__name__, name)
+
+
+def test_getattr_cannot_detect_a_deleted_field_that_has_a_class_default():
+    """Exactly why the repair reads the instance dictionary.
+
+    A sentinel-defaulted ``getattr`` is not a repair for this, because
+    ``getattr`` is precisely the thing that falls through to the class.
+    """
+    item = ob.EvidenceItem(evidence_id="e1", content=b"the evidence")
+    stripped = _deleted(item, "digest")
+
+    # getattr reports a value that was never set on this instance - with a
+    # sentinel default or without one, because it never reaches the sentinel.
+    assert getattr(stripped, "digest") == ""
+    assert getattr(stripped, "digest", "SENTINEL") == ""
+    assert stripped.digest != item.digest
+
+    # The reader is not fooled, and still answers correctly for a live field.
+    assert rc._field_of(stripped, "digest") is rc._ABSENT_FIELD
+    assert rc._field_of(item, "digest") == item.digest
+    assert rc._fields_present(item, ("digest",)) is True
+    assert rc._fields_present(stripped, ("digest",)) is False
+
+
+def test_the_reader_also_reports_a_deleted_field_that_has_no_default():
+    """The loud half. Both halves go through the same one mechanism."""
+    item = ob.EvidenceItem(evidence_id="e1", content=b"the evidence")
+    stripped = _deleted(item, "content")
+    with pytest.raises(AttributeError):
+        stripped.content
+    assert rc._field_of(stripped, "content") is rc._ABSENT_FIELD
+    assert rc._fields_present(stripped, ("content",)) is False
+
+
+def test_the_reader_cannot_be_answered_by_a_type_level_hook():
+    """``object.__getattribute__`` is used so a hook cannot answer instead."""
+
+    class Faker:
+        def __getattr__(self, name):
+            return "anything you like"
+
+        @property
+        def digest(self):
+            return "a" * 64
+
+    faker = Faker()
+    assert faker.nope == "anything you like"
+    assert rc._field_of(faker, "nope") is rc._ABSENT_FIELD
+    assert rc._field_of(faker, "digest") is rc._ABSENT_FIELD
+    assert rc._fields_present(faker, ("digest",)) is False
+
+
+def test_the_absent_marker_is_of_a_type_no_field_is_ever_declared_as():
+    """It has to fail every exact-type check a caller already performs."""
+    marker = rc._ABSENT_FIELD
+    for legitimate in (str, int, bytes, bool, tuple, dict, type(None)):
+        assert type(marker) is not legitimate
+    assert rc._field_of(object(), "anything") is marker
+
+
+def test_declared_field_names_is_taken_from_the_dataclass_itself():
+    """So a field added later is covered without editing a hand-written list."""
+    for carrier_type in (
+        ob.EvidenceItem,
+        ob.ResourceReservation,
+        ob.ReservationDecision,
+        ob.ObservationEnvelope,
+        ob.ObservationExchange,
+        rc.ObservationReceipt,
+    ):
+        assert rc._declared_field_names(carrier_type) == tuple(
+            _field_names(carrier_type)
+        )
+    assert len(rc._declared_field_names(rc.ObservationReceipt)) == 25
+
+
+@pytest.mark.parametrize("name", _field_names(ob.EvidenceItem))
+def test_a_deleted_evidence_field_refuses_the_plan(name):
+    item = _deleted(ob.EvidenceItem(evidence_id="e1", content=b"the evidence"), name)
+    result = ob.plan_observation(**plan_kwargs(evidence=[item]))
+    assert result.ok is False
+    assert result.refusal in rc.PLAN_REFUSALS
+    assert result.envelope is None
+
+
+@pytest.mark.parametrize("name", _field_names(ob.ResourceReservation))
+def test_a_deleted_reservation_field_refuses_the_plan(name):
+    reservation = _deleted(ob.ResourceReservation(cpu_cores=2, memory_mib=4096), name)
+    result = ob.plan_observation(**plan_kwargs(reservation=reservation))
+    assert result.ok is False
+    assert result.refusal in rc.PLAN_REFUSALS
+    assert result.envelope is None
+
+
+def test_a_deleted_optional_reservation_field_is_absent_not_declared_none():
+    """``gpu_memory_mib`` deleted is not the same as ``gpu_memory_mib=None``.
+
+    A declared ``None`` means *no GPU reservation is declared*. An absent field
+    means nobody knows, and the two must not collapse into one another.
+    """
+    declared_none = ob.ResourceReservation(cpu_cores=2, memory_mib=4096)
+    assert declared_none.gpu_memory_mib is None
+    accepted = ob.plan_observation(**plan_kwargs(reservation=declared_none))
+    assert accepted.ok is True
+
+    absent = _deleted(declared_none, "gpu_memory_mib")
+    refused = ob.plan_observation(**plan_kwargs(reservation=absent))
+    assert refused.ok is False
+    assert refused.refusal == "reservation-field-not-exact-int"
+
+
+@pytest.mark.parametrize("name", _field_names(rc.ObservationReceipt))
+def test_a_deleted_receipt_field_is_a_deterministic_value_error(name):
+    receipt = _deleted(rc.ObservationReceipt(**receipt_kwargs()), name)
+    with pytest.raises(ValueError) as caught:
+        rc.serialize_receipt(receipt)
+    # Exactly ValueError - an AttributeError would not be caught here at all,
+    # and a subclass would mean some other authority answered.
+    assert type(caught.value) is ValueError
+    assert "must still be set" in str(caught.value)
+    # Which field is missing is not disclosed: a receipt discloses nothing
+    # about what it was handed.
+    assert name not in str(caught.value)
+
+
+def test_a_deleted_receipt_field_never_reaches_the_result_carrier():
+    """``ObservationResult`` reads a receipt it did not build."""
+    receipt = _deleted(rc.ObservationReceipt(**receipt_kwargs()), "outcome")
+    with pytest.raises(ValueError) as caught:
+        ob.ObservationResult(ok=True, receipt=receipt)
+    assert type(caught.value) is ValueError
+
+
+def test_the_planner_is_behaviourally_total_over_every_deletion():
+    """Behaviour, not prose.
+
+    A control that reads the document proves what the document says. This one
+    plans every mutilated carrier the two planning types admit and requires a
+    plan object back from each - which is what makes the totality claim true.
+    """
+    planned = 0
+    for name in _field_names(ob.EvidenceItem):
+        item = _deleted(ob.EvidenceItem(evidence_id="e1", content=b"x" * 12), name)
+        result = ob.plan_observation(**plan_kwargs(evidence=[item]))
+        assert type(result) is ob.ObservationPlan
+        assert result.ok is False
+        planned += 1
+    for name in _field_names(ob.ResourceReservation):
+        reservation = _deleted(
+            ob.ResourceReservation(cpu_cores=2, memory_mib=4096), name
+        )
+        result = ob.plan_observation(**plan_kwargs(reservation=reservation))
+        assert type(result) is ob.ObservationPlan
+        assert result.ok is False
+        planned += 1
+    assert planned == len(_field_names(ob.EvidenceItem)) + len(
+        _field_names(ob.ResourceReservation)
+    )
+
+
+def test_the_serializer_is_behaviourally_total_over_every_deletion():
+    """Every receipt field, deleted, and never a raw ``AttributeError``."""
+    checked = 0
+    for name in _field_names(rc.ObservationReceipt):
+        receipt = _deleted(rc.ObservationReceipt(**receipt_kwargs()), name)
+        try:
+            rc.serialize_receipt(receipt)
+        except ValueError:
+            checked += 1
+        except AttributeError as exc:  # pragma: no cover - the defect itself
+            raise AssertionError("raw AttributeError for %r: %s" % (name, exc))
+        else:  # pragma: no cover - a deleted field must never serialise
+            raise AssertionError("a receipt missing %r serialised" % name)
+    assert checked == 25
+
+
+def test_an_honest_carrier_is_untouched_by_any_of_this():
+    """The repair must not have made a legitimate carrier harder to use."""
+    result = ob.plan_observation(**plan_kwargs())
+    assert result.ok is True
+    envelope = result.envelope
+    assert envelope.reservation.gpu_memory_mib is None
+    assert rc._fields_present(
+        envelope, rc._declared_field_names(ob.ObservationEnvelope)
+    ) is True
+    receipt = rc.ObservationReceipt(**receipt_kwargs())
+    assert len(rc.serialize_receipt(receipt)) > 0
