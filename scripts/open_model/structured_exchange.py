@@ -65,7 +65,7 @@ request side.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Optional, Union, get_args
 
@@ -432,9 +432,53 @@ def _closed_completion_check():
     _tokens = REFUSAL_TOKENS
     _dialect_ok = is_supported_dialect
     _pre_dialect = is_pre_dialect_refusal
+    #: The carrier's five declared field names, taken from the dataclass
+    #: itself at import time so a field added later is covered without
+    #: anyone remembering to extend a hand-written list.
+    _declared = tuple(field.name for field in fields(StructuredCompletion))
+    _instance_dict_of = object.__getattribute__
     _type = type
     _str = str
     _bool = bool
+    _dict = dict
+
+    def _fields_set_on(completion: Any) -> bool:
+        """True only if all five declared fields are set on **this instance**.
+
+        ``getattr`` and ``hasattr`` cannot answer this, and that is the whole
+        reason this exists. ``StructuredCompletion`` declares four of its five
+        fields with a class-level default, so ``object.__delattr__`` on an
+        instance leaves the attribute lookup quietly returning that default:
+        ``None`` for ``response``, ``refusal`` and ``dialect``, ``False`` for
+        ``response_format_sent``. Where the default happens to equal the value
+        the carrier was built with, the deletion is invisible - a successful
+        completion whose ``refusal`` was removed read as a coherent success,
+        and was consumed as one. The fifth field, ``ok``, has no default at
+        all, so reading it raised a raw ``AttributeError`` out of a function
+        that promises a verdict.
+
+        Only the instance dictionary distinguishes a value that was *set* from
+        a fallback to the class, so that is what is read - through
+        ``object.__getattribute__`` so that no ``__getattr__``,
+        ``__getattribute__``, property or descriptor on the carrier's type can
+        answer in its place.
+
+        The one ``except`` is a single expression wide and means exactly one
+        thing: *this object has no instance dictionary*. Anything else that
+        lookup raises - a transport failure, a ``HermeticViolation`` - is not
+        caught here and propagates, which is the difference between a narrow
+        clause and a broad one.
+        """
+        try:
+            instance = _instance_dict_of(completion, "__dict__")
+        except AttributeError:
+            return False
+        if _type(instance) is not _dict:
+            return False
+        for name in _declared:
+            if name not in instance:
+                return False
+        return True
 
     def _completion_state_ok(completion: Any) -> bool:
         """True only for a completion in one of the carrier's coherent states.
@@ -450,12 +494,24 @@ def _closed_completion_check():
         ``StructuredExchange`` construction raise ``ValueError`` - both escaping
         as raw incidental exceptions from a function that promises a result.
 
-        Nothing here catches an exception. Transport failures raised by the
-        backend itself, and ``HermeticViolation`` from anywhere, still propagate
-        untouched: this function is only ever reached once the backend has
-        already returned.
+        The only exception caught anywhere in this check is the single
+        ``AttributeError`` in :func:`_fields_set_on`, one expression wide,
+        meaning *this object has no instance dictionary* and nothing else.
+        Transport failures raised by the backend itself, and
+        ``HermeticViolation`` from anywhere, still propagate untouched: this
+        function is only ever reached once the backend has already returned.
         """
         if _type(completion) is not _completion_type:
+            return False
+        # Presence before any field is read at all. Exact outer type says
+        # nothing about whether the fields are still there: freezing a
+        # dataclass blocks `del completion.ok`, and `object.__delattr__`
+        # walks straight past that, as it does past `object.__setattr__`'s
+        # counterpart. A missing field is not a state this carrier can
+        # coherently be in, so it lands on the same closed refusal every
+        # other incoherence does - no new token, and no second opinion about
+        # what a completion means.
+        if not _fields_set_on(completion):
             return False
         if _type(completion.ok) is not _bool:
             return False
