@@ -1287,17 +1287,84 @@ def _idle_quarantine_root_usable(data_root, device) -> bool:
     return identity is not None and identity[0] == device
 
 
-def _validated_quarantine_root(data_root):
-    """The quarantine root as a real, non-reparse directory on this volume."""
+def _root_creation_has_headroom(scan, policy: RetentionPolicy) -> bool:
+    """Whether ONE more top-level entry fits inside the scanner's own bound.
+
+    Only a SUCCESSFUL scan says anything about the entry count; anything else
+    is treated as no headroom at all, which fails closed. The scanner never
+    reports more than `max_directory_entries` -- it refuses one past it on an
+    unprocessed look-ahead -- so `>=` and `==` coincide for any scan this
+    module produced. `<` is written rather than `!=` so the comparison stays
+    fail-closed if that ever changes.
+    """
+    if not isinstance(scan, ScanSucceeded):
+        return False
+    return scan.processed < policy.max_directory_entries
+
+
+def _validated_quarantine_root(data_root, *, may_create):
+    """The quarantine root as a real, non-reparse directory on this volume.
+
+    Returns `(root, None)` when the root is usable, or `(None, reason)`.
+
+    Creating an ABSENT root costs the data root one top-level entry, and the
+    scan charges every yielded root entry against `max_directory_entries` and
+    refuses one past it. So creation is gated: `may_create` is false when the
+    successful scan processed the maximum, and the pass then refuses
+    `ENTRY_LIMIT_EXCEEDED` rather than pushing the directory past the very
+    bound it exists to hold -- after which no later pass could scan far enough
+    to help. Nothing is created on that path and no mover is called.
+
+    That is a deliberate, disclosed trade: an action batch that might itself
+    have relieved the directory is forgone at exactly the limit, because every
+    planned move can still be skipped -- an open handle, a changed identity, a
+    quiescence window -- leaving a net gain of one entry and a directory no
+    later pass can read. The refusal is also PERSISTENT at the exact limit,
+    and hand-creating the root is the one repair that makes it worse: that
+    pushes the directory to the limit plus one, where the SCANNER refuses
+    first. The remedies are raising the bound or relieving entries out of
+    band, never a removal from here.
+
+    It does NOT close the residual race in which a concurrent producer adds
+    entries between the scan and this creation; nothing here makes those two
+    steps atomic.
+
+    Absence is proved SPECIFICALLY by `FileNotFoundError` from one
+    non-following read. `directory_state(root) is None` cannot serve here: it
+    conflates "absent" with "present and unprovable", so a root that exists
+    but cannot be read would be charged headroom it does not consume -- and,
+    worse, would be handed to `os.mkdir`. Any other `OSError` is a root that
+    exists and cannot be proved, which stays the more specific
+    `QUARANTINE_ROOT_INVALID`.
+
+    The three structural checks mirror `directory_state` rather than calling
+    it, for the same reason `_idle_quarantine_root_usable` does: telling
+    absence from unusability needs the errno, and a second `os.lstat` would
+    open a window between the two reads for the very replacement this looks
+    for. The caller still re-proves the root's identity and device
+    immediately before any mutation.
+    """
     root = Path(data_root) / QUARANTINE_DIRNAME
-    if directory_state(root) is None:
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        # The ONLY creating branch, and only with headroom to spend.
+        if not may_create:
+            return None, RetentionFailureReason.ENTRY_LIMIT_EXCEEDED
         try:
             os.mkdir(root)
         except OSError:
-            return None
+            return None, RetentionFailureReason.QUARANTINE_ROOT_INVALID
         if directory_state(root) is None:
-            return None
-    return root
+            return None, RetentionFailureReason.QUARANTINE_ROOT_INVALID
+        return root, None
+    except OSError:
+        return None, RetentionFailureReason.QUARANTINE_ROOT_INVALID
+    if not stat_module.S_ISDIR(info.st_mode) or _is_reparse_point(info):
+        return None, RetentionFailureReason.QUARANTINE_ROOT_INVALID
+    if _stable_identity(info) is None:
+        return None, RetentionFailureReason.QUARANTINE_ROOT_INVALID
+    return root, None
 
 
 def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
@@ -1333,9 +1400,12 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                        reserve_ok=reserve_ok, blocked=blocked)
     device = data_state[0]
 
-    root = _validated_quarantine_root(data_root)
+    # Creation is charged against the scanner's own entry bound, so the root
+    # is only made when this pass measured room for it.
+    root, root_refusal = _validated_quarantine_root(
+        data_root, may_create=_root_creation_has_headroom(scan, policy))
     if root is None:
-        return _report(mode, refused=RetentionFailureReason.QUARANTINE_ROOT_INVALID,
+        return _report(mode, refused=root_refusal,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
