@@ -1,14 +1,16 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected eight times — after
+> **Status**: implemented, inert, and hermetic. Corrected nine times — after
 > Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), a fourth
 > adversarial review (§ 17), a fifth (§ 18) whose production correction is
 > upstream in ``scripts/open_model/structured_exchange.py``, a sixth (§ 19),
 > documentation-only, a seventh (§ 20) whose two findings came from an
 > **independent Opus 5 audit**, and an eighth (§ 21) closing what that audit's
-> re-run found still open one layer upstream. Each section lists every defect
-> that round found and what each one cost. **Independent re-acceptance is
-> pending.** Modules
+> re-run found still open one layer upstream, and a documentation-only ninth
+> (§ 22) after that correction passed independently and a supplementary
+> challenge found § 16.8's test inventory stale. Each section lists every
+> defect that round found and what each one cost. **A final documentation
+> confirmation is pending.** Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -1419,3 +1421,97 @@ reproduction here, the correction, the controls and this section are the same
 agent lineage that wrote the code. **This is same-author evidence, and
 independent re-acceptance remains pending.** Nothing in this round is a pass, a
 certification, or a claim of merge readiness.
+
+## 22. Ninth round (2026-08-25) — documentation only
+
+The independent Opus auditor returned
+`PASS — ROUND-EIGHT CORRECTION INDEPENDENTLY REPRODUCED` at
+`16eb89e8a3d15a573c639a34313ea232296a09ce`. A supplementary Fable Five
+challenge of the same base and head then found a **material documentation
+defect** that every behavioural control had passed straight over. This round
+corrects it and changes no code.
+
+### What the supplementary challenge reproduced
+
+Independently, at the pinned head:
+
+| Claim | Reproduced |
+|---|---|
+| OMI-V2 suites, normal / `-O` / `-OO` | 279 in each |
+| OMI-V3A suites, normal / `-O` / `-OO` | 1,145 in each |
+| Deletion matrix, corrected | 15 refused / 0 raw exceptions / 0 silent acceptances |
+| Deletion matrix, synthetic pre-correction | 3 raw exceptions / 6 silent acceptances / 6 already refused |
+| Review threads at the pinned head | zero |
+| Checks at the pinned head | seven, all successful |
+
+**One limitation it drew itself**: it did **not** re-run the complete
+7,391 / 55 / 2 repository suite, and said so rather than implying whole-suite
+coverage. That figure remains this lineage's own measurement.
+
+### The finding
+
+§ 16.8 of [`OPEN_MODEL_INTEGRATION.md`](OPEN_MODEL_INTEGRATION.md) claimed
+**724 hermetic tests across nine files** and gave a per-file table. Three of the
+nine rows no longer matched what pytest collects:
+
+| File | Documented | Collected | Origin |
+|---|---|---|---|
+| `tests/test_omi_v2_exchange.py` | 54 | 105 | **introduced by this branch** (+51) |
+| `tests/test_omi_v2_jack_round4.py` | 87 | 88 | inherited from live `main` (+1) |
+| `tests/test_omi_v2_jack_round5.py` | 166 | 174 | inherited from live `main` (+8) |
+
+The corrected total is **784**, derived from a fresh nine-file collection under
+normal Python, `-O` and `-OO` — identical in all three — not from arithmetic on
+the old figure. The challenge named two of the three mismatches; the third,
+`jack_round4` at +1, surfaced only because every row was re-collected rather
+than the two named ones spot-checked.
+
+Provenance is established from the blobs, not inferred: of the nine files, only
+`tests/test_omi_v2_exchange.py` differs between `main` and this head, and the
+base blob collects exactly 54. So the +51 is this branch's, and the +9 across
+the two round files was already stale on `main` before this branch existed.
+
+### Why no control caught it
+
+§ 16.8 said *"These counts are checked by the suite itself."* That sentence was
+the real defect. The three controls in `test_omi_v2_jack_round1.py` assert that
+every `test_omi_v2_*.py` on disk is named in the table, that every file named
+exists, and that the stated total equals the sum of **the table's own rows**.
+None of them compares a row to live pytest collection — so a row may drift
+arbitrarily far from reality while all three keep passing, provided the total is
+kept consistent with the rows. Internal consistency is not truth, and the prose
+claimed the stronger thing.
+
+The narrowed statement now says exactly what is verified and records what is
+not, rather than presenting this class of staleness as mechanically impossible.
+**No control was added in this round**, so the limitation stands openly instead
+of being quietly closed.
+
+### What was corrected
+
+Two documentation paths and nothing else. Three per-file counts, the total
+sentence, the over-claimed verification sentence, and one further stale figure
+found in the same sweep — § 16.8 ended *"All five files pass identically under
+normal, `-O` and `-OO`"* while the table lists nine.
+
+Every code and test blob is byte-identical to
+`16eb89e8a3d15a573c639a34313ea232296a09ce`.
+
+### Sequencing, recorded rather than assumed
+
+PRs **#479** and **#480** remain separate OPEN, DRAFT branches and are **not**
+incorporated here. The challenge found that neither foundation correction must
+precede #478 at the audited base and head. Later integration will still need
+§ 16.8 reconciled, because #480 adds another inventory row — so the table this
+round corrects is one that a subsequent merge will have to correct again, and
+the narrowed sentence above is what makes that visible.
+
+### Provenance
+
+The Opus PASS is independent. The Fable challenge is **supplementary
+AI-assisted evidence, not external organizational certification**. The
+reproduction of the § 16.8 finding, the correction, and this section are the
+same agent lineage that wrote the code and the documentation — same-author
+evidence. **A short Fable confirmation of this new documentation head remains
+pending**, and nothing here claims a final clear, ready status, merge approval,
+or certification.

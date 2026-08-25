@@ -1031,27 +1031,42 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-724 hermetic tests across nine files, injected clients only — no network, no
-key, no endpoint, no download.
+784 hermetic tests across nine files, injected clients only — no network, no
+key, no endpoint, no download. Every row below was re-collected under normal
+Python, `-O` and `-OO` on 2026-08-25; the three modes agree.
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_omi_v2_structured_request.py` | 94 | Exact wire shape per dialect; the closed dialect gate; schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
 | `tests/test_omi_v2_backend.py` | 47 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
-| `tests/test_omi_v2_exchange.py` | 54 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_exchange.py` | 105 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written; and the completion-carrier controls added by OMI-V3A's fifth and eighth rounds — a returned `StructuredCompletion` whose field was replaced, or deleted, is refused before any of it is read. |
 | `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
-| `tests/test_omi_v2_jack_round4.py` | 87 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
-| `tests/test_omi_v2_jack_round5.py` | 166 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
+| `tests/test_omi_v2_jack_round4.py` | 88 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
+| `tests/test_omi_v2_jack_round5.py` | 174 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
 
-These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
-asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
-table, that the stated total equals the sum of the rows, and that the table
-names no file that does not exist. The table above went stale once — it
-claimed 186 tests across three files while a fourth file of 111 tests existed
-and none of the three figures was right — and prose alone did not catch it.
+**What the suite checks about this table, stated exactly.**
+`test_omi_v2_jack_round1.py` asserts three things, and only three: that every
+`tests/test_omi_v2_*.py` file on disk is named here; that every file named here
+exists; and that the stated total equals the sum of the numbers in this table's
+own rows.
+
+It does **not** compare any row against live pytest collection. A row can
+therefore drift arbitrarily far from what pytest actually collects while all
+three controls keep passing, provided the total is kept consistent with the
+rows — which is exactly what happened. Three rows were found stale at once in
+the ninth OMI-V3A round: the exchange row by fifty-one, introduced on that
+branch, and two more already stale on `main`. Keeping the total equal to the
+row sum makes this table *internally consistent*, not *true*, and that
+distinction is the whole of what these controls can offer. **This class of
+staleness is not mechanically prevented**, and no control was added to pretend
+otherwise; the counts above were re-collected by hand.
+
+The table went stale once before, too — it claimed 186 tests across three
+files while a fourth file of 111 tests existed and none of the three figures
+was right — and prose alone did not catch it then either.
 
 The ordering control is the load-bearing one. `ExplodingClient` raises on
 every attribute access, so a refusal returned while the backend holds one
@@ -1059,7 +1074,7 @@ proves the refusal completed before the SDK was reached — a refused request
 never becomes a billed, logged, or rate-limited call. A guard test asserts
 `ExplodingClient` actually fires, so that proof cannot go vacuous.
 
-All five files pass identically under normal, `-O` and `-OO`. No library
+All nine files pass identically under normal, `-O` and `-OO`. No library
 `assert` is relied upon (`-O` strips those) and no test reads `__doc__`
 (`-OO` strips that); documentation checks read the source file instead.
 
@@ -1372,7 +1387,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected eight times (2026-08-24 / 25).**
+**Corrected nine times (2026-08-24 / 25).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1418,7 +1433,13 @@ rounds had attacked `object.__setattr__` and none had tried
 had no class default, and read as that default where it had one. An eighth
 (section 21) closed the same blind spot one layer upstream, in OMI-V2's own
 completion carrier, after the re-audit confirmed the seventh round's
-corrections closed and nevertheless returned FAIL.
+corrections closed and nevertheless returned FAIL. The independent auditor
+then returned a PASS on that correction, and a supplementary challenge of the
+same head found a documentation defect rather than a behavioural one: three of
+§16.8's nine per-file counts had gone stale, one of them on this branch and two
+inherited. A documentation-only ninth round (section 22 of the inception
+document) corrected them and narrowed the sentence that had claimed the suite
+checks those counts against reality.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,
