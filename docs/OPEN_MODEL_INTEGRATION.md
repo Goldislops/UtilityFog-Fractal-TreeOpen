@@ -1372,7 +1372,7 @@ is gated on an injected checker or operator **attestation** rather than on any
 measurement. Both limits, and eight more, are enumerated in § 9 of the
 inception document.
 
-**Corrected five times (2026-08-24 / 25).**
+**Corrected eight times (2026-08-24 / 25).**
 Twenty-four demonstrated cases all reproduced, in five findings — three of them
 one root cause: an exact outer type mistaken for an unaltered object, since
 `object.__setattr__` replaces any field on a frozen dataclass and the digest
@@ -1409,7 +1409,19 @@ returned `StructuredCompletion` without re-checking them, so a backend that
 mutated one could run its own hooks inside OMI-V2 - and corrected it there;
 section 18 records that, together with a transmission claim that was withdrawn
 because no receipt can attest what a caller-supplied backend actually sends.
+Three further rounds followed. A documentation-only sixth (section 19)
+corrected a sentence still claiming the planner never raises, when it
+deliberately does not catch `BaseException`. A seventh (section 20) - the
+first whose findings came from an **independent audit** - found that six
+rounds had attacked `object.__setattr__` and none had tried
+`object.__delattr__`: a deleted field raised a raw `AttributeError` where it
+had no class default, and read as that default where it had one. An eighth
+(section 21) closed the same blind spot one layer upstream, in OMI-V2's own
+completion carrier, after the re-audit confirmed the seventh round's
+corrections closed and nevertheless returned FAIL.
 
 **Same-author evidence.** As with §16, everything above was written by the
 agent that wrote the code under test. It demonstrates internal consistency,
-not independent acceptance.
+not independent acceptance. The findings of rounds seven and eight came from
+an independent auditor; the corrections, the controls and this text did not,
+and **independent re-acceptance is still pending**.

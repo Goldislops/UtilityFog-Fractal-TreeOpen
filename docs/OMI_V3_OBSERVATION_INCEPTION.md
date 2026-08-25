@@ -1,12 +1,14 @@
 # OMI_V3_OBSERVATION_INCEPTION.md — the OMI-V3A observation envelope
 
-> **Status**: implemented, inert, and hermetic. Corrected seven times — after
+> **Status**: implemented, inert, and hermetic. Corrected eight times — after
 > Jack's first HOLD round (§ 11), his second (§ 13), his third (§ 15), a fourth
 > adversarial review (§ 17), a fifth (§ 18) whose production correction is
 > upstream in ``scripts/open_model/structured_exchange.py``, a sixth (§ 19),
-> documentation-only, and a seventh (§ 20) whose two findings came from an
-> **independent Opus 5 audit**. Each section lists every defect that round
-> found and what each one cost. Modules
+> documentation-only, a seventh (§ 20) whose two findings came from an
+> **independent Opus 5 audit**, and an eighth (§ 21) closing what that audit's
+> re-run found still open one layer upstream. Each section lists every defect
+> that round found and what each one cost. **Independent re-acceptance is
+> pending.** Modules
 > [`scripts/open_model/observation.py`](../scripts/open_model/observation.py)
 > and
 > [`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py).
@@ -1301,3 +1303,119 @@ reproduced them. The reproduction, the repair, the controls and this section
 are the same agent lineage that wrote the code — so this round is the first
 whose *findings* are independent while its *corrections* are not.
 **Independent re-acceptance remains pending.**
+
+## 21. Eighth round (2026-08-25)
+
+The independent re-audit of § 20's corrections. It confirmed **both round-seven
+findings closed** — the forty-two raw `AttributeError` paths across the OMI-V3A
+carriers, and the false adapter return annotation — and then returned
+`FAIL — MATERIAL DEFECT OR OVERCLAIM REPRODUCED` anyway, because the same blind
+spot survived one layer upstream, in OMI-V2's own completion carrier.
+
+That is the honest shape of this round: the corrections held where they were
+made, and the round-seven record was **incomplete about where the pattern
+reached**. § 20 said the reads were changed "where they happen, in
+`observation.py`". True of the OMI-V3A checkers. Not true of
+`_completion_state_ok`, which reads a `StructuredCompletion` in
+`structured_exchange.py` and was left reading it by attribute.
+
+### What reproduced
+
+**The auditor's finding.** An exact `StructuredCompletion`, returned normally by
+a backend, with its instance field `ok` removed by `object.__delattr__`, made
+`_completion_state_ok` raise a **raw `AttributeError`** — the same failure mode
+round seven had just closed everywhere else. `ok` is the one field of the five
+declared *without* a class default, so it is the one attribute access cannot
+answer for.
+
+**Jack's addition.** The auditor's sentence that *only `ok` is affected* is not
+complete, and Jack reproduced why. The other four fields **do** carry class
+defaults — `None` for `response`, `refusal` and `dialect`, `False` for
+`response_format_sent` — so deleting one of them does not raise. It reads as
+that default. Where the default happens to equal the value the coherent carrier
+held, the deletion is **invisible to every ordinary read**, and the mutilated
+completion was consumed as if intact:
+
+| Coherent shape | Deleted field | Before this round |
+|---|---|---|
+| success | `ok` | raw `AttributeError` |
+| success | **`refusal`** | **accepted as a coherent success** |
+| success | `response`, `dialect`, `response_format_sent` | closed refusal |
+| post-dialect refusal | `ok` | raw `AttributeError` |
+| post-dialect refusal | `response`, `response_format_sent` | consumed; propagated `schema-empty` |
+| post-dialect refusal | `refusal`, `dialect` | closed refusal |
+| pre-dialect refusal | `ok` | raw `AttributeError` |
+| pre-dialect refusal | `response`, `dialect`, `response_format_sent` | consumed; propagated `dialect-unsupported` |
+| pre-dialect refusal | `refusal` | closed refusal |
+
+Nine of the fifteen combinations were wrong: **three raw exceptions and six
+silent acceptances.** Six were already refused.
+
+### The correction
+
+A **completion-local presence gate** inside `structured_exchange.py`. The
+already-audited reader in `observation_receipt.py` was deliberately **not**
+relocated or reused: that module imports *from* this one, so reaching upward
+would invert the dependency, and OMI-V2 is the lower layer that must be able to
+answer this question on its own.
+
+`_fields_set_on` is built in the same closure factory as
+`_completion_state_ok`, with the carrier's five declared field names taken from
+`dataclasses.fields` at import time and `object.__getattribute__` bound in a
+cell. It reads the **instance dictionary** — the only thing that distinguishes a
+value that was *set* from a fallback to the class — and is applied immediately
+after the exact-type test and before any field is read. Its one
+`except AttributeError` is a single expression wide and means exactly *this
+object has no instance dictionary*.
+
+Ordering is unchanged and load-bearing: exact type first, presence second, then
+the existing rule-for-rule mirror of the carrier's own coherence. A missing
+field returns false and lands on the **existing** closed token
+`backend-not-structured-capable`. **No new token, no second semantic
+authority.** Nothing is caught around the backend call: a raising backend still
+raises, and `HermeticViolation` still propagates.
+
+All fifteen combinations now return that one refusal. A control proves the
+exact-type gate still comes first, by handing the checker a subclass whose
+`__dict__` raises and asserting the property never runs.
+
+### The controls
+
+**+29** in `tests/test_omi_v2_exchange.py`, 76 → **105**. Every field deleted
+from every coherent shape, parametrised so the coverage cannot fall behind the
+carrier; the six default-equals-value combinations pinned separately, because
+they are the ones no ordinary read can see; an explicit demonstration that
+`hasattr` is `True` and a sentinel-defaulted `getattr` never reaches its
+sentinel for a deleted defaulted field; a control that reproduces what a
+reverted implementation would report and requires it to disagree with the
+module; and a non-vacuity control, which this suite had not previously carried.
+
+### Evidence
+
+| Suite | normal | `-O` | `-OO` |
+|---|---|---|---|
+| OMI-V2 (105 + 174) | **279** | **279** | **279** |
+| OMI-V3A (771 + 374) | **1145** | **1145** | **1145** |
+
+Collected counts are identical in all three modes. The OMI-V3A total is
+**unchanged** from § 20, which is the point: this round touched OMI-V2 and left
+the independently validated round-seven correction undisturbed.
+
+### Limitations
+
+The gate answers presence, not provenance: a backend that returns a *coherent*
+completion it fabricated is indistinguishable from an honest one, and always
+was — § 9's limitation 12 already says the receipt cannot attest what a backend
+transmitted. `StructuredCompletion` has no `__slots__`, so an instance
+dictionary exists to read; a control pins the five declared names and their
+defaults so that if either changes upstream, this fails loudly rather than
+quietly covering less.
+
+### Provenance
+
+The finding is **independent**: the re-audit found it and Jack reproduced it,
+adding the class-default half the auditor's sentence had not covered. The
+reproduction here, the correction, the controls and this section are the same
+agent lineage that wrote the code. **This is same-author evidence, and
+independent re-acceptance remains pending.** Nothing in this round is a pass, a
+certification, or a claim of merge readiness.
