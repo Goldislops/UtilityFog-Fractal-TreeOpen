@@ -3624,3 +3624,249 @@ def test_the_manifest_close_fault_leaks_no_descriptor(tmp_path, monkeypatch):
     after = _watermark()
     assert len(fault.close_attempts) == 1
     assert after <= before + 1
+
+
+# ===========================================================================
+# D1 -- an ACTION-BEARING pass must not create the quarantine root when the
+#       directory is already at its own entry bound
+# ===========================================================================
+#
+# The no-action correction above closed exactly one half of this. The scan
+# charges EVERY yielded root entry against `max_directory_entries` and refuses
+# one past it, so creating `.retention_quarantine` costs the data root one
+# top-level entry it may not have. An action-bearing pass reaches
+# `_validated_quarantine_root`, which creates that root unconditionally --
+# and every planned move can still be SKIPPED (an open handle, an identity
+# change, quiescence), leaving a net +1 and a directory no later pass can
+# scan.
+#
+# Absence must be proved by `FileNotFoundError` specifically. A root that
+# exists but cannot be read costs no headroom at all and is the more specific
+# `QUARANTINE_ROOT_INVALID`.
+
+
+def _headroom_policy(entries, **kwargs):
+    base = dict(entries=entries, combined=1_000, snap=1_000, telem=1_000,
+                ceiling=8_192, floor=1)
+    base.update(kwargs)
+    return _tiny(**base)
+
+
+def _headroom_run(directory, policy, pass_id="p20260101T000000",
+                  mover=_injected_mover, admit=None):
+    return retention.run_pass(
+        directory, policy=policy,
+        mode=retention.RetentionMode.QUARANTINE, now_ns=NOW,
+        pass_id=pass_id,
+        admit=admit if admit is not None else _Admit({0, 1, 2}),
+        mover=mover)
+
+
+def test_an_action_bearing_pass_at_the_entry_limit_refuses_and_creates_nothing(
+        tmp_path):
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    before = sorted(path.name for path in tmp_path.iterdir())
+    report = _headroom_run(tmp_path, _headroom_policy(count))
+    assert report.planned_actions, "the fixture must be action-bearing"
+    assert report.refused is (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+    assert report.moved == 0
+    assert report.skipped == 0
+    assert report.unmanifested == 0
+    assert not _quarantine_root(tmp_path).exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
+def test_the_entry_limit_refusal_calls_no_mover(tmp_path):
+    def _forbidden(source, destination):     # pragma: no cover - must not run
+        raise AssertionError("a mover ran on a refused pass")
+
+    _populate(tmp_path, snapshots=6)
+    report = _headroom_run(tmp_path, _headroom_policy(6), mover=_forbidden)
+    assert report.refused is (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+    assert report.moved == 0
+
+
+def test_one_below_the_entry_limit_still_creates_the_root_and_moves(tmp_path):
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    report = _headroom_run(tmp_path, _headroom_policy(count + 1))
+    assert report.refused is None
+    assert report.moved == report.planned_actions_count
+    assert report.moved > 0
+    assert _quarantine_root(tmp_path).is_dir()
+
+
+def test_past_the_entry_limit_the_scan_itself_still_refuses(tmp_path):
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    report = _headroom_run(tmp_path, _headroom_policy(count - 1))
+    assert report.refused is (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+    assert report.planned_actions == ()
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_directory_refused_for_headroom_is_still_scannable(tmp_path):
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    policy = _headroom_policy(count)
+    first = _headroom_run(tmp_path, policy)
+    assert first.refused is (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+
+    rescan = retention.scan_retention_candidates(tmp_path, policy=policy)
+    assert isinstance(rescan, retention.ScanSucceeded)
+    assert rescan.processed == count
+
+    second = _headroom_run(tmp_path, policy, pass_id="p20260101T000001")
+    assert second.refused is (
+        retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED)
+    assert second.processed == count
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_an_existing_root_at_the_entry_limit_still_acts(tmp_path):
+    """A root that already exists costs no headroom, so the pass proceeds and
+    the top-level count cannot grow."""
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    _quarantine_root(tmp_path).mkdir()
+    entries = count + 1                    # the files plus the root itself
+    before = len(list(tmp_path.iterdir()))
+    report = _headroom_run(tmp_path, _headroom_policy(entries))
+    assert report.refused is None
+    assert report.moved > 0
+    assert len(list(tmp_path.iterdir())) <= before
+
+
+def test_an_existing_root_at_the_entry_limit_permits_an_all_skipped_pass(
+        tmp_path):
+    """Nothing eligible, a valid root already present: a clean no-op that does
+    not grow the directory."""
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    _quarantine_root(tmp_path).mkdir()
+    entries = count + 1
+    before = len(list(tmp_path.iterdir()))
+    report = _headroom_run(tmp_path, _headroom_policy(entries, floor=50))
+    assert report.planned_actions == ()
+    assert report.refused is None
+    assert len(list(tmp_path.iterdir())) == before
+
+
+def test_a_present_but_invalid_root_at_the_limit_is_root_invalid_not_the_limit(
+        tmp_path):
+    """Precedence: a root that EXISTS consumes no headroom, so the specific
+    refusal for an unusable root wins."""
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    _quarantine_root(tmp_path).write_bytes(b"not a directory")
+    report = _headroom_run(tmp_path, _headroom_policy(count + 1))
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+    assert report.moved == 0
+
+
+def _root_lstat_error(monkeypatch, error):
+    real_lstat = os.lstat
+
+    def _patched(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == retention.QUARANTINE_DIRNAME:
+            raise error
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _patched)
+
+
+def test_an_unreadable_root_is_not_absence_and_is_never_created(
+        tmp_path, monkeypatch):
+    """`directory_state(root) is None` conflates ABSENT with PRESENT-and-
+    unprovable. Only `FileNotFoundError` is absence; anything else is a root
+    that exists, and no `mkdir` may be attempted against it."""
+    _populate(tmp_path, snapshots=6)
+    _root_lstat_error(monkeypatch,
+                      PermissionError(errno.EACCES, "permission denied"))
+    report = _headroom_run(tmp_path, _headroom_policy(1_000))
+    assert report.refused is (
+        retention.RetentionFailureReason.QUARANTINE_ROOT_INVALID)
+    assert report.moved == 0
+    assert not _quarantine_root(tmp_path).exists(), (
+        "a refusal created the very root it refused")
+
+
+def test_an_absent_root_below_the_limit_is_still_created(tmp_path):
+    """The `FileNotFoundError` branch is the ONLY creating branch."""
+    _populate(tmp_path, snapshots=6)
+    report = _headroom_run(tmp_path, _headroom_policy(1_000))
+    assert report.refused is None
+    assert _quarantine_root(tmp_path).is_dir()
+
+
+@pytest.mark.parametrize("offset,expected_refusal,expects_root", [
+    (-1, retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED, False),
+    (0, retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED, False),
+    (1, None, True),
+])
+def test_the_entry_bound_is_exact_at_limit_minus_one_limit_and_limit_plus_one(
+        tmp_path, offset, expected_refusal, expects_root):
+    count = 6
+    _populate(tmp_path, snapshots=count)
+    report = _headroom_run(tmp_path, _headroom_policy(count + offset))
+    assert report.refused is expected_refusal
+    assert _quarantine_root(tmp_path).exists() is expects_root
+
+
+def test_an_invalid_pass_identifier_precedes_the_headroom_refusal(tmp_path):
+    _populate(tmp_path, snapshots=6)
+    report = _headroom_run(tmp_path, _headroom_policy(6), pass_id="../escape")
+    assert report.refused is retention.RetentionFailureReason.PASS_ID_INVALID
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_timestamp_ambiguity_precedes_the_headroom_refusal(tmp_path):
+    _populate(tmp_path, snapshots=5)
+    _write(tmp_path, _snap_name(900, 900), age_days=-5)      # future-dated
+    report = _headroom_run(tmp_path, _headroom_policy(6))
+    assert report.refused is (
+        retention.RetentionFailureReason.TIMESTAMP_AMBIGUOUS)
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_a_reserve_check_failure_precedes_the_headroom_refusal(tmp_path):
+    def _boom(path, *, data_dir, policy=None):
+        raise RuntimeError("unexpected")
+
+    _populate(tmp_path, snapshots=6)
+    report = _headroom_run(tmp_path, _headroom_policy(6), admit=_boom)
+    assert report.refused is (
+        retention.RetentionFailureReason.RESERVE_CHECK_FAILED)
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_an_unusable_data_root_precedes_the_headroom_refusal(tmp_path,
+                                                             monkeypatch):
+    _populate(tmp_path, snapshots=6)
+    real_lstat = os.lstat
+
+    def _identityless(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(tmp_path):
+            return _Stat(mode=info.st_mode, size=info.st_size,
+                         mtime_ns=info.st_mtime_ns, nlink=1, dev=0, ino=0)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _identityless)
+    report = _headroom_run(tmp_path, _headroom_policy(6))
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert not _quarantine_root(tmp_path).exists()
+
+
+def test_the_headroom_refusal_introduces_no_deletion_primitive():
+    source = Path(retention.__file__).read_text(encoding="utf-8")
+    for banned in ("os.unlink", "os.remove", "os.rmdir", "shutil.rmtree",
+                   "shutil."):
+        assert banned not in source, banned
