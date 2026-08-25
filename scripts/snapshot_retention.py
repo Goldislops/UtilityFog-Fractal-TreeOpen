@@ -1645,6 +1645,29 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         actions = plan.actions
 
     if mode is RetentionMode.PLAN:
+        # A LIVE plan proves the target it actually read, immediately before
+        # reporting on it. `scan_retention_candidates` reports a missing or
+        # non-directory path as an EMPTY SUCCESS -- correct in isolation,
+        # because there is nothing to maintain -- and `os.scandir` FOLLOWS a
+        # reparse point, so a junction is enumerated while being somewhere no
+        # pass may act. `QUARANTINE` proves the root on both its branches;
+        # without this, `PLAN` reports a clean no-op and the operator CLI
+        # exits 0 over all three, which is the opposite of what was asked.
+        #
+        # ONLY when `scan is None`. An injected scan represents an object this
+        # invocation did NOT read, so validating the supplied path would prove
+        # the WRONG object and would couple a synthetic analysis to whatever
+        # the working directory happens to contain.
+        #
+        # One non-following read, creating nothing. The quarantine root is
+        # neither inspected nor made: `PLAN` mutates nothing at all, and
+        # inspecting the root here would report on a path this mode never
+        # touches.
+        if scan is None and directory_state(directory) is None:
+            return _report(mode,
+                           refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                           scan=observed, plan=plan, actions=actions,
+                           reserve_ok=reserve_ok, blocked=blocked)
         return _report(mode, scan=observed, plan=plan, actions=actions,
                        reserve_ok=reserve_ok, blocked=blocked)
 
