@@ -2,9 +2,14 @@
 
 Stage one is `PLAN` and recoverable `QUARANTINE` only. There is no `DELETE`,
 no automatic reaping, no automatic restoration, no scheduler and no execution
-of a serialized plan. Nothing here touches the real `data/` directory: every
-population is either an injected fake `scandir` or a handful of real files in
-pytest's own `tmp_path`. No test creates a production-sized directory.
+of a serialized plan. Nothing here touches the real `data/` directory. A
+population is one of exactly three things: a `ScanSucceeded` built DIRECTLY
+from `CandidateEntry` values by `_built_scan`, which never goes near a
+filesystem and is what the large planner and reserve populations use; an
+injected fake `scandir` for the scanner controls; or a handful of real files
+in pytest's own `tmp_path` for the quarantine controls. Only the first is ever
+production-sized, and it creates no directory at all -- no test creates a
+production-sized directory on disk.
 
 Two numbers that look similar are deliberately different controls and are
 tested as such: the SCANNER refusal limits (196,608 entries / 65,536 inspected)
@@ -256,19 +261,91 @@ def test_no_delete_reap_restore_or_scheduler_surface_exists():
         assert not any(banned in name for name in names), banned
 
 
-def test_the_module_is_not_importable_from_a_request_handler():
-    """A retention scan must never be reachable from an unauthenticated GET."""
+#: The two request handlers that share `scripts/` with the retention module.
+_REQUEST_HANDLER_MODULES = ("medusa_api", "lucid_server")
+
+
+def _handler_imports(module_name):
+    """Every module name `module_name` imports, by static parse.
+
+    Both node kinds are collected, and `ImportFrom` contributes its module AND
+    each imported alias qualified onto it, so `from scripts import
+    snapshot_retention` is caught by the alias arm even though its `node.module`
+    is only `scripts`. A relative import carries no absolute module name, so its
+    written dotted form is recorded instead of being silently dropped.
+    """
     import ast as _ast
-    for consumer in ("medusa_api", "lucid_server"):
-        source = Path(
-            Path(retention.__file__).parent / (consumer + ".py")
-        ).read_text(encoding="utf-8")
-        for node in _ast.walk(_ast.parse(source)):
-            if isinstance(node, _ast.ImportFrom) and node.module:
-                assert "snapshot_retention" not in node.module
-            if isinstance(node, _ast.Import):
-                for alias in node.names:
-                    assert "snapshot_retention" not in alias.name
+    path = Path(retention.__file__).parent / (module_name + ".py")
+    source = path.read_text(encoding="utf-8")
+    assert source.strip(), path
+    collected = []
+    for node in _ast.walk(_ast.parse(source)):
+        if isinstance(node, _ast.Import):
+            collected.extend(alias.name for alias in node.names)
+        elif isinstance(node, _ast.ImportFrom):
+            prefix = "." * node.level + (node.module or "")
+            collected.append(prefix)
+            collected.extend(prefix + "." + alias.name for alias in node.names)
+    return collected
+
+
+_IMPORT_FORMS = [
+    "import scripts.snapshot_retention",
+    "import scripts.snapshot_retention as _r",
+    "from scripts import snapshot_retention",
+    "from scripts.snapshot_retention import scan_retention_candidates",
+    "from . import snapshot_retention",
+    "from .snapshot_retention import scan_retention_candidates",
+]
+
+
+@pytest.mark.parametrize("form", _IMPORT_FORMS)
+def test_the_handler_import_collector_sees_every_import_form(form):
+    """Non-vacuity for the control below, WITHOUT requiring either handler to
+    import anything.
+
+    Zero imports in a request handler is a legitimately safe state, so the
+    collector must not be validated by "the list came back non-empty". It is
+    validated against this fixture instead. Two of these forms --
+    `from scripts import snapshot_retention` and `from . import
+    snapshot_retention` -- are invisible to a per-node check on
+    `ImportFrom.module`, which is why the collector qualifies aliases onto
+    their module and records the relative prefix.
+    """
+    import ast as _ast
+    collected = []
+    for node in _ast.walk(_ast.parse(form + chr(10))):
+        if isinstance(node, _ast.Import):
+            collected.extend(alias.name for alias in node.names)
+        elif isinstance(node, _ast.ImportFrom):
+            prefix = "." * node.level + (node.module or "")
+            collected.append(prefix)
+            collected.extend(prefix + "." + alias.name for alias in node.names)
+    assert any("snapshot_retention" in name for name in collected), (
+        form, collected)
+
+
+def test_the_module_is_not_importable_from_a_request_handler():
+    """A retention scan must never be reachable from an unauthenticated GET.
+
+    Imports from BOTH handlers are collected first and judged in ONE assertion
+    over the collected result, so this cannot pass merely by walking a tree
+    that produced no import nodes.
+
+    Zero imports is a legitimately SAFE state and is deliberately not required
+    to be non-empty. What is pinned instead is that both named files were
+    located, read with content, and parsed -- the failure mode a per-node
+    assertion inside a loop cannot distinguish from success.
+    """
+    collected = {name: _handler_imports(name)
+                 for name in _REQUEST_HANDLER_MODULES}
+    assert sorted(collected) == sorted(_REQUEST_HANDLER_MODULES)
+    offenders = sorted(
+        (module_name, imported)
+        for module_name, names in collected.items()
+        for imported in names
+        if "snapshot_retention" in imported)
+    assert offenders == [], offenders
 
 
 # ===========================================================================
@@ -495,7 +572,7 @@ def test_each_digit_run_position_fixture_is_otherwise_valid(label, kind,
                          ids=_POSITION_IDS)
 def test_no_digit_run_position_accepts_a_unicode_decimal_digit(
         label, kind, build, script_name, base):
-    """Eight positions x three scripts: `\d` is observable at every one.
+    r"""Eight positions x three scripts: `\d` is observable at every one.
 
     `\d` in a `str` pattern matches all three of these blocks and `[0-9]`
     matches none, so substituting `\d` at ANY single position makes exactly
@@ -1786,9 +1863,19 @@ def test_an_inode_replacement_with_identical_size_and_time_is_detected(
 
 
 def test_the_scan_captures_the_full_stable_identity(monkeypatch, tmp_path):
+    """The scan must SUCCEED and carry the whole fixture population first.
+
+    A `ScanFailed`, or a success that collected nothing, would satisfy the
+    per-entry loop below by never entering it. The expected population is the
+    exact two basenames `_populate` writes, not merely "non-empty".
+    """
     _populate(tmp_path, snapshots=2)
     result = retention.scan_retention_candidates(
         tmp_path, policy=_quarantine_policy())
+    assert isinstance(result, retention.ScanSucceeded)
+    assert sorted(entry.basename for entry in result.snapshots) == [
+        _snap_name(0, 0), _snap_name(1, 1)]
+    assert result.telemetry == ()
     for entry in result.snapshots:
         assert entry.dev != 0 and entry.ino != 0
         real = os.lstat(tmp_path / entry.basename)
@@ -1796,8 +1883,18 @@ def test_the_scan_captures_the_full_stable_identity(monkeypatch, tmp_path):
 
 
 def test_a_planned_action_carries_the_identity_it_was_planned_on(tmp_path):
+    """No refusal, and the exact planned population, before the per-action loop.
+
+    `_quarantine_policy` has `floor=1`, so of the three entries `_populate`
+    writes -- index 0 newest, each successive index a day older -- the floor
+    protects index 0 and exactly indices 1 and 2 are planned. A refusal, or a
+    plan that selected nothing, would otherwise pass here by never looping.
+    """
     _populate(tmp_path, snapshots=3)
     report = _run(tmp_path, mode=retention.RetentionMode.PLAN)
+    assert report.refused is None
+    assert sorted(action.basename for action in report.planned_actions) == [
+        _snap_name(1, 1), _snap_name(2, 2)]
     for action in report.planned_actions:
         real = os.lstat(tmp_path / action.basename)
         assert (action.dev, action.ino) == (real.st_dev, real.st_ino)
@@ -3739,14 +3836,15 @@ def test_an_exactly_full_directory_with_a_valid_root_stays_exactly_full(
 # `_ManifestCloseFault` patches `retention.os.close`, and `retention.os` IS the
 # process-global `os` module -- so the patch is global for the test. That is
 # tolerable only while the injector matches exactly one descriptor lifetime.
-# It matches on the fd NUMBER and never clears `target_fd`, and the operating
-# system recycles fd numbers freely: once the manifest descriptor is released,
-# the very next `os.open` can hand the same integer to something unrelated,
-# and closing THAT would take the injected failure and inflate the
-# exactly-one-close-attempt counter the close controls depend on.
+# It matches on the fd NUMBER, and the operating system recycles fd numbers
+# freely: once the manifest descriptor is released, the very next `os.open` can
+# hand the same integer to something unrelated, and closing THAT would take the
+# injected failure and inflate the exactly-one-close-attempt counter the close
+# controls depend on. The injector therefore clears `target_fd` BEFORE the real
+# close, and these controls are what hold it to that.
 #
-# These assert the invariant directly rather than waiting for the platform to
-# recycle a number, so they are deterministic on every OS.
+# These assert the retirement invariant directly rather than waiting for the
+# platform to recycle a number, so they are deterministic on every OS.
 
 
 def test_the_manifest_close_fault_retires_its_target_after_one_lifetime(
@@ -3772,8 +3870,15 @@ def test_a_successful_manifest_close_also_retires_the_target(tmp_path,
 
 def test_a_recycled_descriptor_number_is_not_treated_as_the_manifest(
         tmp_path, monkeypatch):
-    """The decisive control: reopen until the released number comes back, then
-    close it. A live injector would fail that close and count it twice."""
+    """Reopen until the released number comes back, then close it: a live
+    injector would fail that close and count it twice.
+
+    Recycling is the platform's choice, so `recycled` may stay None and the
+    reissue arm may not execute on a given run. The retirement invariant that
+    makes recycling harmless is proved unconditionally by the two controls
+    above; this one adds the real-reissue observation when the platform
+    offers it, and its close-attempt count is asserted either way.
+    """
     _populate(tmp_path, snapshots=5)
     fault = _ManifestCloseFault(monkeypatch)
     _run(tmp_path)
