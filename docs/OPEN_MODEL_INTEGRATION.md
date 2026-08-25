@@ -1,7 +1,10 @@
 # OPEN_MODEL_INTEGRATION.md — OMI-V1 and OMI-V2
 
 > **Status**: implemented foundation + dated source matrix (OMI-V1, §§1–15),
-> plus a closed structured-output request contract (OMI-V2, §16). Packages
+> plus a closed structured-output request contract (OMI-V2, §16), plus an
+> inert observation envelope built on top of it (OMI-V3A, §17 — full contract
+> in [`OMI_V3_OBSERVATION_INCEPTION.md`](OMI_V3_OBSERVATION_INCEPTION.md)).
+> Packages
 > [`scripts/open_model/`](../scripts/open_model/) and, for OMI-V2 only,
 > [`scripts/agent_backends/structured_request.py`](../scripts/agent_backends/structured_request.py).
 >
@@ -1028,28 +1031,43 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-758 hermetic tests across ten files, injected clients only — no network, no
-key, no endpoint, no download.
+818 hermetic tests across ten files, injected clients only — no network, no
+key, no endpoint, no download. Every row below was re-collected under normal
+Python, `-O` and `-OO` on 2026-08-25; the three modes agree.
 
 | File | Tests | Covers |
 |---|---|---|
 | `tests/test_omi_v2_structured_request.py` | 94 | Exact wire shape per dialect; the closed dialect gate; schema, depth, size, and type negatives; refusal-vocabulary containment; non-disclosure; rebinding controls; layering. |
 | `tests/test_omi_v2_backend.py` | 47 | Ordering — every refusal completes against a client that raises on *any* attribute access; legacy request equality with and without a dialect configured; exactly one added key; no `extra_body` or passthrough; no key in request or result. |
-| `tests/test_omi_v2_exchange.py` | 54 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written. |
+| `tests/test_omi_v2_exchange.py` | 105 | Validator reuse, structurally and behaviourally; the full response-failure boundary; request refusals kept distinct from response failures; no file written; and the completion-carrier controls added by OMI-V3A's fifth and eighth rounds — a returned `StructuredCompletion` whose field was replaced, or deleted, is refused before any of it is read. |
 | `tests/test_omi_v2_result_closure.py` | 111 | Structural closure of all three result carriers: exact booleans, closed vocabularies, coherent missing indices, and every incoherent state refused at construction. |
 | `tests/test_omi_v2_jack_round1.py` | 48 | Jack's first independent HOLD round — one control per confirmed defect; see §16.9. |
 | `tests/test_omi_v2_jack_round2.py` | 66 | Jack's second independent HOLD round — the closed mutation window, rebinding closure across every mirror in every consuming module, and full cross-field carrier coherence; see §16.10. |
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
-| `tests/test_omi_v2_jack_round4.py` | 87 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
-| `tests/test_omi_v2_jack_round5.py` | 166 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
+| `tests/test_omi_v2_jack_round4.py` | 88 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
+| `tests/test_omi_v2_jack_round5.py` | 174 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
 | `tests/test_omi_v2_backend_arguments_boundary.py` | 34 | The tool-call `arguments` JSON-string boundary in both directions: non-finite spellings (tokens and overflow literals) folded into the byte-verbatim raw fallback inbound; strict `allow_nan=False` encoding outbound behind one fixed, non-disclosing, cause-agnostic error, with a circular exact-dict control and a pre-transport failure proof. |
 
-These counts are checked by the suite itself. `test_omi_v2_jack_round1.py`
-asserts that every `tests/test_omi_v2_*.py` file on disk is named in this
-table, that the stated total equals the sum of the rows, and that the table
-names no file that does not exist. The table above went stale once — it
-claimed 186 tests across three files while a fourth file of 111 tests existed
-and none of the three figures was right — and prose alone did not catch it.
+**What the suite checks about this table, stated exactly.**
+`test_omi_v2_jack_round1.py` asserts three things, and only three: that every
+`tests/test_omi_v2_*.py` file on disk is named here; that every file named here
+exists; and that the stated total equals the sum of the numbers in this table's
+own rows.
+
+It does **not** compare any row against live pytest collection. A row can
+therefore drift arbitrarily far from what pytest actually collects while all
+three controls keep passing, provided the total is kept consistent with the
+rows — which is exactly what happened. Three rows were found stale at once in
+the ninth OMI-V3A round: the exchange row by fifty-one, introduced on that
+branch, and two more already stale on `main`. Keeping the total equal to the
+row sum makes this table *internally consistent*, not *true*, and that
+distinction is the whole of what these controls can offer. **This class of
+staleness is not mechanically prevented**, and no control was added to pretend
+otherwise; the counts above were re-collected by hand.
+
+The table went stale once before, too — it claimed 186 tests across three
+files while a fourth file of 111 tests existed and none of the three figures
+was right — and prose alone did not catch it then either.
 
 The ordering control is the load-bearing one. `ExplodingClient` raises on
 every attribute access, so a refusal returned while the backend holds one
@@ -1057,7 +1075,7 @@ proves the refusal completed before the SDK was reached — a refused request
 never becomes a billed, logged, or rate-limited call. A guard test asserts
 `ExplodingClient` actually fires, so that proof cannot go vacuous.
 
-All five files pass identically under normal, `-O` and `-OO`. No library
+All nine files pass identically under normal, `-O` and `-OO`. No library
 `assert` is relied upon (`-O` strips those) and no test reads `__doc__`
 (`-OO` strips that); documentation checks read the source file instead.
 
@@ -1326,3 +1344,106 @@ by a guard rather than by care.
 **Same-author evidence.** Everything above was written by the agent that wrote
 the code under test. It demonstrates internal consistency, not independent
 acceptance.
+
+## 17. OMI-V3A — the observation envelope (2026-08-24)
+
+**Status: implemented, inert, hermetic.** The full contract, every limitation,
+and the complete control inventory live in
+[`OMI_V3_OBSERVATION_INCEPTION.md`](OMI_V3_OBSERVATION_INCEPTION.md). This
+section exists so a reader of §§1–16 knows the layer is there and knows where
+its boundary is drawn; it deliberately does not restate the contract.
+
+**What was added.** Two modules —
+[`scripts/open_model/observation.py`](../scripts/open_model/observation.py) and
+[`scripts/open_model/observation_receipt.py`](../scripts/open_model/observation_receipt.py)
+— carrying the task envelope that
+[`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md`](LOCAL_MODEL_DEPLOYMENT_INCEPTION.md)
+§ 7 specified as a design requirement: immutable task identity, input hashes,
+bounded context and result, a monotonic deadline, provenance, plus a declared
+loopback endpoint and an explicit resource reservation. Nothing in §§1–16
+changed.
+
+**What it reuses rather than reinventing.** OMI-V3A adds **no** second schema
+validator, dialect map, refusal vocabulary, or network guard. The dialect and
+the schema are decided end to end by §16's `plan_structured_request`, whose
+refusal token travels through unchanged; the response is validated by §16's
+`request_structured_json`; the two refusal vocabularies and the response-failure
+vocabulary are imported; `hermetic_guard` is OMI-V1's. `schema_conformance`
+stays closed to `"unverified"` — §16.4 is unaffected, and OMI-V3A adds nothing
+that could establish conformance.
+
+**The boundary, stated exactly.** OMI-V3A contacts no endpoint, resolves no
+name, opens no socket, downloads nothing, starts no runtime, registers no
+backend, and inspects no process, service, port, credential, or hardware or
+workload state. §8's "no live backend is registered anywhere in this
+repository" remains true. §7's four deliberate steps for adding a real backend
+are unchanged and uncleared. The read-only inventory probe of
+`LOCAL_MODEL_DEPLOYMENT_INCEPTION.md` § 5 remains gated behind its own
+authorization and was not run.
+
+Two things OMI-V3A validates are **declarations**, not facts about the world,
+and the receipt records them as such: the loopback endpoint is validated as
+text with no name resolved and no socket opened, and the resource reservation
+is gated on an injected checker or operator **attestation** rather than on any
+measurement. Both limits, and eight more, are enumerated in § 9 of the
+inception document.
+
+**Corrected nine times (2026-08-24 / 25).**
+Twenty-four demonstrated cases all reproduced, in five findings — three of them
+one root cause: an exact outer type mistaken for an unaltered object, since
+`object.__setattr__` replaces any field on a frozen dataclass and the digest
+computed at construction does not follow. Carriers are now revalidated and
+their digests recomputed before planning, at construction, and again before
+execution; direct envelope construction is held to the planner's exact
+standard through OMI-V2's own dialect and schema authorities; a clock that
+raises is refused with a fixed token and every clock figure is bounded;
+execution-time revalidation proves field types before anything is iterated,
+compared or truth-tested; and the receipt enforces every bound it documents.
+The second round went further: it found the two gates *still* disagreeing about
+strict UTF-8 evidence, found accepted envelopes retaining the caller's own
+carriers, and - most importantly - found an **unkeyed digest being treated as
+authority for validity**, so that an envelope resealed after a tamper executed
+normally. Every semantic constraint is now revalidated before execution, the
+returned OMI-V2 carrier is revalidated field by field before any of it is read,
+and the receipt re-checks itself at serialisation. Sections 11 and 13 of the
+inception document list each finding and its correction. The third round closed
+two windows that round two's own corrections had introduced - validation
+followed by a second read of the thing just validated, in the envelope and in
+the receipt - required OMI-V2's full exchange state machine to be enforced
+before a result is consumed, and rejected as a false choice the residual round
+two had offered as a trade: the result is now measured on the canonical adapter
+path, where a mapping proxy's provenance is knowable, so the executor never
+walks a mapping and the byte bound is kept. Sections 15, 14 and 16 record the
+findings and two reporting errors in this work's own earlier evidence. A
+fourth adversarial review then found that the executor and the canonical
+adapter both went on reading the envelope *after* validation - with
+caller-supplied callables running in between, which is how a hostile clock
+could shrink a bound mid-flight and a hostile exchange could make receipt
+construction raise. Section 17 records it. A fifth round then found the same
+pattern one layer upstream - `request_structured_json` read the fields of a
+returned `StructuredCompletion` without re-checking them, so a backend that
+mutated one could run its own hooks inside OMI-V2 - and corrected it there;
+section 18 records that, together with a transmission claim that was withdrawn
+because no receipt can attest what a caller-supplied backend actually sends.
+Three further rounds followed. A documentation-only sixth (section 19)
+corrected a sentence still claiming the planner never raises, when it
+deliberately does not catch `BaseException`. A seventh (section 20) - the
+first whose findings came from an **independent audit** - found that six
+rounds had attacked `object.__setattr__` and none had tried
+`object.__delattr__`: a deleted field raised a raw `AttributeError` where it
+had no class default, and read as that default where it had one. An eighth
+(section 21) closed the same blind spot one layer upstream, in OMI-V2's own
+completion carrier, after the re-audit confirmed the seventh round's
+corrections closed and nevertheless returned FAIL. The independent auditor
+then returned a PASS on that correction, and a supplementary challenge of the
+same head found a documentation defect rather than a behavioural one: three of
+§16.8's nine per-file counts had gone stale, one of them on this branch and two
+inherited. A documentation-only ninth round (section 22 of the inception
+document) corrected them and narrowed the sentence that had claimed the suite
+checks those counts against reality.
+
+**Same-author evidence.** As with §16, everything above was written by the
+agent that wrote the code under test. It demonstrates internal consistency,
+not independent acceptance. The findings of rounds seven and eight came from
+an independent auditor; the corrections, the controls and this text did not,
+and **independent re-acceptance is still pending**.
