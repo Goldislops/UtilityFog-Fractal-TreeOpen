@@ -341,10 +341,175 @@ def test_retention_is_stricter_than_the_discovery_glob():
     assert retention.classify_name(hostile) is None
 
 
-def test_the_grammars_use_ascii_digit_classes_only():
-    source = Path(retention.__file__).read_text(encoding="utf-8")
-    for pattern in re.findall(r"re\.compile\((.*?)\)", source, re.S):
-        assert "\\d" not in pattern, pattern
+# -- the three compiled grammars, pinned on the COMPILED objects -------------
+#
+# The retired control read the module SOURCE TEXT with a non-greedy
+# `re.findall(r"re\.compile\((.*?)\)", source, re.S)`. A non-greedy capture
+# stops at the FIRST `)`, and `_SNAPSHOT_NAME` opens a capturing group before
+# its second digit run, so that call yielded only
+#
+#     '\n    r"v070_gen([0-9]{1,18}'
+#
+# -- one of that pattern's FOUR digit runs. Across the module it saw FIVE of
+# the EIGHT runs and was blind to THREE: the snapshot STEP, DATE and TIME. A
+# `\d` introduced at any of those three positions was invisible to it, and no
+# other control covered them either. These read `.pattern` off the compiled
+# objects, so every run is in scope, and the rejection controls below exercise
+# all eight positions behaviourally as well.
+
+_EXPECTED_GRAMMARS = {
+    "_SNAPSHOT_NAME":
+        r"v070_gen([0-9]{1,18})_step([0-9]{1,18})_[0-9]{8}T[0-9]{6}\.npz",
+    "_TELEMETRY_NAME": r"telemetry_[0-9]{8}T[0-9]{6}\.json",
+    "_PASS_ID": r"p[0-9]{8}T[0-9]{6}",
+}
+
+#: `[0-9]{n}` or `[0-9]{n,m}` -- the only digit-run form the grammars may use.
+_ASCII_DIGIT_RUN = re.compile(r"\[0-9\]\{[0-9]+(?:,[0-9]+)?\}")
+
+#: Digit-run POSITIONS per grammar: snapshot has four (generation, step, date,
+#: time), telemetry two (date, time), the pass identifier two (date, time).
+_DIGIT_RUN_COUNTS = {"_SNAPSHOT_NAME": 4, "_TELEMETRY_NAME": 2, "_PASS_ID": 2}
+_TOTAL_DIGIT_RUNS = 8
+
+#: A `str` pattern's `\d` matches every Unicode decimal digit, not just ASCII.
+#: These are the first codepoint of three such blocks; `_foreign` re-spells an
+#: ASCII run into each. `[0-9]` matches none of them.
+_UNICODE_DIGIT_SCRIPTS = {
+    "arabic_indic": "٠",
+    "devanagari": "०",
+    "fullwidth": "０",
+}
+
+
+def _foreign(digits, base):
+    """`digits` re-spelled in the decimal script beginning at `base`.
+
+    `base="0"` returns the ASCII run unchanged, which is how each hostile
+    fixture below has an otherwise-identical valid twin.
+    """
+    return "".join(chr(ord(base) + int(digit)) for digit in digits)
+
+
+def _snapshot_spelled(generation="000001", step="000001",
+                      date="20260101", clock="000000"):
+    return "v070_gen%s_step%s_%sT%s.npz" % (generation, step, date, clock)
+
+
+def _telemetry_spelled(date="20260101", clock="000000"):
+    return "telemetry_%sT%s.json" % (date, clock)
+
+
+def _pass_id_spelled(date="20260101", clock="000000"):
+    return "p%sT%s" % (date, clock)
+
+
+#: One row per digit-run position: `(label, kind, builder)`, where `builder`
+#: takes a script base and re-spells ONLY that one run.
+_DIGIT_RUN_POSITIONS = [
+    ("snapshot.generation", "snapshot",
+     lambda base: _snapshot_spelled(generation=_foreign("000001", base))),
+    ("snapshot.step", "snapshot",
+     lambda base: _snapshot_spelled(step=_foreign("000001", base))),
+    ("snapshot.date", "snapshot",
+     lambda base: _snapshot_spelled(date=_foreign("20260101", base))),
+    ("snapshot.time", "snapshot",
+     lambda base: _snapshot_spelled(clock=_foreign("000000", base))),
+    ("telemetry.date", "telemetry",
+     lambda base: _telemetry_spelled(date=_foreign("20260101", base))),
+    ("telemetry.time", "telemetry",
+     lambda base: _telemetry_spelled(clock=_foreign("000000", base))),
+    ("pass_id.date", "pass_id",
+     lambda base: _pass_id_spelled(date=_foreign("20260101", base))),
+    ("pass_id.time", "pass_id",
+     lambda base: _pass_id_spelled(clock=_foreign("000000", base))),
+]
+
+_POSITION_IDS = [row[0] for row in _DIGIT_RUN_POSITIONS]
+
+
+@pytest.mark.parametrize("name", sorted(_EXPECTED_GRAMMARS))
+def test_each_compiled_grammar_is_exactly_the_pinned_pattern(name):
+    """Pinned on `.pattern`, not on the source text that spells it."""
+    compiled = getattr(retention, name)
+    assert isinstance(compiled, re.Pattern)
+    assert compiled.pattern == _EXPECTED_GRAMMARS[name]
+    # `re.UNICODE` is implicit for every `str` pattern; anything ELSE here --
+    # `re.IGNORECASE` above all -- would silently widen the grammar.
+    assert compiled.flags == re.UNICODE
+
+
+def test_the_module_compiles_exactly_these_three_grammars():
+    """A fourth compiled pattern would sit outside every control here."""
+    compiled = sorted(name for name, value in vars(retention).items()
+                      if isinstance(value, re.Pattern))
+    assert compiled == sorted(_EXPECTED_GRAMMARS)
+
+
+@pytest.mark.parametrize("name", sorted(_EXPECTED_GRAMMARS))
+def test_no_compiled_grammar_uses_a_unicode_aware_shorthand(name):
+    pattern = getattr(retention, name).pattern
+    for shorthand in ("\\d", "\\D", "\\w", "\\W", "\\s", "\\S", "\\b", "\\B"):
+        assert shorthand not in pattern, (name, shorthand)
+
+
+@pytest.mark.parametrize("name", sorted(_EXPECTED_GRAMMARS))
+def test_every_digit_run_is_an_explicitly_bounded_ascii_class(name):
+    pattern = getattr(retention, name).pattern
+    runs = _ASCII_DIGIT_RUN.findall(pattern)
+    assert len(runs) == _DIGIT_RUN_COUNTS[name], (name, runs)
+    # With the bounded ASCII runs removed, no character class may survive: an
+    # unbounded `[0-9]*`/`[0-9]+`, or any other bracket class, fails here.
+    assert "[" not in _ASCII_DIGIT_RUN.sub("", pattern), pattern
+
+
+def test_the_three_grammars_carry_exactly_eight_digit_run_positions():
+    total = sum(len(_ASCII_DIGIT_RUN.findall(getattr(retention, name).pattern))
+                for name in _EXPECTED_GRAMMARS)
+    assert total == _TOTAL_DIGIT_RUNS
+    assert len(_DIGIT_RUN_POSITIONS) == _TOTAL_DIGIT_RUNS
+
+
+@pytest.mark.parametrize("label,kind,build", _DIGIT_RUN_POSITIONS,
+                         ids=_POSITION_IDS)
+def test_each_digit_run_position_fixture_is_otherwise_valid(label, kind,
+                                                            build):
+    """Non-vacuity for the rejection controls below.
+
+    Without this, a fixture malformed in some OTHER way would be refused
+    whatever digit class the grammar used, and the rejection would prove
+    nothing about the digit class at all.
+    """
+    ascii_form = build("0")
+    if kind == "pass_id":
+        assert retention.valid_pass_id(ascii_form) is True
+    elif kind == "snapshot":
+        assert retention.classify_name(ascii_form) == retention.SNAPSHOT_CLASS
+    else:
+        assert retention.classify_name(ascii_form) == retention.TELEMETRY_CLASS
+
+
+@pytest.mark.parametrize("script_name,base",
+                         sorted(_UNICODE_DIGIT_SCRIPTS.items()))
+@pytest.mark.parametrize("label,kind,build", _DIGIT_RUN_POSITIONS,
+                         ids=_POSITION_IDS)
+def test_no_digit_run_position_accepts_a_unicode_decimal_digit(
+        label, kind, build, script_name, base):
+    """Eight positions x three scripts: `\d` is observable at every one.
+
+    `\d` in a `str` pattern matches all three of these blocks and `[0-9]`
+    matches none, so substituting `\d` at ANY single position makes exactly
+    the cases for that position start classifying or validating.
+    """
+    hostile = build(base)
+    assert hostile != build("0"), "the fixture re-spelled nothing"
+    assert not hostile.isascii(), hostile
+    if kind == "pass_id":
+        assert retention.valid_pass_id(hostile) is False
+        return
+    assert retention.classify_name(hostile) is None
+    if kind == "snapshot":
+        assert retention._sequence_of(hostile) == retention.NO_SEQUENCE
 
 
 @pytest.mark.parametrize("name", [
@@ -653,12 +818,16 @@ def test_telemetry_carries_the_no_sequence_sentinel(monkeypatch):
 
 
 def test_the_recovery_floor_protects_the_newest_entries_at_any_age():
+    """The protected set is the fixture's newest 512 by construction -- index
+    0 is newest and each successive index is one nanosecond older -- so it is
+    written as literals rather than recomputed with `retention.rank`."""
     scan = _built_scan(snapshots=_aged_snapshots(600, age_days=400))
     plan = _plan(scan)
     acted = {action.basename for action in plan.actions}
-    ranked = retention.rank(scan.snapshots)
-    for protected in ranked[:512]:
-        assert protected.basename not in acted
+    assert acted, "an empty plan would satisfy the loop below vacuously"
+    for index in range(512):
+        assert _snap_name(index, index) not in acted
+    assert acted == {_snap_name(index, index) for index in range(512, 600)}
     assert plan.snapshot_eligible == 600 - 512
 
 
@@ -826,12 +995,35 @@ def test_the_reserve_stops_as_soon_as_it_is_satisfied():
     assert len(admit.calls) == 3
 
 
+def test_the_aged_snapshot_fixture_is_newest_first_by_construction():
+    """The premise the reserve-order oracle below rests on, asserted directly.
+
+    `_aged_snapshots` gives index 0 the largest `mtime_ns` and makes each
+    successive index exactly one nanosecond older, so index order IS
+    newest-first and the expected probe order can be written as literals.
+    """
+    entries = _aged_snapshots(20, age_days=1)
+    times = [entry.mtime_ns for entry in entries]
+    assert times == sorted(times, reverse=True)
+    assert len(set(times)) == len(times), "the fixture must not tie"
+    assert [entry.basename for entry in entries[:3]] == [
+        _snap_name(0, 0), _snap_name(1, 1), _snap_name(2, 2)]
+
+
 def test_the_reserve_probes_newest_first():
+    """The expected order is derived from the FIXTURE, never from `rank`.
+
+    Naming `retention.rank` here would let production ordering compute its own
+    expectation: invert `_rank_key` and both sides invert together, so the
+    control agrees with the defect. These literals come from the fixture's
+    construction -- index 0 newest, one nanosecond apart -- pinned by the test
+    above.
+    """
     admit = _Admit({0, 1, 2})
     scan = _built_scan(snapshots=_aged_snapshots(20, age_days=1))
     _reserve(scan, admit)
-    assert admit.calls == [
-        entry.basename for entry in retention.rank(scan.snapshots)[:3]]
+    assert admit.calls == [_snap_name(0, 0), _snap_name(1, 1),
+                           _snap_name(2, 2)]
 
 
 def test_fewer_snapshots_than_required_blocks(monkeypatch):
