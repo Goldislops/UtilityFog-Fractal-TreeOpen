@@ -121,23 +121,29 @@ class _FakeScandir:
     """A recording stand-in for `os.scandir`, yielding `_Entry` objects.
 
     Also serves the SCANNED ROOT's own metadata, because the scanner reads the
-    directory's stable identity before and after the enumeration. Root reads
-    are counted separately and never appear in `statted`, which stays a record
-    of what the pass did to ENTRIES.
+    directory's stable identity around the open and again after the
+    enumeration. Root reads are counted separately and never appear in
+    `statted`, which stays a record of what the pass did to ENTRIES.
 
-    `root_stats` supplies successive answers for those two reads, which is how
-    a root replaced or removed part-way through one pass is expressed.
+    `root_stats` supplies successive answers for those reads, which is how a
+    root replaced or removed part-way through one pass is expressed.
+
+    `root` is known at CONSTRUCTION, not at the call: the scanner's first
+    reading of the directory is taken before `os.scandir` is reached at all,
+    and a fake that only learned its own pathname once it was called would
+    answer that first reading with `FileNotFoundError` and turn every control
+    here into an identity refusal.
     """
 
     def __init__(self, entries, open_error=None, iteration_error_after=None,
-                 root_stat=None, root_stats=None):
+                 root_stat=None, root_stats=None, root="data"):
         self.entries = list(entries)
         self.open_error = open_error
         self.iteration_error_after = iteration_error_after
         self.yielded = []
         self.statted = []
         self.closed = 0
-        self.root = None
+        self.root = os.fspath(root)
         self.root_reads = 0
         self.root_stat = _dir_stat() if root_stat is None else root_stat
         self.root_stats = None if root_stats is None else list(root_stats)
@@ -771,8 +777,13 @@ def test_directory_level_failures_return_no_candidate_collection(
 
 
 def test_a_missing_directory_is_a_clean_empty_scan(monkeypatch):
+    # The root's own metadata must be missing too. A fixture whose `os.scandir`
+    # says "no such directory" while its `os.lstat` reports a healthy one is
+    # not a missing directory at all -- it is a directory that vanished under
+    # the pass, which is a different outcome and has its own control.
     _install(monkeypatch, _FakeScandir([], open_error=FileNotFoundError(
-        errno.ENOENT, "No such file or directory")))
+        errno.ENOENT, "No such file or directory"),
+        root_stat=FileNotFoundError(errno.ENOENT, "no such file")))
     result = _scan()
     assert isinstance(result, retention.ScanSucceeded)
     assert result.snapshots == () and result.telemetry == ()
@@ -4423,14 +4434,21 @@ def test_a_successful_scan_carries_the_scanned_roots_identity(monkeypatch):
     assert result.root_identity == (41, 777)
 
 
-def test_the_root_identity_is_read_exactly_twice_and_is_not_an_entry_read(
+def test_the_root_identity_is_read_exactly_three_times_and_never_as_an_entry(
         monkeypatch):
-    """Bounded: two reads per pass whatever the directory holds, and neither
-    is charged to the per-entry accounting the limits are built on."""
+    """Bounded: three reads per pass whatever the directory holds, and none of
+    them is charged to the per-entry accounting the limits are built on.
+
+    Three, not two, and each one brackets something different: one before
+    `os.scandir` and one immediately after it bracket the OPEN, which is where
+    a handle and a pathname part company; the third, after the iterator
+    closes, brackets the ENUMERATION. Two reads on the same side of the open
+    can only ever agree with each other about the wrong directory.
+    """
     fake = _install(monkeypatch, _FakeScandir(_snapshots(64)))
     result = _scan()
     assert isinstance(result, retention.ScanSucceeded)
-    assert fake.root_reads == 2
+    assert fake.root_reads == 3
     assert len(fake.statted) == 64
     assert all(name != fake.root for name, _ in fake.statted)
     assert result.processed == 64 and result.inspected == 64
@@ -4465,15 +4483,21 @@ def test_a_root_without_a_usable_identity_fails_the_scan_closed(
     assert not hasattr(result, "snapshots")
 
 
+#: Each is THREE answers, not two: the change must land after the open has
+#: been bracketed by two agreeing readings, or it would be caught at the open
+#: instead and this control would silently stop covering the window it names.
 _CHANGED_ROOTS = [
-    ("replaced", [_dir_stat(ino=1), _dir_stat(ino=2)]),
+    ("replaced", [_dir_stat(ino=1), _dir_stat(ino=1), _dir_stat(ino=2)]),
     ("moved_to_another_volume", [_dir_stat(dev=41, ino=1),
+                                 _dir_stat(dev=41, ino=1),
                                  _dir_stat(dev=42, ino=1)]),
-    ("removed", [_dir_stat(ino=1),
+    ("removed", [_dir_stat(ino=1), _dir_stat(ino=1),
                  FileNotFoundError(errno.ENOENT, "no such file")]),
-    ("became_a_reparse_point", [_dir_stat(ino=1), _dir_stat(
-        ino=1, file_attributes=stat_module.FILE_ATTRIBUTE_REPARSE_POINT)]),
-    ("lost_its_identity", [_dir_stat(ino=1), _dir_stat(dev=0, ino=0)]),
+    ("became_a_reparse_point", [_dir_stat(ino=1), _dir_stat(ino=1),
+                                _dir_stat(ino=1, file_attributes=(
+                                    stat_module.FILE_ATTRIBUTE_REPARSE_POINT))]),
+    ("lost_its_identity", [_dir_stat(ino=1), _dir_stat(ino=1),
+                           _dir_stat(dev=0, ino=0)]),
 ]
 
 
@@ -4483,13 +4507,18 @@ def test_a_root_replaced_during_the_scan_discards_the_whole_pass(
         monkeypatch, label, root_stats):
     """The open handle keeps enumerating the ORIGINAL object while every
     per-entry `os.lstat(root / name)` resolves by PATH into the replacement,
-    so the two halves of one scan would describe two different directories."""
+    so the two halves of one scan would describe two different directories.
+
+    The change lands AFTER the open, so all three readings are taken and the
+    pass is discarded by the last of them -- the enumeration window, not the
+    open window, which has its own controls.
+    """
     fake = _install(monkeypatch, _FakeScandir(_snapshots(5),
                                               root_stats=root_stats))
     result = _scan()
     assert isinstance(result, retention.ScanFailed)
     assert result.reason is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
-    assert fake.root_reads == 2
+    assert fake.root_reads == 3
     assert not hasattr(result, "snapshots")
 
 
@@ -4596,8 +4625,15 @@ def test_a_live_plan_refuses_a_root_replaced_after_the_scan(tmp_path,
     live = tmp_path / "live"
     live.mkdir()
     _populate(live, snapshots=4)
-    _repointing_scan(monkeypatch, live, tmp_path / "aside")
+    record = _repointing_scan(monkeypatch, live, tmp_path / "aside")
     report = _live_plan(live)
+    # Non-vacuity, asserted rather than inferred: the pathname really did come
+    # to name a DIFFERENT object. A refusal over a fixture that never swapped
+    # anything would look identical here and would prove nothing.
+    assert record.before is not None, "the original root was never identified"
+    assert record.after is not None, "no substitute was installed at the name"
+    assert record.before != record.after, (
+        "the fixture did not actually change the root's identity")
     assert report.refused is (
         retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
     assert list(live.iterdir()) == []
@@ -4613,8 +4649,12 @@ def test_quarantine_creates_nothing_when_the_root_was_replaced(tmp_path,
     live.mkdir()
     aside = tmp_path / "aside"
     made = _populate(live, snapshots=6)
-    _repointing_scan(monkeypatch, live, aside)
+    record = _repointing_scan(monkeypatch, live, aside)
     report = _run(live)
+    assert record.before is not None, "the original root was never identified"
+    assert record.after is not None, "no substitute was installed at the name"
+    assert record.before != record.after, (
+        "the fixture did not actually change the root's identity")
     assert report.refused is (
         retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
     assert report.moved == 0
@@ -4648,8 +4688,12 @@ def test_an_idle_quarantine_pass_refuses_a_root_replaced_after_the_scan(
     live = tmp_path / "live"
     live.mkdir()
     _populate(live, snapshots=2, age_days=0)      # far inside the horizon
-    _repointing_scan(monkeypatch, live, tmp_path / "aside")
+    record = _repointing_scan(monkeypatch, live, tmp_path / "aside")
     report = _run(live)
+    assert record.before is not None, "the original root was never identified"
+    assert record.after is not None, "no substitute was installed at the name"
+    assert record.before != record.after, (
+        "the fixture did not actually change the root's identity")
     assert report.planned_actions == ()
     assert report.refused is (
         retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
@@ -5213,3 +5257,550 @@ def test_the_public_surface_carries_only_the_bound_root(tmp_path):
     # still works, and records no binding.
     legacy = retention.ScanSucceeded((), (), 0, 0, 0)
     assert legacy.root_identity is None
+
+
+# ===========================================================================
+# P3 -- the open-to-first-proof window
+# ===========================================================================
+#
+# `scan_retention_candidates` acquires its iterator FIRST and proves the root
+# SECOND:
+#
+#     iterator = os.scandir(root)
+#     ...
+#     root_identity = directory_state(root)
+#
+# A substitute installed between those two statements leaves the handle
+# enumerating the ORIGINAL object while BOTH of the scan's proofs -- the one
+# taken before the first entry and the one taken after the iterator closes --
+# read the SUBSTITUTE and agree with each other. The scan therefore SUCCEEDS,
+# bound to a directory it never opened; `run_pass` proves the same pathname
+# again, gets the same agreeing answer, and goes on to build the quarantine
+# tree inside the substitute and move the substitute's files.
+#
+# The two proofs bracket the ENUMERATION. They do not bracket the OPEN, and
+# the open is where the handle and the pathname part company.
+#
+# Nothing here sleeps, threads or races. The window is entered by wrapping
+# `os.scandir` itself: the wrapper acquires the real iterator, performs the
+# substitution, and only then hands back the iterator it already holds. That
+# is the window exactly, in one thread, in a fixed order, on every platform.
+
+#: Non-allowlisted on both sides, so neither is ever classified, statted,
+#: planned or moved. They exist only so a control can say WHICH object a
+#: handle was enumerating instead of inferring it from a listing that both
+#: directories would satisfy equally well.
+_ORIGINAL_MARKER = "enumerated_the_original.marker"
+_REPLACEMENT_MARKER = "installed_at_the_pathname.marker"
+
+
+class _RecordedIterator:
+    """The real `os.scandir` iterator, with its yields and its close recorded.
+
+    The scanner uses the iterator as a context manager on both of its paths --
+    `with iterator as entries:` around the enumeration, and a bare
+    `with iterator: pass` when it refuses before iterating -- so those three
+    methods are the whole surface. Nothing is filtered, reordered or withheld:
+    every entry the real iterator produces is passed straight through, which
+    is what makes `yielded` evidence of which directory the handle was on
+    rather than of what the fixture wished it were.
+    """
+
+    __slots__ = ("_real", "yielded", "closed")
+
+    def __init__(self, real):
+        self._real = real
+        self.yielded = []
+        self.closed = 0
+
+    def __enter__(self):
+        self._real.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self.closed += 1
+        return self._real.__exit__(*exc)
+
+    def __iter__(self):
+        for entry in self._real:
+            self.yielded.append(entry.name)
+            yield entry
+
+    def undrained(self):
+        """What the REAL handle still has to give.
+
+        A closed `os.ScandirIterator` yields nothing; an open one over a
+        populated directory yields its entries. Only meaningful where the
+        handle was never iterated -- which is every refusing control here, and
+        is why an empty answer there means released rather than exhausted.
+        """
+        return [entry.name for entry in self._real]
+
+
+class _ScandirThatMovesTheRootUnderTheOpen:
+    """`os.scandir`, wrapped so a substitution lands in one exact window.
+
+    `when="after_open"` is the defect's own window: acquire the real iterator
+    over the ORIGINAL object, replace the pathname, then return the iterator
+    already acquired. `when="before_open"` puts the substitution on the other
+    side of the same call, which is the window a PRE-OPEN proof creates and
+    must also close. `when="never"` substitutes nothing at all, so a control
+    can prove the seam itself refuses nothing.
+
+    `vanish` renames the root away and puts nothing back, so the real
+    `os.scandir` raises `FileNotFoundError` over a pathname that WAS a real
+    directory when the pass proved it moments earlier.
+
+    Only the pass's own FIRST enumeration is interfered with. A control's own
+    assertions -- and `os.walk` below -- go through the untouched primitive.
+    """
+
+    __slots__ = ("_root", "_contents", "_when", "_vanish", "_real",
+                 "calls", "replacement", "displaced", "iterators")
+
+    def __init__(self, root, *, contents=(), when="after_open", vanish=False):
+        self._root = Path(os.fspath(root))
+        self._contents = tuple(contents)
+        self._when = when
+        self._vanish = vanish
+        self._real = os.scandir
+        self.calls = 0
+        self.replacement = None
+        self.displaced = None
+        self.iterators = []
+
+    def _substitute(self):
+        if self._when == "never":
+            return
+        if self._vanish:
+            self.displaced = self._root.with_name(
+                self._root.name + ".displaced")
+            os.rename(self._root, self.displaced)
+            return
+        self.replacement = _replace_root_pathname(self._root,
+                                                  contents=self._contents)
+        self.displaced = self.replacement.displaced
+
+    def _wrap(self, iterator):
+        recorded = _RecordedIterator(iterator)
+        self.iterators.append(recorded)
+        return recorded
+
+    def __call__(self, directory):
+        self.calls += 1
+        if self.calls > 1:
+            return self._real(directory)
+        if self._when == "before_open":
+            self._substitute()
+            return self._wrap(self._real(directory))
+        iterator = self._real(directory)
+        self._substitute()
+        return self._wrap(iterator)
+
+
+def _move_the_root_under_the_open(monkeypatch, root, **kwargs):
+    swap = _ScandirThatMovesTheRootUnderTheOpen(root, **kwargs)
+    monkeypatch.setattr(retention.os, "scandir", swap)
+    return swap
+
+
+def _root_and_matching_substitute(tmp_path, snapshots=3):
+    """A populated root, its eligible names, and the substitute's contents.
+
+    The substitute is given the SAME eligible allowlisted names, so a refusal
+    can never be the trivial consequence of it holding nothing worth acting
+    on: every structural check, every classification and every age comparison
+    succeeds on it just as well as on the original. What differs is WHICH
+    object the pathname names, and that is the only thing left for a refusal
+    to be about.
+    """
+    root = _scanned_root(tmp_path, snapshots=snapshots)
+    names = _listing(root)
+    _write(root, _ORIGINAL_MARKER, age_days=400)
+    return root, names, list(names) + [_REPLACEMENT_MARKER]
+
+
+def _manifests_beneath(tmp_path):
+    """Every journal beneath `tmp_path`, walked through the real primitive."""
+    found = []
+    for directory, _subdirectories, files in os.walk(tmp_path):
+        if retention.MANIFEST_NAME in files:
+            found.append(directory)
+    return found
+
+
+# -- fixture integrity, proved without the module under test -----------------
+
+def test_an_open_handle_and_its_pathname_really_do_part_company(tmp_path):
+    """Every control below rests on one claim about the platform: a directory
+    renamed out from under an already-acquired `os.scandir` handle keeps being
+    enumerated THROUGH THAT HANDLE, while the pathname it used to have
+    resolves to the substitute. If that were not true here, the controls would
+    be refusing for some entirely different reason and would prove nothing
+    about the window they name.
+
+    So it is asserted rather than assumed, and asserted using no retention
+    code at all.
+    """
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    handle = _RecordedIterator(os.scandir(root))
+    replacement = _replace_root_pathname(root, contents=contents)
+    with handle as entries:
+        enumerated = sorted(entry.name for entry in entries)
+
+    assert replacement.before is not None
+    assert replacement.after is not None
+    assert replacement.before != replacement.after, (
+        "the two directories were never given distinct identities")
+    assert _ORIGINAL_MARKER in enumerated, (
+        "the handle stopped enumerating the object it was opened on")
+    assert _REPLACEMENT_MARKER not in enumerated, (
+        "the handle followed the pathname instead of the object")
+    assert _REPLACEMENT_MARKER in _listing(root), (
+        "the pathname did not come to name the substitute")
+    assert _ORIGINAL_MARKER not in _listing(root)
+    assert sorted(name for name in enumerated
+                  if name != _ORIGINAL_MARKER) == sorted(names), (
+        "both directories must carry the same eligible names")
+    assert handle.closed == 1
+
+
+def test_the_window_wrapper_refuses_nothing_when_it_substitutes_nothing(
+        tmp_path, monkeypatch):
+    """The seam is not the refusal. Installed with no substitution at all, the
+    same wrapper leaves an ordinary pass entirely alone: the scan succeeds,
+    binds the root it enumerated, and the quarantine lifecycle completes.
+    """
+    root, names, _contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, when="never")
+    identity = _directory_identity(root)
+    report = _headroom_run(root, _headroom_policy(1_000))
+
+    assert swap.calls == 1
+    assert swap.replacement is None
+    handle, = swap.iterators
+    assert handle.closed == 1
+    assert sorted(handle.yielded) == sorted(names + [_ORIGINAL_MARKER])
+    assert report.refused is None
+    assert report.halted is False
+    assert report.moved == report.planned_actions_count
+    assert report.moved >= 1, "the fixture must be action-bearing"
+    assert _directory_identity(root) == identity
+    assert _quarantine_root(root).exists()
+
+
+# -- the window itself, at the level it opens in -----------------------------
+
+def test_the_scanner_refuses_a_root_replaced_between_the_open_and_the_proof(
+        tmp_path, monkeypatch):
+    """The defect. The handle is on the original; both of the scan's proofs
+    are on the substitute; the two proofs agree with each other and neither
+    has anything to do with what was enumerated. A scan that returns success
+    here hands every later step a binding to a directory it never opened, and
+    every later step then re-proves that same binding successfully.
+    """
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
+    result = retention.scan_retention_candidates(
+        root, policy=_headroom_policy(1_000))
+
+    assert swap.calls == 1
+    assert swap.replacement.before is not None
+    assert swap.replacement.after is not None
+    assert swap.replacement.before != swap.replacement.after, (
+        "the fixture did not actually change the root's identity")
+    assert set(names) <= set(swap.replacement.decoy_names), (
+        "the substitute must carry the same eligible names, or a refusal "
+        "could be a name mismatch and nothing more")
+
+    assert isinstance(result, retention.ScanFailed), (
+        "the scan succeeded while bound to a directory it never enumerated")
+    assert result.reason is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert not hasattr(result, "snapshots")
+    assert not hasattr(result, "telemetry")
+    assert (result.processed, result.inspected) == (0, 0), (
+        "entries were read inside a root the pass had not proved")
+
+
+def test_the_refused_open_is_released_and_never_enumerated(tmp_path,
+                                                           monkeypatch):
+    """A refusal that leaked the handle would pin the original directory open
+    for as long as the process lived, on the very platform whose rename
+    semantics this module is built around.
+    """
+    root, _names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
+    retention.scan_retention_candidates(root, policy=_headroom_policy(1_000))
+
+    handle, = swap.iterators
+    assert swap.replacement.before != swap.replacement.after
+    assert handle.closed == 1, "the scandir handle was not released"
+    assert handle.yielded == [], (
+        "entries were enumerated inside a root the pass had not proved")
+    assert handle.undrained() == [], (
+        "the handle was left open on the directory that was refused")
+
+
+def test_the_refusal_is_about_which_directory_and_not_about_a_bad_one(
+        tmp_path, monkeypatch):
+    """The substitute is an ordinary, perfectly usable directory: not a
+    junction, not a symlink, not a mount point, not a file. It holds the same
+    eligible names and scans clean when nothing is disturbing it. So the
+    pathname now identifies a REAL directory that is simply not the one the
+    handle was opened on, and that -- alone -- is what the refusal is about.
+    """
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
+    refused = retention.scan_retention_candidates(
+        root, policy=_headroom_policy(1_000))
+
+    now = _directory_identity(root)
+    assert stat_module.S_ISDIR(_REAL_LSTAT(root).st_mode), (
+        "the pathname does not name a directory at all")
+    assert now == swap.replacement.after
+    assert now != swap.replacement.before, (
+        "the pathname still names the object the handle was opened on")
+    assert retention.directory_state(root) is not None, (
+        "the substitute is not even provable, so the refusal proves nothing")
+
+    # The same substitute, undisturbed, is scannable over the very same names.
+    fresh = retention.scan_retention_candidates(
+        root, policy=_headroom_policy(1_000))
+    assert isinstance(fresh, retention.ScanSucceeded)
+    assert sorted(entry.basename for entry in fresh.snapshots) == sorted(names)
+    assert fresh.root_identity == swap.replacement.after
+
+    assert isinstance(refused, retention.ScanFailed)
+    assert refused.reason is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+
+
+# -- and what the two live modes do with it ----------------------------------
+
+def test_a_live_plan_refuses_a_root_replaced_between_the_open_and_the_proof(
+        tmp_path, monkeypatch):
+    """`PLAN` reports. A report taken over a directory the pass never opened
+    describes somewhere else entirely, and the operator CLI exits 0 on it.
+    """
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
+    report = _live_plan(root, policy=_headroom_policy(1_000))
+
+    assert swap.replacement.before != swap.replacement.after
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.planned_actions == ()
+    assert report.planned_actions_count == 0
+    assert (report.processed, report.inspected) == (0, 0)
+    assert report.moved == 0
+    assert _listing(root) == sorted(contents), "the substitute was mutated"
+    assert _listing(swap.displaced) == sorted(
+        names + [_ORIGINAL_MARKER]), "the scanned directory was mutated"
+
+
+def test_quarantine_creates_nothing_when_the_root_moves_under_the_open(
+        tmp_path, monkeypatch):
+    """The whole cost of the defect, in one control.
+
+    Unbound, this pass creates the quarantine root, the pass directory and the
+    journal inside the substitute and moves the substitute's files into them
+    -- and every per-file identity check passes while it does, because the
+    scan's own metadata reads resolved by PATHNAME into the substitute too.
+    Bound, nothing is created, nothing is moved, and the mover is never
+    reached.
+    """
+    def _forbidden(source, destination):  # pragma: no cover - must not run
+        raise AssertionError("a mover ran on a pass that proved no root")
+
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
+    report = _headroom_run(root, _headroom_policy(1_000), mover=_forbidden)
+
+    assert swap.replacement.before != swap.replacement.after
+    assert set(names) <= set(swap.replacement.decoy_names)
+
+    assert report.refused is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.moved == 0
+    assert report.skipped == 0, (
+        "skipping is what per-file identity already did; it is not the fix")
+    assert report.unmanifested == 0
+    assert report.halted is False
+    assert report.planned_actions == ()
+
+    assert not _quarantine_root(root).exists(), (
+        "a quarantine tree was built inside the substitute")
+    assert not _quarantine_root(swap.displaced).exists(), (
+        "a quarantine tree was built inside the scanned directory")
+    assert _manifests_beneath(tmp_path) == [], (
+        "a journal was written for a pass that proved no root")
+    assert _listing(root) == sorted(contents), "the substitute was mutated"
+    assert _listing(swap.displaced) == sorted(names + [_ORIGINAL_MARKER]), (
+        "the scanned directory was mutated")
+
+
+# -- the two windows a pre-open proof creates, which it must also close ------
+
+def test_a_root_that_vanishes_between_its_proof_and_the_open_fails_closed(
+        tmp_path, monkeypatch):
+    """A pathname that was NEVER a directory is nothing to maintain, and stays
+    the clean empty success it has always been. A pathname that WAS a real
+    directory when this pass proved it and is gone by the time the open is
+    attempted is a different fact entirely: the object the pass was pointed at
+    disappeared underneath it. Reporting that as a healthy empty directory
+    tells an operator the opposite of what happened, and is precisely the
+    outcome the empty-success branch must not be allowed to absorb.
+    """
+    root = _scanned_root(tmp_path, snapshots=3)
+    swap = _move_the_root_under_the_open(monkeypatch, root,
+                                         when="before_open", vanish=True)
+    result = retention.scan_retention_candidates(
+        root, policy=_headroom_policy(1_000))
+
+    assert swap.calls == 1
+    assert swap.displaced is not None
+    assert stat_module.S_ISDIR(_REAL_LSTAT(swap.displaced).st_mode), (
+        "the original directory was destroyed rather than moved aside")
+    assert not os.path.exists(root), "the fixture did not vacate the pathname"
+    assert isinstance(result, retention.ScanFailed), (
+        "a root that vanished under the pass was reported as a clean, empty, "
+        "successful directory")
+    assert result.reason is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert (result.processed, result.inspected) == (0, 0)
+
+
+def test_a_pathname_that_was_never_a_directory_is_still_a_clean_empty_scan(
+        tmp_path):
+    """The other half of that discrimination, pinned beside it so the two
+    cannot drift apart. Nothing to maintain stays a success and carries no
+    binding; something that vanished under the pass does not.
+    """
+    policy = _headroom_policy(1_000)
+    absent = retention.scan_retention_candidates(tmp_path / "gone",
+                                                 policy=policy)
+    assert isinstance(absent, retention.ScanSucceeded)
+    assert absent.root_identity is None
+    assert (absent.processed, absent.inspected) == (0, 0)
+
+    plain = tmp_path / "not_a_directory"
+    plain.write_bytes(b"x")
+    result = retention.scan_retention_candidates(plain, policy=policy)
+    assert isinstance(result, retention.ScanSucceeded)
+    assert result.root_identity is None
+
+
+def test_a_root_replaced_between_its_proof_and_the_open_is_refused(
+        tmp_path, monkeypatch):
+    """The second window a pre-open proof opens, seen from the other side.
+
+    Here the handle is acquired on the SUBSTITUTE, so the enumeration and the
+    pathname agree with each other perfectly -- and both disagree with the
+    object this pass proved a moment earlier. Going ahead would mean
+    maintaining a directory that replaced the one the operator pointed at,
+    which is the same fact as the window above and is refused the same way.
+    """
+    root, names, contents = _root_and_matching_substitute(tmp_path)
+    swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents,
+                                         when="before_open")
+    result = retention.scan_retention_candidates(
+        root, policy=_headroom_policy(1_000))
+
+    handle, = swap.iterators
+    assert swap.replacement.before != swap.replacement.after
+    assert set(names) <= set(swap.replacement.decoy_names)
+    assert isinstance(result, retention.ScanFailed), (
+        "a pass proved one directory and enumerated another")
+    assert result.reason is (
+        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert (result.processed, result.inspected) == (0, 0)
+    assert handle.closed == 1, "the scandir handle was not released"
+    assert handle.yielded == []
+    assert handle.undrained() == []
+
+
+# ===========================================================================
+# Pre-open proof -- the remaining decision-table rows
+# ===========================================================================
+
+
+#: The same five root changes as `_CHANGED_ROOTS`, expressed as the PAIR this
+#: control needs: what the root was, and what it became. The enumeration
+#: control needs three answers because its mismatch lands after the open;
+#: this one needs two, because its mismatch lands before the first entry is
+#: read. Derived rather than restated, so the two can never drift apart.
+_PRE_OPEN_CHANGED_ROOTS = [(label, answers[0], answers[-1])
+                           for label, answers in _CHANGED_ROOTS]
+
+
+@pytest.mark.parametrize("label,before,after", _PRE_OPEN_CHANGED_ROOTS,
+                         ids=[row[0] for row in _PRE_OPEN_CHANGED_ROOTS])
+def test_a_root_replaced_before_the_first_entry_is_read_refuses(
+        monkeypatch, label, before, after):
+    """The window the ordering opens. The identity is acquired BEFORE the
+    iterator, so a replacement installed either side of the open -- between
+    the proof and the acquisition, or between the acquisition and the first
+    proof of the handle -- disagrees with something read earlier and is
+    refused. Read after the open instead, both proofs would observe the
+    replacement, agree with each other, and bind the pass to a directory the
+    iterator never enumerated.
+
+    Nothing is read from the directory and the handle is released.
+    """
+    fake = _install(monkeypatch, _FakeScandir(_snapshots(5),
+                                              root_stats=[before, after]))
+    result = _scan()
+    assert isinstance(result, retention.ScanFailed)
+    assert result.reason is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
+    assert (result.processed, result.inspected) == (0, 0)
+    assert fake.root_reads == 2
+    assert fake.yielded == [], "an entry was yielded after the mismatch"
+    assert fake.statted == [], "an entry was read after the mismatch"
+    assert fake.closed == 1, "the scandir handle was not released"
+    assert not hasattr(result, "snapshots")
+
+
+def test_a_root_that_stops_being_a_directory_between_proof_and_open_refuses(
+        monkeypatch):
+    fake = _install(monkeypatch, _FakeScandir(
+        _snapshots(3), root_stat=_dir_stat(ino=1),
+        open_error=NotADirectoryError(errno.ENOTDIR, "not a directory")))
+    result = _scan()
+    assert isinstance(result, retention.ScanFailed)
+    assert result.reason is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
+    assert fake.root_reads == 1
+
+
+def test_an_unreadable_root_is_still_a_directory_open_failure(monkeypatch):
+    """The open's own non-missing outcomes are untouched by the new proof,
+    whether or not an identity was observed first."""
+    for root_stat in (_dir_stat(ino=1),
+                      PermissionError(errno.EACCES, "denied")):
+        fake = _FakeScandir(_snapshots(3), root_stat=root_stat,
+                            open_error=PermissionError(errno.EACCES, "denied"))
+        monkeypatch_local = pytest.MonkeyPatch()
+        try:
+            _install(monkeypatch_local, fake)
+            result = _scan()
+        finally:
+            monkeypatch_local.undo()
+        assert isinstance(result, retention.ScanFailed)
+        assert result.reason is (
+            retention.RetentionFailureReason.DIRECTORY_OPEN_FAILED)
+
+
+def test_an_openable_root_with_no_prior_identity_is_never_an_empty_success(
+        monkeypatch):
+    """The empty success needs BOTH halves. `os.scandir` FOLLOWS a reparse
+    point and opens it perfectly happily, so an open that succeeds over a
+    pathname no identity was ever proved at fails closed instead."""
+    fake = _install(monkeypatch, _FakeScandir(
+        _snapshots(3),
+        root_stat=_dir_stat(ino=1,
+                            file_attributes=(
+                                stat_module.FILE_ATTRIBUTE_REPARSE_POINT))))
+    result = _scan()
+    assert isinstance(result, retention.ScanFailed)
+    assert result.reason is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
+    assert fake.statted == [] and fake.closed == 1
