@@ -593,8 +593,14 @@ def _closed_exchange_entry_point():
     ) -> StructuredExchange:
         """Ask ``backend`` for schema-constrained JSON, then validate the answer.
 
-        Returns a :class:`StructuredExchange` for every reachable input. Transport
-        errors raised by the underlying SDK propagate, matching ``complete()``.
+        Returns a :class:`StructuredExchange` for every input this layer
+        decides itself. ``backend`` is accepted structurally, and its
+        ``complete_structured`` method is invoked directly with nothing
+        caught here, so whatever exceptions that method raises propagate
+        through this layer. For ``OpenAICompatBackend`` these include SDK
+        transport failures and the fixed, non-disclosing pre-transport error
+        for a message history whose tool-call arguments cannot be encoded as
+        strict JSON.
 
         ``backend`` is accepted as ``Any`` and checked structurally, so this
         function works with any backend exposing the OMI-V2 method and refuses

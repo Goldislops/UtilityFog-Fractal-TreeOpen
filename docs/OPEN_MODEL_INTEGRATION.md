@@ -1031,7 +1031,7 @@ routing record — OMI-V2 persists nothing at all.
 
 ### 16.8 What was tested
 
-784 hermetic tests across nine files, injected clients only — no network, no
+818 hermetic tests across ten files, injected clients only — no network, no
 key, no endpoint, no download. Every row below was re-collected under normal
 Python, `-O` and `-OO` on 2026-08-25; the three modes agree.
 
@@ -1046,6 +1046,7 @@ Python, `-O` and `-OO` on 2026-08-25; the three modes agree.
 | `tests/test_omi_v2_jack_round3.py` | 51 | Jack's third independent HOLD round — transitive closure of every decision path including builtins, the backend dialect authority, and the narrowed exchange value; see §16.11. |
 | `tests/test_omi_v2_jack_round4.py` | 88 | Jack's fourth independent HOLD round — removal of caller-addressable authorities, stdlib-alias and capability closure, the finish-reason vocabulary, and a bytecode-level completeness proof; see §16.12. |
 | `tests/test_omi_v2_jack_round5.py` | 174 | Jack's fifth independent HOLD round — restored module-level public identity, pickle round-trips, and re-assertion that the closure cells are unweakened; see §16.13. |
+| `tests/test_omi_v2_backend_arguments_boundary.py` | 34 | The tool-call `arguments` JSON-string boundary in both directions: non-finite spellings (tokens and overflow literals) folded into the byte-verbatim raw fallback inbound; strict `allow_nan=False` encoding outbound behind one fixed, non-disclosing, cause-agnostic error, with a circular exact-dict control and a pre-transport failure proof. |
 
 **What the suite checks about this table, stated exactly.**
 `test_omi_v2_jack_round1.py` asserts three things, and only three: that every
