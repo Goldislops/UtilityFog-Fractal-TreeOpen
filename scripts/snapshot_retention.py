@@ -357,13 +357,32 @@ class CandidateEntry:
 
 @dataclasses.dataclass(frozen=True)
 class ScanSucceeded:
-    """A complete, exact directory pass."""
+    """A complete, exact directory pass.
+
+    `root_identity` is the `(device, inode)` of the real, non-reparse
+    directory this pass actually enumerated -- the DIRECTORY-shaped
+    counterpart of the per-entry identity `CandidateEntry` carries. Without
+    it a later step can only prove that a pathname is *a* usable directory,
+    never that it is *the* directory that was scanned, so a root renamed or
+    replaced after the iterator closed is accepted and a quarantine tree gets
+    built inside a directory no pass ever read.
+
+    `None` means no live filesystem read established one: an injected
+    synthetic scan, or the empty success returned when the path is missing or
+    is not a directory at all. `None` is NOT an identity and never compares
+    equal to anything -- see `_scanned_root_unchanged`, which is the only
+    thing permitted to compare it.
+
+    Optional and last, so every existing positional construction and every
+    `dataclasses.replace` of a scan keeps working unchanged.
+    """
 
     snapshots: Tuple[CandidateEntry, ...]
     telemetry: Tuple[CandidateEntry, ...]
     processed: int
     inspected: int
     excluded: int
+    root_identity: Optional[Tuple[int, int]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -452,6 +471,27 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     except OSError:
         return ScanFailed(RetentionFailureReason.DIRECTORY_OPEN_FAILED, 0, 0)
 
+    # The identity of the directory this pass is ABOUT TO enumerate, from one
+    # bounded, non-following read taken before a single entry is yielded.
+    #
+    # It is read here rather than before `os.scandir` so the open's own
+    # outcomes are untouched: a missing or non-directory path stays the clean
+    # empty success it has always been, and an unreadable one stays
+    # `DIRECTORY_OPEN_FAILED`.
+    #
+    # `os.scandir` FOLLOWS a reparse point, so a junction enumerates its
+    # target perfectly happily while the PATH is somewhere no pass may act.
+    # `directory_state` is what sees that, and it also refuses a root whose
+    # device or inode the platform reports as zero. Either way the scan fails
+    # closed rather than handing back a success nothing downstream can bind
+    # to an object.
+    root_identity = directory_state(root)
+    if root_identity is None:
+        # `os.scandir` already opened a handle; release it before refusing.
+        with iterator:
+            pass
+        return ScanFailed(RetentionFailureReason.IDENTITY_UNAVAILABLE, 0, 0)
+
     snapshots = []
     telemetry = []
     processed = 0
@@ -530,8 +570,18 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
         return ScanFailed(RetentionFailureReason.ITERATION_FAILED,
                           processed, inspected)
 
+    # Read AGAIN, after the iterator closed, and required to agree. A root
+    # replaced DURING the pass leaves the two halves of one scan describing
+    # two different directories: the open handle keeps enumerating the
+    # original object, while every per-entry `os.lstat(root / name)` above
+    # resolves by PATH into the replacement. Equality here is what discards
+    # that whole pass instead of planning against the mixture.
+    if not _scanned_root_unchanged(root, root_identity):
+        return ScanFailed(RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                          processed, inspected)
+
     return ScanSucceeded(tuple(snapshots), tuple(telemetry), processed,
-                         inspected, excluded)
+                         inspected, excluded, root_identity)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1179,33 @@ def directory_state(path):
     return identity[:2]
 
 
+def _scanned_root_unchanged(path, scanned) -> bool:
+    """Whether `path` is STILL the exact directory a live scan enumerated.
+
+    One fresh non-following read compared against the `(dev, ino)` the scan
+    bound to itself. Deliberately the directory pair and never the file
+    4-tuple: a directory's size and modification time change whenever its
+    contents do, and a pass that moves entries out of the root it is
+    maintaining changes both by design -- so a 4-tuple comparison would call
+    the pass's own legitimate work a replacement.
+
+    Fails closed on a MISSING binding, which is the whole point of the
+    function existing rather than the comparison being written inline.
+    `None` is the absence of an identity, not a value: `directory_state` also
+    answers `None` for a path that is gone, so `scanned == directory_state(p)`
+    would be true for an unbound scan over a path that does not exist and
+    would "prove" a directory nothing ever read. An injected synthetic scan
+    is exactly that case.
+
+    This detects replacement. It is not an atomic defence against a hostile
+    swap and does not claim to be: the caller acts on a PATHNAME, which the
+    operating system resolves again when it acts.
+    """
+    if scanned is None:
+        return False
+    return directory_state(path) == scanned
+
+
 def _open_manifest(pass_directory):
     """Exclusively create the journal and verify it by handle."""
     path = Path(pass_directory) / MANIFEST_NAME
@@ -1393,8 +1470,23 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
     # The data root itself first, before anything is created or moved: it must
     # be a real directory with a stable identity, or an environment that cannot
     # support any of this does exactly nothing.
+    #
+    # And it must be the SAME real directory the scan enumerated. Proving only
+    # that the path is usable proves nothing about WHICH object it is, so a
+    # root renamed or replaced after `scan_retention_candidates` closed its
+    # iterator would be accepted here -- and this is the last point at which
+    # that costs nothing. `_validated_quarantine_root` immediately below may
+    # `os.mkdir` the quarantine root, `os.mkdir` then makes the pass directory
+    # and `_open_manifest` the journal, all inside whatever the path now names.
+    # The per-file identity checks in the move loop cannot help: they skip
+    # planned ACTIONS, and skipping every action still leaves a quarantine tree
+    # created inside a directory this pass never scanned.
+    #
+    # A single read serves both questions, so the check costs nothing extra.
     data_state = directory_state(data_root)
-    if data_state is None:
+    scanned_root = getattr(scan, "root_identity", None)
+    if (data_state is None or scanned_root is None
+            or data_state != scanned_root):
         return _report(mode, refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
@@ -1490,6 +1582,23 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
             if (now_ns - identity[3]) < quiescence_ns:
                 skipped += 1
                 continue
+
+            # -- the source's directory is still the one that was scanned ---
+            # `mover` is handed PATHNAMES, and the operating system resolves
+            # `data_root / basename` afresh when it renames. The identity
+            # matched just above belongs to whatever that path names NOW, so
+            # on its own it cannot tell a planned entry from an identically
+            # named entry in a directory swapped in behind it. This is what
+            # makes "before moving any candidate" literal rather than
+            # inferred from the destination proofs below.
+            #
+            # Halts rather than skips: a data root that is no longer the
+            # scanned one invalidates every remaining action at once, not
+            # this one.
+            if not _scanned_root_unchanged(data_root, scanned_root):
+                refused = RetentionFailureReason.IDENTITY_UNAVAILABLE
+                halted = True
+                break
 
             # -- the quarantine destination is still what it was ------------
             if (directory_state(pass_directory) != pass_identity
@@ -1663,7 +1772,14 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         # neither inspected nor made: `PLAN` mutates nothing at all, and
         # inspecting the root here would report on a path this mode never
         # touches.
-        if scan is None and directory_state(directory) is None:
+        # It is not enough that the path is A usable directory: it must still
+        # be THE directory this pass enumerated. `_scanned_root_unchanged`
+        # compares against the identity the scan bound to itself and fails
+        # closed when there is none -- which is also what keeps the injected
+        # case honest, because an unbound scan can never satisfy it even if
+        # the guard above were ever removed.
+        if scan is None and not _scanned_root_unchanged(
+                directory, observed.root_identity):
             return _report(mode,
                            refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                            scan=observed, plan=plan, actions=actions,
@@ -1693,8 +1809,13 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         # without this the pass would report a clean no-op against something
         # that is not a directory at all. Proving costs one read and creates
         # nothing.
+        # Same binding as the action-bearing branch: an idle pass that
+        # reported a clean no-op over a root it never scanned would tell an
+        # operator the directory is healthy on the strength of a reading taken
+        # somewhere else.
         data_state = directory_state(directory)
-        if data_state is None:
+        if (data_state is None or observed.root_identity is None
+                or data_state != observed.root_identity):
             return _report(mode,
                            refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                            scan=observed, plan=plan, actions=actions,
