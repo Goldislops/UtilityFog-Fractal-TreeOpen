@@ -463,21 +463,18 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
         raise TypeError("explicit RetentionPolicy required")
 
     root = Path(os.fspath(directory))
-    try:
-        iterator = os.scandir(root)
-    except (FileNotFoundError, NotADirectoryError):
-        # Nothing to maintain is a clean, successful, empty outcome.
-        return ScanSucceeded((), (), 0, 0, 0)
-    except OSError:
-        return ScanFailed(RetentionFailureReason.DIRECTORY_OPEN_FAILED, 0, 0)
 
-    # The identity of the directory this pass is ABOUT TO enumerate, from one
-    # bounded, non-following read taken before a single entry is yielded.
+    # The identity of the directory this pass intends to enumerate, from one
+    # bounded, non-following read taken BEFORE the iterator is acquired.
     #
-    # It is read here rather than before `os.scandir` so the open's own
-    # outcomes are untouched: a missing or non-directory path stays the clean
-    # empty success it has always been, and an unreadable one stays
-    # `DIRECTORY_OPEN_FAILED`.
+    # The order is the whole of the guarantee. Read AFTER the open, this proof
+    # and the post-enumeration one both resolve the PATHNAME, so a replacement
+    # installed between the open and the first proof is observed by both while
+    # the iterator -- bound to a handle, not a name -- goes on yielding the
+    # ORIGINAL object's entries. Both halves then agree, about a directory no
+    # entry in the pass came from: the exact inverse of the binding. Taking
+    # the proof first is what gives the post-open one something acquired
+    # earlier to disagree with.
     #
     # `os.scandir` FOLLOWS a reparse point, so a junction enumerates its
     # target perfectly happily while the PATH is somewhere no pass may act.
@@ -486,7 +483,34 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     # closed rather than handing back a success nothing downstream can bind
     # to an object.
     root_identity = directory_state(root)
-    if root_identity is None:
+
+    try:
+        iterator = os.scandir(root)
+    except (FileNotFoundError, NotADirectoryError):
+        if root_identity is not None:
+            # A real, non-reparse directory was proved at this pathname a
+            # moment ago and the pathname no longer opens as one. That is a
+            # live change underneath the pass, not the steady state of a path
+            # that was never there, and reporting it as a clean empty success
+            # would report health about a directory that has gone.
+            return ScanFailed(
+                RetentionFailureReason.IDENTITY_UNAVAILABLE, 0, 0)
+        # Nothing to maintain is a clean, successful, empty outcome -- and
+        # only here: no identity was ever observed AND the open itself says
+        # the pathname is missing or is not a directory.
+        return ScanSucceeded((), (), 0, 0, 0)
+    except OSError:
+        return ScanFailed(RetentionFailureReason.DIRECTORY_OPEN_FAILED, 0, 0)
+
+    # IMMEDIATELY, before a single entry is read: the pathname must still be
+    # the object proved above. This is what binds the handle that was actually
+    # opened to the name every later step resolves.
+    #
+    # `_scanned_root_unchanged` also refuses a MISSING binding, so a root that
+    # never had a usable identity at all -- a reparse point, a zero device or
+    # inode, one `os.lstat` could not read -- fails closed here rather than
+    # becoming a success nothing downstream can bind to an object.
+    if not _scanned_root_unchanged(root, root_identity):
         # `os.scandir` already opened a handle; release it before refusing.
         with iterator:
             pass
