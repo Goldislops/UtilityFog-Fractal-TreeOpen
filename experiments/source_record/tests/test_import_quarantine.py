@@ -268,8 +268,74 @@ def test_sr_q_009_no_production_module_contains_a_bare_assert_statement():
         assert not offenders, (path.name, offenders)
 
 
-def test_sr_q_010_no_production_module_swallows_an_exception_without_reraising():
-    """A bare or broad catch turns a refusal into a silent pass."""
+BROAD_EXCEPTION_NAMES = ("Exception", "BaseException")
+
+
+def broad_exception_handlers(source: str) -> list[tuple[int, str]]:
+    """Prohibited handlers: bare ``except:``, ``Exception``, ``BaseException``.
+
+    Mechanically decidable from the syntax tree. The earlier rule — a broad
+    catch is fine provided some ``raise`` appears inside it — was not: any
+    ``raise`` anywhere in the handler satisfied it, including one on a branch
+    that may never be taken, or an unrelated ``raise ValueError(...)``.
+    Narrow, explicitly named classes and tuples of them remain permitted.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        if node.type is None:
+            found.append((node.lineno, "bare-except"))
+            continue
+        targets = (
+            node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
+        )
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id in BROAD_EXCEPTION_NAMES:
+                found.append((node.lineno, target.id))
+            elif (
+                isinstance(target, ast.Attribute)
+                and target.attr in BROAD_EXCEPTION_NAMES
+            ):
+                found.append((node.lineno, target.attr))
+    return found
+
+
+def write_capable_calls(source: str) -> list[tuple[int, str]]:
+    """Write-capable filesystem calls, and ``open`` in a non-read mode."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = (
+            target.attr
+            if isinstance(target, ast.Attribute)
+            else getattr(target, "id", None)
+        )
+        if name in sup.FORBIDDEN_WRITE_CALLS:
+            found.append((node.lineno, name))
+            continue
+        if name != "open":
+            continue
+        mode = None
+        if len(node.args) >= 2:
+            mode = node.args[1]
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                mode = keyword.value
+        if mode is None:
+            continue
+        if not (
+            isinstance(mode, ast.Constant)
+            and isinstance(mode.value, str)
+            and mode.value in sup.READ_ONLY_OPEN_MODES
+        ):
+            found.append((node.lineno, "open-non-read-mode"))
+    return found
+
+
+def test_sr_q_010_no_production_module_catches_broadly_in_any_form():
     modules = sup.lab_production_modules()
     if not modules:
         raise AssertionError(
@@ -277,22 +343,73 @@ def test_sr_q_010_no_production_module_swallows_an_exception_without_reraising()
             f"present; implementation is not yet authorized"
         )
     for path in modules:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler):
-                continue
-            broad = node.type is None or (
-                isinstance(node.type, ast.Name)
-                and node.type.id in ("Exception", "BaseException")
-            )
-            if not broad:
-                continue
-            raises = any(
-                isinstance(inner, ast.Raise) for inner in ast.walk(node)
-            )
-            assert raises, (
-                f"{path.name}:{node.lineno} catches broadly without re-raising"
-            )
+        offenders = broad_exception_handlers(path.read_text(encoding="utf-8"))
+        assert not offenders, (path.name, offenders)
+
+
+def test_sr_q_011_no_production_module_calls_a_write_capable_operation():
+    """The static half of the read-only guarantee, bounded to this laboratory.
+
+    It makes no claim about arbitrary external paths; SR-C-017 supplies the
+    behavioural half over the records tree and the laboratory tree.
+    """
+    modules = sup.lab_production_modules()
+    if not modules:
+        raise AssertionError(
+            f"{sup.IMPLEMENTATION_ABSENT}: no laboratory production module is "
+            f"present; implementation is not yet authorized"
+        )
+    for path in modules:
+        offenders = write_capable_calls(path.read_text(encoding="utf-8"))
+        assert not offenders, (path.name, offenders)
+
+
+def test_sr_q_012_the_broad_exception_guard_detects_every_prohibited_form():
+    """Synthetic probes, in memory. Nothing is written and nothing is imported."""
+    prohibited = (
+        "try:\n    pass\nexcept:\n    pass\n",
+        "try:\n    pass\nexcept Exception:\n    raise\n",
+        "try:\n    pass\nexcept BaseException:\n    raise RuntimeError('x')\n",
+        "try:\n    pass\nexcept (ValueError, Exception):\n    raise\n",
+        "import builtins\ntry:\n    pass\nexcept builtins.Exception:\n    raise\n",
+        "try:\n    pass\nexcept Exception:\n    if False:\n        raise\n",
+    )
+    for source in prohibited:
+        assert broad_exception_handlers(source), source
+    permitted = (
+        "try:\n    pass\nexcept OSError:\n    pass\n",
+        "try:\n    pass\nexcept (OSError, ValueError):\n    raise\n",
+        "try:\n    pass\nexcept KeyError:\n    raise RuntimeError('x') from None\n",
+    )
+    for source in permitted:
+        assert not broad_exception_handlers(source), source
+
+
+def test_sr_q_013_the_write_guard_detects_every_prohibited_operation():
+    prohibited = (
+        "import pathlib\npathlib.Path('x').write_text('y')\n",
+        "import pathlib\npathlib.Path('x').write_bytes(b'y')\n",
+        "import pathlib\npathlib.Path('x').mkdir()\n",
+        "import pathlib\npathlib.Path('x').unlink()\n",
+        "import os\nos.remove('x')\n",
+        "import os\nos.rename('x', 'y')\n",
+        "import shutil\nshutil.rmtree('x')\n",
+        "import tempfile\ntempfile.mkdtemp()\n",
+        "open('x', 'w')\n",
+        "open('x', mode='a')\n",
+        "open('x', 'r+')\n",
+    )
+    for source in prohibited:
+        assert write_capable_calls(source), source
+    permitted = (
+        "open('x')\n",
+        "open('x', 'rb')\n",
+        "open('x', mode='r')\n",
+        "import pathlib\npathlib.Path('x').read_text()\n",
+        "import json\njson.loads('{}')\n",
+    )
+    for source in permitted:
+        assert not write_capable_calls(source), source
 
 
 def test_sr_q_008_the_suite_scan_examined_a_non_zero_expected_surface():

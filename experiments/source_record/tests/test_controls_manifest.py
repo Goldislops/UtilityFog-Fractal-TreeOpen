@@ -59,17 +59,19 @@ AUTHORED_CONTROLS = {
         "SR-C-011", "SR-C-012", "SR-C-013", "SR-C-014", "SR-C-015",
         "SR-C-016", "SR-C-017", "SR-C-018", "SR-C-019", "SR-C-020",
         "SR-C-021", "SR-C-022", "SR-C-023", "SR-C-024", "SR-C-025",
-        "SR-C-026", "SR-C-027",
+        "SR-C-026", "SR-C-027", "SR-C-028", "SR-C-029", "SR-C-030",
+        "SR-C-031", "SR-C-032",
     ),
     "test_import_quarantine.py": (
         "SR-Q-001", "SR-Q-002", "SR-Q-003", "SR-Q-004", "SR-Q-005",
         "SR-Q-006", "SR-Q-007", "SR-Q-008", "SR-Q-009", "SR-Q-010",
+        "SR-Q-011", "SR-Q-012", "SR-Q-013",
     ),
     "test_controls_manifest.py": (
         "SR-M-001", "SR-M-002", "SR-M-003", "SR-M-004", "SR-M-005",
         "SR-M-006", "SR-M-007", "SR-M-008", "SR-M-009", "SR-M-010",
         "SR-M-011", "SR-M-012", "SR-M-013", "SR-M-014", "SR-M-015",
-        "SR-M-016", "SR-M-017", "SR-M-018", "SR-M-019",
+        "SR-M-016", "SR-M-017", "SR-M-018", "SR-M-019", "SR-M-020",
     ),
 }
 
@@ -77,9 +79,11 @@ AUTHORED_CONTROLS = {
 #: condition and assert it exactly. SR-M-013 checks coverage in both
 #: directions; SR-M-014 checks that each named control really does assert it.
 TOKEN_CONTROLS = {
-    # path, exit 4
+    # path and binding, exit 4
     "path-missing": ("SR-C-004",),
     "path-not-directory": ("SR-C-004",),
+    "path-symlink-refused": ("SR-C-030", "SR-C-031"),
+    "path-binding-failed": ("SR-C-032",),
     "records-root-missing-directory": ("SR-R-007",),
     "records-root-unexpected-entry": ("SR-R-006",),
     "record-directory-unexpected-entry": ("SR-R-008", "SR-C-026"),
@@ -158,13 +162,20 @@ REMOVED_TOKENS = {
         "redundant with records-root-missing-directory, which names the same "
         "condition precisely"
     ),
+}
+
+#: Tokens an earlier revision wrongly removed and this revision reinstated.
+#: Removing them left the contract unsatisfiable: I02 and I06 require the
+#: behaviour and I61 requires every refusal to carry a retained token.
+REINSTATED_TOKENS = {
     "path-symlink-refused": (
-        "requirement retained as I02; the condition cannot be constructed "
-        "deterministically on the authoring platform, so no v1 token claims it"
+        "reinstated with a deterministic fixture: a symbolic link where "
+        "privilege allows, a Windows directory junction otherwise, built "
+        "entirely under tmp_path and never skipped"
     ),
     "path-binding-failed": (
-        "requirement retained as I06; a binding-primitive failure is a "
-        "platform-capability event, not an input, so no v1 token claims it"
+        "reinstated with a frozen private seam, _acquire_directory_binding, "
+        "carrying no public configuration and no verbose mode"
     ),
 }
 
@@ -178,18 +189,6 @@ DEFERRED_CONTROLS = {
         "deferred, is not part of this phase or the initial implementation "
         "acceptance requirement, and must not be replaced by a broad "
         "repository scan. See CONTRACT.md section 3c."
-    ),
-    "symlink-path-refusal": (
-        "Constructing a symbolic link or reparse point needs privilege that "
-        "may be absent, so any control would be environment-conditional. The "
-        "requirement is retained as I02; the token is removed. It must not be "
-        "replaced by a conditional or skipped control."
-    ),
-    "binding-failure-refusal": (
-        "A binding-primitive failure is a platform-capability event, not an "
-        "input, and cannot be constructed deterministically. The requirement "
-        "is retained as I06; the token is removed. It must not be replaced by "
-        "a conditional or skipped control."
     ),
 }
 
@@ -253,23 +252,38 @@ def suite_modules() -> dict[str, pathlib.Path]:
 
 
 def exact_token_assertions(function_node) -> set[str]:
-    """Tokens a control asserts EXACTLY.
+    """Tokens a control asserts EXACTLY, counted only in two exact shapes.
 
-    Counted only when a string literal is either compared with ``==`` or passed
-    as a literal argument to ``assert_refused``. Membership tests such as
-    ``token in (a, b)`` are deliberately not counted: asserting one of several
-    tokens is not asserting the exact token.
+    A literal counts when it is either
+
+    * the **token position** — the third positional argument — of an
+      ``assert_refused(...)`` call; or
+    * one side of an ``==`` comparison whose **opposite operand is a ``.token``
+      attribute access**.
+
+    Nothing else counts. An earlier revision counted any literal in any
+    equality, so a harmless ``"token" == "token"`` left behind after the real
+    ``error.token`` assertion disappeared would have preserved the binding.
+    Membership tests are excluded too: asserting one of several tokens is not
+    asserting the exact token. SR-M-020 proves the discrimination.
     """
     found: set[str] = set()
     for node in ast.walk(function_node):
         if isinstance(node, ast.Compare):
-            if not all(isinstance(op, ast.Eq) for op in node.ops):
+            if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
                 continue
-            for operand in [node.left, *node.comparators]:
-                if isinstance(operand, ast.Constant) and isinstance(
-                    operand.value, str
+            left, right = node.left, node.comparators[0]
+            for literal, opposite in ((left, right), (right, left)):
+                if not (
+                    isinstance(literal, ast.Constant)
+                    and isinstance(literal.value, str)
                 ):
-                    found.add(operand.value)
+                    continue
+                if (
+                    isinstance(opposite, ast.Attribute)
+                    and opposite.attr == "token"
+                ):
+                    found.add(literal.value)
         elif isinstance(node, ast.Call):
             target = node.func
             name = (
@@ -277,13 +291,13 @@ def exact_token_assertions(function_node) -> set[str]:
                 if isinstance(target, ast.Attribute)
                 else getattr(target, "id", None)
             )
-            if name != "assert_refused":
+            if name != "assert_refused" or len(node.args) < 3:
                 continue
-            for argument in node.args:
-                if isinstance(argument, ast.Constant) and isinstance(
-                    argument.value, str
-                ):
-                    found.add(argument.value)
+            argument = node.args[2]
+            if isinstance(argument, ast.Constant) and isinstance(
+                argument.value, str
+            ):
+                found.add(argument.value)
     return found
 
 
@@ -415,11 +429,7 @@ def test_sr_m_009_every_deferred_control_is_declared_labelled_and_uncounted():
     checkout, so on-disk absence proves nothing about the repository, and a
     control that claimed otherwise would be asserting a fact it cannot know.
     """
-    expected = {
-        "root-reverse-import-guard",
-        "symlink-path-refusal",
-        "binding-failure-refusal",
-    }
+    expected = {"root-reverse-import-guard"}
     assert set(DEFERRED_CONTROLS) == expected
     for name, reason in sorted(DEFERRED_CONTROLS.items()):
         assert reason.strip() == reason and reason
@@ -576,11 +586,17 @@ def test_sr_m_015_no_control_asserts_a_removed_token_and_every_refusal_is_retain
     assert checked > 0, "no assert_refused token argument was examined"
 
 
-def test_sr_m_016_every_removed_token_is_gone_from_the_vocabulary_with_a_reason():
+def test_sr_m_016_removed_tokens_are_gone_and_reinstated_tokens_are_bound():
     for token, reason in sorted(REMOVED_TOKENS.items()):
         assert token not in sup.REFUSAL_TOKENS, token
         assert token not in TOKEN_CONTROLS, token
         assert reason.strip() == reason and len(reason) > 20
+    for token, reason in sorted(REINSTATED_TOKENS.items()):
+        assert token in sup.REFUSAL_TOKENS, token
+        assert token in TOKEN_CONTROLS, token
+        assert TOKEN_CONTROLS[token], token
+        assert reason.strip() == reason and len(reason) > 20
+    assert not (set(REMOVED_TOKENS) & set(REINSTATED_TOKENS))
 
 
 # --------------------------------------------------------------------------
@@ -606,20 +622,84 @@ def test_sr_m_018_the_readme_and_gitattributes_carry_their_frozen_content():
     assert attributes == sup.GITATTRIBUTES_CONTENT, repr(attributes)
 
 
-def test_sr_m_019_the_source_record_workflow_meets_its_frozen_contract():
-    """Addresses one exact path. It never scans .github or any wider surface."""
+def test_sr_m_019_the_source_record_workflow_matches_its_canonical_bytes():
+    """Byte-for-byte equality against one canonical string, final newline included.
+
+    Fragment presence cannot enforce trigger scope, permissions, the commands
+    actually run, or the absence of extra network steps: every fragment could
+    sit inside a comment while a far broader workflow still passed. Byte
+    equality is the only assertion here that means what it says.
+
+    This control addresses **one exact path** and never scans ``.github`` or any
+    wider surface.
+
+    Epistemic limit, stated in the control as well as the contract: a workflow
+    file, and a job name inside it, cannot establish that a check is not
+    required. Required-check status is external repository configuration. This
+    phase neither changes nor attests branch protection, and nothing below
+    claims it does.
+    """
     text = sup.require_future_file(
         sup.WORKFLOW_PATH, ".github/workflows/source-record.yml"
     )
-    for fragment in sup.WORKFLOW_REQUIRED_FRAGMENTS:
-        assert fragment in text, fragment
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("- uses:") and "uses:" not in stripped:
-            continue
-        reference = stripped.split("uses:", 1)[1].strip()
-        assert reference.startswith(sup.WORKFLOW_ALLOWED_ACTION_PREFIXES), (
-            reference
-        )
-    assert "pull_request:" in text
-    assert "paths:" in text
+    assert text == sup.WORKFLOW_CONTENT
+    assert sup.WORKFLOW_CONTENT.endswith("\n")
+    assert "non-required" not in sup.WORKFLOW_CONTENT
+    assert "informational, path-scoped" in sup.WORKFLOW_CONTENT
+
+
+def _function_named(source: str, name: str):
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                return node
+    raise AssertionError(f"function not found in the probe source: {name}")
+
+
+def test_sr_m_020_a_token_assertion_downgraded_to_a_literal_equality_is_detected():
+    """In-memory mutation probe for ``exact_token_assertions``.
+
+    Replacing a real ``error.token == "..."`` assertion with a harmless
+    ``"..." == "..."`` must lose the binding. An earlier revision counted any
+    literal in any equality, so the mutation would have gone unnoticed and a
+    token could have kept a control that no longer tested it.
+    """
+    path = suite_modules()["test_records.py"]
+    source = path.read_text(encoding="utf-8")
+    real = 'assert excinfo.value.token == "supersedes-cycle"'
+    harmless = 'assert "supersedes-cycle" == "supersedes-cycle"'
+    assert real in source, "the probe target assertion is missing"
+
+    target = "test_sr_r_018_a_supersession_cycle_is_refused_before_digests_are_compared"
+    before = exact_token_assertions(_function_named(source, target))
+    assert "supersedes-cycle" in before
+
+    mutated = source.replace(real, harmless)
+    assert mutated != source
+    after = exact_token_assertions(_function_named(mutated, target))
+    assert "supersedes-cycle" not in after, (
+        "a literal-to-literal equality must not preserve a token binding"
+    )
+
+    # The same discrimination, on minimal synthetic sources.
+    counted = (
+        'def f():\n    assert error.token == "reference-self"\n',
+        'def f():\n    assert "reference-self" == error.token\n',
+        'def f():\n    sup.assert_refused(s, p, "reference-self")\n',
+        'def f():\n    sup.assert_refused(s, p, "reference-self", ("a",))\n',
+    )
+    for probe in counted:
+        assert "reference-self" in exact_token_assertions(
+            _function_named(probe, "f")
+        ), probe
+    not_counted = (
+        'def f():\n    assert "reference-self" == "reference-self"\n',
+        'def f():\n    assert error.token in ("reference-self", "reference-cycle")\n',
+        'def f():\n    assert label == "reference-self"\n',
+        'def f():\n    sup.assert_refused(s, "reference-self")\n',
+        'def f():\n    assert error.path == "reference-self"\n',
+    )
+    for probe in not_counted:
+        assert "reference-self" not in exact_token_assertions(
+            _function_named(probe, "f")
+        ), probe

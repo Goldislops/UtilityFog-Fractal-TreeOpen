@@ -93,14 +93,6 @@ explicitly bounded, non-excluded scan surface is defined**. It is:
 The laboratory-local forward quarantine control scans only
 `experiments/source_record/**` and must never scan the repository generally.
 
-**Two further controls are deferred, and the gap is named rather than hidden.**
-`path-symlink-refused` and `path-binding-failed` would require creating a
-symbolic link or reparse point, or forcing a binding-primitive failure. Neither
-can be constructed deterministically on the authoring platform, and an
-environment-conditional control is not a control. The **requirements** survive
-as I02 and I06; the **tokens** are removed from v1 (section 8b) and both
-controls are recorded in `DEFERRED_CONTROLS`.
-
 **Nothing here claims a file is absent from the repository.** A sparse checkout
 materializes only part of the tree, so on-disk absence inside this worktree
 proves nothing about the repository. Deferral is asserted through the contract
@@ -123,13 +115,15 @@ a perfectly formed and entirely fabricated record passes every rule, the six
 human-gated items, and the closing line that a green suite is not coverage of
 them.
 
-**`.github/workflows/source-record.yml`** — must satisfy I88: triggered on
-`pull_request` and on `push` to the default branch, both `paths`-filtered to
-`experiments/source_record/**` and to the workflow file itself; its job name
-carries the literal `non-required`; `permissions:` grants `contents: read`;
-it runs `python -m pytest --collect-only -q experiments/source_record/tests`
-and `python -m pytest -q -p no:cacheprovider experiments/source_record/tests`;
-and it references no network action beyond checkout and Python setup.
+**`.github/workflows/source-record.yml`** — frozen by **exact bytes** against
+the canonical string `WORKFLOW_CONTENT` in `tests/_support.py`, including its
+final line feed (I88). It is triggered on `pull_request` and on `push` to the
+default branch, both `paths`-filtered to `experiments/source_record/**` and to
+the workflow file itself; `permissions:` grants `contents: read`; it runs the
+two authorized pytest commands; and it references only checkout and Python
+setup, both SHA-pinned. Its job name reads *informational, path-scoped* —
+**not** non-required, because a workflow file cannot establish required-check
+status, which is external repository configuration this phase does not touch.
 
 ## 4. Physical organization
 
@@ -160,6 +154,32 @@ Inside each of the three directories, direct `.json` files are the only
 permitted entries. A subdirectory or a non-JSON file is refused with
 `record-directory-unexpected-entry`. **Nothing is silently ignored.** The
 refusal never echoes the unexpected entry's name.
+
+### 4c. Path security and the binding seam
+
+**Reparse points.** The records root and each of the three data directories
+must be a real directory. A symbolic link, a directory junction, or any other
+reparse point is refused with `path-symlink-refused`. Checking
+`Path.is_symlink()` alone is **not sufficient**: a Windows directory junction
+is a reparse point that both `os.path.islink` and `Path.is_symlink` report as
+False, and a validator inspecting only that predicate would accept it. The
+implementation must consult the platform's reparse attribute where one exists.
+The control builds its fixture with a symbolic link where privilege allows and
+a directory junction otherwise, entirely under the test's temporary directory,
+and it never skips.
+
+**The binding seam.** I06 requires the directory binding to be held across
+enumeration and capture, and to fail closed when no binding primitive is
+available. A binding-primitive failure is a platform-capability event rather
+than an input, so it is made testable through **one frozen private seam**:
+
+    validate._acquire_directory_binding(path)
+
+It is private by name, has no public configuration, no environment variable and
+no verbose mode, and exists solely so a control can inject the fault. Its
+contract: when it raises `OSError`, the validator refuses with
+`path-binding-failed`, exit class 4. A control monkeypatches it and asserts
+that exact token behaviourally.
 
 ## 5. Field inventory
 
@@ -559,20 +579,42 @@ without renumbering noise.
   character for character. It is the one place a reader meets the limit before
   the code, so it may not be paraphrased.
 - **I87** `.gitattributes` content is exactly `* text eol=lf` followed by a
-  single line feed. The repository sets `core.autocrlf = true`, so without this
-  the laboratory's committed line endings depend on the checkout platform and
-  every canonical-form guarantee becomes platform-conditional.
-- **I88** `.github/workflows/source-record.yml` is **path-scoped** to
-  `experiments/source_record/**` plus its own file, names its job
-  **non-required**, grants `contents: read` only, runs the two authorized
-  pytest commands, and contacts no network beyond checkout and Python setup. A
-  control addresses that exact path and never scans `.github` or any wider
-  surface.
+  single line feed. Without it the laboratory's committed line endings depend
+  on the checkout platform's line-ending configuration, and every
+  canonical-form and digest guarantee becomes platform-conditional. The reason
+  is platform-independent and does not rest on any particular checkout's
+  current setting.
+- **I88** `.github/workflows/source-record.yml` is frozen by **exact bytes**,
+  not by fragment presence: fragment matching cannot enforce trigger scope,
+  permissions, the commands actually run, or the absence of extra network
+  steps, since every fragment could sit inside a comment while a far broader
+  workflow still passed. A control asserts byte-for-byte equality against one
+  canonical string, including its final line feed, and addresses that exact
+  path — it never scans `.github` or any wider surface.
+  **Epistemic limit on this invariant:** a workflow file, and a job name inside
+  it, **cannot establish that a check is not required**. Required-check status
+  is external repository configuration. This phase neither changes nor attests
+  branch protection. The workflow is described as *informational and
+  path-scoped*; it is **not** proven non-required, and no control claims it is.
 - **I89** No laboratory production module contains a bare `assert` statement,
   which `python -O` strips, removing every runtime invariant it carried.
-- **I90** No laboratory production module contains a bare `except:` or an
-  `except Exception:` that does not re-raise; a swallowed exception turns a
-  refusal into a silent pass.
+- **I90** No laboratory production module contains a bare `except:`, an
+  `except Exception`, or an `except BaseException`, in any form. Narrow,
+  explicitly named exception classes and tuples of them remain permitted. The
+  earlier "broad catch without a re-raise" formulation was not mechanically
+  decidable: any `raise` anywhere inside the handler satisfied it, including a
+  conditional one on a branch that may never be taken, or an unrelated
+  `raise ValueError(...)`. Prohibiting the broad forms outright is decidable
+  from the syntax tree, and it is the rule.
+- **I92** No laboratory production module calls a write-capable filesystem
+  operation. Statically forbidden: `write_text`, `write_bytes`, `mkdir`,
+  `makedirs`, `touch`, `unlink`, `rmdir`, `remove`, `rename`, `replace`,
+  `symlink`, `link`, `chmod`, `truncate`, the `tempfile` creation helpers and
+  the `shutil` copy, move and tree-removal helpers. `open` is permitted only in
+  a read mode. This is a **bounded static control over the laboratory's own
+  source**; it is paired with behavioural snapshots of the records tree and of
+  the laboratory tree. **It does not claim protection over arbitrary external
+  paths**, and no control asserts one.
 - **I91** The Phase 2 ordering of section 9 is observable: supersession
   acyclicity is decided before digest matching, so `supersedes-cycle` is
   reachable. A control asserts each of the two tokens exactly, on fixtures that
@@ -582,7 +624,8 @@ without renumbering noise.
 
 Every token the validator can emit is a member; every member is reachable.
 
-**Path, exit 4:** `path-missing`, `path-not-directory`,
+**Path and binding, exit 4:** `path-missing`, `path-not-directory`,
+`path-symlink-refused`, `path-binding-failed`,
 `records-root-missing-directory`, `records-root-unexpected-entry`,
 `record-directory-unexpected-entry`
 
@@ -626,14 +669,13 @@ this vocabulary rather than carried as an untested claim.
   `attribution-author-mismatch`), so no input reaches a residual class token.
 - **`directory-set-incomplete`** — redundant with
   `records-root-missing-directory`, which names the same condition precisely.
-- **`path-symlink-refused`** and **`path-binding-failed`** — the *requirements*
-  survive as I02 and I06, but neither condition can be constructed
-  deterministically on the authoring platform: creating a symbolic link or a
-  reparse point needs privilege that may be absent, and a binding-primitive
-  failure is a platform-capability event, not an input. A control for either
-  would be environment-conditional, which this suite forbids. They are recorded
-  in `DEFERRED_CONTROLS` with their reason, so the gap is visible rather than
-  papered over, and no v1 token claims them.
+
+**`path-symlink-refused` and `path-binding-failed` are retained.** An earlier
+revision removed them for want of a deterministic control, which left the
+contract unsatisfiable: I02 and I06 require the behaviour, and I61 requires
+every refusal to carry a retained token, so no implementation could obey all
+three. Both are reinstated with exact behavioural controls, described in
+sections 4c and 9.
 
 **One accepted, deliberate disclosure, named rather than hidden.** Fail-fast
 with a schema-declared path means a refusal reveals *which declared field failed
@@ -642,13 +684,24 @@ documented, never of input content.
 
 ## 9. Static validation order
 
-**Phase 0 — capture.** Verify the records-root shape, section 4a. Then for
-`register-a`, `register-b`, `bridge` in that fixed order: existence,
-is-directory, not a symbolic link or reparse point, bind, verify the directory
-shape of section 4b, enumerate direct `.json` files in sorted order,
-per-directory count ceiling, per-record byte capture with per-record ceiling,
-running total ceiling over captured bytes. **All three must complete before any
-record work.** Any failure ends validation.
+**Phase 0 — capture.** Verify the records-root shape, section 4a
+(`path-missing`, `path-not-directory`, `path-symlink-refused`,
+`records-root-missing-directory`, `records-root-unexpected-entry`). Then for
+`register-a`, `register-b`, `bridge` in that fixed order: existence;
+is-directory; **not a symbolic link, junction, or other reparse point**
+(`path-symlink-refused`, section 4c); acquire the directory binding through
+`_acquire_directory_binding`, whose `OSError` becomes `path-binding-failed`;
+verify the directory shape of section 4b
+(`record-directory-unexpected-entry`); enumerate direct `.json` files in sorted
+order; per-directory count ceiling; per-record byte capture with per-record
+ceiling; running total ceiling over captured bytes.
+
+**All three directories must complete Phase 0 before any record is parsed.**
+This is observable and is asserted: a set carrying a schema-invalid record in
+`register-a` *and* a Phase 0 structural defect in `bridge` must refuse with the
+**`bridge` Phase 0 token**, because no parsing may begin until capture of all
+three has finished. A validator that parsed `register-a` on the way past would
+emit the record token instead and fail that control.
 
 **Phase 1 — per record**, directories in fixed order, filenames sorted. For each
 record, in exactly this sequence: JSON parse with duplicate-key rejection; root
@@ -735,12 +788,19 @@ No total key exists in the structure.
     def serialize_summary(summary: dict) -> str
     def main(argv: list[str] | None = None) -> int
 
+    # Frozen private seam, section 4c. Private by name, no public
+    # configuration, no environment variable, no verbose mode. It exists only
+    # so a control can inject a binding fault deterministically. When it
+    # raises OSError, the validator refuses with `path-binding-failed`.
+    def _acquire_directory_binding(path) -> object
+
 All three error classes carry `token` and `path`, as `SourceRecordError` does.
 
 ## 12. Acceptance criteria for the future implementation
 
-A conforming implementation satisfies **I01 through I82**, with a failing-input
-control for each and every positive control passing — a validator that refuses
+A conforming implementation satisfies **every retained invariant, I01 through
+I92** — the original set together with the amendments I83 through I92 — with a
+failing-input control for each and every positive control passing — a validator that refuses
 everything is broken, not correct. It is standard-library only, contains no bare
 `assert` and no unreraised broad `except`, holds the laboratory-local forward
 quarantine, ships a path-scoped **non-required** workflow, and emits
@@ -760,7 +820,9 @@ independence scoring and connected-component counting; traversal and bridge
 composition; flat import or export; tombstones and re-registration control;
 concurrency; writer APIs; the human-facing register mapping, which is not
 created now and lives outside the repository; automatic truth, authenticity or
-neutrality judgment; the root reverse import guard, section 3c; and the
-symbolic-link and binding-failure path controls, section 3c and section 8b.
+neutrality judgment; and the root reverse import guard, section 3c.
+
+The symbolic-link and binding-failure path controls are **no longer deferred**:
+both tokens are retained and both are asserted behaviourally. See section 4c.
 
 **Historical v1 records remain unchanged when any of these lands.**

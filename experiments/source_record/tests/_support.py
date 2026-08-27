@@ -18,7 +18,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import pathlib
+import stat
+import subprocess
 import sys
 
 import pytest
@@ -125,22 +128,142 @@ Six things remain human-gated and only human-gated:
 
 **A green suite is not coverage of those six.**"""
 
-#: Fragments the source-record workflow must carry. Text assertions, because
-#: the laboratory installs no YAML parser.
-WORKFLOW_REQUIRED_FRAGMENTS = (
-    "experiments/source_record/**",
-    ".github/workflows/source-record.yml",
-    "non-required",
-    "contents: read",
-    "python -m pytest --collect-only -q experiments/source_record/tests",
-    "python -m pytest -q -p no:cacheprovider experiments/source_record/tests",
+#: The workflow is frozen by EXACT BYTES, not by fragment presence.
+#:
+#: Without a YAML parser, fragment matching cannot enforce trigger scope,
+#: permissions, the commands actually run, or the absence of extra network
+#: steps — every fragment could sit in a comment while a far broader workflow
+#: still passed. Byte equality is the only assertion available that means what
+#: it says.
+#:
+#: The job name says "informational, path-scoped" and NOT "non-required". A
+#: workflow file cannot establish that a check is not required: required-check
+#: status is external repository configuration. This phase neither changes nor
+#: attests branch protection, and no control here claims to.
+WORKFLOW_CONTENT = """name: source-record
+
+on:
+  pull_request:
+    paths:
+      - "experiments/source_record/**"
+      - ".github/workflows/source-record.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/source_record/**"
+      - ".github/workflows/source-record.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-record-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: source-record (informational, path-scoped)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: pip install pytest
+      - name: Collect the acceptance surface
+        run: python -m pytest --collect-only -q experiments/source_record/tests
+      - name: Run the acceptance suite
+        run: python -m pytest -q -p no:cacheprovider experiments/source_record/tests
+"""
+
+# --------------------------------------------------------------------------
+# Deterministic reparse-point fixture. tmp_path only; never inside the repo.
+# --------------------------------------------------------------------------
+
+
+def make_reparse_directory(link: pathlib.Path, target: pathlib.Path) -> str:
+    """Create a link-or-junction at ``link`` pointing at ``target``.
+
+    Returns the mechanism used. Raises ``AssertionError`` if no mechanism is
+    available: this control is never skipped, never marked xfail, and never
+    passes conditionally.
+
+    A Windows directory junction is deliberately preferred as the fallback
+    because it is a reparse point that ``os.path.islink`` and
+    ``Path.is_symlink`` both report as False. A validator that inspects only
+    ``is_symlink`` accepts it, so the junction is the harder fixture.
+    """
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return "os.symlink"
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0 and link.exists():
+            return "mklink-junction"
+    raise AssertionError(
+        "no deterministic reparse-point mechanism is available on this "
+        "platform; the path-security control cannot be constructed and must "
+        "not be skipped"
+    )
+
+
+def is_reparse_point(path: pathlib.Path) -> bool:
+    """True for a symbolic link or a Windows reparse point."""
+    if path.is_symlink():
+        return True
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+# --------------------------------------------------------------------------
+# Write-capable filesystem operations forbidden in laboratory production code.
+# --------------------------------------------------------------------------
+
+#: Attribute or bare-name calls a read-only validator may never make.
+FORBIDDEN_WRITE_CALLS = frozenset(
+    {
+        "write_text",
+        "write_bytes",
+        "mkdir",
+        "makedirs",
+        "touch",
+        "unlink",
+        "rmdir",
+        "remove",
+        "removedirs",
+        "rename",
+        "replace",
+        "renames",
+        "symlink",
+        "link",
+        "chmod",
+        "chown",
+        "truncate",
+        "mkstemp",
+        "mkdtemp",
+        "NamedTemporaryFile",
+        "TemporaryDirectory",
+        "copy",
+        "copy2",
+        "copyfile",
+        "copytree",
+        "rmtree",
+        "move",
+    }
 )
 
-#: Actions the workflow may reference. Anything else is a network surface.
-WORKFLOW_ALLOWED_ACTION_PREFIXES = (
-    "actions/checkout@",
-    "actions/setup-python@",
-)
+#: ``open`` is permitted only in a read mode.
+READ_ONLY_OPEN_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
 
 # Resource ceilings, mirrored from the contract so drift is detectable.
 MAX_RECORDS_PER_DIR = 256
@@ -227,9 +350,11 @@ LOCATOR_VALUE_PATTERN = r"\Asynthetic-[a-z0-9-]{1,64}\Z"
 DIGEST_PATTERN = r"\A[0-9a-f]{64}\Z"
 
 REFUSAL_TOKENS = (
-    # path, exit 4
+    # path and binding, exit 4
     "path-missing",
     "path-not-directory",
+    "path-symlink-refused",
+    "path-binding-failed",
     "records-root-missing-directory",
     "records-root-unexpected-entry",
     "record-directory-unexpected-entry",

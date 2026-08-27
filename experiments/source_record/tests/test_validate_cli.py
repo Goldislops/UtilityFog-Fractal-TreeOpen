@@ -205,44 +205,170 @@ def test_sr_c_025_the_resource_ceilings_are_exactly_the_frozen_constants():
     assert tuple(validate.REGISTER_DIRS) == sup.REGISTER_DIR_NAMES
 
 
-def test_sr_c_026_capture_completes_all_three_directories_before_record_work(
-    tmp_path,
-):
-    """A defect in the third directory must surface even when the first is fine.
+def test_sr_c_026_all_capture_completes_before_any_record_is_parsed(tmp_path):
+    """Competing defects: an earlier record defect versus a later Phase 0 one.
 
-    CONTRACT.md I01: all three directories are captured before any set-level
-    invariant is evaluated. A validator that short-circuited after register-a
-    would miss this.
+    ``register-a`` carries a schema-invalid record *and* a malformed-JSON one;
+    ``bridge`` carries a Phase 0 structural defect. CONTRACT.md section 9
+    requires capture of all three directories to finish before any record is
+    parsed, so the **later directory's Phase 0 token** must win. A validator
+    that parsed ``register-a`` on the way past would emit a record token and
+    fail here, which is the whole point: an unexpected entry in the last
+    directory alone would not have proved anything.
     """
     validate = sup.require_validate()
-    root = build_root(tmp_path, minimal_valid_set())
+    records = minimal_valid_set()
+    records[1]["origin"] = "ingested"
+    root = build_root(tmp_path, records)
+    (root / "register-a" / "SR-A-SRC-0002.json").write_text(
+        "{not json", encoding="utf-8"
+    )
     (root / "bridge" / "not-a-record.txt").write_text("synthetic", encoding="utf-8")
     with pytest.raises(validate.RecordsPathError) as excinfo:
         validate.validate_records_root(root)
     assert excinfo.value.token == "record-directory-unexpected-entry"
 
 
-def test_sr_c_027_directory_order_is_fixed_and_fail_fast_is_deterministic(
+def test_sr_c_027_field_order_decides_between_two_defects_in_one_record(
     tmp_path,
 ):
-    """The same two defects always yield the same single refusal.
+    """One record, two competing defects; the declared field order decides.
 
-    Fail-fast means one refusal, and the fixed schema-declared order means the
-    same one every time, whichever directory the filesystem happens to enumerate
-    first.
+    ``origin`` precedes ``recorded_by_label`` in the common field order, so
+    ``enum-value-invalid`` at path ``("origin",)`` is the only admissible
+    refusal. Key insertion order is permuted across attempts to prove the
+    validator walks the schema's declared order and not the input's.
     """
     validate = sup.require_validate()
-    tokens = []
-    for attempt in range(3):
+    outcomes = []
+    for attempt, reverse in enumerate((False, True, False)):
         records = minimal_valid_set()
-        records[0]["origin"] = "ingested"
-        records[1]["recorded_by_label"] = ""
-        root = build_root(tmp_path / f"attempt{attempt}", records)
+        broken = records[1]
+        broken["origin"] = "ingested"
+        broken["recorded_by_label"] = ""
+        if reverse:
+            records[1] = {key: broken[key] for key in sorted(broken, reverse=True)}
+        root = build_root(tmp_path / f"field{attempt}", records)
         with pytest.raises(validate.RecordsInputError) as excinfo:
             validate.validate_records_root(root)
-        tokens.append(excinfo.value.token)
-    assert len(set(tokens)) == 1, tokens
-    assert tokens[0] in sup.REFUSAL_TOKENS
+        outcomes.append((excinfo.value.token, tuple(excinfo.value.path)))
+    assert len(set(outcomes)) == 1, outcomes
+    assert outcomes[0] == ("enum-value-invalid", ("origin",))
+
+
+def test_sr_c_028_directory_order_decides_between_defects_in_two_registers(
+    tmp_path,
+):
+    """register-a is captured and parsed before register-b, so its token wins.
+
+    The two defects carry *different* tokens, so the winner names the order
+    rather than merely being stable. File creation order is reversed on the
+    second attempt to prove the result does not depend on it.
+    """
+    validate = sup.require_validate()
+    outcomes = []
+    for attempt, reverse in enumerate((False, True)):
+        records = minimal_valid_set()
+        for record in records:
+            if record["record_id"] == "SR-A-SRC-0001":
+                record["origin"] = "ingested"
+            if record["record_id"] == "SR-B-SRC-0001":
+                record["recorded_date"] = "2026-13-01"
+        ordered = list(reversed(records)) if reverse else records
+        root = build_root(tmp_path / f"dir{attempt}", ordered)
+        with pytest.raises(validate.RecordsInputError) as excinfo:
+            validate.validate_records_root(root)
+        outcomes.append((excinfo.value.token, tuple(excinfo.value.path)))
+    assert len(set(outcomes)) == 1, outcomes
+    assert outcomes[0] == ("enum-value-invalid", ("origin",))
+
+
+def test_sr_c_029_filename_order_decides_between_defects_in_one_directory(
+    tmp_path,
+):
+    """Within a directory, sorted filename order decides which defect refuses.
+
+    Again the two defects carry different tokens, and the files are written in
+    both orders, so a passing result cannot come from creation order.
+    """
+    validate = sup.require_validate()
+    outcomes = []
+    for attempt, reverse in enumerate((False, True)):
+        records = minimal_valid_set()
+        for record in records:
+            if record["record_id"] == "SR-A-SRC-0001":
+                record["origin"] = "ingested"
+            if record["record_id"] == "SR-A-SRC-0002":
+                record["recorded_date"] = "2026-13-01"
+        ordered = list(reversed(records)) if reverse else records
+        root = build_root(tmp_path / f"name{attempt}", ordered)
+        with pytest.raises(validate.RecordsInputError) as excinfo:
+            validate.validate_records_root(root)
+        outcomes.append((excinfo.value.token, tuple(excinfo.value.path)))
+    assert len(set(outcomes)) == 1, outcomes
+    assert outcomes[0] == ("enum-value-invalid", ("origin",))
+
+
+def test_sr_c_030_a_reparse_point_records_root_is_refused(tmp_path):
+    """A symbolic link or junction standing in for the records root is refused.
+
+    The fixture is built with a symbolic link where privilege allows and a
+    Windows directory junction otherwise, entirely under ``tmp_path``. It never
+    skips. The junction is the harder case: it is a reparse point that
+    ``Path.is_symlink`` reports as False, so a validator inspecting only that
+    predicate would accept it.
+    """
+    validate = sup.require_validate()
+    real = build_root(tmp_path / "real", minimal_valid_set())
+    link = tmp_path / "linked-records"
+    mechanism = sup.make_reparse_directory(link, real)
+    assert sup.is_reparse_point(link), mechanism
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(link)
+    assert excinfo.value.token == "path-symlink-refused"
+
+
+def test_sr_c_031_a_reparse_point_data_directory_is_refused(tmp_path):
+    validate = sup.require_validate()
+    real = build_root(tmp_path / "real", minimal_valid_set())
+    staged = build_root(tmp_path / "staged", minimal_valid_set())
+    for child in sorted((staged / "register-b").iterdir()):
+        child.unlink()
+    (staged / "register-b").rmdir()
+    mechanism = sup.make_reparse_directory(
+        staged / "register-b", real / "register-b"
+    )
+    assert sup.is_reparse_point(staged / "register-b"), mechanism
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(staged)
+    assert excinfo.value.token == "path-symlink-refused"
+
+
+def test_sr_c_032_a_binding_failure_is_refused_through_the_frozen_private_seam(
+    tmp_path, monkeypatch
+):
+    """I06 fail-closed, made testable by one frozen private seam.
+
+    ``_acquire_directory_binding`` is private by name and has no public
+    configuration, environment variable, or verbose mode. Its only purpose is
+    deterministic fault injection: when it raises ``OSError`` the validator must
+    refuse with ``path-binding-failed``.
+    """
+    validate = sup.require_validate()
+    assert hasattr(validate, "_acquire_directory_binding"), (
+        "the frozen private binding seam is missing"
+    )
+    for name in dir(validate):
+        assert "verbose" not in name.lower(), name
+
+    def refuse_to_bind(path):
+        raise OSError("synthetic binding-primitive failure")
+
+    monkeypatch.setattr(validate, "_acquire_directory_binding", refuse_to_bind)
+    root = build_root(tmp_path, minimal_valid_set())
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "path-binding-failed"
 
 
 def test_sr_c_008_an_argparse_usage_error_keeps_its_own_systemexit_two(capsys):
@@ -379,17 +505,29 @@ def test_sr_c_016_no_environment_variable_alters_refusal_content(
 # --------------------------------------------------------------------------
 
 
-def test_sr_c_017_the_validator_writes_nothing_on_any_path(tmp_path, capsys):
+def test_sr_c_017_the_validator_leaves_the_records_tree_and_the_laboratory_unchanged(
+    tmp_path, capsys
+):
+    """Two behavioural snapshots, over exactly the trees this control observes.
+
+    It does **not** claim protection over arbitrary external paths: no snapshot
+    covers them, so no such claim is made. The static counterpart is SR-Q-011,
+    which forbids write-capable calls in the laboratory's own source.
+    """
     validate = sup.require_validate()
     good = build_root(tmp_path / "good", minimal_valid_set())
     bad_records = minimal_valid_set()
     bad_records[0]["origin"] = "ingested"
     bad = build_root(tmp_path / "bad", bad_records)
+    laboratory_before = tree_snapshot(sup.LAB_DIR)
+    assert laboratory_before, "the laboratory snapshot observed nothing"
     for root in (good, bad):
         before = tree_snapshot(root)
+        assert before, "the records-tree snapshot observed nothing"
         validate.main([str(root)])
         capsys.readouterr()
         assert tree_snapshot(root) == before
+    assert tree_snapshot(sup.LAB_DIR) == laboratory_before
 
 
 def test_sr_c_018_no_network_call_is_attempted_on_any_path(
