@@ -1073,12 +1073,53 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
     The schema is closed and exact -- the five named keys, no others, no
     booleans standing in for integers, and a class that agrees with the
     basename's own grammar.
+
+    The pass directory is BOUND, and the binding is proved three times over.
+    One non-following read takes `(dev, ino)` before anything is enumerated,
+    and a directory with no such identity is refused there. That identity is
+    then re-proved after `os.scandir` holds its iterator and before an entry
+    is consumed, after enumeration has closed and before the manifest
+    pathname is resolved, and once more the instant those bytes come back --
+    before a single record is parsed and before any count is calculated.
+
+    The third proof is not decoration. Enumeration and the manifest read
+    resolve the SAME pathname twice, so without it names collected from the
+    original directory could be reconciled against a journal read from its
+    replacement and hand back a `manifested` count that neither directory
+    ever held. A mismatch at any proof discards every collected name and
+    every manifest byte and answers the ordinary zeroed refusal; it is taken
+    ahead of the byte-budget refusal, because measuring bytes that came from
+    somewhere else is not discarding them.
+
+    This is the PASS directory's own binding, and it is not the data root's.
+    A scan binding travels with a live scan of the maintained data root;
+    this one is taken here, on the directory handed in, and never leaves the
+    call. Reconciliation still reads no data root at all.
+
+    Three extra metadata reads, fixed at one per proof -- never one per entry
+    and never one per record. Contents may change freely within the same
+    directory: an operator adding or removing a file changes what is
+    enumerated without changing `(dev, ino)`, and that is not a replacement.
+
+    What this does NOT close: every proof reads a PATHNAME, and the operating
+    system resolves that pathname again when it opens the directory and again
+    when it opens the manifest. A substitution installed and withdrawn wholly
+    between two proofs -- so that `os.scandir` or the manifest open lands on
+    the impostor while both bracketing reads see the original -- is not
+    detected. Neither is a recycled identity: a `(dev, ino)` the platform has
+    handed back out compares equal to the one it replaced, so an object that
+    was removed and another created into its slot can satisfy every proof.
+    This detects replacement between the explicit proofs. It is not an atomic
+    defence against a hostile swap and does not claim to be.
     """
     if not isinstance(policy, RetentionPolicy):
         raise TypeError("explicit RetentionPolicy required")
 
     root = Path(os.fspath(pass_directory))
-    if directory_state(root) is None:
+    # RETAINED, not discarded. Proving the directory and then throwing the
+    # answer away leaves every later resolution of this pathname unbound.
+    surveyed = directory_state(root)
+    if surveyed is None:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
 
     # PAYLOAD entries are capped on their own, and the manifest is allowed as
@@ -1089,6 +1130,10 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
     manifest_entries = 0
     try:
         with os.scandir(root) as entries:
+            # (a) The iterator is held; nothing has been consumed from it yet.
+            if not _scanned_root_unchanged(root, surveyed):
+                return _survey_refusal(
+                    RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
             for entry in entries:
                 if entry.name == MANIFEST_NAME:
                     manifest_entries += 1
@@ -1103,11 +1148,23 @@ def survey_quarantine(pass_directory, *, policy: RetentionPolicy) -> QuarantineS
     except OSError:
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
 
+    # (b) Enumeration is over and the iterator is closed. The names in hand
+    # came from this directory, and the manifest pathname is about to be
+    # resolved through the same root component.
+    if not _scanned_root_unchanged(root, surveyed):
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
     # Exactly one batch of maximum-length records, plus a single look-ahead
     # byte whose arrival is itself the refusal.
     byte_budget = policy.max_actions_per_pass * MAX_MANIFEST_RECORD_BYTES
     raw = _read_manifest_bytes(root / MANIFEST_NAME, byte_budget)
     if raw is None:
+        return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    # (c) The bytes are in hand. Proved BEFORE the byte budget is applied:
+    # a length taken from a journal that belongs to some other directory must
+    # not decide this directory's refusal reason, and discarding the bytes
+    # means not measuring them either.
+    if not _scanned_root_unchanged(root, surveyed):
         return _survey_refusal(RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
     if len(raw) > byte_budget:
         return _survey_refusal(RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
