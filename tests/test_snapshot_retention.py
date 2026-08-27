@@ -5804,3 +5804,741 @@ def test_an_openable_root_with_no_prior_identity_is_never_an_empty_success(
     assert isinstance(result, retention.ScanFailed)
     assert result.reason is retention.RetentionFailureReason.IDENTITY_UNAVAILABLE
     assert fake.statted == [] and fake.closed == 1
+
+
+# ===========================================================================
+# A single-instance LOCK close failure must be contained, not escape
+# ===========================================================================
+#
+# `_LockHandle.acquire` and `_LockHandle.release` both call `os.close` on the
+# lock descriptor UNGUARDED in their cleanup paths.
+#
+# In `release` that call is the `finally` of the unlock block, so a raising
+# close escapes through `single_instance_lock.__exit__`. In `main` the report
+# has already been printed and the return value already chosen by then, so the
+# operator gets a traceback INSTEAD OF the promised fixed, path-free outcome --
+# and in a QUARANTINE pass that traceback arrives after files have already been
+# renamed into quarantine, so the aggregate that says how many moved is lost
+# with it.
+#
+# In `acquire` the same unguarded close sits on the lock-contention path, where
+# it replaces the intended `False` -- and therefore the sanitized
+# `lock_unavailable` line and exit status 1 -- with an exception carrying an
+# errno and a path.
+#
+# In BOTH cases the `self._fd = None` that follows the close never executes
+# when the close raises, leaving a stale descriptor reference on the handle:
+# the number it names may already have been reissued to something else, so a
+# later traversal of `release` would close an unrelated descriptor. That is
+# exactly the hazard `_quarantine` already documents for the manifest journal
+# ("a second attempt could close a descriptor the runtime has already
+# reissued to something else"); the lock is the same hazard, unfixed.
+#
+# The correction contains `OSError` at both sites, ALWAYS clears `_fd` exactly
+# once, and never retries the close.
+#
+# The fault below is injected against the LOCK DESCRIPTOR SPECIFICALLY, by
+# path. `retention.os` is the process-global `os` module, so a blanket
+# `os.close` failure would break pytest's own descriptors and the quarantine
+# manifest's, and would prove nothing about this path.
+
+
+def _normalized_fs_path(value):
+    """Normalize anything `os.open` accepts into one comparable text key.
+
+    Returns None for a value that is not a path at all -- an integer
+    descriptor for a `dir_fd`-relative open, or a name that cannot be brought
+    into text form -- so a non-path open can never accidentally compare equal
+    to the lock and be mistaken for it.
+    """
+    if isinstance(value, int):
+        return None
+    try:
+        text = os.fspath(value)
+    except TypeError:
+        return None
+    if isinstance(text, bytes):
+        try:
+            text = text.decode("utf-8", "surrogateescape")
+        except ValueError:  # pragma: no cover - decoding cannot fail this way
+            return None
+    try:
+        return os.path.normcase(os.path.abspath(text))
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+
+
+class _LockCloseFault:
+    """Fail the close of the SINGLE-INSTANCE LOCK, for ONE descriptor lifetime.
+
+    Two levels of selectivity, and both are needed.
+
+    First, by PATH at open time. `retention.os` is the process-global `os`
+    module, so patching `os.close` is global for the duration of the test --
+    and the same pass also opens and closes the quarantine manifest. The
+    injector therefore only ever adopts a descriptor that `os.open` handed out
+    for the lock file itself; every other descriptor, the manifest's included,
+    is recorded and delegated untouched. The lock lives OUTSIDE the maintained
+    directory by construction, so the two paths can never normalize equal.
+
+    Second, by DESCRIPTOR LIFETIME at close time, which is the lesson
+    `_ManifestCloseFault` already paid for: a file descriptor is a NUMBER the
+    operating system recycles the moment it is released, so the very next
+    `os.open` can hand the same integer to something entirely unrelated. The
+    target is therefore retired BEFORE the real close, never after. Clearing
+    it afterwards would leave a window in which the number has been released
+    and reissued while the injector still matched it -- failing an unrelated
+    close and inflating `close_attempts`, the counter the "exactly one close
+    attempt" control depends on.
+
+    The real close always happens, and happens first, so no descriptor leaks
+    and the operating system genuinely drops the lock even when the injected
+    failure follows.
+
+    Retirement is also what makes a RETRY visible. `close_attempts` counts
+    only the injected close, so a correction that contained the failure and
+    then closed again would leave it at one and look correct; `retired_fd`
+    therefore stays set after retirement and `retried_closes` records any
+    further close of that number, delegating it rather than injecting. The
+    watch is dropped the instant `os.open` hands the number out again, which
+    is the only way that number can legitimately belong to something else.
+
+    `arm` selects WHICH lock-path open is adopted rather than assuming the
+    first: a contention control needs the CONTENDER's descriptor while the
+    holder's stays open, and a report-comparison control needs one unfaulted
+    invocation before the faulted one.
+    """
+
+    def __init__(self, monkeypatch, lock_path, *, arm=True, fail=True):
+        self.fail = fail
+        self.lock_path = _normalized_fs_path(lock_path)
+        self.target_fd = None
+        self.retired_fd = None
+        self.lock_opens = []
+        self.other_opens = []
+        self.close_attempts = []
+        self.delegated_closes = 0
+        self.retried_closes = []
+        self._arm_next = bool(arm)
+        real_open = os.open
+        real_close = os.close
+
+        def _open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if fd == self.retired_fd:
+                # The number has been REISSUED. Stop watching it entirely:
+                # from here a close of this integer belongs to whatever just
+                # took it, and counting that as a second attempt on the lock
+                # would be a fabrication. Every reissue passes through here,
+                # so the watch closes itself the moment it stops being sound.
+                self.retired_fd = None
+            if _normalized_fs_path(path) == self.lock_path:
+                self.lock_opens.append(fd)
+                if self._arm_next:
+                    self._arm_next = False
+                    self.target_fd = fd
+            else:
+                self.other_opens.append(fd)
+            return fd
+
+        def _close(fd):
+            if self.target_fd is not None and fd == self.target_fd:
+                self.close_attempts.append(fd)
+                # Retire the target FIRST: from here the number may be
+                # reissued at any moment, and every later close must delegate.
+                self.target_fd = None
+                self.retired_fd = fd
+                real_close(fd)          # release for real: never leak an fd
+                if self.fail:
+                    raise OSError(errno.EIO, "injected lock close failure")
+                return None
+            if self.retired_fd is not None and fd == self.retired_fd:
+                # A SECOND close of the number the first attempt already
+                # named, with no reissue in between -- so this is a RETRY, and
+                # a retry is exactly what must never happen: the descriptor
+                # state after a failed close is ambiguous, and by the time a
+                # retry lands the number may belong to something else. It is
+                # recorded and then delegated, so the control sees it rather
+                # than the injector hiding it.
+                self.retried_closes.append(fd)
+            self.delegated_closes += 1
+            return real_close(fd)
+
+        monkeypatch.setattr(retention.os, "open", _open)
+        monkeypatch.setattr(retention.os, "close", _close)
+
+    def arm(self):
+        """Adopt the NEXT descriptor `os.open` hands out for the lock path."""
+        self._arm_next = True
+
+
+def _lock_layout(tmp_path):
+    """A data directory and a lock file that lives OUTSIDE it.
+
+    The lock must never sit inside the directory being measured -- a `PLAN`
+    that created a file in its own target would change the entry count it
+    reports -- and every control here passes the path explicitly, so nothing
+    is ever created in the shared system temporary directory.
+    """
+    data = Path(tmp_path) / "data"
+    data.mkdir()
+    return data, Path(tmp_path) / "retention.lock"
+
+
+def _lock_only(tmp_path):
+    """Just the lock file. Controls that exercise the handle alone need no
+    target directory at all, and creating one would only invite the reader to
+    look for a relationship that is not being tested."""
+    return Path(tmp_path) / "retention.lock"
+
+
+class _LockBodyFailure(Exception):
+    """A distinct, unmistakable failure raised by the `with` body itself."""
+
+
+class _FailingUnlockModule:
+    """A stand-in for `msvcrt` whose UNLOCK call fails.
+
+    The Windows branch of `release` is the only one that issues an explicit
+    unlock; on POSIX the kernel drops the `flock` when the descriptor closes,
+    so there is no call there to fail. Modelling that branch with a double is
+    what makes "an unlock failure followed by a close failure" a control that
+    runs identically on every platform, instead of one that only means
+    something on Windows or needs elevation to reach.
+    """
+
+    LK_NBLCK = 0
+    LK_UNLCK = 1
+
+    def __init__(self):
+        self.calls = []
+
+    def locking(self, fd, mode, length):
+        self.calls.append((fd, mode, length))
+        raise OSError(errno.EACCES, "injected unlock failure")
+
+
+# -- the injector itself, proved before anything is proved with it -----------
+#
+# These bind nothing to `_LockHandle`: they drive the patched `os` entry points
+# directly, so they hold identically before and after the correction and can
+# never be mistaken for evidence about the fix.
+
+
+def test_the_lock_close_fault_delegates_every_other_descriptor(tmp_path,
+                                                               monkeypatch):
+    """Selectivity, stated directly: while armed and failing, an unrelated
+    descriptor closes normally and is not counted, and only the lock
+    descriptor takes the injected failure."""
+    data, lock_path = _lock_layout(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    probe = data / "unrelated"
+    probe.write_bytes(b"x")
+    probe_fd = os.open(probe, os.O_RDONLY)
+    os.close(probe_fd)                        # must NOT raise
+    assert probe_fd in fault.other_opens
+    assert fault.close_attempts == []
+    assert fault.delegated_closes == 1
+
+    with pytest.raises(OSError) as caught:
+        os.close(lock_fd)
+    assert caught.value.errno == errno.EIO
+    assert fault.close_attempts == [lock_fd]
+    assert fault.lock_opens == [lock_fd]
+    assert fault.target_fd is None, "the target was not retired"
+    assert fault.retried_closes == []
+
+
+def test_the_lock_close_fault_sees_a_retried_close(tmp_path, monkeypatch):
+    """The retry watch, proved on the injector rather than on the handle.
+
+    `close_attempts` cannot detect a retry -- the target is retired by then,
+    so a second close delegates and is never counted. Without a separate
+    watch, a correction that contained the failure and then closed the same
+    number again would satisfy every containment control here while keeping
+    the more dangerous half of the defect.
+    """
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with pytest.raises(OSError):
+        os.close(lock_fd)
+    assert fault.retried_closes == []
+    with pytest.raises(OSError) as caught:
+        os.close(lock_fd)                     # the retry: already released
+    assert caught.value.errno == errno.EBADF
+    assert fault.retried_closes == [lock_fd]
+    assert fault.close_attempts == [lock_fd], "the retry was injected too"
+
+
+def test_the_lock_close_fault_stops_watching_a_reissued_number(tmp_path,
+                                                               monkeypatch):
+    """The watch must retire itself the moment the number is handed out
+    again, or an ordinary recycled descriptor would be reported as a retry."""
+    data, lock_path = _lock_layout(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with pytest.raises(OSError):
+        os.close(lock_fd)
+    assert fault.retired_fd == lock_fd
+
+    spare = data / "reissue_probe"
+    spare.write_bytes(b"x")
+    handles = []
+    reissued = None
+    try:
+        for _ in range(64):
+            opened = os.open(spare, os.O_RDONLY)
+            if opened == lock_fd:
+                reissued = opened
+                break
+            handles.append(opened)
+    finally:
+        for opened in handles:
+            os.close(opened)
+
+    if reissued is not None:
+        assert fault.retired_fd is None, "the watch outlived the reissue"
+        os.close(reissued)                    # an unrelated close, not a retry
+    assert fault.retried_closes == []
+    assert fault.close_attempts == [lock_fd]
+
+
+def test_the_lock_close_fault_retires_its_target_after_one_lifetime(
+        tmp_path, monkeypatch):
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path, fail=False)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+    handle.release()
+    assert len(fault.close_attempts) == 1
+    assert fault.target_fd is None
+    assert fault.retired_fd == fault.close_attempts[0]
+
+
+def test_a_recycled_descriptor_number_is_not_treated_as_the_lock(tmp_path,
+                                                                 monkeypatch):
+    """Reopen until the released number comes back, then close it: a live
+    injector would fail that close and count it twice.
+
+    Recycling is the platform's choice, so `recycled` may stay None and the
+    reissue arm may not execute on a given run. The retirement invariant that
+    makes recycling harmless is proved unconditionally above; this one adds
+    the real-reissue observation when the platform offers it, and asserts the
+    close-attempt count either way.
+    """
+    data, lock_path = _lock_layout(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path, fail=False)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+    handle.release()
+    assert len(fault.close_attempts) == 1
+    released = fault.close_attempts[0]
+
+    spare = data / "recycled_probe"
+    spare.write_bytes(b"x")
+    handles = []
+    recycled = None
+    try:
+        for _ in range(64):
+            opened = os.open(spare, os.O_RDONLY)
+            if opened == released:
+                recycled = opened
+                break
+            handles.append(opened)
+    finally:
+        for opened in handles:
+            os.close(opened)
+
+    if recycled is not None:
+        os.close(recycled)                    # must NOT raise the injection
+    assert len(fault.close_attempts) == 1
+
+
+def test_the_lock_close_fault_leaks_no_descriptor(tmp_path, monkeypatch):
+    data, lock_path = _lock_layout(tmp_path)
+    probe = data / "watermark"
+    probe.write_bytes(b"x")
+
+    def _watermark():
+        opened = os.open(probe, os.O_RDONLY)
+        os.close(opened)
+        return opened
+
+    before = _watermark()
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with pytest.raises(OSError):
+        os.close(lock_fd)
+    after = _watermark()
+    assert fault.close_attempts == [lock_fd]
+    assert after <= before + 1
+
+
+def test_the_lock_close_fault_never_targets_the_manifest_descriptor(
+        tmp_path, monkeypatch):
+    """The one control that puts BOTH descriptors in flight at once.
+
+    A full QUARANTINE pass runs inside a held lock, so the lock descriptor is
+    open across the whole pass while the manifest descriptor is opened,
+    written, synchronised and closed inside it. The manifest close must be a
+    plain delegation: it is a different path, therefore a different adopted
+    descriptor, therefore never the injected one. `fail=False` keeps this a
+    statement about the INJECTOR rather than about the correction, so it holds
+    identically before and after the fix.
+
+    The manifest is only OBSERVED here. Nothing about manifest handling is
+    changed, and the completed journal is read back as independent proof that
+    its own close really did succeed.
+    """
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=5)
+    fault = _LockCloseFault(monkeypatch, lock_path, fail=False)
+
+    seen = {}
+    real_open_manifest = retention._open_manifest
+
+    def _observed_open_manifest(pass_directory):
+        fd = real_open_manifest(pass_directory)
+        seen["fd"] = fd
+        seen["path"] = Path(pass_directory) / retention.MANIFEST_NAME
+        return fd
+
+    monkeypatch.setattr(retention, "_open_manifest", _observed_open_manifest)
+
+    with retention.single_instance_lock(lock_path) as acquired:
+        assert acquired is True
+        report = _run(data)
+
+    assert report.refused is None
+    assert report.moved == 4
+    lock_fd = fault.lock_opens[0]
+    assert seen["fd"] != lock_fd, "both descriptors must be live at once"
+    assert seen["fd"] in fault.other_opens
+    assert seen["fd"] not in fault.close_attempts
+    assert fault.close_attempts == [lock_fd]
+    assert _normalized_fs_path(seen["path"]) != fault.lock_path
+    lines = [line for line
+             in seen["path"].read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) == report.moved, "the manifest close did not succeed"
+
+
+# -- release: the failure must be contained -----------------------------------
+
+
+def test_a_lock_release_close_failure_does_not_escape_the_context_manager(
+        tmp_path, monkeypatch):
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    with retention.single_instance_lock(lock_path) as acquired:
+        assert acquired is True
+    assert len(fault.close_attempts) == 1
+
+
+def test_a_contained_release_close_failure_clears_the_descriptor_reference(
+        tmp_path, monkeypatch):
+    """A stale `_fd` is not untidiness: the number it holds may already have
+    been reissued, so anything that later trusted it would close a descriptor
+    belonging to something else."""
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+    handle.release()
+    assert handle._fd is None
+    assert len(fault.close_attempts) == 1
+
+
+def test_the_lock_descriptor_receives_exactly_one_close_attempt(tmp_path,
+                                                                monkeypatch):
+    """One attempt, and no retry. Both halves matter: a correction that
+    contained the failure and then tried the close again would satisfy every
+    other control here while reintroducing the worse half of the defect --
+    a close aimed at a number the runtime may already have reissued."""
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    with retention.single_instance_lock(lock_path) as acquired:
+        assert acquired is True
+    assert fault.close_attempts == [fault.lock_opens[0]]
+    assert fault.retried_closes == []
+    assert fault.target_fd is None
+
+
+def test_a_repeated_release_after_a_contained_close_failure_is_inert(
+        tmp_path, monkeypatch):
+    """The unlock and the close sit on ONE path, with the close in the
+    `finally`, so any second traversal of `release` is necessarily a second
+    close attempt. Counting close attempts therefore counts traversals on
+    every platform, with no `msvcrt`/`fcntl` branch in the control at all.
+
+    A second traversal would also be actively dangerous, which is why this is
+    asserted rather than assumed: the number the failed close named may
+    already have been reissued, so closing it again would take out an
+    unrelated descriptor. `retried_closes` records exactly that -- a close of
+    the retired number with no reissue in between -- and stops watching the
+    moment the number is genuinely handed out again, so ordinary recycling
+    cannot forge an observation.
+    """
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+    handle.release()                          # contained; one close attempt
+    assert handle._fd is None
+    assert len(fault.close_attempts) == 1
+
+    handle.release()                          # inert: no unlock, no close
+    assert fault.retried_closes == []
+    assert len(fault.close_attempts) == 1
+    assert handle._fd is None
+
+
+def test_an_exception_in_the_body_survives_a_lock_close_failure(tmp_path,
+                                                                monkeypatch):
+    """Precedence. The body's own failure is what the caller must see; a
+    cleanup failure that replaced it would hide the real diagnosis behind an
+    errno from the lock file."""
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    with pytest.raises(_LockBodyFailure):
+        with retention.single_instance_lock(lock_path) as acquired:
+            assert acquired is True
+            raise _LockBodyFailure("the body's own failure")
+    assert len(fault.close_attempts) == 1
+
+
+def test_an_unlock_failure_followed_by_a_close_failure_stays_contained(
+        tmp_path, monkeypatch):
+    """Both halves of the cleanup fail at once.
+
+    The unlock is modelled rather than required, so this runs the same on
+    every platform: the existing `except OSError: pass` swallows the unlock,
+    and the correction must then also contain the close that the `finally`
+    performs -- while still clearing `_fd` exactly once.
+    """
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+
+    unlock = _FailingUnlockModule()
+    with mock.patch.dict(sys.modules, {"msvcrt": unlock}), \
+            mock.patch.object(retention.os, "name", "nt"):
+        handle.release()                      # must not raise
+    assert unlock.calls, "the modelled unlock branch never ran"
+    assert handle._fd is None
+    assert len(fault.close_attempts) == 1
+    assert fault.retried_closes == []
+
+
+# -- acquire: a contended lock plus a failing close ---------------------------
+
+
+def test_a_lock_acquisition_failure_with_a_failing_close_returns_false(
+        tmp_path, monkeypatch):
+    """Genuine contention, not a patched locking primitive: a second
+    descriptor on the same file fails `msvcrt.locking` and `fcntl.flock`
+    alike, so the control needs no platform branch and no second process."""
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path, arm=False)
+    with retention.single_instance_lock(lock_path) as held:
+        assert held is True
+        fault.arm()                           # the CONTENDER's descriptor
+        contender = retention._LockHandle(lock_path)
+        assert contender.acquire() is False
+        assert contender._fd is None
+        assert len(fault.close_attempts) == 1
+        assert fault.retried_closes == []
+    assert len(fault.close_attempts) == 1, "the holder's close was injected"
+
+
+def test_a_contended_cli_pass_with_a_failing_close_reports_lock_unavailable(
+        tmp_path, monkeypatch, capsys):
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=3)
+    fault = _LockCloseFault(monkeypatch, lock_path, arm=False)
+    with retention.single_instance_lock(lock_path) as held:
+        assert held is True
+        fault.arm()
+        status = retention.main([str(data), "--lock", str(lock_path)])
+        printed = capsys.readouterr()
+    assert status == 1
+    assert printed.out.strip() == (
+        "retention refused=%s"
+        % retention.RetentionFailureReason.LOCK_UNAVAILABLE.value)
+    assert printed.err == ""
+    assert len(fault.close_attempts) == 1
+    assert fault.retried_closes == []
+    for leak in ("Traceback", "OSError", "Errno", "EIO", "injected",
+                 "descriptor", "fd=", str(tmp_path), str(lock_path),
+                 lock_path.name):
+        assert leak not in printed.out, leak
+        assert leak not in printed.err, leak
+
+
+# -- the operator outcome must be exactly what it would have been -------------
+
+
+def test_a_successful_plan_through_main_survives_a_lock_close_failure(
+        tmp_path, monkeypatch, capsys):
+    """`main` prints the report and chooses its exit status BEFORE `__exit__`
+    releases the lock, so a close failure arrives too late to change anything
+    except by destroying it.
+
+    The unfaulted invocation supplies the reference line, and the faulted one
+    must reproduce it BYTE FOR BYTE. That is a stronger statement than any
+    list of forbidden substrings -- nothing whatsoever is added, so no path,
+    no errno text and no descriptor number can be present -- and the explicit
+    leak list is kept alongside it to name what is being ruled out.
+    """
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=3)
+    fault = _LockCloseFault(monkeypatch, lock_path, arm=False)
+
+    reference_status = retention.main([str(data), "--lock", str(lock_path)])
+    reference = capsys.readouterr()
+    assert reference_status == 0
+    assert "refused=none" in reference.out
+    assert fault.close_attempts == []
+
+    fault.arm()
+    status = retention.main([str(data), "--lock", str(lock_path)])
+    printed = capsys.readouterr()
+
+    assert status == 0
+    assert printed.out == reference.out
+    assert printed.err == ""
+    assert len(fault.close_attempts) == 1
+    for leak in ("Traceback", "OSError", "Errno", "EIO", "injected",
+                 "descriptor", "fd=", str(tmp_path), str(lock_path),
+                 lock_path.name):
+        assert leak not in printed.out, leak
+        assert leak not in printed.err, leak
+
+
+def test_a_refused_pass_through_main_keeps_its_reason_and_exit_status(
+        tmp_path, monkeypatch, capsys):
+    """A controlled refusal is a diagnosis. A close failure that replaced it
+    would tell the operator nothing about the target at all."""
+    data, lock_path = _lock_layout(tmp_path)
+    absent = data / "absent"
+    fault = _LockCloseFault(monkeypatch, lock_path, arm=False)
+
+    reference_status = retention.main([str(absent), "--lock", str(lock_path)])
+    reference = capsys.readouterr()
+    assert reference_status == 1
+    assert (retention.RetentionFailureReason.IDENTITY_UNAVAILABLE.value
+            in reference.out)
+
+    fault.arm()
+    status = retention.main([str(absent), "--lock", str(lock_path)])
+    printed = capsys.readouterr()
+
+    assert status == 1
+    assert printed.out == reference.out
+    assert printed.err == ""
+    assert len(fault.close_attempts) == 1
+    for leak in ("Traceback", "OSError", "Errno", "EIO", "injected",
+                 str(tmp_path), str(lock_path)):
+        assert leak not in printed.out, leak
+        assert leak not in printed.err, leak
+
+
+def test_a_quarantine_pass_that_moved_artifacts_keeps_its_accounting(
+        tmp_path, monkeypatch):
+    """The worst arrival time for the escaping close: after the renames.
+
+    Files are already in quarantine when the lock is released, so an escaping
+    OSError costs the caller the entire aggregate -- how many moved, how many
+    were skipped, how many are evidence without a record -- for a failure that
+    changed none of it. The counts are checked against the directory and the
+    journal, not merely against themselves.
+    """
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=5)
+    fault = _LockCloseFault(monkeypatch, lock_path)
+
+    with retention.single_instance_lock(lock_path) as acquired:
+        assert acquired is True
+        report = _run(data)
+        line = retention.format_report(report)
+
+    assert report.refused is None
+    assert report.halted is False
+    assert report.moved == 4
+    assert report.moved == report.planned_actions_count
+    assert report.skipped == 0
+    assert report.unmanifested == 0
+    assert len(fault.close_attempts) == 1
+
+    pass_directory = _quarantine_root(data) / "p20260101T000000"
+    arrived = [path for path in pass_directory.iterdir()
+               if path.name != retention.MANIFEST_NAME]
+    assert len(arrived) == report.moved
+    manifest = pass_directory / retention.MANIFEST_NAME
+    records = [json.loads(entry) for entry
+               in manifest.read_text(encoding="utf-8").splitlines() if entry]
+    assert len(records) == report.moved
+    assert "moved=4" in line and "halted=False" in line
+
+
+# -- nothing about the ordinary lifecycle may change --------------------------
+
+
+def test_the_lock_survives_acquisition_contention_release_and_reacquisition(
+        tmp_path):
+    """No injection at all. The correction touches two cleanup paths and must
+    leave the behaviour every other control rests on exactly as it was."""
+    lock_path = _lock_only(tmp_path)
+    with retention.single_instance_lock(lock_path) as first:
+        assert first is True
+        with retention.single_instance_lock(lock_path) as second:
+            assert second is False
+    with retention.single_instance_lock(lock_path) as again:
+        assert again is True
+
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is True
+    handle.release()
+    assert handle._fd is None
+    handle.release()                          # already inert today
+    assert handle._fd is None
+
+
+def test_the_lock_lifecycle_is_unchanged_when_the_close_succeeds(tmp_path,
+                                                                 monkeypatch):
+    """The same lifecycle with the injector installed but not failing, so the
+    close counts are observable: one adopted descriptor per armed acquisition,
+    one close attempt each, and contention still answers False."""
+    lock_path = _lock_only(tmp_path)
+    fault = _LockCloseFault(monkeypatch, lock_path, fail=False)
+    with retention.single_instance_lock(lock_path) as first:
+        assert first is True
+        with retention.single_instance_lock(lock_path) as second:
+            assert second is False
+    assert len(fault.close_attempts) == 1
+    assert len(fault.lock_opens) == 2         # holder and contender
+
+    fault.arm()
+    with retention.single_instance_lock(lock_path) as reacquired:
+        assert reacquired is True
+    assert len(fault.close_attempts) == 2
+    assert fault.target_fd is None
+
+
+def test_a_lock_open_failure_leaves_no_descriptor_reference(tmp_path,
+                                                            monkeypatch):
+    """The third cleanup path. It is already correct, and is pinned here so
+    "always clear `_fd`" is stated for every exit `acquire` and `release`
+    have between them."""
+    lock_path = _lock_only(tmp_path)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(retention.os, "open", _denied)
+    handle = retention._LockHandle(lock_path)
+    assert handle.acquire() is False
+    assert handle._fd is None
