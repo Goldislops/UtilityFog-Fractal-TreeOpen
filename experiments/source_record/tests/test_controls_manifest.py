@@ -1,16 +1,21 @@
 """The explicit control manifest and the meta-controls that guard the suite.
 
-Every control authored for this phase is named here. Adding or removing a
-control requires an intentional edit to ``AUTHORED_CONTROLS``: a numeric test
-count is never the acceptance claim, and a control that quietly disappears
-fails ``SR-M-002``.
+Every control authored for this phase is named in ``AUTHORED_CONTROLS``. Every
+retained refusal token is bound to at least one real control in
+``TOKEN_CONTROLS``, and ``SR-M-014`` verifies mechanically that each such
+control actually asserts that exact token — not an exit class, not a textual
+mention. A token with no such control is removed from the contract rather than
+carried as an untested claim; ``CONTRACT.md`` section 8b records every removal
+and its reason.
 
 ``DEFERRED_CONTROLS`` names work that is **not present** and must never be
-counted as present or silently substituted.
+counted as present or silently substituted. Deferral is asserted through the
+contract and this manifest only. Nothing here claims a file is absent from the
+repository: a sparse checkout materializes part of the tree, so on-disk absence
+inside this worktree proves nothing.
 
-Neutrality is enforced by **approved manifests** — the path manifest and the
-anchored synthetic locator pattern — never by a list of prohibited names. No
-proscribed-name list is created, stored, or read here.
+Neutrality is enforced by **approved manifests** — the exact path allow-list and
+the anchored synthetic locator pattern — never by a list of prohibited names.
 
 Control ids SR-M-NNN are declared below alongside every other control.
 """
@@ -24,7 +29,7 @@ import re
 from experiments.source_record.tests import _support as sup
 
 # --------------------------------------------------------------------------
-# The manifest.
+# The control manifest.
 # --------------------------------------------------------------------------
 
 AUTHORED_CONTROLS = {
@@ -38,35 +43,133 @@ AUTHORED_CONTROLS = {
         "SR-S-031", "SR-S-032", "SR-S-033", "SR-S-034", "SR-S-035",
         "SR-S-036", "SR-S-037", "SR-S-038", "SR-S-039", "SR-S-040",
         "SR-S-041", "SR-S-042", "SR-S-043", "SR-S-044", "SR-S-045",
-        "SR-S-046", "SR-S-047", "SR-S-048", "SR-S-049",
+        "SR-S-046", "SR-S-047", "SR-S-048", "SR-S-049", "SR-S-050",
+        "SR-S-051",
     ),
     "test_records.py": (
         "SR-R-001", "SR-R-002", "SR-R-003", "SR-R-004", "SR-R-005",
         "SR-R-006", "SR-R-007", "SR-R-008", "SR-R-009", "SR-R-010",
         "SR-R-011", "SR-R-012", "SR-R-013", "SR-R-014", "SR-R-015",
         "SR-R-016", "SR-R-017", "SR-R-018", "SR-R-019", "SR-R-020",
-        "SR-R-021", "SR-R-022", "SR-R-023", "SR-R-024",
+        "SR-R-021", "SR-R-022", "SR-R-023", "SR-R-024", "SR-R-025",
     ),
     "test_validate_cli.py": (
         "SR-C-001", "SR-C-002", "SR-C-003", "SR-C-004", "SR-C-005",
         "SR-C-006", "SR-C-007", "SR-C-008", "SR-C-009", "SR-C-010",
         "SR-C-011", "SR-C-012", "SR-C-013", "SR-C-014", "SR-C-015",
         "SR-C-016", "SR-C-017", "SR-C-018", "SR-C-019", "SR-C-020",
-        "SR-C-021", "SR-C-022",
+        "SR-C-021", "SR-C-022", "SR-C-023", "SR-C-024", "SR-C-025",
+        "SR-C-026", "SR-C-027",
     ),
     "test_import_quarantine.py": (
         "SR-Q-001", "SR-Q-002", "SR-Q-003", "SR-Q-004", "SR-Q-005",
-        "SR-Q-006", "SR-Q-007", "SR-Q-008",
+        "SR-Q-006", "SR-Q-007", "SR-Q-008", "SR-Q-009", "SR-Q-010",
     ),
     "test_controls_manifest.py": (
         "SR-M-001", "SR-M-002", "SR-M-003", "SR-M-004", "SR-M-005",
         "SR-M-006", "SR-M-007", "SR-M-008", "SR-M-009", "SR-M-010",
-        "SR-M-011", "SR-M-012", "SR-M-013",
+        "SR-M-011", "SR-M-012", "SR-M-013", "SR-M-014", "SR-M-015",
+        "SR-M-016", "SR-M-017", "SR-M-018", "SR-M-019",
+    ),
+}
+
+#: Every retained refusal token, bound to the controls that construct its
+#: condition and assert it exactly. SR-M-013 checks coverage in both
+#: directions; SR-M-014 checks that each named control really does assert it.
+TOKEN_CONTROLS = {
+    # path, exit 4
+    "path-missing": ("SR-C-004",),
+    "path-not-directory": ("SR-C-004",),
+    "records-root-missing-directory": ("SR-R-007",),
+    "records-root-unexpected-entry": ("SR-R-006",),
+    "record-directory-unexpected-entry": ("SR-R-008", "SR-C-026"),
+    # resource, exit 5
+    "record-count-ceiling": ("SR-C-007",),
+    "record-bytes-ceiling": ("SR-C-023",),
+    "total-bytes-ceiling": ("SR-C-024",),
+    # parse, schema and record, exit 2
+    "json-malformed": ("SR-C-006",),
+    "json-duplicate-key": ("SR-C-006",),
+    "root-not-object": ("SR-S-011",),
+    "key-not-exact-str": ("SR-S-008",),
+    "undeclared-key": ("SR-S-005", "SR-S-006", "SR-S-036"),
+    "missing-key": ("SR-S-004", "SR-S-007"),
+    "schema-id-invalid": ("SR-S-025",),
+    "record-id-malformed": ("SR-S-022",),
+    "record-id-filename-mismatch": ("SR-R-009",),
+    "record-id-directory-mismatch": ("SR-R-010",),
+    "record-id-register-mismatch": ("SR-S-023",),
+    "record-id-type-mismatch": ("SR-S-024",),
+    "type-not-exact": (
+        "SR-S-011", "SR-S-012", "SR-S-013", "SR-S-014", "SR-S-015",
+        "SR-S-016", "SR-S-017", "SR-S-050",
+    ),
+    "float-refused": ("SR-S-018",),
+    "int-out-of-range": ("SR-S-019",),
+    "enum-value-invalid": ("SR-S-026",),
+    "digits-not-ascii": ("SR-S-020",),
+    "date-invalid": ("SR-S-021",),
+    "string-empty": ("SR-S-033",),
+    "string-length-invalid": ("SR-S-033",),
+    "string-not-valid-unicode": ("SR-S-034",),
+    "string-contains-record-id": ("SR-S-035",),
+    "list-length-invalid": ("SR-S-043", "SR-S-051"),
+    "list-duplicate-item": ("SR-S-029", "SR-S-042"),
+    "locator-value-not-synthetic": ("SR-S-027",),
+    "null-not-permitted": ("SR-S-032",),
+    "unknown-token-not-permitted": ("SR-S-032",),
+    "attribution-author-mismatch": ("SR-S-031",),
+    "derived-from-required": ("SR-S-028",),
+    "derived-from-forbidden": ("SR-S-028",),
+    "instrument-context-required": ("SR-S-030",),
+    "instrument-context-forbidden": ("SR-S-030",),
+    "reference-not-found": ("SR-R-011",),
+    "reference-wrong-register": ("SR-S-029", "SR-S-038"),
+    "reference-wrong-type": ("SR-S-029", "SR-S-039"),
+    "reference-self": ("SR-S-040",),
+    "reference-cycle": ("SR-R-012",),
+    "bridge-side-register-invalid": ("SR-S-037",),
+    "bridge-endpoint-not-source": ("SR-S-037",),
+    "bridge-duplicate-pair": ("SR-R-013",),
+    "digest-format-invalid": ("SR-S-050",),
+    "supersedes-target-missing": ("SR-R-025",),
+    "supersedes-register-mismatch": ("SR-S-041",),
+    "supersedes-type-mismatch": ("SR-S-041",),
+    "supersedes-digest-mismatch": ("SR-R-014", "SR-R-015"),
+    "supersedes-fork-refused": ("SR-R-017",),
+    "supersedes-self": ("SR-S-040",),
+    "supersedes-cycle": ("SR-R-018",),
+    "verification-state-invalid": ("SR-S-026",),
+    "verification-evidence-not-null": ("SR-S-026",),
+    "resolution-state-invalid": ("SR-S-026",),
+}
+
+#: Tokens deliberately removed from v1. CONTRACT.md section 8b carries the
+#: reasons; SR-M-019 asserts they are gone from the vocabulary.
+REMOVED_TOKENS = {
+    "record-id-duplicate": (
+        "unreachable: I12 derives uniqueness from the filename and directory "
+        "rules, so no duplicate full record id can be constructed"
+    ),
+    "attribution-class-mismatch": (
+        "redundant: every per-class rule already has its own exact token"
+    ),
+    "directory-set-incomplete": (
+        "redundant with records-root-missing-directory, which names the same "
+        "condition precisely"
+    ),
+    "path-symlink-refused": (
+        "requirement retained as I02; the condition cannot be constructed "
+        "deterministically on the authoring platform, so no v1 token claims it"
+    ),
+    "path-binding-failed": (
+        "requirement retained as I06; a binding-primitive failure is a "
+        "platform-capability event, not an input, so no v1 token claims it"
     ),
 }
 
 #: Work deliberately absent. Never claimed as present; never substituted by a
-#: broader scan.
+#: broader scan; never asserted through a filesystem absence check.
 DEFERRED_CONTROLS = {
     "root-reverse-import-guard": (
         "tests/test_source_record_reverse_quarantine.py is NOT authored. "
@@ -76,9 +179,21 @@ DEFERRED_CONTROLS = {
         "acceptance requirement, and must not be replaced by a broad "
         "repository scan. See CONTRACT.md section 3c."
     ),
+    "symlink-path-refusal": (
+        "Constructing a symbolic link or reparse point needs privilege that "
+        "may be absent, so any control would be environment-conditional. The "
+        "requirement is retained as I02; the token is removed. It must not be "
+        "replaced by a conditional or skipped control."
+    ),
+    "binding-failure-refusal": (
+        "A binding-primitive failure is a platform-capability event, not an "
+        "input, and cannot be constructed deterministically. The requirement "
+        "is retained as I06; the token is removed. It must not be replaced by "
+        "a conditional or skipped control."
+    ),
 }
 
-#: Files this laboratory is permitted to contain in this phase. An allow-list.
+#: Files this laboratory contains in this phase. An exact allow-list.
 APPROVED_LABORATORY_PATHS = frozenset(
     {
         "CONTRACT.md",
@@ -90,6 +205,23 @@ APPROVED_LABORATORY_PATHS = frozenset(
         "tests/test_import_quarantine.py",
         "tests/test_controls_manifest.py",
     }
+)
+
+#: Files a later implementation phase may add, by EXACT name only. Prefix
+#: matching would admit schema.py.extra, README.md.backup and the like.
+FUTURE_EXACT_FILES = frozenset(
+    {
+        "__init__.py",
+        "schema.py",
+        "validate.py",
+        "README.md",
+        ".gitattributes",
+    }
+)
+
+#: Record files, handled separately: exactly three directories, direct JSON.
+FUTURE_RECORD_PATTERN = re.compile(
+    r"\Arecords/(register-a|register-b|bridge)/[^/]+\.json\Z"
 )
 
 CONTROL_ID_PATTERN = re.compile(r"\Atest_sr_([a-z])_([0-9]{3})_")
@@ -118,6 +250,55 @@ def suite_modules() -> dict[str, pathlib.Path]:
         for path in sup.lab_test_modules()
         if path.name.startswith("test_")
     }
+
+
+def exact_token_assertions(function_node) -> set[str]:
+    """Tokens a control asserts EXACTLY.
+
+    Counted only when a string literal is either compared with ``==`` or passed
+    as a literal argument to ``assert_refused``. Membership tests such as
+    ``token in (a, b)`` are deliberately not counted: asserting one of several
+    tokens is not asserting the exact token.
+    """
+    found: set[str] = set()
+    for node in ast.walk(function_node):
+        if isinstance(node, ast.Compare):
+            if not all(isinstance(op, ast.Eq) for op in node.ops):
+                continue
+            for operand in [node.left, *node.comparators]:
+                if isinstance(operand, ast.Constant) and isinstance(
+                    operand.value, str
+                ):
+                    found.add(operand.value)
+        elif isinstance(node, ast.Call):
+            target = node.func
+            name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else getattr(target, "id", None)
+            )
+            if name != "assert_refused":
+                continue
+            for argument in node.args:
+                if isinstance(argument, ast.Constant) and isinstance(
+                    argument.value, str
+                ):
+                    found.add(argument.value)
+    return found
+
+
+def control_functions() -> dict[str, ast.AST]:
+    """Every control in the suite, keyed by control id."""
+    found: dict[str, ast.AST] = {}
+    for path in sorted(suite_modules().values()):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            control_id = control_id_of(node.name)
+            if control_id is not None:
+                found[control_id] = node
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -227,21 +408,32 @@ def test_sr_m_008_the_canary_markers_are_non_empty_unique_and_distinctive():
 # --------------------------------------------------------------------------
 
 
-def test_sr_m_009_the_deferred_root_reverse_guard_is_declared_and_absent():
-    assert "root-reverse-import-guard" in DEFERRED_CONTROLS
-    reason = DEFERRED_CONTROLS["root-reverse-import-guard"]
-    assert "deferred" in reason
-    assert "must not be replaced" in reason
+def test_sr_m_009_every_deferred_control_is_declared_labelled_and_uncounted():
+    """Deferral is asserted through the contract and the manifest only.
+
+    No filesystem absence check appears here. This worktree is a sparse
+    checkout, so on-disk absence proves nothing about the repository, and a
+    control that claimed otherwise would be asserting a fact it cannot know.
+    """
+    expected = {
+        "root-reverse-import-guard",
+        "symlink-path-refusal",
+        "binding-failure-refusal",
+    }
+    assert set(DEFERRED_CONTROLS) == expected
+    for name, reason in sorted(DEFERRED_CONTROLS.items()):
+        assert reason.strip() == reason and reason
+        assert "deferred" in reason or "removed" in reason
+        assert "must not be replaced" in reason
     declared = {
         control_id
-        for declared in AUTHORED_CONTROLS.values()
-        for control_id in declared
+        for controls in AUTHORED_CONTROLS.values()
+        for control_id in controls
     }
-    assert not any("REVERSE" in control_id for control_id in declared)
-    guard = sup.REPO_ROOT / "tests" / "test_source_record_reverse_quarantine.py"
-    assert not guard.exists(), (
-        "the root reverse guard is deferred and must not be authored here"
-    )
+    for name in expected:
+        assert name not in declared
+    # A deferred control never appears as a token binding.
+    assert not (set(DEFERRED_CONTROLS) & set(TOKEN_CONTROLS))
 
 
 def test_sr_m_010_the_laboratory_contains_exactly_the_approved_paths():
@@ -251,24 +443,24 @@ def test_sr_m_010_the_laboratory_contains_exactly_the_approved_paths():
         if path.is_file() and "__pycache__" not in path.parts
     }
     assert present, "the path scan examined nothing"
-    unapproved = sorted(present - APPROVED_LABORATORY_PATHS - _future_paths(present))
+    allowed = APPROVED_LABORATORY_PATHS | _future_paths(present)
+    unapproved = sorted(present - allowed)
     assert not unapproved, f"unapproved laboratory path present: {unapproved}"
     missing = sorted(APPROVED_LABORATORY_PATHS - present)
     assert not missing, f"approved path absent: {missing}"
 
 
 def _future_paths(present: set[str]) -> set[str]:
-    """Paths a later implementation phase is expected to add.
+    """Paths a later implementation phase may add.
 
-    Kept separate so this phase's approved set stays exact while a later
-    implementation does not have to edit this control to land its own files.
+    Exact equality for files, and a bound pattern for record files. Prefix
+    matching would admit ``schema.py.extra``, ``README.md.backup`` and
+    ``.gitattributes.unapproved``.
     """
-    allowed_prefixes = ("records/", "__init__.py", "schema.py", "validate.py",
-                        "README.md", ".gitattributes")
     return {
         path
         for path in present
-        if path.startswith(allowed_prefixes)
+        if path in FUTURE_EXACT_FILES or FUTURE_RECORD_PATTERN.match(path)
     }
 
 
@@ -286,14 +478,12 @@ def test_sr_m_011_every_builder_emits_only_anchored_synthetic_locator_values():
 
 
 def test_sr_m_012_the_meta_controls_detect_the_removal_of_a_control():
-    """Strip one control from an in-memory copy and prove the check fails."""
+    """Rename one control in an in-memory copy and prove the check notices."""
     path = suite_modules()["test_schema.py"]
     source = path.read_text(encoding="utf-8")
     present = control_ids_in_source(source)
     assert "SR-S-001" in present
 
-    # Rename rather than delete: the copy must stay parseable, so the control
-    # is removed from the *manifest surface* without orphaning its body.
     stripped = source.replace(
         "def test_sr_s_001_a_minimal_valid_record_of_every_type_is_accepted",
         "def _control_removed_for_this_probe",
@@ -305,14 +495,131 @@ def test_sr_m_012_the_meta_controls_detect_the_removal_of_a_control():
     assert sorted(declared - reduced) == ["SR-S-001"]
 
 
-def test_sr_m_013_every_refusal_token_is_referenced_by_at_least_one_control():
-    modules = suite_modules()
-    assert modules, "the token reachability scan examined nothing"
-    corpus = "".join(
-        path.read_text(encoding="utf-8") for path in sorted(modules.values())
+# --------------------------------------------------------------------------
+# Token-to-control manifest
+# --------------------------------------------------------------------------
+
+
+def test_sr_m_013_every_retained_token_is_bound_to_a_control_and_the_reverse():
+    assert set(TOKEN_CONTROLS) == set(sup.REFUSAL_TOKENS), (
+        sorted(set(TOKEN_CONTROLS) ^ set(sup.REFUSAL_TOKENS))
     )
-    corpus += sup.TESTS_DIR.joinpath("_support.py").read_text(encoding="utf-8")
-    unreferenced = sorted(
-        token for token in sup.REFUSAL_TOKENS if token not in corpus
+    declared = {
+        control_id
+        for controls in AUTHORED_CONTROLS.values()
+        for control_id in controls
+    }
+    for token, controls in sorted(TOKEN_CONTROLS.items()):
+        assert controls, f"{token}: bound to no control"
+        assert len(controls) == len(set(controls)), token
+        for control_id in controls:
+            assert control_id in declared, (token, control_id)
+
+
+def test_sr_m_014_every_bound_control_asserts_its_exact_token():
+    """Each binding must be real: the control asserts that exact token.
+
+    An exit-class assertion or a textual mention is not enough; the token must
+    appear in an equality comparison or as a literal ``assert_refused``
+    argument. Membership tests are excluded by ``exact_token_assertions``.
+    """
+    functions = control_functions()
+    assert functions, "the token-assertion scan examined nothing"
+    for token, controls in sorted(TOKEN_CONTROLS.items()):
+        for control_id in controls:
+            node = functions.get(control_id)
+            assert node is not None, (token, control_id)
+            asserted = exact_token_assertions(node)
+            assert token in asserted, (
+                f"{control_id} is bound to {token!r} but does not assert it "
+                f"exactly; it asserts {sorted(asserted)}"
+            )
+
+
+def test_sr_m_015_no_control_asserts_a_removed_token_and_every_refusal_is_retained():
+    """Two directions, both narrow enough to be exact.
+
+    No control may assert a token this phase removed, and every literal token
+    passed to ``assert_refused`` must be a member of the retained vocabulary.
+    Both are decidable from the source; neither guesses at what a string means.
+    """
+    functions = control_functions()
+    assert functions, "the token-assertion scan examined nothing"
+    retained = set(sup.REFUSAL_TOKENS)
+    removed = set(REMOVED_TOKENS)
+    checked = 0
+    for control_id, node in sorted(functions.items()):
+        for asserted in exact_token_assertions(node):
+            assert asserted not in removed, (
+                f"{control_id} asserts removed token {asserted!r}"
+            )
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            target = inner.func
+            name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else getattr(target, "id", None)
+            )
+            if name != "assert_refused" or len(inner.args) < 3:
+                continue
+            token_argument = inner.args[2]
+            if isinstance(token_argument, ast.Constant) and isinstance(
+                token_argument.value, str
+            ):
+                checked += 1
+                assert token_argument.value in retained, (
+                    control_id,
+                    token_argument.value,
+                )
+    assert checked > 0, "no assert_refused token argument was examined"
+
+
+def test_sr_m_016_every_removed_token_is_gone_from_the_vocabulary_with_a_reason():
+    for token, reason in sorted(REMOVED_TOKENS.items()):
+        assert token not in sup.REFUSAL_TOKENS, token
+        assert token not in TOKEN_CONTROLS, token
+        assert reason.strip() == reason and len(reason) > 20
+
+
+# --------------------------------------------------------------------------
+# Frozen content of future files
+# --------------------------------------------------------------------------
+
+
+def test_sr_m_017_the_contract_carries_the_epistemic_limit_verbatim():
+    text = sup.LAB_DIR.joinpath("CONTRACT.md").read_text(encoding="utf-8")
+    assert sup.EPISTEMIC_LIMIT_TEXT in text, (
+        "CONTRACT.md section 2 no longer matches the frozen epistemic limit"
     )
-    assert not unreferenced, f"refusal tokens no control mentions: {unreferenced}"
+
+
+def test_sr_m_018_the_readme_and_gitattributes_carry_their_frozen_content():
+    readme = sup.require_future_file(sup.README_PATH, "README.md")
+    assert sup.EPISTEMIC_LIMIT_TEXT in readme, (
+        "README.md must reproduce the epistemic limit verbatim"
+    )
+    attributes = sup.require_future_file(
+        sup.GITATTRIBUTES_PATH, ".gitattributes"
+    )
+    assert attributes == sup.GITATTRIBUTES_CONTENT, repr(attributes)
+
+
+def test_sr_m_019_the_source_record_workflow_meets_its_frozen_contract():
+    """Addresses one exact path. It never scans .github or any wider surface."""
+    text = sup.require_future_file(
+        sup.WORKFLOW_PATH, ".github/workflows/source-record.yml"
+    )
+    for fragment in sup.WORKFLOW_REQUIRED_FRAGMENTS:
+        assert fragment in text, fragment
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- uses:") and "uses:" not in stripped:
+            continue
+        reference = stripped.split("uses:", 1)[1].strip()
+        assert reference.startswith(sup.WORKFLOW_ALLOWED_ACTION_PREFIXES), (
+            reference
+        )
+    assert "pull_request:" in text
+    assert "paths:" in text

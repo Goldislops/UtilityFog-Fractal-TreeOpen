@@ -398,26 +398,52 @@ def test_sr_r_017_two_successors_of_one_predecessor_are_refused(tmp_path):
     assert excinfo.value.token == "supersedes-fork-refused"
 
 
-def test_sr_r_018_a_supersession_cycle_is_refused_on_the_supersession_graph(
+def test_sr_r_018_a_supersession_cycle_is_refused_before_digests_are_compared(
     tmp_path,
 ):
+    """A cycle must yield exactly ``supersedes-cycle``, never a digest token.
+
+    A digest covers a record canonical form, which includes that record own
+    ``supersedes`` block, so a supersession cycle can never be
+    digest-consistent: computing either digest would require the other. If
+    digest matching ran first it would fire first on every cyclic fixture and
+    ``supersedes-cycle`` would be unreachable, so an implementation carrying no
+    cycle detector at all would pass. CONTRACT.md section 9 therefore orders
+    acyclicity before digest matching, and this control asserts the exact token
+    that ordering makes reachable.
+    """
     validate = sup.require_validate()
     records = minimal_valid_set()
     left = sup.source_record("SR-A-SRC-0003", neutral_label="synthetic theta one")
     right = sup.source_record("SR-A-SRC-0004", neutral_label="synthetic theta two")
-    left["supersedes"] = {
-        "record_id": "SR-A-SRC-0004",
-        "content_digest": sup.digest_of(right),
-    }
-    right["supersedes"] = {
-        "record_id": "SR-A-SRC-0003",
-        "content_digest": sup.digest_of(left),
-    }
+    # Well-formed placeholder digests: the format is valid, so the refusal
+    # cannot be attributed to digest shape.
+    left["supersedes"] = {"record_id": "SR-A-SRC-0004", "content_digest": "a" * 64}
+    right["supersedes"] = {"record_id": "SR-A-SRC-0003", "content_digest": "b" * 64}
     records.extend([left, right])
     root = build_root(tmp_path, records)
     with pytest.raises(validate.RecordsInputError) as excinfo:
         validate.validate_records_root(root)
-    assert excinfo.value.token in ("supersedes-cycle", "supersedes-digest-mismatch")
+    assert excinfo.value.token == "supersedes-cycle"
+
+
+def test_sr_r_025_a_supersedes_target_that_does_not_exist_is_refused(tmp_path):
+    validate = sup.require_validate()
+    records = minimal_valid_set()
+    records.append(
+        sup.source_record(
+            "SR-A-SRC-0003",
+            neutral_label="synthetic iota",
+            supersedes={
+                "record_id": "SR-A-SRC-0099",
+                "content_digest": "c" * 64,
+            },
+        )
+    )
+    root = build_root(tmp_path, records)
+    with pytest.raises(validate.RecordsInputError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "supersedes-target-missing"
 
 
 def test_sr_r_019_the_same_local_ordinal_in_both_registers_stays_distinguishable(
@@ -436,23 +462,55 @@ def test_sr_r_019_the_same_local_ordinal_in_both_registers_stays_distinguishable
     assert len(b_ids) == len(set(b_ids))
 
 
-def test_sr_r_020_a_duplicate_record_id_across_directories_is_refused(tmp_path):
+def test_sr_r_020_record_id_uniqueness_is_a_derived_structural_guarantee(
+    tmp_path,
+):
+    """Uniqueness is derived, not refused, and no token claims otherwise.
+
+    I09 makes a filename equal its record id, so ids are unique within a
+    directory. I10 makes the directory agree with the id register segment, so
+    ids in different directories differ in that segment. A duplicate full
+    record id is therefore unreachable: there is nothing to refuse, and
+    CONTRACT.md section 8b removes the token rather than carry an untested
+    claim. This control asserts the guarantee and the absence of the token.
+    """
     validate = sup.require_validate()
-    root = build_root(tmp_path, minimal_valid_set())
-    stray = root / "bridge" / "SR-X-BRG-0001.json"
-    duplicate = json.loads(stray.read_text(encoding="utf-8"))
-    (root / "bridge" / "SR-X-BRG-0001.json").write_text(
-        json.dumps(duplicate, sort_keys=True), encoding="utf-8"
-    )
-    # A duplicate id can only arise across directories once directory/id
-    # agreement is enforced, so assert the guarantee that makes it impossible.
+    schema = sup.require_schema()
+
+    assert "record-id-duplicate" not in schema.REFUSAL_TOKENS
+    assert "record-id-duplicate" not in sup.REFUSAL_TOKENS
+
+    # The same four-digit ordinal in every register and every applicable type.
+    records = minimal_valid_set()
+    root = build_root(tmp_path, records)
     summary = validate.validate_records_root(root)
+
     every_id = [
         record_id
         for name in sup.REGISTER_DIR_NAMES
         for record_id in summary["registers"][name]["record_ids"]
     ]
     assert len(every_id) == len(set(every_id))
+
+    # The reason, asserted rather than assumed: within a directory the filename
+    # carries the id, and across directories the register segment differs.
+    for name in sup.REGISTER_DIR_NAMES:
+        directory = root / name
+        filenames = sorted(path.name for path in directory.glob("*.json"))
+        assert len(filenames) == len(set(filenames))
+        for filename in filenames:
+            assert filename.endswith(".json")
+    segments = {
+        record_id[3] for record_id in every_id
+    }
+    assert segments <= {"A", "B", "X"}
+    for name, expected_segment in (
+        ("register-a", "A"),
+        ("register-b", "B"),
+        ("bridge", "X"),
+    ):
+        for record_id in summary["registers"][name]["record_ids"]:
+            assert record_id[3] == expected_segment, record_id
 
 
 # --------------------------------------------------------------------------

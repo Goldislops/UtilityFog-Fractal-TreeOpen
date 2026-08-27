@@ -691,7 +691,24 @@ def test_sr_s_041_a_supersedes_block_of_the_wrong_shape_is_refused():
         ),
         "supersedes-type-mismatch",
     )
-    for bad_digest in ("0" * 63, "0" * 65, "G" * 64, "0" * 64 + " ", ""):
+
+def test_sr_s_050_a_digest_of_the_wrong_format_is_refused_on_format_not_on_type():
+    """A 64-character non-hexadecimal string is an exact str of the wrong shape.
+
+    Refusing it with a type token would be dishonest, and refusing it with a
+    free-text length token would be wrong for the wrong-alphabet and
+    wrong-case cases. CONTRACT.md I83 gives it its own token.
+    """
+    schema = sup.require_schema()
+    for bad_digest in (
+        "0" * 63,
+        "0" * 65,
+        "G" * 64,
+        "A" * 64,
+        "0" * 63 + " ",
+        " " + "0" * 63,
+        "",
+    ):
         sup.assert_refused(
             schema,
             sup.source_record(
@@ -700,10 +717,41 @@ def test_sr_s_041_a_supersedes_block_of_the_wrong_shape_is_refused():
                     "content_digest": bad_digest,
                 }
             ),
-            "string-length-invalid"
-            if len(bad_digest) != 64
-            else "type-not-exact",
+            "digest-format-invalid",
         )
+    # A non-string digest is refused earlier, on exact type, not on format.
+    for wrong_type in (0, None, [], sup.HookedStr("0" * 64)):
+        sup.assert_refused(
+            schema,
+            sup.source_record(
+                supersedes={
+                    "record_id": "SR-A-SRC-0002",
+                    "content_digest": wrong_type,
+                }
+            ),
+            "type-not-exact",
+        )
+
+
+def test_sr_s_051_derived_from_accepts_its_upper_bound_and_refuses_one_beyond():
+    schema = sup.require_schema()
+    at_bound = [
+        f"SR-A-ASR-{index + 2:04d}" for index in range(sup.DERIVED_FROM_MAX)
+    ]
+    sup.assert_accepted(
+        schema,
+        sup.assertion_record(
+            attribution_class="derived-inference", derived_from=at_bound
+        ),
+    )
+    beyond = at_bound + [f"SR-A-ASR-{sup.DERIVED_FROM_MAX + 2:04d}"]
+    sup.assert_refused(
+        schema,
+        sup.assertion_record(
+            attribution_class="derived-inference", derived_from=beyond
+        ),
+        "list-length-invalid",
+    )
 
 
 def test_sr_s_042_a_duplicate_list_item_is_refused():

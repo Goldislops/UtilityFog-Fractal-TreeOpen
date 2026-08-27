@@ -81,6 +81,73 @@ def require_records_root() -> pathlib.Path:
     return RECORDS_ROOT
 
 
+def require_future_file(path: pathlib.Path, label: str) -> str:
+    """Return a future file's text, or fail the calling test clearly.
+
+    This asserts the file is *required*. It never asserts a file is absent: a
+    sparse checkout materializes only part of the tree, so on-disk absence
+    inside this worktree proves nothing about the repository.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        raise AssertionError(
+            f"{IMPLEMENTATION_ABSENT}: {label} is not present; "
+            f"implementation is not yet authorized"
+        ) from None
+
+
+# --------------------------------------------------------------------------
+# Frozen content of future files. CONTRACT.md sections 3d, I86, I87, I88.
+# --------------------------------------------------------------------------
+
+README_PATH = LAB_DIR / "README.md"
+GITATTRIBUTES_PATH = LAB_DIR / ".gitattributes"
+#: The one exact path outside the laboratory this suite may address. It is
+#: never globbed and `.github` is never scanned.
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "source-record.yml"
+
+GITATTRIBUTES_CONTENT = "* text eol=lf\n"
+
+EPISTEMIC_LIMIT_TEXT = """A record that is perfectly typed, correctly attributed, honestly marked
+`unverified` and **entirely fabricated passes every rule in this contract.**
+The schema constrains the *form* of an assertion and never the *truth* of its
+content.
+
+Six things remain human-gated and only human-gated:
+
+- whether a record was filed in the right register;
+- paraphrase-level content laundering, which is undetectable by construction;
+- whether a relationship is warranted;
+- whether a proposed vocabulary addition is evaluative;
+- whether fixture content is semantically neutral;
+- whether any output is being presented as more than it is.
+
+**A green suite is not coverage of those six.**"""
+
+#: Fragments the source-record workflow must carry. Text assertions, because
+#: the laboratory installs no YAML parser.
+WORKFLOW_REQUIRED_FRAGMENTS = (
+    "experiments/source_record/**",
+    ".github/workflows/source-record.yml",
+    "non-required",
+    "contents: read",
+    "python -m pytest --collect-only -q experiments/source_record/tests",
+    "python -m pytest -q -p no:cacheprovider experiments/source_record/tests",
+)
+
+#: Actions the workflow may reference. Anything else is a network surface.
+WORKFLOW_ALLOWED_ACTION_PREFIXES = (
+    "actions/checkout@",
+    "actions/setup-python@",
+)
+
+# Resource ceilings, mirrored from the contract so drift is detectable.
+MAX_RECORDS_PER_DIR = 256
+MAX_RECORD_BYTES = 65536
+MAX_TOTAL_BYTES = 4194304
+
+
 # --------------------------------------------------------------------------
 # Contract mirrors. The test side keeps its own copy so a drift between the
 # suite and the implementation is itself detectable.
@@ -160,15 +227,12 @@ LOCATOR_VALUE_PATTERN = r"\Asynthetic-[a-z0-9-]{1,64}\Z"
 DIGEST_PATTERN = r"\A[0-9a-f]{64}\Z"
 
 REFUSAL_TOKENS = (
-    # path and binding, exit 4
+    # path, exit 4
     "path-missing",
     "path-not-directory",
-    "path-symlink-refused",
-    "path-binding-failed",
     "records-root-missing-directory",
     "records-root-unexpected-entry",
     "record-directory-unexpected-entry",
-    "directory-set-incomplete",
     # resource, exit 5
     "record-count-ceiling",
     "record-bytes-ceiling",
@@ -186,7 +250,6 @@ REFUSAL_TOKENS = (
     "record-id-directory-mismatch",
     "record-id-register-mismatch",
     "record-id-type-mismatch",
-    "record-id-duplicate",
     "type-not-exact",
     "float-refused",
     "int-out-of-range",
@@ -202,7 +265,6 @@ REFUSAL_TOKENS = (
     "locator-value-not-synthetic",
     "null-not-permitted",
     "unknown-token-not-permitted",
-    "attribution-class-mismatch",
     "attribution-author-mismatch",
     "derived-from-required",
     "derived-from-forbidden",
@@ -216,6 +278,7 @@ REFUSAL_TOKENS = (
     "bridge-side-register-invalid",
     "bridge-endpoint-not-source",
     "bridge-duplicate-pair",
+    "digest-format-invalid",
     "supersedes-target-missing",
     "supersedes-register-mismatch",
     "supersedes-type-mismatch",

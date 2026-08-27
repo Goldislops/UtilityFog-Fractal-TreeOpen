@@ -250,6 +250,51 @@ def test_sr_q_007_discovery_is_deterministic_and_excludes_bytecode_caches():
         assert "__pycache__" not in path.parts
 
 
+def test_sr_q_009_no_production_module_contains_a_bare_assert_statement():
+    """``python -O`` strips ``assert``, taking every invariant it carried."""
+    modules = sup.lab_production_modules()
+    if not modules:
+        raise AssertionError(
+            f"{sup.IMPLEMENTATION_ABSENT}: no laboratory production module is "
+            f"present; implementation is not yet authorized"
+        )
+    for path in modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assert)
+        ]
+        assert not offenders, (path.name, offenders)
+
+
+def test_sr_q_010_no_production_module_swallows_an_exception_without_reraising():
+    """A bare or broad catch turns a refusal into a silent pass."""
+    modules = sup.lab_production_modules()
+    if not modules:
+        raise AssertionError(
+            f"{sup.IMPLEMENTATION_ABSENT}: no laboratory production module is "
+            f"present; implementation is not yet authorized"
+        )
+    for path in modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
+                continue
+            broad = node.type is None or (
+                isinstance(node.type, ast.Name)
+                and node.type.id in ("Exception", "BaseException")
+            )
+            if not broad:
+                continue
+            raises = any(
+                isinstance(inner, ast.Raise) for inner in ast.walk(node)
+            )
+            assert raises, (
+                f"{path.name}:{node.lineno} catches broadly without re-raising"
+            )
+
+
 def test_sr_q_008_the_suite_scan_examined_a_non_zero_expected_surface():
     modules = sup.lab_test_modules()
     names = {path.name for path in modules}

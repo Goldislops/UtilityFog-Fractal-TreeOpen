@@ -80,12 +80,23 @@ def test_sr_c_003_serialize_summary_is_byte_stable_across_repeated_calls(tmp_pat
 # --------------------------------------------------------------------------
 
 
-def test_sr_c_004_a_missing_or_non_directory_path_exits_four(tmp_path, capsys):
+def test_sr_c_004_a_missing_or_non_directory_path_exits_four_with_its_exact_token(
+    tmp_path, capsys
+):
     validate = sup.require_validate()
-    assert validate.main([str(tmp_path / "absent")]) == 4
+
+    absent = tmp_path / "absent"
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(absent)
+    assert excinfo.value.token == "path-missing"
+    assert validate.main([str(absent)]) == 4
     capsys.readouterr()
+
     plain = tmp_path / "a-file"
     plain.write_text("synthetic", encoding="utf-8")
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(plain)
+    assert excinfo.value.token == "path-not-directory"
     assert validate.main([str(plain)]) == 4
     capsys.readouterr()
 
@@ -99,14 +110,18 @@ def test_sr_c_005_a_record_refusal_exits_two(tmp_path, capsys):
     capsys.readouterr()
 
 
-def test_sr_c_006_malformed_json_and_a_duplicate_json_key_exit_two(
+def test_sr_c_006_malformed_json_and_a_duplicate_json_key_exit_two_with_exact_tokens(
     tmp_path, capsys
 ):
     validate = sup.require_validate()
+
     root = build_root(tmp_path, minimal_valid_set())
     (root / "register-a" / "SR-A-SRC-0001.json").write_text(
         "{not json", encoding="utf-8"
     )
+    with pytest.raises(validate.RecordsInputError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "json-malformed"
     assert validate.main([str(root)]) == 2
     capsys.readouterr()
 
@@ -115,35 +130,119 @@ def test_sr_c_006_malformed_json_and_a_duplicate_json_key_exit_two(
         '{"schema": "source-record-v1", "schema": "source-record-v1"}',
         encoding="utf-8",
     )
+    with pytest.raises(validate.RecordsInputError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "json-duplicate-key"
     assert validate.main([str(root)]) == 2
     capsys.readouterr()
 
 
-def test_sr_c_007_each_ceiling_class_exits_five(tmp_path, capsys):
+def test_sr_c_007_the_record_count_ceiling_exits_five_with_its_exact_token(
+    tmp_path, capsys
+):
     validate = sup.require_validate()
-
-    root = build_root(tmp_path / "count", [])
+    root = build_root(tmp_path, [])
     for index in range(validate.MAX_RECORDS_PER_DIR + 1):
         (root / "register-a" / f"SR-A-SRC-{index:04d}.json").write_text(
             "{}", encoding="utf-8"
         )
+    with pytest.raises(validate.RecordsCeilingError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "record-count-ceiling"
     assert validate.main([str(root)]) == 5
     capsys.readouterr()
 
-    root = build_root(tmp_path / "bytes", [])
+
+def test_sr_c_023_the_per_record_byte_ceiling_exits_five_with_its_exact_token(
+    tmp_path, capsys
+):
+    validate = sup.require_validate()
+    root = build_root(tmp_path, [])
     (root / "register-a" / "SR-A-SRC-0001.json").write_bytes(
         b"x" * (validate.MAX_RECORD_BYTES + 1)
     )
+    with pytest.raises(validate.RecordsCeilingError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "record-bytes-ceiling"
     assert validate.main([str(root)]) == 5
     capsys.readouterr()
 
-    root = build_root(tmp_path / "total", [])
-    chunk = b"x" * 64000
-    count = validate.MAX_TOTAL_BYTES // 64000 + 2
+
+def test_sr_c_024_the_total_byte_ceiling_exits_five_with_its_exact_token(
+    tmp_path, capsys
+):
+    validate = sup.require_validate()
+    root = build_root(tmp_path, [])
+    chunk_size = validate.MAX_RECORD_BYTES - 1536
+    chunk = b"x" * chunk_size
+    count = validate.MAX_TOTAL_BYTES // chunk_size + 2
+    assert count <= validate.MAX_RECORDS_PER_DIR, (
+        "the total-bytes fixture must not also breach the count ceiling"
+    )
     for index in range(count):
         (root / "register-a" / f"SR-A-SRC-{index:04d}.json").write_bytes(chunk)
+    with pytest.raises(validate.RecordsCeilingError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "total-bytes-ceiling"
     assert validate.main([str(root)]) == 5
     capsys.readouterr()
+
+
+def test_sr_c_025_the_resource_ceilings_are_exactly_the_frozen_constants():
+    validate = sup.require_validate()
+    assert validate.MAX_RECORDS_PER_DIR == 256
+    assert validate.MAX_RECORD_BYTES == 65536
+    assert validate.MAX_TOTAL_BYTES == 4194304
+    assert validate.MAX_RECORDS_PER_DIR == sup.MAX_RECORDS_PER_DIR
+    assert validate.MAX_RECORD_BYTES == sup.MAX_RECORD_BYTES
+    assert validate.MAX_TOTAL_BYTES == sup.MAX_TOTAL_BYTES
+    for value in (
+        validate.MAX_RECORDS_PER_DIR,
+        validate.MAX_RECORD_BYTES,
+        validate.MAX_TOTAL_BYTES,
+    ):
+        assert type(value) is int
+    assert tuple(validate.REGISTER_DIRS) == sup.REGISTER_DIR_NAMES
+
+
+def test_sr_c_026_capture_completes_all_three_directories_before_record_work(
+    tmp_path,
+):
+    """A defect in the third directory must surface even when the first is fine.
+
+    CONTRACT.md I01: all three directories are captured before any set-level
+    invariant is evaluated. A validator that short-circuited after register-a
+    would miss this.
+    """
+    validate = sup.require_validate()
+    root = build_root(tmp_path, minimal_valid_set())
+    (root / "bridge" / "not-a-record.txt").write_text("synthetic", encoding="utf-8")
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(root)
+    assert excinfo.value.token == "record-directory-unexpected-entry"
+
+
+def test_sr_c_027_directory_order_is_fixed_and_fail_fast_is_deterministic(
+    tmp_path,
+):
+    """The same two defects always yield the same single refusal.
+
+    Fail-fast means one refusal, and the fixed schema-declared order means the
+    same one every time, whichever directory the filesystem happens to enumerate
+    first.
+    """
+    validate = sup.require_validate()
+    tokens = []
+    for attempt in range(3):
+        records = minimal_valid_set()
+        records[0]["origin"] = "ingested"
+        records[1]["recorded_by_label"] = ""
+        root = build_root(tmp_path / f"attempt{attempt}", records)
+        with pytest.raises(validate.RecordsInputError) as excinfo:
+            validate.validate_records_root(root)
+        tokens.append(excinfo.value.token)
+    assert len(set(tokens)) == 1, tokens
+    assert tokens[0] in sup.REFUSAL_TOKENS
 
 
 def test_sr_c_008_an_argparse_usage_error_keeps_its_own_systemexit_two(capsys):

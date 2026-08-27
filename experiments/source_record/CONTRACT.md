@@ -93,6 +93,44 @@ explicitly bounded, non-excluded scan surface is defined**. It is:
 The laboratory-local forward quarantine control scans only
 `experiments/source_record/**` and must never scan the repository generally.
 
+**Two further controls are deferred, and the gap is named rather than hidden.**
+`path-symlink-refused` and `path-binding-failed` would require creating a
+symbolic link or reparse point, or forcing a binding-primitive failure. Neither
+can be constructed deterministically on the authoring platform, and an
+environment-conditional control is not a control. The **requirements** survive
+as I02 and I06; the **tokens** are removed from v1 (section 8b) and both
+controls are recorded in `DEFERRED_CONTROLS`.
+
+**Nothing here claims a file is absent from the repository.** A sparse checkout
+materializes only part of the tree, so on-disk absence inside this worktree
+proves nothing about the repository. Deferral is asserted through the contract
+and the manifest, never through a filesystem absence check.
+
+### 3d. Frozen content of future files
+
+These are contract, not suggestion. A control asserts each exactly and fails
+with `implementation-absent` while the file does not exist.
+
+**`experiments/source_record/.gitattributes`** — exactly:
+
+    * text eol=lf
+
+followed by a single line feed and nothing else.
+
+**`experiments/source_record/README.md`** — must contain the section 2
+epistemic limit verbatim, character for character, including the sentence that
+a perfectly formed and entirely fabricated record passes every rule, the six
+human-gated items, and the closing line that a green suite is not coverage of
+them.
+
+**`.github/workflows/source-record.yml`** — must satisfy I88: triggered on
+`pull_request` and on `push` to the default branch, both `paths`-filtered to
+`experiments/source_record/**` and to the workflow file itself; its job name
+carries the literal `non-required`; `permissions:` grants `contents: read`;
+it runs `python -m pytest --collect-only -q experiments/source_record/tests`
+and `python -m pytest -q -p no:cacheprovider experiments/source_record/tests`;
+and it references no network action beyond checkout and Python setup.
+
 ## 4. Physical organization
 
     experiments/source_record/
@@ -225,6 +263,13 @@ resolution path and no vocabulary for one.
                     superseding record
     content_digest  exact str matching \A[0-9a-f]{64}\Z
 
+`content_digest` is an exact builtin `str` whose **format** is separately
+constrained. A value of the wrong length, wrong alphabet, wrong case, or
+carrying surrounding whitespace is an exact string of the wrong shape, so it is
+refused with **`digest-format-invalid`** — never with a type token and never
+with a free-text length token. A non-`str` value is refused earlier, with
+`type-not-exact`.
+
 The lineage field is named **`supersedes`**. No field named `predecessor`
 exists. Cycle detection operates on the **supersession graph**; an
 increasing-ordinal shortcut is not a substitute and is not permitted.
@@ -307,7 +352,13 @@ only** and does not appear in `BRIDGE_TYPES`.
 - **I10** The containing directory agrees with the id register segment.
 - **I11** The `register` and `record_type` fields agree with the id register
   and type segments.
-- **I12** `record_id` is unique across all three directories.
+- **I12** Record-id uniqueness is a **derived structural guarantee, not an
+  enforced refusal.** I09 makes a filename equal its record id, so ids are
+  unique within a directory; I10 makes the directory agree with the id register
+  segment, so ids in different directories differ in that segment. A duplicate
+  full record id is therefore unreachable, and v1 declares **no refusal token**
+  for it. A control asserts the derived guarantee; none asserts a refusal,
+  because none can occur.
 
 **Type discipline**
 
@@ -491,14 +542,49 @@ only** and does not appear in `BRIDGE_TYPES`.
   control requires an intentional manifest edit. **A numeric test count is never
   the acceptance claim.**
 
+**Amendments added after the first audit.** These extend the set; existing
+numbers are deliberately left unchanged so an auditor can diff the two commits
+without renumbering noise.
+
+- **I83** `content_digest` format violations — wrong length, alphabet, case, or
+  surrounding whitespace on an exact `str` — are refused with
+  `digest-format-invalid`, never with a type or free-text length token.
+- **I84** The resource constants are exactly `MAX_RECORDS_PER_DIR = 256`,
+  `MAX_RECORD_BYTES = 65536`, `MAX_TOTAL_BYTES = 4194304`. They are frozen
+  values, not suggestions, and a control asserts each exactly.
+- **I85** `derived_from`, when present, holds 1..`DERIVED_FROM_MAX` items; the
+  upper boundary is accepted and one item beyond it is refused with
+  `list-length-invalid`.
+- **I86** `README.md` reproduces the section 2 epistemic limit **verbatim**,
+  character for character. It is the one place a reader meets the limit before
+  the code, so it may not be paraphrased.
+- **I87** `.gitattributes` content is exactly `* text eol=lf` followed by a
+  single line feed. The repository sets `core.autocrlf = true`, so without this
+  the laboratory's committed line endings depend on the checkout platform and
+  every canonical-form guarantee becomes platform-conditional.
+- **I88** `.github/workflows/source-record.yml` is **path-scoped** to
+  `experiments/source_record/**` plus its own file, names its job
+  **non-required**, grants `contents: read` only, runs the two authorized
+  pytest commands, and contacts no network beyond checkout and Python setup. A
+  control addresses that exact path and never scans `.github` or any wider
+  surface.
+- **I89** No laboratory production module contains a bare `assert` statement,
+  which `python -O` strips, removing every runtime invariant it carried.
+- **I90** No laboratory production module contains a bare `except:` or an
+  `except Exception:` that does not re-raise; a swallowed exception turns a
+  refusal into a silent pass.
+- **I91** The Phase 2 ordering of section 9 is observable: supersession
+  acyclicity is decided before digest matching, so `supersedes-cycle` is
+  reachable. A control asserts each of the two tokens exactly, on fixtures that
+  differ only in whether a cycle exists.
+
 ### 8a. Closed refusal-token vocabulary
 
 Every token the validator can emit is a member; every member is reachable.
 
-**Path and binding, exit 4:** `path-missing`, `path-not-directory`,
-`path-symlink-refused`, `path-binding-failed`, `records-root-missing-directory`,
-`records-root-unexpected-entry`, `record-directory-unexpected-entry`,
-`directory-set-incomplete`
+**Path, exit 4:** `path-missing`, `path-not-directory`,
+`records-root-missing-directory`, `records-root-unexpected-entry`,
+`record-directory-unexpected-entry`
 
 **Resource, exit 5:** `record-count-ceiling`, `record-bytes-ceiling`,
 `total-bytes-ceiling`
@@ -507,22 +593,47 @@ Every token the validator can emit is a member; every member is reachable.
 `root-not-object`, `key-not-exact-str`, `undeclared-key`, `missing-key`,
 `schema-id-invalid`, `record-id-malformed`, `record-id-filename-mismatch`,
 `record-id-directory-mismatch`, `record-id-register-mismatch`,
-`record-id-type-mismatch`, `record-id-duplicate`, `type-not-exact`,
+`record-id-type-mismatch`, `type-not-exact`,
 `float-refused`, `int-out-of-range`, `enum-value-invalid`, `digits-not-ascii`,
 `date-invalid`, `string-empty`, `string-length-invalid`,
 `string-not-valid-unicode`, `string-contains-record-id`, `list-length-invalid`,
 `list-duplicate-item`, `locator-value-not-synthetic`, `null-not-permitted`,
-`unknown-token-not-permitted`, `attribution-class-mismatch`,
+`unknown-token-not-permitted`,
 `attribution-author-mismatch`, `derived-from-required`, `derived-from-forbidden`,
 `instrument-context-required`, `instrument-context-forbidden`,
 `reference-not-found`, `reference-wrong-register`, `reference-wrong-type`,
 `reference-self`, `reference-cycle`, `bridge-side-register-invalid`,
 `bridge-endpoint-not-source`, `bridge-duplicate-pair`,
-`supersedes-target-missing`, `supersedes-register-mismatch`,
+`digest-format-invalid`, `supersedes-target-missing`,
+`supersedes-register-mismatch`,
 `supersedes-type-mismatch`, `supersedes-digest-mismatch`,
 `supersedes-fork-refused`, `supersedes-self`, `supersedes-cycle`,
 `verification-state-invalid`, `verification-evidence-not-null`,
 `resolution-state-invalid`
+
+**Every retained token is bound to at least one control that constructs its
+condition and asserts it exactly**, through the token-to-control manifest in
+`tests/test_controls_manifest.py`. A token with no such control is removed from
+this vocabulary rather than carried as an untested claim.
+
+### 8b. Tokens removed from v1, with reasons
+
+- **`record-id-duplicate`** — unreachable. See I12: uniqueness is derived from
+  the filename and directory rules, so no duplicate full id can be constructed.
+- **`attribution-class-mismatch`** — redundant. Every per-class rule already has
+  its own exact token (`derived-from-required`, `derived-from-forbidden`,
+  `instrument-context-required`, `instrument-context-forbidden`,
+  `attribution-author-mismatch`), so no input reaches a residual class token.
+- **`directory-set-incomplete`** — redundant with
+  `records-root-missing-directory`, which names the same condition precisely.
+- **`path-symlink-refused`** and **`path-binding-failed`** — the *requirements*
+  survive as I02 and I06, but neither condition can be constructed
+  deterministically on the authoring platform: creating a symbolic link or a
+  reparse point needs privilege that may be absent, and a binding-primitive
+  failure is a platform-capability event, not an input. A control for either
+  would be environment-conditional, which this suite forbids. They are recorded
+  in `DEFERRED_CONTROLS` with their reason, so the gap is visible rather than
+  papered over, and no v1 token claims them.
 
 **One accepted, deliberate disclosure, named rather than hidden.** Fail-fast
 with a schema-declared path means a refusal reveals *which declared field failed
@@ -550,11 +661,24 @@ validated at the point its field is reached, its key set closed before its field
 are read in declared order.
 
 **Phase 2 — set level**, only once every record has passed Phase 1, in exactly
-this order: record-id uniqueness across all three directories; reference
-existence; reference register; reference type; self reference; `link` graph
-acyclicity per register; bridge pair uniqueness; supersedes target existence,
-register and type; supersedes fork check; supersedes digest match; supersession
-graph acyclicity.
+this order: reference existence; reference register; reference type; self
+reference; `link` graph acyclicity per register; bridge pair uniqueness;
+supersedes target existence, register and type; supersedes fork check;
+**supersession graph acyclicity**; supersedes digest match.
+
+**The last two steps are ordered deliberately, and the order is load-bearing.**
+A digest covers a record canonical form, which includes that record own
+`supersedes` block, so a supersession cycle can never be digest-consistent:
+computing either digest would require the other. If digest matching ran first it
+would always fire first on any cyclic fixture, and `supersedes-cycle` would be
+unreachable — a declared token that no input could ever produce, and an
+implementation with no cycle detector at all would pass. Acyclicity is therefore
+decided **before** digests are compared. A control asserts exactly
+`supersedes-cycle` on a cyclic fixture; a separate control asserts exactly
+`supersedes-digest-mismatch` on an acyclic one.
+
+Record-id uniqueness is deliberately **not** a Phase 2 step: it is derived
+(I12), not enforced.
 
 **Phase 3 — summary emission**, section 10.
 
@@ -636,6 +760,7 @@ independence scoring and connected-component counting; traversal and bridge
 composition; flat import or export; tombstones and re-registration control;
 concurrency; writer APIs; the human-facing register mapping, which is not
 created now and lives outside the repository; automatic truth, authenticity or
-neutrality judgment; and the root reverse import guard, section 3c.
+neutrality judgment; the root reverse import guard, section 3c; and the
+symbolic-link and binding-failure path controls, section 3c and section 8b.
 
 **Historical v1 records remain unchanged when any of these lands.**
