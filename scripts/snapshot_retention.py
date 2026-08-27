@@ -816,8 +816,21 @@ class _LockHandle:
                 import fcntl
                 fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            os.close(self._fd)
-            self._fd = None
+            # The lock is held elsewhere. Releasing the descriptor is cleanup,
+            # not the outcome: a close that fails here must not turn a plain
+            # "another pass is running" into an exception carrying an errno
+            # and a path, and must not replace the fixed `lock_unavailable`
+            # line the operator is promised. Same rule as the manifest
+            # journal: contain it, clear the reference exactly once on every
+            # path, and never retry -- a failed close leaves the descriptor
+            # state ambiguous, and a second attempt could close a descriptor
+            # the runtime has already reissued to something else.
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            finally:
+                self._fd = None
             return False
         return True
 
@@ -832,8 +845,27 @@ class _LockHandle:
         except OSError:
             pass
         finally:
-            os.close(self._fd)
-            self._fd = None
+            # EXACTLY ONE close attempt, on every path, and its failure is
+            # contained. This runs from `single_instance_lock.__exit__`, which
+            # in `main` happens AFTER the report has been printed and the exit
+            # status chosen -- so an escaping OSError could only replace a
+            # complete, truthful outcome with a traceback, possibly one that
+            # arrives when a QUARANTINE pass has already moved files. It would
+            # also displace an exception the `with` body raised, hiding the
+            # real diagnosis behind an errno from the lock file.
+            #
+            # `_fd` is cleared whatever the close did. Leaving a stale number
+            # behind is not untidiness: the operating system reissues
+            # descriptor numbers immediately, so a later traversal of this
+            # method would close something else entirely. Clearing it is also
+            # what makes a repeated `release` inert. The close is never
+            # retried, for the same reason the manifest close is not.
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            finally:
+                self._fd = None
 
 
 class single_instance_lock:  # noqa: N801 - used as a context manager
