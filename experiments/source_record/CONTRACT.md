@@ -1,0 +1,641 @@
+# `source-record-v1` — frozen contract
+
+**Status: contract and acceptance surface only. No implementation exists in this commit.**
+
+This document is the single authority for the `source-record` laboratory. It
+supersedes every earlier specification response once accepted. Where this file
+and any prior text disagree, this file governs.
+
+## 1. Purpose
+
+`source-record-v1` is a **synthetic-only, read-only laboratory** for recording
+**sources and attributed claims** across two mechanically separated corpus
+registers and one bridge register. It records **who said what, on whose
+authority, in which register**.
+
+Four failures it is built to make *structurally impossible* rather than merely
+discouraged:
+
+1. **Conflating a delivery with a source.** `message` and `source` are distinct
+   record types joined only through an explicit `assertion`. Each population is
+   separately countable with its own denominator, and no field anywhere can hold
+   their difference.
+2. **Merging the two corpora.** Register is part of identity — encoded in the
+   record id, in the `register` field, and in the containing directory. A
+   cross-register reference is refused. A bridge is the only connection, and it
+   neither composes nor traverses.
+3. **Recording a conclusion as an observation.** Every relationship vocabulary
+   is observational. No token means corroborates, supports, confirms, or
+   duplicates.
+4. **Promoting verification by inference.** In v1 `verification_state` is closed
+   to the single token `unverified`, so promotion has no representation at all.
+
+## 2. Epistemic limit
+
+A record that is perfectly typed, correctly attributed, honestly marked
+`unverified` and **entirely fabricated passes every rule in this contract.**
+The schema constrains the *form* of an assertion and never the *truth* of its
+content.
+
+Six things remain human-gated and only human-gated:
+
+- whether a record was filed in the right register;
+- paraphrase-level content laundering, which is undetectable by construction;
+- whether a relationship is warranted;
+- whether a proposed vocabulary addition is evaluative;
+- whether fixture content is semantically neutral;
+- whether any output is being presented as more than it is.
+
+**A green suite is not coverage of those six.**
+
+## 3. Physical manifest
+
+### 3a. Present in this commit
+
+    experiments/source_record/CONTRACT.md
+    experiments/source_record/tests/__init__.py
+    experiments/source_record/tests/_support.py
+    experiments/source_record/tests/test_schema.py
+    experiments/source_record/tests/test_records.py
+    experiments/source_record/tests/test_validate_cli.py
+    experiments/source_record/tests/test_import_quarantine.py
+    experiments/source_record/tests/test_controls_manifest.py
+
+### 3b. Absent in this commit — future implementation, not yet authorized
+
+    experiments/source_record/__init__.py
+    experiments/source_record/schema.py
+    experiments/source_record/validate.py
+    experiments/source_record/.gitattributes
+    experiments/source_record/README.md
+    experiments/source_record/records/register-a/**
+    experiments/source_record/records/register-b/**
+    experiments/source_record/records/bridge/**
+    .github/workflows/source-record.yml
+
+The acceptance suite in 3a is expected to be **red** until 3b exists. That is
+the evidence that the independent acceptance surface preceded implementation.
+
+### 3c. Deferred — not part of this or the initial implementation acceptance
+
+    tests/test_source_record_reverse_quarantine.py   (root reverse import guard)
+
+A repository-wide import scanner would read files outside this laboratory's
+authorized surface. The root reverse guard is therefore **deferred until an
+explicitly bounded, non-excluded scan surface is defined**. It is:
+
+- a deferred future control;
+- **not** part of this phase or the initial implementation acceptance
+  requirement;
+- **never** to be claimed as present while absent;
+- **not** to be substituted by a broad repository scan.
+
+The laboratory-local forward quarantine control scans only
+`experiments/source_record/**` and must never scan the repository generally.
+
+## 4. Physical organization
+
+    experiments/source_record/
+      __init__.py            (future)
+      schema.py              (future)
+      validate.py            (future)
+      records/               (future)
+        register-a/          direct .json files only, non-recursive
+        register-b/          direct .json files only, non-recursive
+        bridge/              direct .json files only, non-recursive
+      tests/                 (present)
+
+The laboratory has **no write path**: no writer API, no tombstone, no
+migration, no deletion.
+
+### 4a. Records-root shape
+
+The direct children of `records/` are **exactly** `register-a`, `register-b`
+and `bridge`. Any other entry at that level is refused with
+`records-root-unexpected-entry`. A missing one of the three is refused with
+`records-root-missing-directory`. All three are mandatory; a directory
+containing **zero records is permitted and is not a schema failure**.
+
+### 4b. Record-directory shape
+
+Inside each of the three directories, direct `.json` files are the only
+permitted entries. A subdirectory or a non-JSON file is refused with
+`record-directory-unexpected-entry`. **Nothing is silently ignored.** The
+refusal never echoes the unexpected entry's name.
+
+## 5. Field inventory
+
+### 5a. Common root keys, present on all six record types, in declared order
+
+| Field | Type | Constraint |
+|---|---|---|
+| `schema` | exact `str` | exactly `source-record-v1` |
+| `record_id` | exact `str` | section 6 grammar |
+| `record_type` | exact `str` | `RECORD_TYPES` |
+| `register` | exact `str` | `REGISTERS` |
+| `origin` | exact `str` | `ORIGINS`, closed to `synthetic-fixture` |
+| `recorded_date` | exact `str` | real ISO `YYYY-MM-DD`, ASCII digits only |
+| `recorded_by_role` | exact `str` | `ROLES` |
+| `recorded_by_label` | exact `str` | free text, 1..`LABEL_MAX` |
+| `supersedes` | `null` or block | section 6 `supersedes` block |
+
+`recorded_by_role` and `recorded_by_label` are the meta-provenance for **every**
+record, including `link`, `bridge` and `contradiction`: this is who recorded or
+proposed the relationship. There is no second proposer pair.
+
+### 5b. Type-specific keys, appended in declared order
+
+**`message`** — id form `SR-(A|B)-MSG-NNNN`
+
+    carrier_role        ROLES
+    carrier_label       free text, 1..LABEL_MAX
+    received_date       real ISO YYYY-MM-DD, ASCII digits only
+    sequence_ordinal    exact int in [ORDINAL_MIN, ORDINAL_MAX], or null
+
+**`source`** — id form `SR-(A|B)-SRC-NNNN`
+
+    neutral_label       free text, 1..TEXT_MAX
+    locators            exact list of locator blocks, 0..LOCATORS_MAX, no duplicates
+    issuer_claim        issuer_claim block
+
+**`assertion`** — id form `SR-(A|B)-ASR-NNNN`
+
+    message_ref             one MSG id, same register
+    subject_ref             one SRC id, same register
+    attribution_class       ATTRIBUTION_CLASSES
+    asserted_by_role        ROLES
+    attributed_author       free text 1..LABEL_MAX, or the token "unknown"
+    claim_text              free text, 1..TEXT_MAX
+    instrument_context      free text 1..TEXT_MAX, or "unknown", or null
+    derived_from            list of ASR ids, same register, 1..DERIVED_FROM_MAX,
+                            no duplicates, or null
+    verification_state      VERIFICATION_STATES
+    verification_evidence   always null
+
+**`link`** — id form `SR-(A|B)-LNK-NNNN`
+
+    left_ref            SRC id, same register
+    right_ref           SRC id, same register
+    link_type           LINK_TYPES
+    basis               RELATIONSHIP_BASES
+    verification_state  VERIFICATION_STATES
+
+**`bridge`** — id form `SR-X-BRG-NNNN`
+
+    side_a              SR-A-SRC-NNNN
+    side_b              SR-B-SRC-NNNN
+    bridge_type         BRIDGE_TYPES
+    basis               RELATIONSHIP_BASES
+    verification_state  VERIFICATION_STATES
+
+The bridge key set contains **no** locator, claim text, attribution class,
+attributed author, issuer claim, or verification evidence. Those fields do not
+exist on it, so a bridge cannot assert; it can only relate. `basis` is a
+**closed enum, not free text**, so the relationship layer carries no free-text
+laundering channel beyond a bounded party label.
+
+**`contradiction`** — id form `SR-(A|B)-CTR-NNNN`
+
+    left_assertion_ref   ASR id, same register
+    right_assertion_ref  ASR id, same register
+    conflict_basis       CONFLICT_BASES
+    resolution_state     RESOLUTION_STATES, closed to "unresolved"
+    verification_state   VERIFICATION_STATES
+
+A contradiction **records** a conflict and never resolves it. There is no
+resolution path and no vocabulary for one.
+
+## 6. Nested blocks and identity
+
+**`locator`**, element of `source.locators`, closed key set:
+
+    scheme      LOCATOR_SCHEMES
+    value       exact str matching \Asynthetic-[a-z0-9-]{1,64}\Z
+    resolution  LOCATOR_RESOLUTIONS, closed to "unattempted"
+
+**`issuer_claim`**, on `source`, closed key set:
+
+    claimed_issuer         free text 1..LABEL_MAX, or the token "unknown"
+    verification_state     VERIFICATION_STATES
+    verification_evidence  always null
+
+**`supersedes`**, on every type, `null` or a closed key set:
+
+    record_id       exact str; same register AND same record type as the
+                    superseding record
+    content_digest  exact str matching \A[0-9a-f]{64}\Z
+
+The lineage field is named **`supersedes`**. No field named `predecessor`
+exists. Cycle detection operates on the **supersession graph**; an
+increasing-ordinal shortcut is not a substitute and is not permitted.
+
+**Record id grammar — the only accepted form:**
+
+    \ASR-(A|B|X)-(MSG|SRC|ASR|LNK|BRG|CTR)-[0-9]{4}\Z
+
+The `[0-9]` class is load-bearing, not stylistic: the Python `\d` class matches
+Arabic-Indic and Devanagari digits and `int()` parses them.
+
+`A` corresponds to `register-a`; `B` to `register-b`; `X` to `bridge`, which
+also requires `record_type == "bridge"` and the `BRG` type segment. All of the
+id segments, the fields, and the containing directory must agree.
+
+Each record filename is exactly `<record_id>.json`.
+
+## 7. Closed vocabularies
+
+    SCHEMA_ID            = "source-record-v1"
+    REGISTERS            = ("register-a", "register-b", "bridge")
+    RECORD_TYPES         = ("message", "source", "assertion", "link",
+                            "bridge", "contradiction")
+    ORIGINS              = ("synthetic-fixture",)
+    VERIFICATION_STATES  = ("unverified",)
+    RESOLUTION_STATES    = ("unresolved",)
+    LOCATOR_SCHEMES      = ("opaque-handle", "network-locator", "filename",
+                            "document-number", "container-reference", "none")
+    LOCATOR_RESOLUTIONS  = ("unattempted",)
+    ATTRIBUTION_CLASSES  = ("receipt-fact", "attributed-assertion",
+                            "recorded-observation", "derived-inference")
+    ROLES                = ("relay-agent", "operator", "auditor",
+                            "analysis-seat", "external-author", "unattributed")
+    LINK_TYPES           = ("claimed-container-includes", "claimed-derivative-of",
+                            "commentary-about", "apparent-textual-overlap",
+                            "contested-correspondence")
+    BRIDGE_TYPES         = ("shared-attributed-author", "shared-locator-value",
+                            "apparent-textual-overlap", "contested-correspondence")
+    RELATIONSHIP_BASES   = ("recorded-by-inspection",
+                            "recorded-from-supplied-material",
+                            "recorded-as-proposed-elsewhere")
+    CONFLICT_BASES       = ("same-quantity-different-values",
+                            "same-property-mutually-exclusive-values",
+                            "presence-and-absence-of-the-same-property",
+                            "incompatible-attributions")
+    UNKNOWN_TOKEN        = "unknown"
+
+    LABEL_MAX = 128 ; TEXT_MAX = 4096 ; LOCATORS_MAX = 16
+    DERIVED_FROM_MAX = 16 ; ORDINAL_MIN = 1 ; ORDINAL_MAX = 9999
+    MAX_RECORDS_PER_DIR = 256 ; MAX_RECORD_BYTES = 65536
+    MAX_TOTAL_BYTES = 4194304
+
+Absent by decision and never to be added: any token meaning duplicate,
+corroborates, supports, confirms, same-subject, or any evaluative or
+authenticity-implying relationship. `commentary-about` is **within-register
+only** and does not appear in `BRIDGE_TYPES`.
+
+## 8. Invariants
+
+**Capture and structure**
+
+- **I01** All three data directories are captured successfully before any
+  set-level invariant is evaluated; partial capture fails closed.
+- **I02** Each data directory is a real directory, not a symbolic link,
+  junction, or reparse point.
+- **I03** Enumeration is non-recursive; the records root and each data
+  directory hold exactly the permitted entries, sections 4a and 4b.
+- **I04** Enumeration is in deterministic sorted filename order.
+- **I05** Ceilings are enforced over **captured bytes**, not stat sizes, before
+  any parsing: per-directory record count, per-record bytes, running total.
+- **I06** The directory binding is held across enumeration and capture; where no
+  binding primitive exists, the validator fails closed rather than presenting an
+  identity re-check as a binding.
+
+**Identity**
+
+- **I07** `schema` is exactly `SCHEMA_ID`, exact builtin `str`.
+- **I08** `record_id` matches the section 6 grammar with ASCII digits only.
+- **I09** The filename equals `<record_id>.json` exactly.
+- **I10** The containing directory agrees with the id register segment.
+- **I11** The `register` and `record_type` fields agree with the id register
+  and type segments.
+- **I12** `record_id` is unique across all three directories.
+
+**Type discipline**
+
+- **I13** The root is an exact builtin `dict`; every key is an exact builtin
+  `str`.
+- **I14** The root key set is exactly the declared set for the record type.
+- **I15** Every nested block key set is likewise exact and closed.
+- **I16** Exact builtin types throughout; subclasses are refused, and the
+  refusal occurs **before any hook on the rejected object can run**.
+- **I17** No float anywhere, including integral-valued floats and any JSON
+  literal that parses to a non-finite value.
+- **I18** Every integer field is an exact builtin `int`, never `bool`, within
+  its declared bounded range.
+
+**Register separation**
+
+- **I19** `register` is part of identity and is therefore immutable; it is
+  encoded redundantly in id, field and directory, and all three must agree.
+- **I20** A non-bridge record may reference only records in its own corpus
+  register.
+- **I21** A bridge references exactly one `register-a` source and one
+  `register-b` source.
+- **I22** A bridge endpoint is never a bridge and never a non-`source` record.
+- **I23** Bridge relationships do not compose and do not participate in
+  traversal; no traversal API exists and no public callable accepts a depth or
+  recursion parameter.
+- **I24** No cross-register result set, deduplication, ordering, independence
+  calculation, flattened export, or global corpus total exists.
+- **I25** Identity resolution requires the declared register **plus** the
+  complete record id; no public resolver accepts a stripped local ordinal.
+
+**References and graph**
+
+- **I26** Every reference resolves to an existing record within the captured set.
+- **I27** Every reference points at a record of the declared type for that field.
+- **I28** No record references itself.
+- **I29** The within-register `link` graph is acyclic.
+- **I30** At most one bridge exists per ordered `(side_a, side_b)` pair.
+- **I31** No list field contains duplicate items.
+
+**Attribution**
+
+- **I32** `attribution_class` is closed and never inferred, defaulted, or
+  promoted.
+- **I33** `derived-inference` requires a non-empty `derived_from` whose members
+  are **`assertion` records in the same register**; every other attribution
+  class requires `derived_from` to be `null`.
+- **I34** `recorded-observation` requires a non-null `instrument_context`, which
+  may be the token `unknown`; every other class requires it to be `null`.
+- **I35** `asserted_by_role == "unattributed"` if and only if
+  `attributed_author == "unknown"`.
+- **I36** An assertion joins exactly one message and exactly one source; the
+  join is never widened, and no field can hold a count.
+
+**Null and unknown**
+
+- **I37** `null` means *inapplicable*; the exact string `unknown` means
+  *applicable but unknown*. They are never interchangeable.
+- **I38** Per field the schema declares which of the two is legal; the illegal
+  one is refused in either direction.
+- **I39** Neither is ever coerced to a value, a default, or a falsy substitute;
+  a missing key is `missing-key`, never an implicit `null`.
+
+**Synthetic only**
+
+- **I40** `origin` is closed to `synthetic-fixture`.
+- **I41** `verification_state` is closed to `unverified` everywhere it appears.
+- **I42** `verification_evidence` is always `null`; it has no non-null
+  representation.
+- **I43** `locator.resolution` is closed to `unattempted`.
+- **I44** Every `locator.value` matches the **anchored positive** pattern
+  `\Asynthetic-[a-z0-9-]{1,64}\Z`. This is an allow-list, not a deny-list: a
+  deny-list catches only what its author imagined.
+
+**Free text**
+
+- **I45** Every free-text field is bounded by its declared maximum and is
+  non-empty where required.
+- **I46** Free text is valid Unicode containing no null byte and no lone
+  surrogate.
+- **I47** No free-text field may contain a substring matching the record-id
+  grammar; structured references use reference fields.
+- **I48** Free text is inert data: never evaluated, formatted against,
+  interpolated into code, or used as a path, key, or format string.
+
+**Lineage**
+
+- **I49** `supersedes` is `null` or a complete block naming an existing
+  predecessor.
+- **I50** The predecessor is in the same register and of the same record type.
+- **I51** `content_digest` equals the SHA-256 of the predecessor **canonical
+  form**, section 10, not its raw file bytes.
+- **I52** A record never supersedes itself, and supersession chains are acyclic;
+  acyclicity is decided on the supersession graph.
+- **I53** A predecessor has **at most one** successor; a fork is refused.
+- **I54** A superseded predecessor remains present and independently valid.
+
+**Determinism**
+
+- **I55** Canonical form is UTF-8, sorted keys, ASCII escaping, compact
+  separators, no timestamps.
+- **I56** Canonical output and digests are identical across key insertion order,
+  filesystem enumeration order, separate processes, and differing hash seeds.
+- **I57** Every field is read exactly once into a safe internal carrier; no
+  check re-reads the input mapping after validating that field.
+- **I58** The validator is pure and non-mutating: it never writes, infers,
+  rewrites, defaults, or upgrades a field.
+- **I59** Validation traverses the **schema declared field order**, never the
+  input key order.
+
+**Refusal and non-disclosure**
+
+- **I60** Validation is deterministic **fail-fast** in the fixed order of
+  section 9; defects are not collected or enumerated.
+- **I61** A refusal carries exactly two things: a `token` from the section 8a
+  closed vocabulary and a schema-declared `path`. **There is no rejected-value
+  slot.**
+- **I62** Path components are drawn only from the schema static path set and
+  integer indices into declared lists; a path is never constructed from input
+  text.
+- **I63** An undeclared key is reported as the **nearest declared container
+  path** plus the generic token `undeclared-key`. The key name, position, value,
+  type name, and count are never reported. The same non-echo rule applies to
+  `records-root-unexpected-entry` and `record-directory-unexpected-entry`.
+- **I64** No refusal invokes `__repr__`, `__str__`, `__format__`, `__hash__`,
+  `__eq__`, `__len__`, `__iter__` or `__index__` on a rejected object, and never
+  reads the runtime type name of a rejected object: a hostile metaclass makes
+  reading it execute code, and the name is attacker controlled.
+- **I65** A foreign non-`str` mapping key is refused without being hashed,
+  compared, or stringified.
+- **I66** No refusal carries a number derived from input; length violations use
+  a constant token revealing neither direction nor magnitude.
+- **I67** Exception chaining discloses nothing: every refusal raised inside an
+  `except` block uses `raise ... from None`, so `__cause__` is `None` and
+  `__suppress_context__` is `True`.
+- **I68** There is **no verbose refusal mode**; no flag, configuration, or
+  environment variable alters refusal content.
+
+**CLI and resources**
+
+- **I69** Exit classes: `0` valid; `2` usage, parse, schema or record refusal;
+  `4` path or binding refusal; `5` resource ceiling. Argparse usage errors keep
+  the argparse `SystemExit(2)`.
+- **I70** Unrelated programming errors are not caught and propagate loudly.
+- **I71** Exactly one physical stderr line per expected failure; carriage
+  return, line feed and terminal control characters are rendered as visible
+  escapes and never reach a terminal raw.
+- **I72** The validator writes nothing on any path: no file, directory, cache,
+  or temporary artifact.
+- **I73** No network call is made on any path.
+- **I74** The success summary reports `register-a`, `register-b` and `bridge`
+  blocks **separately**, and emits no combined total. **This guarantees only
+  that the laboratory does not compute or emit the aggregate. It does not and
+  cannot prevent an external consumer from adding the three numbers together.**
+
+**Quarantine**
+
+- **I75** Laboratory production modules import only the standard library and the
+  laboratory own package.
+- **I76** They never import `tech_ledger`, or any production, engine, agent,
+  telemetry, or network module.
+- **I77** No dynamic-import mechanism: no `importlib`, no `__import__`, no
+  function-body import of a non-standard-library root, in production modules.
+- **I78** Static scanning **parses** modules and never executes them; discovery
+  finds modules that did not exist when the guard was written, and excludes
+  `__pycache__`.
+- **I79** The forward guard lives in the laboratory and scans only
+  `experiments/source_record/**`. The root reverse guard is **deferred**,
+  section 3c, and must never be claimed as present while absent.
+
+**Neutrality and controls**
+
+- **I80** Neutrality is enforced by **exact approved manifests** — the path
+  manifest, module names, schema fields, closed vocabularies, fixture keys and
+  fixture values — never by a blacklist of prohibited names. No proscribed-name
+  list is created, stored, or read. Neutrality and textual-overlap detection are
+  **review signals, not truth or acceptance controls**.
+- **I81** Every scan asserts it examined a **non-zero expected surface**; a scan
+  rooted at the wrong path is otherwise indistinguishable from a clean one.
+- **I82** The control manifest is explicit and named. Adding or removing a
+  control requires an intentional manifest edit. **A numeric test count is never
+  the acceptance claim.**
+
+### 8a. Closed refusal-token vocabulary
+
+Every token the validator can emit is a member; every member is reachable.
+
+**Path and binding, exit 4:** `path-missing`, `path-not-directory`,
+`path-symlink-refused`, `path-binding-failed`, `records-root-missing-directory`,
+`records-root-unexpected-entry`, `record-directory-unexpected-entry`,
+`directory-set-incomplete`
+
+**Resource, exit 5:** `record-count-ceiling`, `record-bytes-ceiling`,
+`total-bytes-ceiling`
+
+**Parse, schema and record, exit 2:** `json-malformed`, `json-duplicate-key`,
+`root-not-object`, `key-not-exact-str`, `undeclared-key`, `missing-key`,
+`schema-id-invalid`, `record-id-malformed`, `record-id-filename-mismatch`,
+`record-id-directory-mismatch`, `record-id-register-mismatch`,
+`record-id-type-mismatch`, `record-id-duplicate`, `type-not-exact`,
+`float-refused`, `int-out-of-range`, `enum-value-invalid`, `digits-not-ascii`,
+`date-invalid`, `string-empty`, `string-length-invalid`,
+`string-not-valid-unicode`, `string-contains-record-id`, `list-length-invalid`,
+`list-duplicate-item`, `locator-value-not-synthetic`, `null-not-permitted`,
+`unknown-token-not-permitted`, `attribution-class-mismatch`,
+`attribution-author-mismatch`, `derived-from-required`, `derived-from-forbidden`,
+`instrument-context-required`, `instrument-context-forbidden`,
+`reference-not-found`, `reference-wrong-register`, `reference-wrong-type`,
+`reference-self`, `reference-cycle`, `bridge-side-register-invalid`,
+`bridge-endpoint-not-source`, `bridge-duplicate-pair`,
+`supersedes-target-missing`, `supersedes-register-mismatch`,
+`supersedes-type-mismatch`, `supersedes-digest-mismatch`,
+`supersedes-fork-refused`, `supersedes-self`, `supersedes-cycle`,
+`verification-state-invalid`, `verification-evidence-not-null`,
+`resolution-state-invalid`
+
+**One accepted, deliberate disclosure, named rather than hidden.** Fail-fast
+with a schema-declared path means a refusal reveals *which declared field failed
+first*. That is disclosure of **schema structure**, which is public and
+documented, never of input content.
+
+## 9. Static validation order
+
+**Phase 0 — capture.** Verify the records-root shape, section 4a. Then for
+`register-a`, `register-b`, `bridge` in that fixed order: existence,
+is-directory, not a symbolic link or reparse point, bind, verify the directory
+shape of section 4b, enumerate direct `.json` files in sorted order,
+per-directory count ceiling, per-record byte capture with per-record ceiling,
+running total ceiling over captured bytes. **All three must complete before any
+record work.** Any failure ends validation.
+
+**Phase 1 — per record**, directories in fixed order, filenames sorted. For each
+record, in exactly this sequence: JSON parse with duplicate-key rejection; root
+is an exact `dict`; every key is an exact `str`; `schema`; `record_id`; filename
+match; directory match; `record_type`; `register`; root key-set closure for that
+type; then the remaining common fields in declared order, `origin`,
+`recorded_date`, `recorded_by_role`, `recorded_by_label`, `supersedes`; then the
+type-specific fields in the declared order of section 5b. Each nested block is
+validated at the point its field is reached, its key set closed before its fields
+are read in declared order.
+
+**Phase 2 — set level**, only once every record has passed Phase 1, in exactly
+this order: record-id uniqueness across all three directories; reference
+existence; reference register; reference type; self reference; `link` graph
+acyclicity per register; bridge pair uniqueness; supersedes target existence,
+register and type; supersedes fork check; supersedes digest match; supersession
+graph acyclicity.
+
+**Phase 3 — summary emission**, section 10.
+
+## 10. Canonicalization, digest domain, and summary
+
+**Canonical form of a record:**
+`json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))`,
+encoded UTF-8, with **no trailing newline**.
+
+**Digest:** SHA-256 of those bytes, lowercase hex, 64 characters.
+
+**Domain:** the digest covers a record **canonical form, not its raw file
+bytes**. Consequence, deliberate: reformatting a predecessor whitespace or key
+order does not break a lineage chain, while any single-character content change
+does.
+
+**Summary:** the same canonicalization plus exactly one trailing line feed:
+
+    {"registers":{"bridge":{"record_count":N,"record_ids":[]},
+                  "register-a":{"record_count":N,"record_ids":[]},
+                  "register-b":{"record_count":N,"record_ids":[]}},
+     "schema":"source-record-v1"}
+
+No total key exists in the structure.
+
+## 11. Implementation API pinned for the future implementation phase
+
+`experiments/source_record/schema.py`
+
+    SCHEMA_ID: str
+    class SourceRecordError(ValueError)      # attributes: token: str, path: tuple
+    REFUSAL_TOKENS: tuple[str, ...]
+    REGISTERS, RECORD_TYPES, ORIGINS, VERIFICATION_STATES, RESOLUTION_STATES,
+    LOCATOR_SCHEMES, LOCATOR_RESOLUTIONS, ATTRIBUTION_CLASSES, ROLES,
+    LINK_TYPES, BRIDGE_TYPES, RELATIONSHIP_BASES, CONFLICT_BASES: tuple[str, ...]
+    UNKNOWN_TOKEN: str
+    RECORD_ID_PATTERN: re.Pattern[str]
+    ROOT_KEYS: dict[str, frozenset[str]]
+    LOCATOR_KEYS, ISSUER_CLAIM_KEYS, SUPERSEDES_KEYS: frozenset[str]
+    LABEL_MAX, TEXT_MAX, LOCATORS_MAX, DERIVED_FROM_MAX,
+    ORDINAL_MIN, ORDINAL_MAX: int
+    def validate_record(obj: object) -> None
+    def canonical_bytes(obj: object) -> bytes
+    def digest(obj: object) -> str
+
+`experiments/source_record/validate.py`
+
+    REGISTER_DIRS: tuple[str, ...] = ("register-a", "register-b", "bridge")
+    MAX_RECORDS_PER_DIR, MAX_RECORD_BYTES, MAX_TOTAL_BYTES: int
+    class RecordsPathError(ValueError)        # exit 4
+    class RecordsCeilingError(RuntimeError)   # exit 5
+    class RecordsInputError(ValueError)       # exit 2
+    def validate_records_root(root) -> dict
+    def serialize_summary(summary: dict) -> str
+    def main(argv: list[str] | None = None) -> int
+
+All three error classes carry `token` and `path`, as `SourceRecordError` does.
+
+## 12. Acceptance criteria for the future implementation
+
+A conforming implementation satisfies **I01 through I82**, with a failing-input
+control for each and every positive control passing — a validator that refuses
+everything is broken, not correct. It is standard-library only, contains no bare
+`assert` and no unreraised broad `except`, holds the laboratory-local forward
+quarantine, ships a path-scoped **non-required** workflow, and emits
+byte-identical output across key order, filesystem order, processes and hash
+seeds. Its refusal carrier has no value slot. Its controls match the manifest in
+`tests/test_controls_manifest.py` exactly. Its own README reproduces section 2
+verbatim. **Its prose claims match what the tooling enforces, not what the
+author intended.**
+
+No seat that authored a component independently accepts it.
+
+## 13. Deferred from v1
+
+Real source ingestion; verification promotion and any non-`unverified` state;
+network resolution; cross-register `commentary-about`; deduplication;
+independence scoring and connected-component counting; traversal and bridge
+composition; flat import or export; tombstones and re-registration control;
+concurrency; writer APIs; the human-facing register mapping, which is not
+created now and lives outside the repository; automatic truth, authenticity or
+neutrality judgment; and the root reverse import guard, section 3c.
+
+**Historical v1 records remain unchanged when any of these lands.**
