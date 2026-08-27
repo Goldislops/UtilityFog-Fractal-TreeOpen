@@ -271,17 +271,53 @@ def test_sr_q_009_no_production_module_contains_a_bare_assert_statement():
 BROAD_EXCEPTION_NAMES = ("Exception", "BaseException")
 
 
+def _broad_aliases(tree: ast.AST) -> set[str]:
+    """Simple names bound to a broad exception class, transitively.
+
+    Covers ``E = Exception``, ``E = builtins.Exception`` and ``F = E``. It does
+    not cover a class produced by a call, subscript, conditional, ``getattr`` or
+    any other runtime construction — CONTRACT.md section 12b says so plainly.
+    """
+    aliases: set[str] = set()
+    for _ in range(4):  # fixed point over simple chains; bounded, terminating
+        grew = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Name) or target.id in aliases:
+                continue
+            value = node.value
+            broad = (
+                (isinstance(value, ast.Name)
+                 and (value.id in BROAD_EXCEPTION_NAMES or value.id in aliases))
+                or (isinstance(value, ast.Attribute)
+                    and value.attr in BROAD_EXCEPTION_NAMES)
+            )
+            if broad:
+                aliases.add(target.id)
+                grew = True
+        if not grew:
+            break
+    return aliases
+
+
 def broad_exception_handlers(source: str) -> list[tuple[int, str]]:
     """Prohibited handlers: bare ``except:``, ``Exception``, ``BaseException``.
 
-    Mechanically decidable from the syntax tree. The earlier rule — a broad
-    catch is fine provided some ``raise`` appears inside it — was not: any
-    ``raise`` anywhere in the handler satisfied it, including one on a branch
-    that may never be taken, or an unrelated ``raise ValueError(...)``.
-    Narrow, explicitly named classes and tuples of them remain permitted.
+    Mechanically decidable from the syntax tree over the surface frozen in
+    CONTRACT.md section 12b: the bare form, the two names directly, the same two
+    through an attribute, either as a tuple member, and either through a simple
+    alias. Narrow, explicitly named classes and tuples of them remain permitted.
+
+    The earlier rule — a broad catch is fine provided some ``raise`` appears
+    inside it — was not decidable: any ``raise`` anywhere satisfied it,
+    including one under ``if False:``.
     """
+    tree = ast.parse(source)
+    aliases = _broad_aliases(tree)
     found: list[tuple[int, str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.ExceptHandler):
             continue
         if node.type is None:
@@ -291,8 +327,11 @@ def broad_exception_handlers(source: str) -> list[tuple[int, str]]:
             node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
         )
         for target in targets:
-            if isinstance(target, ast.Name) and target.id in BROAD_EXCEPTION_NAMES:
-                found.append((node.lineno, target.id))
+            if isinstance(target, ast.Name):
+                if target.id in BROAD_EXCEPTION_NAMES:
+                    found.append((node.lineno, target.id))
+                elif target.id in aliases:
+                    found.append((node.lineno, f"alias:{target.id}"))
             elif (
                 isinstance(target, ast.Attribute)
                 and target.attr in BROAD_EXCEPTION_NAMES
@@ -301,37 +340,90 @@ def broad_exception_handlers(source: str) -> list[tuple[int, str]]:
     return found
 
 
+def _static_flag_names(expression) -> list[str] | None:
+    """Flag names in a ``|``-composed static expression, or None if dynamic."""
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.BitOr):
+        left = _static_flag_names(expression.left)
+        right = _static_flag_names(expression.right)
+        if left is None or right is None:
+            return None
+        return left + right
+    if isinstance(expression, ast.Attribute):
+        return [expression.attr]
+    if isinstance(expression, ast.Name):
+        return [expression.id]
+    return None
+
+
+def _os_open_is_read_only(node: ast.Call) -> bool:
+    flags = node.args[1] if len(node.args) >= 2 else None
+    for keyword in node.keywords:
+        if keyword.arg == "flags":
+            flags = keyword.value
+    if flags is None:
+        return False
+    names = _static_flag_names(flags)
+    if not names:
+        return False
+    return all(name in sup.READ_ONLY_OS_OPEN_FLAGS for name in names)
+
+
+def _open_mode_is_read_only(node: ast.Call, mode_index: int) -> bool:
+    """Mode check for ``open`` and for ``<receiver>.open``.
+
+    The positional index differs: the builtin takes the path first, so its mode
+    is argument 1, while a method call has no receiver argument, so its mode is
+    argument 0. Reading the wrong slot silently treats ``Path(x).open('w')`` as
+    having no mode at all.
+    """
+    mode = node.args[mode_index] if len(node.args) > mode_index else None
+    for keyword in node.keywords:
+        if keyword.arg == "mode":
+            mode = keyword.value
+    if mode is None:
+        return True
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and mode.value in sup.READ_ONLY_OPEN_MODES
+    )
+
+
 def write_capable_calls(source: str) -> list[tuple[int, str]]:
-    """Write-capable filesystem calls, and ``open`` in a non-read mode."""
+    """Write-capable filesystem calls, module- and receiver-aware.
+
+    The covered surface is frozen in CONTRACT.md section 12b. It deliberately
+    permits ``os.open(..., os.O_RDONLY | os.O_DIRECTORY)``, which is what a
+    read-only directory binding needs, and it deliberately does not flag a bare
+    ``.replace()`` or ``.copy()`` on an unknown receiver.
+    """
     found: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
-        target = node.func
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            module, attribute = func.value.id, func.attr
+            if module == "os" and attribute == "open":
+                if not _os_open_is_read_only(node):
+                    found.append((node.lineno, "os.open-not-read-only"))
+                continue
+            prohibited = sup.MODULE_QUALIFIED_WRITE_CALLS.get(module)
+            if prohibited is not None and attribute in prohibited:
+                found.append((node.lineno, f"{module}.{attribute}"))
+                continue
         name = (
-            target.attr
-            if isinstance(target, ast.Attribute)
-            else getattr(target, "id", None)
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else getattr(func, "id", None)
         )
-        if name in sup.FORBIDDEN_WRITE_CALLS:
+        if name in sup.UNAMBIGUOUS_WRITE_METHODS:
             found.append((node.lineno, name))
             continue
-        if name != "open":
-            continue
-        mode = None
-        if len(node.args) >= 2:
-            mode = node.args[1]
-        for keyword in node.keywords:
-            if keyword.arg == "mode":
-                mode = keyword.value
-        if mode is None:
-            continue
-        if not (
-            isinstance(mode, ast.Constant)
-            and isinstance(mode.value, str)
-            and mode.value in sup.READ_ONLY_OPEN_MODES
-        ):
-            found.append((node.lineno, "open-non-read-mode"))
+        if name == "open":
+            mode_index = 1 if isinstance(func, ast.Name) else 0
+            if not _open_mode_is_read_only(node, mode_index):
+                found.append((node.lineno, "open-not-read-mode"))
     return found
 
 
@@ -373,6 +465,16 @@ def test_sr_q_012_the_broad_exception_guard_detects_every_prohibited_form():
         "try:\n    pass\nexcept (ValueError, Exception):\n    raise\n",
         "import builtins\ntry:\n    pass\nexcept builtins.Exception:\n    raise\n",
         "try:\n    pass\nexcept Exception:\n    if False:\n        raise\n",
+        # Simple alias, the form named explicitly in CONTRACT.md section 12b.
+        "E = Exception\ntry:\n    operation()\nexcept E:\n    handle()\n",
+        "E = BaseException\ntry:\n    pass\nexcept E:\n    raise\n",
+        "import builtins\nE = builtins.Exception\ntry:\n    pass\nexcept E:\n    raise\n",
+        # Transitive alias chain.
+        "E = Exception\nF = E\ntry:\n    pass\nexcept F:\n    raise\n",
+        # Alias as a tuple member.
+        "E = Exception\ntry:\n    pass\nexcept (OSError, E):\n    raise\n",
+        # Alias declared inside a function body.
+        "def f():\n    E = Exception\n    try:\n        pass\n    except E:\n        raise\n",
     )
     for source in prohibited:
         assert broad_exception_handlers(source), source
@@ -380,6 +482,8 @@ def test_sr_q_012_the_broad_exception_guard_detects_every_prohibited_form():
         "try:\n    pass\nexcept OSError:\n    pass\n",
         "try:\n    pass\nexcept (OSError, ValueError):\n    raise\n",
         "try:\n    pass\nexcept KeyError:\n    raise RuntimeError('x') from None\n",
+        # An alias to a NARROW class stays permitted.
+        "E = OSError\ntry:\n    pass\nexcept E:\n    raise\n",
     )
     for source in permitted:
         assert not broad_exception_handlers(source), source
@@ -391,13 +495,30 @@ def test_sr_q_013_the_write_guard_detects_every_prohibited_operation():
         "import pathlib\npathlib.Path('x').write_bytes(b'y')\n",
         "import pathlib\npathlib.Path('x').mkdir()\n",
         "import pathlib\npathlib.Path('x').unlink()\n",
+        "import pathlib\npathlib.Path('x').touch()\n",
         "import os\nos.remove('x')\n",
         "import os\nos.rename('x', 'y')\n",
+        "import os\nos.replace('x', 'y')\n",
+        "import os\nos.write(3, b'y')\n",
+        "import os\nos.pwrite(3, b'y', 0)\n",
+        "import os\nos.writev(3, [b'y'])\n",
+        "import os\nos.ftruncate(3, 0)\n",
+        "import os\nos.symlink('x', 'y')\n",
         "import shutil\nshutil.rmtree('x')\n",
+        "import shutil\nshutil.copy('x', 'y')\n",
         "import tempfile\ntempfile.mkdtemp()\n",
         "open('x', 'w')\n",
         "open('x', mode='a')\n",
         "open('x', 'r+')\n",
+        "import pathlib\npathlib.Path('x').open('w')\n",
+        # os.open with any write, create, truncate or append flag.
+        "import os\nos.open('x', os.O_WRONLY)\n",
+        "import os\nos.open('x', os.O_RDONLY | os.O_CREAT)\n",
+        "import os\nos.open('x', os.O_RDWR | os.O_TRUNC)\n",
+        "import os\nos.open('x', os.O_RDONLY | os.O_APPEND)\n",
+        # A non-static flags expression cannot be shown read-only.
+        "import os\nos.open('x', flags)\n",
+        "import os\nos.open('x')\n",
     )
     for source in prohibited:
         assert write_capable_calls(source), source
@@ -406,7 +527,20 @@ def test_sr_q_013_the_write_guard_detects_every_prohibited_operation():
         "open('x', 'rb')\n",
         "open('x', mode='r')\n",
         "import pathlib\npathlib.Path('x').read_text()\n",
+        "import pathlib\npathlib.Path('x').open('rb')\n",
         "import json\njson.loads('{}')\n",
+        # The read-only directory binding I06 requires must stay legal.
+        "import os\nos.open('x', os.O_RDONLY | os.O_DIRECTORY)\n",
+        "import os\nos.open('x', os.O_RDONLY)\n",
+        "import os\nos.open('x', flags=os.O_RDONLY | os.O_NOFOLLOW)\n",
+        # Harmless non-filesystem methods with generic names.
+        "text = 'a'\ntext.replace('a', 'b')\n",
+        "mapping = {}\nmapping.copy()\n",
+        "data = b''\ndata.replace(b'a', b'b')\n",
+        "import os\nos.fstat(3)\n",
+        "import os\nos.close(3)\n",
+        "import os\nos.read(3, 8)\n",
+        "import os\nos.scandir('x')\n",
     )
     for source in permitted:
         assert not write_capable_calls(source), source

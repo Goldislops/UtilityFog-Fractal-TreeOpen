@@ -181,6 +181,40 @@ contract: when it raises `OSError`, the validator refuses with
 `path-binding-failed`, exit class 4. A control monkeypatches it and asserts
 that exact token behaviourally.
 
+**The binding must be *used*, not merely called.** Calling the seam and then
+enumerating and reading through the original path again would satisfy a naive
+control while leaving the time-of-check/time-of-use window wide open. The
+smallest protocol that makes this decidable is therefore frozen. The object
+returned by `_acquire_directory_binding` exposes exactly:
+
+    binding.entries() -> tuple[str, ...]   # direct entry names, sorted
+    binding.read(name) -> bytes            # the captured bytes of one entry
+    binding.close() -> None                # deterministic lifecycle end
+    binding.closed  -> bool                # observable lifecycle state
+
+Binding rules, each behaviourally asserted:
+
+1. **Enumeration comes from the binding.** The validator obtains directory
+   entries only from `entries()`, never by re-listing the path.
+2. **Captured bytes come from the binding.** Record bytes are obtained only
+   from `read(name)`, never by re-opening the path.
+3. **The binding stays live across both.** `closed` is False for every
+   `entries()` and every `read()`.
+4. **The lifecycle closes deterministically.** `close()` is called exactly once
+   per binding, after the last `read()`, on the success path and on every
+   refusal path alike.
+5. **The bound view is authoritative.** Content reachable only through the
+   original path — different bytes, or an entry the binding does not list —
+   cannot replace or augment what the binding exposes.
+
+The control substitutes a recording binding whose view **deliberately differs
+from the on-disk content**, and asserts the outcome follows the bound view. An
+implementation that re-read the path would produce a different refusal and fail.
+
+The protocol is private in the same sense as the seam: no environment switch,
+no verbose mode, no public configuration, and no escape hatch that would let an
+implementation opt out of it.
+
 ## 5. Field inventory
 
 ### 5a. Common root keys, present on all six record types, in declared order
@@ -562,7 +596,7 @@ only** and does not appear in `BRIDGE_TYPES`.
   control requires an intentional manifest edit. **A numeric test count is never
   the acceptance claim.**
 
-**Amendments added after the first audit.** These extend the set; existing
+**Amendments added after the audits.** These extend the set; existing
 numbers are deliberately left unchanged so an auditor can diff the two commits
 without renumbering noise.
 
@@ -591,6 +625,15 @@ without renumbering noise.
   workflow still passed. A control asserts byte-for-byte equality against one
   canonical string, including its final line feed, and addresses that exact
   path — it never scans `.github` or any wider surface.
+  **Disclosed future network surface.** Executing this workflow would fetch two
+  SHA-pinned actions and, additionally, run `pip install` — so **a future
+  execution contacts the configured Python package index** to obtain pytest.
+  That is the whole of its network surface. pytest is pinned to the exact
+  version under which the reported local suite ran, determined locally and
+  read-only; nothing was installed, downloaded, browsed or fetched to determine
+  it. **This phase freezes workflow text only**: it does not execute the
+  workflow, does not prove what a runner would do, and does not establish
+  repository-required status.
   **Epistemic limit on this invariant:** a workflow file, and a job name inside
   it, **cannot establish that a check is not required**. Required-check status
   is external repository configuration. This phase neither changes nor attests
@@ -615,6 +658,12 @@ without renumbering noise.
   source**; it is paired with behavioural snapshots of the records tree and of
   the laboratory tree. **It does not claim protection over arbitrary external
   paths**, and no control asserts one.
+- **I93** The directory binding of section 4c is **used, not merely acquired**.
+  Enumeration comes from `entries()`, captured bytes from `read(name)`, `closed`
+  is False throughout both, `close()` is called exactly once after the last
+  read, and content reachable only through the original path cannot replace or
+  augment the bound view. Controls substitute a recording binding whose view
+  differs from the on-disk content and assert the outcome follows the binding.
 - **I91** The Phase 2 ordering of section 9 is observable: supersession
   acyclicity is decided before digest matching, so `supersedes-cycle` is
   reachable. A control asserts each of the two tokens exactly, on fixtures that
@@ -799,16 +848,85 @@ All three error classes carry `token` and `path`, as `SourceRecordError` does.
 ## 12. Acceptance criteria for the future implementation
 
 A conforming implementation satisfies **every retained invariant, I01 through
-I92** — the original set together with the amendments I83 through I92 — with a
+I93** — the original set together with the amendments I83 through I93 — with a
 failing-input control for each and every positive control passing — a validator that refuses
-everything is broken, not correct. It is standard-library only, contains no bare
-`assert` and no unreraised broad `except`, holds the laboratory-local forward
-quarantine, ships a path-scoped **non-required** workflow, and emits
-byte-identical output across key order, filesystem order, processes and hash
-seeds. Its refusal carrier has no value slot. Its controls match the manifest in
-`tests/test_controls_manifest.py` exactly. Its own README reproduces section 2
-verbatim. **Its prose claims match what the tooling enforces, not what the
-author intended.**
+everything is broken, not correct. It is standard-library only; contains no bare
+`assert`; contains **no bare `except:`, no `except Exception` and no
+`except BaseException`** in any statically covered form (I90); holds the
+laboratory-local forward quarantine; ships the byte-frozen **path-scoped,
+informational** workflow of section 3d — *not* a non-required one, because
+required-check status is external repository configuration that this phase
+neither sets nor attests; and emits byte-identical output across key order,
+filesystem order, processes and hash seeds. Its refusal carrier has no value
+slot. Its controls match the manifest in `tests/test_controls_manifest.py`
+exactly. Its own README reproduces section 2 verbatim. **Its prose claims match
+what the tooling enforces, not what the author intended.**
+
+### 12a. What the controls do not prove
+
+Stated here so no reader has to infer it:
+
+- The static scanners cover a **frozen, enumerated syntactic surface**, listed
+  in section 12b. They do **not** prove the absence of every dynamically
+  constructible Python form: a handler class assembled at runtime, an attribute
+  resolved through `getattr`, or a write reached through an aliased module
+  object can evade any purely static rule.
+- The behavioural read-only controls snapshot the records tree and the
+  laboratory tree, and **claim nothing about any other path**.
+- Nothing here establishes repository configuration of any kind — branch
+  protection, required checks, or workflow enablement.
+- Byte-freezing the workflow text proves what the file must contain. It does
+  **not** execute it, and it proves nothing about what a runner would do.
+
+**A human source audit of the implementation remains a separate and required
+acceptance step.** No control in this suite substitutes for it.
+
+### 12b. The frozen static surface
+
+**Broad-exception scanning (I90) mechanically covers**, in a laboratory
+production module: a bare `except:`; `except Exception` and
+`except BaseException`; the same two reached through an attribute, such as
+`except builtins.Exception`; either appearing as a member of a tuple, such as
+`except (ValueError, Exception)`; and either reached through a **simple
+module-level or function-level alias**, such as
+
+    E = Exception
+    try:
+        operation()
+    except E:
+        handle()
+
+It does **not** cover a handler class produced by a call, a subscript, a
+conditional expression, `getattr`, or any other runtime construction.
+
+**Write-capability scanning (I92) mechanically covers**, in a laboratory
+production module:
+
+- *Unambiguous method names on any receiver* — `write_text`, `write_bytes`,
+  `touch`, `mkdir`, `makedirs`, `rmdir`, `removedirs`, `unlink`, `rename`,
+  `symlink_to`, `hardlink_to`, `rmtree`, `copytree`, `copyfile`, `mkstemp`,
+  `mkdtemp`, `ftruncate`, `pwrite`, `writev`. These have no plausible
+  non-filesystem meaning.
+- *Module-qualified calls only* — `os.remove`, `os.rename`, `os.replace`,
+  `os.write`, `os.truncate`, `os.chmod`, `os.chown`, `os.symlink`, `os.link`,
+  `os.mkfifo`, `os.mknod`; `shutil.copy`, `shutil.copy2`, `shutil.move`,
+  `shutil.make_archive`, `shutil.unpack_archive`; and every `tempfile` creation
+  helper.
+- *`open` and `Path.open`* — permitted only with no mode argument or a mode
+  that is a literal read mode. Any other literal, or a non-literal mode
+  expression, is prohibited.
+- *`os.open`* — permitted **only** when its flags expression is composed
+  exclusively of statically read-only flag names (`O_RDONLY`, `O_DIRECTORY`,
+  `O_NOFOLLOW`, `O_CLOEXEC`, `O_BINARY`, `O_NOINHERIT`, `O_NONBLOCK`, `O_PATH`)
+  combined with `|`. Any write, create, truncate, append or exclusive flag, and
+  any non-static flags expression, is prohibited. This is what allows a
+  legitimate read-only directory binding while still catching an obvious write.
+
+It deliberately does **not** flag a bare `.replace(...)`, `.copy(...)` or
+`.link(...)` on an unknown receiver: `str.replace` and `dict.copy` are ordinary
+and harmless, and a receiver-blind rule would reject correct code while adding
+no real assurance. `os.replace` is caught by the module-qualified rule. This
+residual gap is exactly why the human source audit above is required.
 
 No seat that authored a component independently accepts it.
 

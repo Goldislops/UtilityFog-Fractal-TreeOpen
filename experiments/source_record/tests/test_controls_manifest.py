@@ -60,7 +60,7 @@ AUTHORED_CONTROLS = {
         "SR-C-016", "SR-C-017", "SR-C-018", "SR-C-019", "SR-C-020",
         "SR-C-021", "SR-C-022", "SR-C-023", "SR-C-024", "SR-C-025",
         "SR-C-026", "SR-C-027", "SR-C-028", "SR-C-029", "SR-C-030",
-        "SR-C-031", "SR-C-032",
+        "SR-C-031", "SR-C-032", "SR-C-033", "SR-C-034",
     ),
     "test_import_quarantine.py": (
         "SR-Q-001", "SR-Q-002", "SR-Q-003", "SR-Q-004", "SR-Q-005",
@@ -646,6 +646,12 @@ def test_sr_m_019_the_source_record_workflow_matches_its_canonical_bytes():
     assert sup.WORKFLOW_CONTENT.endswith("\n")
     assert "non-required" not in sup.WORKFLOW_CONTENT
     assert "informational, path-scoped" in sup.WORKFLOW_CONTENT
+    # The disclosed network surface: two SHA-pinned actions plus one package
+    # index installation, pinned to the exact locally observed version.
+    assert f"pip install pytest=={sup.PYTEST_PIN}" in sup.WORKFLOW_CONTENT
+    assert "Contacts the configured Python package index" in sup.WORKFLOW_CONTENT
+    assert sup.WORKFLOW_CONTENT.count("pip install") == 1
+    assert sup.WORKFLOW_CONTENT.count("uses:") == 2
 
 
 def _function_named(source: str, name: str):

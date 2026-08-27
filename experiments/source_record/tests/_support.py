@@ -140,6 +140,21 @@ Six things remain human-gated and only human-gated:
 #: workflow file cannot establish that a check is not required: required-check
 #: status is external repository configuration. This phase neither changes nor
 #: attests branch protection, and no control here claims to.
+#:
+#: DISCLOSED FUTURE NETWORK SURFACE. Two SHA-pinned actions are fetched by the
+#: runner, and the workflow additionally runs `pip install`, so **a future
+#: execution of this workflow contacts the configured Python package index** to
+#: obtain pytest. That is the whole of its network surface. pytest is pinned to
+#: the exact version under which Opus's local suite results were produced,
+#: PYTEST_PIN below, read locally and read-only; nothing was installed,
+#: downloaded, browsed, or fetched to determine it.
+#:
+#: This phase freezes workflow TEXT only. It does not execute the workflow, does
+#: not prove what a runner would do, and does not establish repository-required
+#: status.
+
+#: The exact pytest version under which the reported local suite ran.
+PYTEST_PIN = "9.0.2"
 WORKFLOW_CONTENT = """name: source-record
 
 on:
@@ -169,8 +184,9 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
+      # Contacts the configured Python package index. Pinned exactly.
       - name: Install test dependencies
-        run: pip install pytest
+        run: pip install pytest==9.0.2
       - name: Collect the acceptance surface
         run: python -m pytest --collect-only -q experiments/source_record/tests
       - name: Run the acceptance suite
@@ -229,41 +245,106 @@ def is_reparse_point(path: pathlib.Path) -> bool:
 # Write-capable filesystem operations forbidden in laboratory production code.
 # --------------------------------------------------------------------------
 
-#: Attribute or bare-name calls a read-only validator may never make.
-FORBIDDEN_WRITE_CALLS = frozenset(
+#: Method names with no plausible non-filesystem meaning, on ANY receiver.
+UNAMBIGUOUS_WRITE_METHODS = frozenset(
     {
         "write_text",
         "write_bytes",
+        "touch",
         "mkdir",
         "makedirs",
-        "touch",
-        "unlink",
         "rmdir",
-        "remove",
         "removedirs",
+        "unlink",
         "rename",
-        "replace",
-        "renames",
-        "symlink",
-        "link",
-        "chmod",
-        "chown",
-        "truncate",
+        "symlink_to",
+        "hardlink_to",
+        "rmtree",
+        "copytree",
+        "copyfile",
         "mkstemp",
         "mkdtemp",
-        "NamedTemporaryFile",
-        "TemporaryDirectory",
-        "copy",
-        "copy2",
-        "copyfile",
-        "copytree",
-        "rmtree",
-        "move",
+        "ftruncate",
+        "pwrite",
+        "writev",
     }
 )
 
-#: ``open`` is permitted only in a read mode.
+#: Ambiguous names, prohibited ONLY when qualified by a known module.
+#: A bare ``.replace()``, ``.copy()`` or ``.link()`` on an unknown receiver is
+#: deliberately not flagged: ``str.replace`` and ``dict.copy`` are ordinary and
+#: harmless, and a receiver-blind rule would reject correct code while adding no
+#: real assurance. CONTRACT.md section 12b records this residual gap, which is
+#: one of the reasons the human source audit is a required acceptance step.
+MODULE_QUALIFIED_WRITE_CALLS = {
+    "os": frozenset(
+        {
+            "remove",
+            "rename",
+            "replace",
+            "renames",
+            "write",
+            "pwrite",
+            "writev",
+            "truncate",
+            "ftruncate",
+            "chmod",
+            "chown",
+            "symlink",
+            "link",
+            "mkfifo",
+            "mknod",
+            "unlink",
+            "mkdir",
+            "makedirs",
+            "rmdir",
+            "removedirs",
+        }
+    ),
+    "shutil": frozenset(
+        {
+            "copy",
+            "copy2",
+            "copyfile",
+            "copytree",
+            "copymode",
+            "copystat",
+            "move",
+            "rmtree",
+            "make_archive",
+            "unpack_archive",
+        }
+    ),
+    "tempfile": frozenset(
+        {
+            "mkstemp",
+            "mkdtemp",
+            "NamedTemporaryFile",
+            "TemporaryDirectory",
+            "TemporaryFile",
+            "SpooledTemporaryFile",
+        }
+    ),
+}
+
+#: ``open`` and ``Path.open`` are permitted only in a read mode.
 READ_ONLY_OPEN_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
+
+#: ``os.open`` flags that keep it read-only. A directory binding needs
+#: ``os.O_RDONLY | os.O_DIRECTORY``, so a blanket ban on ``os.open`` would
+#: reject the very mechanism I06 requires.
+READ_ONLY_OS_OPEN_FLAGS = frozenset(
+    {
+        "O_RDONLY",
+        "O_DIRECTORY",
+        "O_NOFOLLOW",
+        "O_CLOEXEC",
+        "O_BINARY",
+        "O_NOINHERIT",
+        "O_NONBLOCK",
+        "O_PATH",
+    }
+)
 
 # Resource ceilings, mirrored from the contract so drift is detectable.
 MAX_RECORDS_PER_DIR = 256

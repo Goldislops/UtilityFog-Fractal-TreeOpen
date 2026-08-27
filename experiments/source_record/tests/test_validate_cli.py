@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import socket
 import subprocess
 import sys
@@ -369,6 +370,134 @@ def test_sr_c_032_a_binding_failure_is_refused_through_the_frozen_private_seam(
     with pytest.raises(validate.RecordsPathError) as excinfo:
         validate.validate_records_root(root)
     assert excinfo.value.token == "path-binding-failed"
+
+
+class RecordingBinding:
+    """A substitute binding whose view deliberately differs from the disk.
+
+    It implements the frozen private protocol of CONTRACT.md section 4c and
+    records every interaction, so a control can prove the validator obtained
+    enumeration and bytes *through the binding* rather than re-reading the path.
+    """
+
+    def __init__(self, name, view):
+        self.name = name
+        self.view = dict(view)
+        self.calls = []
+        self.closed = False
+
+    def entries(self):
+        assert not self.closed, f"{self.name}: enumerated after close"
+        self.calls.append(("entries",))
+        return tuple(sorted(self.view))
+
+    def read(self, entry):
+        assert not self.closed, f"{self.name}: captured after close"
+        self.calls.append(("read", entry))
+        return self.view[entry]
+
+    def close(self):
+        self.calls.append(("close",))
+        self.closed = True
+
+
+def install_recording_bindings(monkeypatch, validate, views):
+    """Replace the private seam with recording bindings; return them by name."""
+    created = {}
+
+    def acquire(path):
+        name = pathlib.Path(path).name
+        binding = RecordingBinding(name, views[name])
+        created[name] = binding
+        return binding
+
+    monkeypatch.setattr(validate, "_acquire_directory_binding", acquire)
+    return created
+
+
+def bound_views(records):
+    """The per-directory view a binding exposes: entry name -> canonical bytes."""
+    views = {name: {} for name in sup.REGISTER_DIR_NAMES}
+    for record in records:
+        views[record["register"]][record["record_id"] + ".json"] = (
+            sup.canonical_bytes(record)
+        )
+    return views
+
+
+def test_sr_c_033_enumeration_and_capture_come_from_the_binding_not_the_path(
+    tmp_path, monkeypatch
+):
+    """The bound view is authoritative; the path is not consulted again.
+
+    On disk, ``register-a`` carries a schema-invalid record *and* an entry the
+    binding does not list. The binding exposes a clean, valid view instead. An
+    implementation that merely called the seam and then re-enumerated or
+    re-read the path would see the hostile content and refuse; one that uses
+    the binding validates cleanly. That difference is the proof.
+    """
+    validate = sup.require_validate()
+    valid = minimal_valid_set()
+
+    hostile = [dict(record) for record in valid]
+    for record in hostile:
+        if record["record_id"] == "SR-A-SRC-0001":
+            record["origin"] = "ingested"
+    root = build_root(tmp_path, hostile)
+    (root / "register-a" / "unlisted-entry.txt").write_text(
+        sup.MARKER_VALUE, encoding="utf-8"
+    )
+
+    bindings = install_recording_bindings(monkeypatch, validate, bound_views(valid))
+    summary = validate.validate_records_root(root)
+
+    assert set(bindings) == set(sup.REGISTER_DIR_NAMES)
+    expected = sorted(
+        record["record_id"] for record in valid if record["register"] == "register-a"
+    )
+    assert summary["registers"]["register-a"]["record_ids"] == expected
+    assert "unlisted-entry.txt" not in str(summary)
+    for name, binding in sorted(bindings.items()):
+        read_names = [entry for kind, *rest in binding.calls
+                      if kind == "read" for entry in rest]
+        assert sorted(read_names) == sorted(binding.view), name
+
+
+def test_sr_c_034_the_binding_stays_live_across_capture_and_closes_exactly_once(
+    tmp_path, monkeypatch
+):
+    """Lifecycle, on the success path and on a refusal path alike."""
+    validate = sup.require_validate()
+
+    def check(bindings):
+        for name, binding in sorted(bindings.items()):
+            kinds = [call[0] for call in binding.calls]
+            assert kinds, name
+            assert kinds[0] == "entries", (name, kinds)
+            assert kinds.count("close") == 1, (name, kinds)
+            close_at = kinds.index("close")
+            assert close_at == len(kinds) - 1, (name, kinds)
+            for index, kind in enumerate(kinds):
+                if kind in ("entries", "read"):
+                    assert index < close_at, (name, kinds)
+            assert binding.closed is True, name
+
+    valid = minimal_valid_set()
+    root = build_root(tmp_path / "ok", valid)
+    bindings = install_recording_bindings(monkeypatch, validate, bound_views(valid))
+    validate.validate_records_root(root)
+    check(bindings)
+
+    broken = [dict(record) for record in valid]
+    for record in broken:
+        if record["record_id"] == "SR-B-SRC-0001":
+            record["origin"] = "ingested"
+    refusal_root = build_root(tmp_path / "bad", valid)
+    bindings = install_recording_bindings(monkeypatch, validate, bound_views(broken))
+    with pytest.raises(validate.RecordsInputError) as excinfo:
+        validate.validate_records_root(refusal_root)
+    assert excinfo.value.token == "enum-value-invalid"
+    check(bindings)
 
 
 def test_sr_c_008_an_argparse_usage_error_keeps_its_own_systemexit_two(capsys):
