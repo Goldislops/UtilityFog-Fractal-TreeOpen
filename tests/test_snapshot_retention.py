@@ -5224,9 +5224,14 @@ def test_the_entry_headroom_refusal_is_unchanged_under_the_binding(tmp_path):
     assert _listing(root) == before
 
 
-def test_the_survey_is_untouched_by_the_root_binding(tmp_path):
+def test_the_survey_is_untouched_by_the_data_root_binding(tmp_path):
     """Reconciliation reads a pass directory, never the data root, so the
-    binding has nothing to say about it."""
+    DATA-ROOT binding has nothing to say about it.
+
+    Named for the binding it is about. The survey has since gained a
+    binding of its own -- taken on the pass directory handed in, and
+    proved across enumeration and the journal read -- so "untouched by
+    the root binding" must not be read as "has no binding at all"."""
     root = _scanned_root(tmp_path, snapshots=3)
     _run(root)
     pass_directory = _quarantine_root(root) / "p20260101T000000"
@@ -6542,3 +6547,1293 @@ def test_a_lock_open_failure_leaves_no_descriptor_reference(tmp_path,
     handle = retention._LockHandle(lock_path)
     assert handle.acquire() is False
     assert handle._fd is None
+
+
+# ===========================================================================
+# P4 -- the SURVEY proves its pass directory ONCE and then stops looking
+# ===========================================================================
+#
+# `survey_quarantine` opens with a proof and immediately throws it away:
+#
+#     if directory_state(root) is None:
+#         return _survey_refusal(
+#             RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+#
+# The `(device, inode)` pair that call read is never compared against
+# anything. Everything after it -- the `os.scandir` block, the manifest read
+# and the record parse -- acts on the PATHNAME again, and the operating
+# system resolves that pathname afresh every single time.
+#
+# `os.scandir` binds the OBJECT. Once the iterator exists it keeps enumerating
+# the directory it was opened on, whatever the pathname comes to mean. Every
+# other step binds the NAME. So a substitution installed at any point after
+# the opening proof splits the survey in half: the entry names come from the
+# directory the handle is on, and the journal comes from whatever now answers
+# to the pathname.
+#
+# The consequence is not a wrong count. It is a CLEAN RECONCILIATION of a
+# state that no directory on the volume has ever held -- payload names from
+# one object, matching records from another, `refused=None`, `unmanifested=0`.
+# An operator reading that answer concludes the pass is fully journalled and
+# that nothing needs recovering.
+#
+# The correction is three calls to the helper that already exists,
+# `_scanned_root_unchanged`, against the identity the opening proof already
+# reads: one inside the scan block before a single entry is consumed, one
+# after the scan block before the manifest is resolved, and one after the
+# manifest bytes come back and BEFORE their length is measured. No new
+# symbol, no new reason, no new field.
+#
+# Nothing here sleeps, threads or races. Each window is entered by wrapping
+# the primitive that opens it -- `os.scandir` for the four scan-time windows,
+# `os.lstat` for the manifest-resolution window -- so the substitution lands
+# at one exact statement, in one thread, in a fixed order, on every platform.
+
+
+#: The five windows, named for the statement each one lands between. They are
+#: parametrised over rather than written out one control at a time so that a
+#: window added later cannot quietly acquire fewer controls than its
+#: neighbours.
+_SURVEY_WINDOWS = ("before_scandir", "after_scandir", "mid_enumeration",
+                   "after_enumeration", "manifest_lstat")
+
+#: The windows in which the handle is already open on the ORIGINAL object, so
+#: the entry names keep coming from it while the pathname names the
+#: substitute. These are the composite-answer windows.
+_COMPOSING_WINDOWS = ("after_scandir", "mid_enumeration", "after_enumeration",
+                      "manifest_lstat")
+
+
+def _names_the_manifest(path):
+    """Whether `path`'s last component is the journal's fixed name.
+
+    The manifest-resolution window is entered by watching `os.lstat`, which
+    the whole interpreter shares, so the watcher has to recognise the one
+    pathname it cares about and pass everything else straight through
+    untouched. `os.lstat` also accepts a descriptor, which is not a pathname
+    at all and must not raise here.
+    """
+    try:
+        text = os.fspath(path)
+    except TypeError:
+        return False
+    if isinstance(text, bytes):
+        text = os.fsdecode(text)
+    return os.path.basename(text) == retention.MANIFEST_NAME
+
+
+def _pass_directory_payloads(count):
+    """`count` allowlisted basenames, as a completed pass would hold them."""
+    return [_snap_name(index + 1, index + 1) for index in range(count)]
+
+
+def _journalled_pass_directory(tmp_path, *, payloads=1, journal=True):
+    """A finished pass directory, and the payload names inside it.
+
+    Built through `_pass_dir`, the survey block's own builder, so these
+    controls and the schema controls above are looking at the same shape of
+    directory. It is a CHILD of the quarantine root rather than `tmp_path`
+    itself, because every control below renames it and pytest owns `tmp_path`
+    and walks it during teardown.
+    """
+    names = _pass_directory_payloads(payloads)
+    records = [_record_bytes(name) for name in names] if journal else ()
+    directory = _pass_dir(tmp_path, records=records, extra_files=names)
+    return directory, names
+
+
+def _replace_pass_directory_pathname(directory, *, entries=(), records=()):
+    """Make `directory` name a DIFFERENT real directory, and prove it did.
+
+    The counterpart of `_replace_root_pathname` for a pass directory, and
+    built the same way and for the same reason: the substitute is allocated
+    WHILE the original still exists and is then renamed over the vacated
+    pathname, because removing the original and recreating it would let the
+    filesystem hand back the inode it just released and the fixture would
+    prove nothing.
+
+    It takes journal bytes as well as entry names, which is the whole
+    difference. A pass directory's answer is assembled from its entries AND
+    its manifest, so a substitute that could not carry a journal could not
+    express the defect this block is about.
+
+    Nothing here is a junction, a symlink or a mount point. The substitute is
+    an ordinary directory that satisfies every structural check
+    `directory_state` makes, and is still not the directory that was proved.
+
+    The two identities are asserted HERE rather than in each control, so no
+    control can accidentally rest on a substitution that never happened.
+    """
+    directory = Path(os.fspath(directory))
+    before = _directory_identity(directory)
+    decoy = directory.with_name(directory.name + ".decoy")
+    decoy.mkdir()
+    for name in entries:
+        (decoy / name).write_bytes(b"\x00" * 8)
+    if records:
+        (decoy / retention.MANIFEST_NAME).write_bytes(b"".join(records))
+    displaced = directory.with_name(directory.name + ".displaced")
+    os.rename(directory, displaced)
+    os.rename(decoy, directory)
+    after = _directory_identity(directory)
+    assert before is not None, "the original had no identity to lose"
+    assert after is not None, "the substitute has no identity of its own"
+    assert before != after, (
+        "the fixture did not actually change which object the pathname names")
+    return _RootReplacement(before, after, displaced, _listing(directory))
+
+
+class _Substitution:
+    """A pass-directory replacement, deferred until a window opens it.
+
+    Callable with no arguments so the scan wrapper and the `lstat` watcher can
+    both fire it without knowing what it does, and idempotent so a window that
+    is entered twice still describes one substitution.
+    """
+
+    __slots__ = ("_directory", "_entries", "_records", "armed", "replacement")
+
+    def __init__(self, directory, *, entries=(), records=(), armed=True):
+        self._directory = Path(os.fspath(directory))
+        self._entries = tuple(entries)
+        self._records = tuple(records)
+        self.armed = armed
+        self.replacement = None
+
+    def __call__(self):
+        if not self.armed or self.replacement is not None:
+            return
+        self.replacement = _replace_pass_directory_pathname(
+            self._directory, entries=self._entries, records=self._records)
+
+
+class _WithdrawnSubstitution:
+    """Put the ORIGINAL back at the pathname the substitute took over.
+
+    This exists to state a DISCLOSED LIMIT rather than to catch anything: a
+    substitution that is installed and withdrawn wholly between two proofs
+    leaves both proofs reading the identity they expect, and no comparison of
+    two `(device, inode)` pairs can see it.
+    """
+
+    __slots__ = ("_directory", "_substitution", "restored")
+
+    def __init__(self, directory, substitution):
+        self._directory = Path(os.fspath(directory))
+        self._substitution = substitution
+        self.restored = None
+
+    def __call__(self):
+        replacement = self._substitution.replacement
+        assert replacement is not None, "nothing was installed to withdraw"
+        aside = self._directory.with_name(self._directory.name + ".withdrawn")
+        os.rename(self._directory, aside)
+        os.rename(replacement.displaced, self._directory)
+        self.restored = _directory_identity(self._directory)
+        assert self.restored == replacement.before, (
+            "the withdrawal did not restore the original object")
+
+
+class _ContentChangedInPlace:
+    """Add and remove entries INSIDE the directory, without replacing it.
+
+    A directory's size and modification time change whenever its contents do,
+    and a pass directory an operator is looking at may legitimately change
+    while it is being read. This is the fixture that proves the correction
+    compares the `(device, inode)` pair and not the file 4-tuple.
+    """
+
+    __slots__ = ("_directory", "_added", "_removed", "performed")
+
+    def __init__(self, directory, *, added=(), removed=()):
+        self._directory = Path(os.fspath(directory))
+        self._added = tuple(added)
+        self._removed = tuple(removed)
+        self.performed = False
+
+    def __call__(self):
+        for name in self._added:
+            (self._directory / name).write_bytes(b"\x00" * 8)
+        for name in self._removed:
+            os.unlink(self._directory / name)
+        self.performed = True
+
+
+class _RecordedSurveyIterator(_RecordedIterator):
+    """`_RecordedIterator`, with the two enumeration-time windows opened.
+
+    The recorder above pins WHICH object a handle stayed on, and that evidence
+    -- `yielded`, `closed`, `undrained` -- is exactly what these controls need
+    too, so it is inherited rather than reimplemented and a reader comparing
+    the two blocks is comparing the same measurements.
+
+    What is added is two injection points the recorder deliberately does not
+    have: one immediately after the first entry has been handed to the caller
+    and consumed by it, and one at the close that ends the scan block. The
+    close hook runs AFTER the real handle has been released, so the window it
+    opens is unambiguously "the enumeration is over and the manifest has not
+    been resolved" rather than anything happening under a live handle.
+    """
+
+    __slots__ = ("_after_first_entry", "_at_close")
+
+    def __init__(self, real, *, after_first_entry=None, at_close=None):
+        super().__init__(real)
+        self._after_first_entry = after_first_entry
+        self._at_close = at_close
+
+    def __iter__(self):
+        for index, entry in enumerate(self._real):
+            self.yielded.append(entry.name)
+            yield entry
+            if index == 0 and self._after_first_entry is not None:
+                self._after_first_entry()
+
+    def __exit__(self, *exc):
+        result = super().__exit__(*exc)
+        if self._at_close is not None:
+            self._at_close()
+        return result
+
+
+class _ScandirAroundTheSurveyScan:
+    """`os.scandir`, wrapped so one deferred action lands in one exact window.
+
+    `when="before_scandir"` acts on the other side of the same call the survey
+    makes, which is the window an opening proof leaves behind and a pre-loop
+    proof must close. `when="after_scandir"` acquires the real iterator over
+    the ORIGINAL object, acts, and then hands back the iterator it already
+    holds -- the window in which the handle and the pathname part company.
+    `when="mid_enumeration"` acts once the first entry has been counted, and
+    `when="after_enumeration"` once the handle has been released.
+    `when="never"` acts not at all, so the same seam can prove that the
+    wrapper itself refuses nothing.
+
+    Only the survey's own FIRST enumeration is interfered with. Every
+    assertion a control makes for itself goes through `_listing`, which uses
+    `os.listdir`, and every identity it reads goes through `_REAL_LSTAT`, so
+    no fixture ever reads its own result back through the double under test.
+    """
+
+    __slots__ = ("_perform", "_when", "_at_close", "_real", "calls",
+                 "iterators")
+
+    def __init__(self, perform, *, when="after_scandir", at_close=None):
+        self._perform = perform
+        self._when = when
+        self._at_close = at_close
+        self._real = os.scandir
+        self.calls = 0
+        self.iterators = []
+
+    def _act(self):
+        if self._when != "never":
+            self._perform()
+
+    def _wrap(self, iterator):
+        recorded = _RecordedSurveyIterator(
+            iterator,
+            after_first_entry=(self._act if self._when == "mid_enumeration"
+                               else None),
+            at_close=self._closer())
+        self.iterators.append(recorded)
+        return recorded
+
+    def _closer(self):
+        if self._when == "after_enumeration":
+            if self._at_close is None:
+                return self._act
+            return lambda: (self._act(), self._at_close())
+        return self._at_close
+
+    def __call__(self, directory):
+        self.calls += 1
+        if self.calls > 1:
+            return self._real(directory)
+        if self._when == "before_scandir":
+            self._act()
+            return self._wrap(self._real(directory))
+        iterator = self._real(directory)
+        if self._when == "after_scandir":
+            self._act()
+        return self._wrap(iterator)
+
+
+class _LstatThatActsWhenTheManifestIsResolved:
+    """`os.lstat`, wrapped to act as the journal's pathname is first resolved.
+
+    `_read_manifest_bytes` begins by reading the manifest's own metadata. That
+    read is the first moment in the whole survey at which the journal's
+    pathname is resolved, so acting immediately BEFORE it means every
+    subsequent step inside the read -- the open, the `fstat` comparison, the
+    second `lstat`, the bytes themselves -- sees one self-consistent
+    substitute. The read therefore succeeds completely and returns a perfectly
+    valid journal. Nothing inside `_read_manifest_bytes` is defeated, faulted
+    or contradicted; it is simply pointed at another directory.
+
+    Delegation is to `_REAL_LSTAT`, captured at import, so that a control
+    combining this watcher with any other metadata double still reaches the
+    genuine primitive exactly once per call.
+    """
+
+    __slots__ = ("_perform", "_when", "manifest_reads")
+
+    def __init__(self, perform, *, when="manifest_lstat"):
+        self._perform = perform
+        self._when = when
+        self.manifest_reads = 0
+
+    def __call__(self, path, *args, **kwargs):
+        if _names_the_manifest(path):
+            self.manifest_reads += 1
+            if self._when != "never" and self.manifest_reads == 1:
+                self._perform()
+        return _REAL_LSTAT(path, *args, **kwargs)
+
+
+class _SurveyWindow:
+    """Everything one installed window can be asked about afterwards."""
+
+    __slots__ = ("when", "action", "scan", "lstat")
+
+    def __init__(self, when, action, scan, lstat):
+        self.when = when
+        self.action = action
+        self.scan = scan
+        self.lstat = lstat
+
+    @property
+    def replacement(self):
+        return getattr(self.action, "replacement", None)
+
+    @property
+    def iterator(self):
+        """The one handle the survey opened, or None if it opened none."""
+        if not self.scan.iterators:
+            return None
+        handle, = self.scan.iterators
+        return handle
+
+
+def _act_during_the_survey(monkeypatch, action, when, *, at_close=None):
+    """Install `action` so it fires in exactly one named window.
+
+    The scan wrapper is installed for EVERY window, including the
+    manifest-resolution one and `never`, because its recording -- which names
+    the handle yielded and whether it was closed -- is evidence every control
+    wants and is not itself an injection.
+    """
+    assert when in _SURVEY_WINDOWS + ("never",), when
+    scan_when = when if when in ("before_scandir", "after_scandir",
+                                 "mid_enumeration",
+                                 "after_enumeration") else "never"
+    scan = _ScandirAroundTheSurveyScan(action, when=scan_when,
+                                       at_close=at_close)
+    monkeypatch.setattr(retention.os, "scandir", scan)
+    watcher = _LstatThatActsWhenTheManifestIsResolved(
+        action, when=when if when == "manifest_lstat" else "never")
+    monkeypatch.setattr(retention.os, "lstat", watcher)
+    return _SurveyWindow(when, action, scan, watcher)
+
+
+def _replace_during_the_survey(monkeypatch, directory, when, *, entries=(),
+                               records=(), at_close=None):
+    substitution = _Substitution(directory, entries=entries, records=records,
+                                 armed=when != "never")
+    return _act_during_the_survey(monkeypatch, substitution, when,
+                                  at_close=at_close)
+
+
+class _CountedDirectoryIdentityReads:
+    """Every non-following metadata read the survey takes of ONE pathname.
+
+    Keyed on the normalised pathname so that the journal's own reads -- which
+    `_read_manifest_bytes` takes of a different path and which scale with
+    nothing -- are never confused with the directory proofs, which are what
+    this is counting.
+    """
+
+    __slots__ = ("_target", "reads")
+
+    def __init__(self, monkeypatch, directory):
+        self._target = os.path.normcase(
+            os.path.abspath(os.fspath(directory)))
+        self.reads = 0
+        monkeypatch.setattr(retention.os, "lstat", self)
+
+    def __call__(self, path, *args, **kwargs):
+        try:
+            text = os.path.normcase(os.path.abspath(os.fspath(path)))
+        except TypeError:
+            text = None
+        if text == self._target:
+            self.reads += 1
+        return _REAL_LSTAT(path, *args, **kwargs)
+
+
+class _ManifestDescriptorLedger:
+    """Every descriptor opened on a journal, and every close attempt on one.
+
+    A refusal that leaked the journal's descriptor would pin the file open for
+    the life of the process, and a double close would be a use-after-free
+    against whatever number the operating system recycled into that slot.
+    Both are counted rather than assumed.
+    """
+
+    __slots__ = ("opened", "closed")
+
+    def __init__(self, monkeypatch):
+        self.opened = []
+        self.closed = []
+        real_open = os.open
+        real_close = os.close
+
+        def _open(path, *args, **kwargs):
+            handle = real_open(path, *args, **kwargs)
+            if _names_the_manifest(path):
+                self.opened.append(handle)
+            return handle
+
+        def _close(handle):
+            if handle in self.opened:
+                self.closed.append(handle)
+            return real_close(handle)
+
+        monkeypatch.setattr(retention.os, "open", _open)
+        monkeypatch.setattr(retention.os, "close", _close)
+
+
+class _CountedManifestReads:
+    """How many times the survey resolved and read the journal at all.
+
+    The proof taken after the scan block is the one that decides whether an
+    unproved directory's journal is opened. Counting the calls says that
+    directly, rather than inferring it from counts that a later refusal would
+    have zeroed anyway.
+    """
+
+    __slots__ = ("calls", "_real")
+
+    def __init__(self, monkeypatch):
+        self.calls = 0
+        self._real = retention._read_manifest_bytes
+        monkeypatch.setattr(retention, "_read_manifest_bytes", self)
+
+    def __call__(self, manifest, byte_budget):
+        self.calls += 1
+        return self._real(manifest, byte_budget)
+
+
+class _CountedRecordParses:
+    """How many journal records were actually decoded into objects.
+
+    `json.loads` is where a record stops being bytes the survey is holding and
+    becomes a value the survey is acting on. Requirement 5 says the bytes are
+    DISCARDED when the directory is disproved after the read, and a count of
+    zero here is what "discarded" means.
+    """
+
+    __slots__ = ("calls", "_real")
+
+    def __init__(self, monkeypatch):
+        self.calls = 0
+        self._real = json.loads
+        monkeypatch.setattr(retention.json, "loads", self)
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self._real(*args, **kwargs)
+
+
+def _fake_pass_directory_metadata(monkeypatch, directory, *, replace,
+                                  from_read=1):
+    """Serve altered metadata for `directory` from the Nth read onwards.
+
+    Modelled on `_fake_quarantine_root_metadata` above, and for the same
+    reason: a real reparse point needs a privilege CI does not have, a second
+    device needs a mount, and an object with no stable identity cannot be
+    created on demand at all. The platform behaviour is modelled through a
+    double so the control is deterministic everywhere.
+
+    `from_read` is what makes it a WINDOW rather than a starting condition.
+    Read zero is the survey's opening proof, and every later read is one of
+    the three proofs the correction adds, so `from_read=1` is a substitution
+    the opening proof cannot see and `from_read=3` is one that arrives while
+    the journal is being read.
+    """
+    target = os.path.normcase(os.path.abspath(os.fspath(directory)))
+    reads = []
+
+    def _lstat(path, *args, **kwargs):
+        info = _REAL_LSTAT(path, *args, **kwargs)
+        try:
+            text = os.path.normcase(os.path.abspath(os.fspath(path)))
+        except TypeError:
+            return info
+        if text != target:
+            return info
+        reads.append(text)
+        if len(reads) > from_read:
+            return replace(info)
+        return info
+
+    monkeypatch.setattr(retention.os, "lstat", _lstat)
+    return reads
+
+
+def _reparsed(info):
+    reparse = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return _Stat(mode=info.st_mode, size=info.st_size,
+                 mtime_ns=info.st_mtime_ns, nlink=1, dev=info.st_dev,
+                 ino=info.st_ino, file_attributes=reparse)
+
+
+def _moved_to_another_device(info):
+    return _Stat(mode=info.st_mode, size=info.st_size,
+                 mtime_ns=info.st_mtime_ns, nlink=1, dev=info.st_dev + 1,
+                 ino=info.st_ino)
+
+
+def _without_a_stable_identity(info):
+    return _Stat(mode=info.st_mode, size=info.st_size,
+                 mtime_ns=info.st_mtime_ns, nlink=1, dev=0, ino=0)
+
+
+_METADATA_SUBSTITUTIONS = [
+    ("reparse_point", _reparsed),
+    ("another_device", _moved_to_another_device),
+    ("no_identity", _without_a_stable_identity),
+]
+
+
+def _assert_a_sanitized_refusal(survey, reason):
+    """The whole refusal, checked as one shape rather than one field.
+
+    A survey refusal is an aggregate the operator sees. It must carry the
+    reason, nothing else, and NO count -- a partial answer over a directory
+    the pass could not prove is exactly what "never a partial answer" rules
+    out -- and it must carry no name, path or errno in any field.
+    """
+    assert survey.refused is reason, survey
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        0, 0, 0), "a refusal reported counts over a directory it disproved"
+    assert (survey.malformed_records, survey.duplicates) == (0, 0), (
+        "a refusal reported journal findings it was not entitled to")
+    for field in dataclasses.fields(survey):
+        value = getattr(survey, field.name)
+        assert not isinstance(value, (str, bytes, Path)), field.name
+        assert not isinstance(value, OSError), field.name
+
+
+# -- the premise, proved on the real platform with no retention code ---------
+
+def test_a_pass_directory_handle_and_its_pathname_really_do_part_company(
+        tmp_path):
+    """Every control below rests on one claim about this platform: an
+    `os.scandir` iterator binds the OBJECT, and a pathname resolved afterwards
+    binds the NAME. If they did not part company here, the controls would be
+    refusing for some other reason entirely and would prove nothing about the
+    windows they are named for.
+
+    So it is asserted, on real directories, using no retention code at all --
+    including the sharpest form of the split: the handle keeps producing the
+    original's entries while an `lstat` of the JOURNAL's pathname resolves
+    inside the substitute, which is precisely how one answer comes to be
+    assembled out of two directories.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2,
+                                                  journal=False)
+    records = [_record_bytes(name) for name in names]
+    handle = _RecordedSurveyIterator(os.scandir(directory))
+    replacement = _replace_pass_directory_pathname(directory, records=records)
+    with handle as entries:
+        enumerated = sorted(entry.name for entry in entries)
+
+    assert replacement.before != replacement.after
+    assert enumerated == sorted(names), (
+        "the handle stopped enumerating the object it was opened on")
+    assert _listing(directory) == [retention.MANIFEST_NAME], (
+        "the pathname did not come to name the substitute")
+    assert _listing(replacement.displaced) == sorted(names), (
+        "the original directory did not survive the substitution intact")
+    journal = _REAL_LSTAT(directory / retention.MANIFEST_NAME)
+    assert stat_module.S_ISREG(journal.st_mode), (
+        "the journal pathname does not resolve inside the substitute")
+    assert _directory_identity(replacement.displaced) == replacement.before
+    assert _directory_identity(directory) == replacement.after
+    assert handle.closed == 1
+
+
+def test_the_survey_window_seam_refuses_nothing_when_it_substitutes_nothing(
+        tmp_path, monkeypatch):
+    """The seam is not the refusal.
+
+    Both wrappers are installed -- the scan recorder and the `lstat` watcher
+    -- with nothing armed, and an ordinary survey must come back byte for byte
+    what an uninstrumented one does. An injection model that changed the
+    answer by existing would make every refusal below unattributable.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=3)
+    reference = _survey(directory)
+    window = _replace_during_the_survey(monkeypatch, directory, "never")
+    survey = _survey(directory)
+
+    assert window.replacement is None
+    assert window.scan.calls == 1
+    assert window.lstat.manifest_reads >= 1, (
+        "the journal was never resolved, so the watcher watched nothing")
+    assert window.iterator.closed == 1
+    assert sorted(window.iterator.yielded) == sorted(
+        names + [retention.MANIFEST_NAME])
+    assert survey == reference
+    assert survey.refused is None
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        3, 3, 0)
+
+
+# -- the headline: one answer assembled out of two directories ---------------
+
+@pytest.mark.parametrize("when", _COMPOSING_WINDOWS)
+def test_the_survey_never_reconciles_two_directories_into_one_answer(
+        tmp_path, monkeypatch, when):
+    """The defect, stated as the operator sees it.
+
+    The original holds payloads and NO journal. The substitute holds a journal
+    naming exactly those payloads and NO payloads. Neither directory, surveyed
+    on its own, reconciles: the original reports everything unmanifested, and
+    the substitute reports nothing at all. Both of those reference answers are
+    taken here, from the same two objects, so the composite cannot be dismissed
+    as a fixture that was reconciled all along.
+
+    Uncorrected, the survey enumerates the original through the handle and
+    reads the substitute's journal through the pathname, and returns
+    `refused=None` with `unmanifested=0` -- a fully journalled pass that never
+    existed. An operator acting on that answer restores nothing, because the
+    answer says there is nothing to restore.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2,
+                                                  journal=False)
+    records = [_record_bytes(name) for name in names]
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        records=records)
+    survey = _survey(directory)
+
+    replacement = window.replacement
+    assert replacement.before != replacement.after
+    assert _listing(replacement.displaced) == sorted(names), (
+        "the original must hold the payloads and no journal")
+    assert _listing(directory) == [retention.MANIFEST_NAME], (
+        "the substitute must hold the journal and no payload")
+    assert sorted(window.iterator.yielded) in (sorted(names), []), (
+        "the handle enumerated something that was neither directory")
+
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
+    original_alone = _survey(replacement.displaced)
+    assert (original_alone.refused, original_alone.present,
+            original_alone.manifested, original_alone.unmanifested) == (
+                None, 2, 0, 2), "the original alone must not reconcile"
+    substitute_alone = _survey(directory)
+    assert (substitute_alone.refused, substitute_alone.present,
+            substitute_alone.manifested, substitute_alone.unmanifested) == (
+                None, 0, 0, 0), "the substitute alone holds no payload at all"
+
+
+# -- every window, one control each ------------------------------------------
+
+@pytest.mark.parametrize("when", _SURVEY_WINDOWS)
+def test_a_pass_directory_replaced_in_any_window_is_refused(
+        tmp_path, monkeypatch, when):
+    """One refusal per window, with the substitute made as ORDINARY as the
+    original: a real directory, not a junction, not a symlink, not a mount
+    point, carrying the same payload names and the same journal. It surveys
+    perfectly cleanly when nothing is disturbing it.
+
+    So the pathname identifies a directory that is entirely usable and simply
+    is not the one that was proved, and that -- alone -- is what the refusal
+    is about.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    records = [_record_bytes(name) for name in names]
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        entries=names, records=records)
+    survey = _survey(directory)
+
+    assert window.replacement.before != window.replacement.after
+    assert sorted(window.replacement.decoy_names) == sorted(
+        names + [retention.MANIFEST_NAME]), (
+        "the substitute must carry the same names, or the refusal could be a "
+        "content difference and nothing more")
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert _survey(window.replacement.displaced).refused is None, (
+        "the ORIGINAL is a perfectly surveyable directory")
+
+
+@pytest.mark.parametrize("when", _SURVEY_WINDOWS)
+def test_a_replacement_refusal_mutates_neither_directory(tmp_path, monkeypatch,
+                                                         when):
+    """Reconciliation is read-only in every circumstance, and a refusal is
+    still a reconciliation. Both objects are checked, because a correction
+    that tidied up after itself would leave the original intact and the
+    substitute changed."""
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    records = [_record_bytes(name) for name in names]
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        entries=names, records=records)
+    survey = _survey(directory)
+
+    displaced = window.replacement.displaced
+    assert survey.refused is (
+        retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert _listing(displaced) == sorted(names + [retention.MANIFEST_NAME])
+    assert _listing(directory) == sorted(names + [retention.MANIFEST_NAME])
+    assert (displaced / retention.MANIFEST_NAME).read_bytes() == b"".join(
+        records)
+    assert (directory / retention.MANIFEST_NAME).read_bytes() == b"".join(
+        records)
+    assert _directory_identity(displaced) == window.replacement.before
+    assert _directory_identity(directory) == window.replacement.after
+
+
+def test_the_survey_refusal_emits_nothing_at_all(tmp_path, monkeypatch,
+                                                 capsys):
+    """The module's output is path-free everywhere else and must stay so on
+    the new refusal path. Names are the one thing a pass directory is full
+    of."""
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    _replace_during_the_survey(monkeypatch, directory, "after_scandir",
+                               entries=names)
+    survey = _survey(directory)
+    printed = capsys.readouterr()
+
+    assert survey.refused is (
+        retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert printed.out == ""
+    assert printed.err == ""
+    for leak in (names[0], "v070_gen", str(tmp_path), str(directory),
+                 "Errno", "OSError", "Traceback", ".decoy", ".displaced"):
+        assert leak not in printed.out, leak
+        assert leak not in printed.err, leak
+
+
+# -- what the handle did, and what it must not have done ---------------------
+
+@pytest.mark.parametrize("when", ["before_scandir", "after_scandir"])
+def test_a_replacement_before_the_first_entry_is_refused_unenumerated(
+        tmp_path, monkeypatch, when):
+    """A directory that has not been proved must not be read AT ALL.
+
+    Both of these windows close before the loop begins, so the proof inside
+    the scan block is reached with nothing consumed. The handle must come back
+    closed and empty on both counts: nothing yielded, and nothing left to
+    yield -- an open handle over a refused directory would pin it for the life
+    of the process on the very platform whose rename semantics this module is
+    built around.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=3)
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        entries=names)
+    survey = _survey(directory)
+
+    handle = window.iterator
+    assert window.replacement.before != window.replacement.after
+    assert survey.refused is (
+        retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert handle.yielded == [], (
+        "entries were read inside a directory the survey had not proved")
+    assert handle.closed == 1, "the scandir handle was not released"
+    assert handle.undrained() == [], (
+        "the handle was left open on the directory that was refused")
+
+
+@pytest.mark.parametrize("when", _SURVEY_WINDOWS + ("never",))
+def test_the_scan_handle_is_closed_exactly_once_on_every_outcome(
+        tmp_path, monkeypatch, when):
+    """One acquisition, one release, whatever the survey decided. Exactly
+    once matters in both directions: a missing close leaks, and a second close
+    would run against whatever the operating system recycled into that
+    slot."""
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        entries=names)
+    _survey(directory)
+
+    assert window.scan.calls == 1
+    assert window.iterator.closed == 1
+
+
+@pytest.mark.parametrize("when", ["never", "manifest_lstat"])
+def test_every_manifest_descriptor_is_closed_exactly_once(tmp_path,
+                                                          monkeypatch, when):
+    """The journal descriptor's lifetime is unchanged by the correction.
+
+    `never` is the ordinary read, and `manifest_lstat` is the one window in
+    which the bytes are read in full and then discarded -- the case where a
+    descriptor is easiest to forget, because the value it produced is thrown
+    away.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    records = [_record_bytes(name) for name in names]
+    _replace_during_the_survey(monkeypatch, directory, when, records=records)
+    ledger = _ManifestDescriptorLedger(monkeypatch)
+    _survey(directory)
+
+    assert len(ledger.opened) == 1, "the journal was not read exactly once"
+    assert ledger.closed == ledger.opened, (
+        "a journal descriptor was leaked or closed twice")
+
+
+# -- the three proofs, each doing something the others cannot ----------------
+
+@pytest.mark.parametrize("when", ["mid_enumeration", "after_enumeration"])
+def test_no_journal_is_opened_once_the_scan_block_has_been_disproved(
+        tmp_path, monkeypatch, when):
+    """The proof after the scan block is the one that decides whether an
+    unproved directory's journal is opened at all.
+
+    These two windows are past the pre-loop proof, so only the post-scan proof
+    stands between the substitution and the substitute's journal. Uncorrected,
+    the survey opens and reads it. The reference count taken first proves the
+    counter is not simply reporting zero for everything.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2)
+    records = [_record_bytes(name) for name in names]
+
+    reference = _CountedManifestReads(monkeypatch)
+    assert _survey(directory).refused is None
+    assert reference.calls == 1, "an undisturbed survey reads its journal"
+
+    window = _replace_during_the_survey(monkeypatch, directory, when,
+                                        records=records)
+    counted = _CountedManifestReads(monkeypatch)
+    survey = _survey(directory)
+
+    assert window.replacement.before != window.replacement.after
+    assert survey.refused is (
+        retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert counted.calls == 0, (
+        "the journal of a directory the survey had disproved was read")
+
+
+def test_no_record_is_parsed_once_the_journal_read_disproves_the_directory(
+        tmp_path, monkeypatch):
+    """Requirement 5 says the manifest bytes are DISCARDED on a mismatch
+    detected after the read, and this is what discarding them means: not one
+    record is decoded into a value the survey then acts on.
+
+    This is the window no earlier proof can reach. The substitution arrives
+    while the journal's own pathname is being resolved, so the pre-loop proof
+    and the post-scan proof have both already passed and agreed.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2,
+                                                  journal=False)
+    records = [_record_bytes(name) for name in names]
+
+    reference_window = _replace_during_the_survey(monkeypatch, directory,
+                                                  "never")
+    reference = _CountedRecordParses(monkeypatch)
+    assert _survey(directory).refused is None
+    assert reference_window.replacement is None
+    assert reference.calls == 0, "the original carries no journal to parse"
+
+    window = _replace_during_the_survey(monkeypatch, directory,
+                                        "manifest_lstat", records=records)
+    counted = _CountedRecordParses(monkeypatch)
+    survey = _survey(directory)
+
+    assert window.lstat.manifest_reads >= 1
+    assert window.replacement.before != window.replacement.after
+    assert survey.refused is (
+        retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert counted.calls == 0, (
+        "records were parsed out of a journal the survey had disproved")
+    assert (survey.malformed_records, survey.duplicates) == (0, 0)
+
+
+def test_the_entry_count_of_the_enumerated_object_cannot_choose_the_reason(
+        tmp_path, monkeypatch):
+    """A refusal reason is a diagnosis, and it must not be selectable by
+    whatever the pass directory happens to hold.
+
+    The original overflows the entry budget; the substitute does not. Without
+    a proof taken BEFORE the loop, the enumeration reaches the budget first
+    and returns `SURVEY_LIMIT_EXCEEDED` -- a bounds diagnosis for a directory
+    that was replaced -- and every later proof is unreachable behind that
+    early return. The operator is told the pass is too big, and is never told
+    the pathname moved.
+
+    The undisturbed reference is taken first, so the limit refusal is known to
+    be reachable and this control cannot pass by the limit never firing.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=6,
+                                                  journal=False)
+    policy = dataclasses.replace(_quarantine_policy(),
+                                 max_actions_per_pass=2)
+    assert _survey(directory, policy).refused is (
+        retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED), (
+        "the fixture must overflow the entry budget when left alone")
+
+    window = _replace_during_the_survey(monkeypatch, directory,
+                                        "after_scandir",
+                                        entries=names[:1])
+    survey = _survey(directory, policy)
+
+    assert window.replacement.before != window.replacement.after
+    assert len(_listing(window.replacement.displaced)) > 2, (
+        "the enumerated object must be the one that overflows")
+    assert len(window.replacement.decoy_names) <= 2, (
+        "the substitute must be within the budget, so the two objects "
+        "disagree about whether the limit was reached")
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert window.iterator.yielded == [], (
+        "the overflowing directory was enumerated before it was proved")
+
+
+def test_the_length_of_a_substituted_journal_cannot_choose_the_reason(
+        tmp_path, monkeypatch):
+    """The same argument at the other end of the survey, and the reason the
+    third proof is placed BEFORE the byte-budget comparison.
+
+    Measuring the substitute's bytes to pick a refusal reason is not
+    discarding them, and it hands the choice of diagnosis to whoever wrote
+    them: a long journal produces `SURVEY_LIMIT_EXCEEDED` and a short one
+    produces the reconciled composite. Neither answer mentions the only thing
+    that actually happened.
+
+    The undisturbed reference is taken first against a journal of the same
+    length, so the budget refusal is known to be reachable.
+    """
+    policy = dataclasses.replace(_quarantine_policy(),
+                                 max_actions_per_pass=1)
+    budget = 1 * retention.MAX_MANIFEST_RECORD_BYTES
+    oversized = [b"x" * (budget + 8) + b"\n"]
+
+    # A separate parent, because `_pass_dir` creates the quarantine root and
+    # will not create it twice under one `tmp_path`.
+    reference_parent = tmp_path / "reference"
+    reference_parent.mkdir()
+    reference_directory = _pass_dir(reference_parent, records=oversized,
+                                    extra_files=[_snap_name(1, 1)])
+    assert _survey(reference_directory, policy).refused is (
+        retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED), (
+        "the fixture journal must overflow the byte budget when left alone")
+
+    directory, _names = _journalled_pass_directory(tmp_path, payloads=1,
+                                                   journal=False)
+    window = _replace_during_the_survey(monkeypatch, directory,
+                                        "manifest_lstat", records=oversized)
+    survey = _survey(directory, policy)
+
+    assert window.replacement.before != window.replacement.after
+    assert len((directory / retention.MANIFEST_NAME).read_bytes()) > budget
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
+
+# -- an unproved directory whose metadata, not whose identity, went bad ------
+
+@pytest.mark.parametrize("label,replace", _METADATA_SUBSTITUTIONS,
+                         ids=[row[0] for row in _METADATA_SUBSTITUTIONS])
+@pytest.mark.parametrize("from_read", [1, 2, 3],
+                         ids=["before_the_scan", "before_the_journal",
+                              "after_the_journal"])
+def test_a_pass_directory_that_stops_being_usable_between_proofs_fails_closed(
+        tmp_path, monkeypatch, label, replace, from_read):
+    """`(device, inode)` says WHICH object a pathname is, never what KIND.
+
+    A pathname that has become a reparse point, or has moved to another
+    device, or reports no stable identity at all, is not somewhere a survey
+    may go on reading -- and none of those is a difference an identity
+    comparison alone would notice, because `_scanned_root_unchanged` asks
+    `directory_state`, which proves kind and identity together.
+
+    The three read positions are the three proofs. Modelled through
+    controlled metadata, exactly as the quarantine-root controls above are,
+    because a real reparse point needs a privilege CI does not have and an
+    object with no stable identity cannot be created on demand.
+
+    The undisturbed reference is taken first, so a refusal cannot be the
+    fixture being unsurveyable to begin with.
+    """
+    directory, _names = _journalled_pass_directory(tmp_path, payloads=2)
+    assert _survey(directory).refused is None, (
+        "the fixture must survey cleanly before any metadata is altered")
+
+    reads = _fake_pass_directory_metadata(monkeypatch, directory,
+                                          replace=replace,
+                                          from_read=from_read)
+    survey = _survey(directory)
+
+    assert len(reads) > from_read, (
+        "the survey never took a %s proof, so nothing was substituted"
+        % label)
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+
+
+# -- the identity budget -----------------------------------------------------
+
+@pytest.mark.parametrize("payloads,journal", [(0, False), (1, True),
+                                              (8, True), (24, True)],
+                         ids=["empty", "one", "eight", "twenty_four"])
+def test_the_survey_reads_the_directory_identity_a_fixed_four_times(
+        tmp_path, monkeypatch, payloads, journal):
+    """Four reads: the opening proof, and the three the correction adds.
+
+    Fixed is the point. A proof taken per entry or per record would turn a
+    bounded reconciliation into work that scales with a directory an operator
+    may have added to, which is the one thing this whole module refuses to do.
+    The journal's own metadata reads are a different pathname and are not
+    counted here.
+    """
+    directory, _names = _journalled_pass_directory(tmp_path,
+                                                   payloads=payloads,
+                                                   journal=journal)
+    counted = _CountedDirectoryIdentityReads(monkeypatch, directory)
+    survey = _survey(directory)
+
+    assert survey.refused is None
+    assert survey.present == payloads
+    assert counted.reads == 4, (
+        "the directory identity was read %d times for %d entries"
+        % (counted.reads, payloads))
+
+
+# -- nothing about an undisturbed survey may change --------------------------
+
+def test_a_stable_pass_directory_reconciles_exactly_as_it_did_before(tmp_path):
+    """No injection at all. A stable directory passes all three proofs, so the
+    ordinary answer -- and the precedence that produces it -- is untouched."""
+    directory, names = _journalled_pass_directory(tmp_path, payloads=3)
+    survey = _survey(directory)
+
+    assert survey.refused is None
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        3, 3, 0)
+    assert (survey.malformed_records, survey.duplicates) == (0, 0)
+    assert _listing(directory) == sorted(
+        names + [retention.MANIFEST_NAME])
+
+
+def test_a_stable_pass_directory_with_no_journal_is_still_unjournalled(
+        tmp_path):
+    """A crash between the last rename and the journal write leaves a
+    directory of fully restorable files and no record of them. That is a
+    counted, reported state and not a refusal, and the correction must not
+    have turned an absent journal into a disproved directory."""
+    directory, names = _journalled_pass_directory(tmp_path, payloads=3,
+                                                  journal=False)
+    survey = _survey(directory)
+
+    assert survey.refused is None
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        0 + 3, 0, 3)
+    assert retention.MANIFEST_NAME not in _listing(directory)
+    assert _listing(directory) == sorted(names)
+
+
+def test_content_changing_after_the_enumeration_is_not_a_replacement(
+        tmp_path, monkeypatch):
+    """A directory's size and modification time change whenever its contents
+    do, and an operator may legitimately be adding to a quarantine pass while
+    it is being surveyed. The correction compares the `(device, inode)` pair
+    for exactly this reason, and a 4-tuple comparison here would call ordinary
+    activity a hostile swap.
+
+    The change lands once the handle has been released, so the enumeration is
+    finished and the expected answer is one fixed tuple on every platform.
+    Both proofs still to come -- the one before the journal is resolved, and
+    the one after it is read -- see a changed directory that is the same
+    object, and must pass.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=3)
+    identity = _directory_identity(directory)
+    before = _listing(directory)
+    change = _ContentChangedInPlace(directory,
+                                    added=["operator_added.tmp"],
+                                    removed=[names[-1]])
+    window = _act_during_the_survey(monkeypatch, change, "after_enumeration")
+    survey = _survey(directory)
+
+    assert change.performed, "the fixture changed nothing"
+    assert _listing(directory) != before, "the contents did not really change"
+    assert _directory_identity(directory) == identity, (
+        "the fixture replaced the directory instead of changing it")
+    assert survey.refused is None, (
+        "an ordinary content change was reported as a replacement")
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        3, 3, 0)
+    assert window.iterator.closed == 1
+
+
+def test_content_changing_during_the_enumeration_is_not_a_replacement(
+        tmp_path, monkeypatch):
+    """The same statement in the harder window, with the change landing under
+    a live handle.
+
+    The COUNTS are deliberately not asserted here. Whether an entry created
+    after an iterator was acquired is yielded by that iterator is a platform
+    question this file does not answer and must not rest on. What is asserted
+    is the whole of what the correction is about: the pathname still names the
+    same object, so this is not a replacement and must not be refused as one,
+    and whatever was enumerated is accounted for exactly once.
+    """
+    directory, _names = _journalled_pass_directory(tmp_path, payloads=3)
+    identity = _directory_identity(directory)
+    before = _listing(directory)
+    change = _ContentChangedInPlace(directory, added=["operator_added.tmp"])
+    window = _act_during_the_survey(monkeypatch, change, "mid_enumeration")
+    survey = _survey(directory)
+
+    assert change.performed, "the fixture changed nothing"
+    assert _listing(directory) != before, "the contents did not really change"
+    assert _directory_identity(directory) == identity, (
+        "the fixture replaced the directory instead of changing it")
+    assert survey.refused is None, (
+        "an ordinary content change was reported as a replacement")
+    assert survey.present == survey.manifested + survey.unmanifested
+    assert survey.present >= 3, "the pre-existing payloads must all be counted"
+    assert (survey.malformed_records, survey.duplicates) == (0, 0)
+    assert window.iterator.closed == 1
+
+
+# -- every pre-existing refusal keeps its precedence -------------------------
+
+def test_an_invalid_pass_directory_is_still_refused_before_any_enumeration(
+        tmp_path, monkeypatch):
+    """The opening proof still comes first and still short-circuits
+    everything: a pathname that is not a directory is refused without a
+    single `os.scandir` call, which is what makes the new pre-loop proof an
+    addition rather than a replacement."""
+    root = tmp_path / retention.QUARANTINE_DIRNAME
+    root.mkdir()
+    impostor = root / "p20260101T000000"
+    impostor.write_bytes(b"not a directory")
+    window = _replace_during_the_survey(monkeypatch, impostor, "never")
+    survey = _survey(impostor)
+
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_DIRECTORY_INVALID)
+    assert window.scan.calls == 0, (
+        "an unproved pathname was enumerated before it was refused")
+
+
+def test_the_entry_limit_refusal_is_unchanged_for_a_stable_directory(tmp_path):
+    directory, _names = _journalled_pass_directory(tmp_path, payloads=6,
+                                                   journal=False)
+    policy = dataclasses.replace(_quarantine_policy(),
+                                 max_actions_per_pass=2)
+    survey = _survey(directory, policy)
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
+
+
+def test_the_journal_byte_limit_refusal_is_unchanged_for_a_stable_directory(
+        tmp_path):
+    policy = dataclasses.replace(_quarantine_policy(),
+                                 max_actions_per_pass=1)
+    budget = 1 * retention.MAX_MANIFEST_RECORD_BYTES
+    directory = _pass_dir(tmp_path, records=[b"x" * (budget + 8) + b"\n"],
+                          extra_files=[_snap_name(1, 1)])
+    survey = _survey(directory, policy)
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
+
+
+def test_the_record_count_limit_refusal_is_unchanged_for_a_stable_directory(
+        tmp_path):
+    directory = _pass_dir(
+        tmp_path,
+        records=[_record_bytes(_snap_name(index, index))
+                 for index in range(6)],
+        extra_files=[_snap_name(1, 1)])
+    policy = dataclasses.replace(_quarantine_policy(),
+                                 max_actions_per_pass=2)
+    survey = _survey(directory, policy)
+    _assert_a_sanitized_refusal(
+        survey, retention.RetentionFailureReason.SURVEY_LIMIT_EXCEEDED)
+
+
+def test_malformed_and_duplicate_records_are_still_counted_not_refused(
+        tmp_path):
+    """Malformed records are evidence of how a pass ended and are counted,
+    never repaired and never escalated into a refusal. The correction adds
+    three proofs that a stable directory passes, so this survives untouched."""
+    name = _snap_name(1, 1)
+    directory = _pass_dir(
+        tmp_path,
+        records=[_record_bytes(name), _record_bytes(name),
+                 b"{ not json\n", _record_bytes(name, extra="unexpected")],
+        extra_files=[name])
+    survey = _survey(directory)
+
+    assert survey.refused is None
+    assert survey.duplicates == 1
+    assert survey.malformed_records == 2
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        1, 1, 0)
+
+
+# -- what the correction still cannot see, said out loud ---------------------
+
+def test_a_substitution_withdrawn_between_two_proofs_is_not_detected(
+        tmp_path, monkeypatch):
+    """A DISCLOSED LIMIT, pinned so nobody has to rediscover it.
+
+    Three proofs compare `(device, inode)` at three instants. A substitution
+    installed and withdrawn wholly between two of them leaves every proof
+    reading the identity it expects, and the survey reconciles normally. The
+    answer here is the ORIGINAL's own answer -- the substitute contributed
+    nothing, because it was gone before the journal was resolved -- so this
+    is a limit on DETECTION, not a wrong answer.
+
+    The two other disclosed limits are of the same kind and are not
+    mechanisable here: a `(device, inode)` pair recycled onto a new object
+    compares equal, and no proof binds the operating-system handle, because
+    the survey acts on a PATHNAME the operating system resolves afresh each
+    time. This module says so in `_scanned_root_unchanged`'s own docstring:
+    it detects replacement, and is not an atomic defence against a hostile
+    swap.
+    """
+    directory, names = _journalled_pass_directory(tmp_path, payloads=2,
+                                                  journal=False)
+    records = [_record_bytes(name) for name in names]
+    substitution = _Substitution(directory, records=records)
+    withdrawal = _WithdrawnSubstitution(directory, substitution)
+    window = _act_during_the_survey(monkeypatch, substitution,
+                                    "mid_enumeration", at_close=withdrawal)
+    survey = _survey(directory)
+
+    assert window.replacement is not None
+    assert window.replacement.before != window.replacement.after
+    assert withdrawal.restored == window.replacement.before, (
+        "the withdrawal did not put the original back")
+    assert survey.refused is None
+    assert (survey.present, survey.manifested, survey.unmanifested) == (
+        2, 0, 2), "the answer is the original's own, not a composite"
+    assert _directory_identity(directory) == window.replacement.before
+
+
+# -- the correction's surface ------------------------------------------------
+
+def test_the_survey_correction_adds_no_symbol_of_any_kind(tmp_path):
+    """Three calls to a helper that already exists, against an identity the
+    survey already reads. No new public name, no new failure reason, no new
+    output field, and no new parameter -- other passes and other code depend
+    on every one of those, and widening any of them would be a different
+    change from the one that was authorized.
+    """
+    assert len(retention.__all__) == 34
+    assert "_scanned_root_unchanged" not in retention.__all__
+    assert len(list(retention.RetentionFailureReason)) == 20
+    assert [field.name for field in
+            dataclasses.fields(retention.QuarantineSurvey)] == [
+                "present", "manifested", "unmanifested", "malformed_records",
+                "duplicates", "refused"]
+    code = retention.survey_quarantine.__code__
+    assert code.co_argcount == 1
+    assert code.co_kwonlyargcount == 1
+    assert code.co_varnames[:2] == ("pass_directory", "policy")
