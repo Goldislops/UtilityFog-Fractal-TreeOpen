@@ -8727,7 +8727,7 @@ class _BytesPath:
 ])
 def test_mixed_case_and_slash_spellings_still_resolve_inside(monkeypatch,
                                                              spelling):
-    """Case and separator are spelling, not identity.
+    r"""Case and separator are spelling, not identity.
 
     Windows `realpath` reduces all three of these to the SAME extended
     backslash form -- measured on the Windows seat, where each returns
