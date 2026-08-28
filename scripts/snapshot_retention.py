@@ -862,11 +862,12 @@ def _lock_path_is_outside(lock_path, directory) -> bool:
     This is a NAMESPACE check, not an atomic one. It establishes the
     relationship at the instant it is asked; a path component replaced
     between this call and the open is not detected, and no filesystem
-    primitive available here would close that window. Nor does it see a
-    POSIX bind mount, which presents one directory under two names that
-    `realpath` collapses in neither direction. It removes a foreseeable
-    operator error and a self-inflicted wedge -- it is not an adversarial
-    guarantee, and does not claim to be.
+    primitive available here would close that window. This lexical check
+    cannot prove filesystem-object separation across aliases such as POSIX
+    bind mounts or Windows UNC, administrative-share, mapped-drive, or
+    comparable aliases. It removes a foreseeable operator error and a
+    self-inflicted wedge -- it is not an adversarial guarantee, and does
+    not claim to be.
     """
     canonical = []
     for candidate in (directory, lock_path):
