@@ -690,7 +690,7 @@ def _tiny(entries=1000, combined=1000, snap=1000, telem=1000, ceiling=8_192,
             absolute_ceiling=ceiling, max_inspected=telem),
         quiescence_seconds=900, max_actions_per_pass=512,
         max_directory_entries=entries, max_combined_inspected=combined,
-        reserve_window=8, reserve_required=3)
+        reserve_window=1, reserve_required=1)
 
 
 @pytest.mark.parametrize("count", [8_192, 8_193])
@@ -3340,7 +3340,7 @@ def test_a_reserve_blocked_pass_with_no_eligible_telemetry_creates_nothing(
         _write(tmp_path, _snap_name(index, index), age_days=400 + index)
     _write(tmp_path, _telem_name("20260101T000001"), age_days=100)
     report = _no_action_run(tmp_path, policy=_quarantine_policy(),
-                            admit=_Admit({0, 1}))
+                            admit=_Admit(set()))
     assert report.snapshot_actions_blocked is True
     assert report.reserve_ok is False
     assert report.snapshot_eligible == 4          # complete, not selected
@@ -5204,7 +5204,7 @@ def test_the_reserve_shortfall_refill_is_unchanged_under_the_binding(
     for index in range(3):
         _write(root, _telem_name("2026010%dT00000%d" % (index, index)),
                age_days=300 + index)
-    report = _run(root, admit=_Admit({0, 1}))
+    report = _run(root, admit=_Admit(set()))
     assert report.reserve_ok is False
     assert report.snapshot_actions_blocked is True
     assert report.refused is None
@@ -8173,3 +8173,198 @@ def test_an_existing_outside_lock_is_untouched_by_a_rejected_run(tmp_path,
     capsys.readouterr()
     assert status == 1
     assert keeper.read_bytes() == b"held"
+
+
+# ===========================================================================
+# P2 -- the RESERVE may only count snapshots the planner cannot quarantine
+# ===========================================================================
+#
+# `snapshot_reserve_available` probes the newest `reserve_window` entries:
+#
+#     for entry in rank(scan.snapshots)[:policy.reserve_window]:
+#
+# `_class_plan` protects only the newest `recovery_floor` entries:
+#
+#     if position < class_policy.recovery_floor:
+#         continue
+#
+# When `recovery_floor < reserve_window` the ranks in between are BOTH counted
+# toward the reserve AND eligible for quarantine. The check therefore passes
+# on the strength of archives the same pass is about to move. With five
+# admissible snapshots, a floor of 1 and `reserve_required=3`, the probe finds
+# three, the planner makes ranks 1..4 eligible, four are moved, and ONE is
+# left -- a third of the reserve that was just certified.
+#
+# Production is unaffected: `recovery_floor` is 512 and `reserve_window` is
+# `SNAPSHOT_ARCHIVE_POLICY.selection_depth`, which is 8, so the protected
+# prefix already contains the whole probe window. The defect is reachable only
+# through an accepted CUSTOM policy, which is why the correction narrows the
+# probe rather than rejecting the policy.
+
+
+def _reserve_policy(*, floor, window=8, required=3):
+    """A policy built for THESE controls, independent of `_tiny`.
+
+    The reserve controls must be able to state their own window and
+    requirement without being coupled to the shared tiny-policy fixture, so
+    that a change to one cannot silently redefine the other.
+    """
+    return retention.RetentionPolicy(
+        snapshot=retention.ClassRetentionPolicy(
+            max_age_seconds=30 * DAY, recovery_floor=floor,
+            absolute_ceiling=8_192, max_inspected=1_000),
+        telemetry=retention.ClassRetentionPolicy(
+            max_age_seconds=14 * DAY, recovery_floor=floor,
+            absolute_ceiling=8_192, max_inspected=1_000),
+        quiescence_seconds=900, max_actions_per_pass=512,
+        max_directory_entries=1_000, max_combined_inspected=1_000,
+        reserve_window=window, reserve_required=required)
+
+
+def _vulnerable_policy():
+    """recovery_floor (1) < reserve_window (8): the overlapping shape."""
+    return _reserve_policy(floor=1)
+
+
+def _five_old_snapshots():
+    return _built_scan(snapshots=_aged_snapshots(5, age_days=400))
+
+
+def test_the_overlapping_policy_shape_is_what_the_defect_needs():
+    """The premise, asserted rather than assumed."""
+    policy = _vulnerable_policy()
+    assert policy.snapshot.recovery_floor == 1
+    assert policy.reserve_window == 8
+    assert policy.reserve_required == 3
+    assert policy.snapshot.recovery_floor < policy.reserve_window
+
+
+def test_the_planner_would_quarantine_all_but_one_of_those_snapshots():
+    """The harm, stated in the planner's own terms and independent of the
+    reserve: four of five move, leaving one -- below `reserve_required`."""
+    policy = _vulnerable_policy()
+    plan = _plan(_five_old_snapshots(), policy=policy)
+    moved = [action.basename for action in plan.actions
+             if action.klass == retention.SNAPSHOT_CLASS]
+    assert len(moved) == 4
+    assert 5 - len(moved) == 1
+    assert 5 - len(moved) < policy.reserve_required
+
+
+def test_the_reserve_cannot_count_snapshots_the_planner_will_quarantine():
+    """The correction: with only the protected prefix countable, three
+    admissible archives cannot be found, so snapshot actions stay blocked."""
+    admit = _Admit({0, 1, 2, 3, 4})
+    assert _reserve(_five_old_snapshots(), admit,
+                    policy=_vulnerable_policy()) is False
+
+
+def test_every_counted_reserve_snapshot_is_disjoint_from_planned_actions():
+    """The invariant itself, proved by basename rather than argued.
+
+    Whatever the probe counted must not appear in the snapshot action set.
+    """
+    policy = _vulnerable_policy()
+    scan = _five_old_snapshots()
+    admit = _Admit({0, 1, 2, 3, 4})
+    _reserve(scan, admit, policy=policy)
+    probed = set(admit.calls)
+    planned = {action.basename for action in _plan(scan, policy=policy).actions
+               if action.klass == retention.SNAPSHOT_CLASS}
+    assert probed, "the probe must actually have looked at something"
+    assert probed & planned == set()
+
+
+def test_the_probe_never_reaches_beyond_the_protected_prefix():
+    """Bounded by the recovery floor AND the reserve window, whichever binds."""
+    policy = _vulnerable_policy()
+    admit = _Admit(set())
+    _reserve(_built_scan(snapshots=_aged_snapshots(5_000, age_days=400)),
+             admit, policy=policy)
+    bound = min(policy.reserve_window, policy.snapshot.recovery_floor)
+    assert len(admit.calls) == bound == 1
+
+
+def test_a_recovery_floor_below_the_reserve_requirement_blocks_actions():
+    """If the protected prefix is smaller than `reserve_required`, the reserve
+    can never be satisfied and snapshot actions must stay blocked -- however
+    many admissible archives exist further down."""
+    policy = _reserve_policy(floor=2)
+    assert policy.snapshot.recovery_floor < policy.reserve_required
+    admit = _Admit(set(range(50)))
+    assert _reserve(_built_scan(snapshots=_aged_snapshots(50, age_days=400)),
+                    admit, policy=policy) is False
+    assert len(admit.calls) == 2
+
+
+def test_rejected_archives_inside_the_protected_prefix_do_not_count():
+    """Admissible and rejected archives mixed inside the protected prefix: only
+    the admissible ones count, and the bound still holds."""
+    policy = _reserve_policy(floor=4)
+    admit = _Admit({0, 2})                      # ranks 1 and 3 are rejected
+    assert _reserve(_built_scan(snapshots=_aged_snapshots(20, age_days=400)),
+                    admit, policy=policy) is False
+    assert len(admit.calls) == 4
+
+
+def test_a_protected_prefix_that_does_satisfy_the_reserve_still_proceeds():
+    """The correction must not block a policy that is genuinely safe."""
+    policy = _reserve_policy(floor=4)
+    admit = _Admit({0, 1, 2})
+    assert _reserve(_built_scan(snapshots=_aged_snapshots(20, age_days=400)),
+                    admit, policy=policy) is True
+    assert len(admit.calls) == 3
+
+
+def test_the_production_policy_probe_bound_is_unchanged():
+    """Production's protected prefix already contains the whole window, so the
+    narrowing is a no-op there -- bound and outcome both."""
+    production = retention.PRODUCTION_RETENTION_POLICY
+    assert production.snapshot.recovery_floor == 512
+    assert production.reserve_window == 8
+    assert min(production.reserve_window,
+               production.snapshot.recovery_floor) == 8
+    admit = _Admit(set())
+    _reserve(_built_scan(snapshots=_aged_snapshots(5_000, age_days=1)), admit)
+    assert len(admit.calls) == 8
+
+
+def test_the_production_policy_outcome_is_unchanged():
+    admit = _Admit({0, 3, 7})
+    assert _reserve(_built_scan(snapshots=_aged_snapshots(20, age_days=1)),
+                    admit) is True
+    admit = _Admit({0, 5})
+    assert _reserve(_built_scan(snapshots=_aged_snapshots(20, age_days=1)),
+                    admit) is False
+
+
+def test_telemetry_stays_actionable_when_the_reserve_blocks_snapshots():
+    """The refill path must survive the narrowing: blocking snapshots must not
+    also strand telemetry."""
+    policy = _vulnerable_policy()
+    telemetry = [
+        _entry(_telem_name("2026010%dT000000" % index),
+               retention.TELEMETRY_CLASS,
+               NOW - _ns(400 * DAY) - _ns(index))
+        for index in range(6)
+    ]
+    scan = _built_scan(snapshots=_aged_snapshots(5, age_days=400),
+                       telemetry=telemetry)
+    report = retention.run_pass(
+        "data", policy=policy, mode=retention.RetentionMode.PLAN,
+        now_ns=NOW, scan=scan, admit=_Admit({0, 1, 2, 3, 4}))
+    assert report.snapshot_actions_blocked is True
+    assert report.refused is None
+    assert report.planned_actions, "telemetry must remain actionable"
+    assert all(action.klass == retention.TELEMETRY_CLASS
+               for action in report.planned_actions)
+
+
+def test_the_narrowed_probe_never_materializes_a_payload():
+    """Still bounded structural preflight only: the injected probe is the only
+    thing called, and it never opens an array."""
+    policy = _vulnerable_policy()
+    admit = _Admit({0})
+    _reserve(_five_old_snapshots(), admit, policy=policy)
+    assert len(admit.calls) <= 1
+    assert all(name.endswith(".npz") for name in admit.calls)
