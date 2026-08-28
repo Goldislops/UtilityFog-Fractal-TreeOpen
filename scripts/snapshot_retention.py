@@ -926,6 +926,7 @@ def _lock_path_is_outside(lock_path, directory) -> bool:
         return False
     return lock_parts[:len(target_parts)] != target_parts
 
+
 class _LockHandle:
     """An operating-system-held exclusive lock on one file.
 
