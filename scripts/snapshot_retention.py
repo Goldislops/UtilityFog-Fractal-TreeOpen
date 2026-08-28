@@ -822,19 +822,42 @@ def _lock_path_is_outside(lock_path, directory) -> bool:
     MAX_PATH workaround, not an exotic spelling. Both paths are therefore
     reduced to one canonical form first: an extended drive path loses the
     prefix, and `\\?\UNC\server\share\x` becomes `\\server\share\x`.
-    Any other device namespace -- `\\.\anything`, `\\?\Volume{...}`,
-    `\\?\GLOBALROOT\...` -- is NOT mapped onto an ordinary path here and
-    is refused instead of guessed at.
+    Windows `realpath` MAY itself reduce some device spellings to an
+    ordinary path before this function ever sees them -- `\\.\` drive
+    forms are observed to come back as plain drive paths -- in which case
+    the ordinary component comparison decides them and the explicit
+    branch below never runs. Whatever namespace form does survive
+    resolution and cannot be mapped onto a drive or UNC path --
+    `\\?\Volume{...}`, `\\?\GLOBALROOT\...`, a bare prefix, a bare
+    `\\?\UNC\` -- is refused rather than guessed at.
 
-    Fails CLOSED on the failures it actually contains: `OSError`,
-    `ValueError` and `TypeError`, which is what `os.fspath`, `realpath`
-    and `normcase` raise for an unusable path, an embedded NUL or a
-    non-path object, together with the unmapped namespaces above. Each
-    returns False, because an unprovable relationship is not a safe one.
-    Exceptions outside that set are deliberately not caught here and
-    propagate. The default lock path is run through this same decision
-    rather than trusted, since nothing guarantees the system temporary
-    directory is outside the target.
+    Fails CLOSED on the expected conversion, resolution and
+    component-construction failures -- `OSError`, `ValueError` and
+    `TypeError` raised by `os.fspath`, `realpath`, `normcase` or the
+    component split -- and on the unmapped namespaces above. Each returns
+    False, because an unprovable relationship is not a safe one.
+    Exceptions outside that set are deliberately NOT caught: a
+    `RuntimeError` is a defect, not an unusable path, and must not be
+    reported as a safe refusal.
+
+    Two inputs are rejected EXPLICITLY rather than left to raise. A
+    `bytes` path -- including a path-like object whose `__fspath__`
+    returns `bytes` -- is a valid path to the operating system but not to
+    the string work here. And an embedded NUL is refused outright: it
+    cannot occur in a filename, `realpath` does not reject it on every
+    platform (on Windows it is returned unchanged, NOT raised as
+    `ValueError`), and the `os.open` that would follow raises
+    `ValueError`, which is not the `OSError` the lock path contains. Both
+    are decided before anything is opened.
+
+    That covers the `main` route only. `_LockHandle.acquire` still
+    catches only `OSError`, so a caller using `single_instance_lock`
+    DIRECTLY with such a path can still receive the `ValueError`. That is
+    a separate, disclosed defect and is not repaired here.
+
+    The default lock path is run through this same decision rather than
+    trusted, since nothing guarantees the system temporary directory is
+    outside the target.
 
     This is a NAMESPACE check, not an atomic one. It establishes the
     relationship at the instant it is asked; a path component replaced
@@ -848,35 +871,56 @@ def _lock_path_is_outside(lock_path, directory) -> bool:
     canonical = []
     for candidate in (directory, lock_path):
         try:
-            resolved = os.path.realpath(os.fspath(candidate))
+            text = os.fspath(candidate)
         except (OSError, ValueError, TypeError):
             return False
-        # A device namespace is never mapped onto an ordinary path here.
-        if resolved[:4] == "\\\\.\\":
+        # Text paths only. `bytes` is a valid path to the operating system
+        # but not to the string work below, and letting it reach that work
+        # turned a refusable input into an escaping `TypeError`. The check
+        # is AFTER `os.fspath`, because a path-like object can return
+        # `bytes` from `__fspath__`.
+        if not isinstance(text, str):
             return False
-        # The extended-length forms are spellings of ordinary paths, and
-        # `realpath` keeps the prefix -- so without this the same
-        # directory spelled two ways compares as two different roots and
-        # containment is missed entirely.
-        if resolved[:4] == "\\\\?\\":
-            rest = resolved[4:]
-            if len(rest) > 4 and rest[:4].upper() == "UNC\\":
-                resolved = "\\\\" + rest[4:]
-            elif len(rest) >= 2 and rest[1] == ":" and rest[0].isalpha():
-                resolved = rest
-            else:
-                return False
+        # A NUL cannot occur in a filename. `realpath` returns it unchanged
+        # on Windows rather than raising, and the `os.open` that would
+        # follow raises `ValueError` -- not the `OSError` the lock path
+        # contains -- so it is refused here, before anything is opened.
+        if "\x00" in text:
+            return False
         try:
+            resolved = os.path.realpath(text)
+            # `realpath` may already have reduced a device spelling to an
+            # ordinary path, in which case the comparison below decides it
+            # and this branch never runs. What survives resolution and
+            # cannot be mapped is refused.
+            if resolved[:4] == "\\\\.\\":
+                return False
+            # The extended-length forms are spellings of ordinary paths,
+            # and `realpath` keeps that prefix -- so without this the same
+            # directory spelled two ways compares as two different roots
+            # and containment is missed entirely.
+            if resolved[:4] == "\\\\?\\":
+                rest = resolved[4:]
+                if len(rest) > 4 and rest[:4].upper() == "UNC\\":
+                    resolved = "\\\\" + rest[4:]
+                elif (len(rest) >= 2 and rest[1] == ":"
+                      and rest[0].isalpha()):
+                    resolved = rest
+                else:
+                    return False
+            # Components, never a string prefix. Both separators are split
+            # so one canonical sequence comes out whatever spelling
+            # arrived; on POSIX a backslash inside a name can only make
+            # this refuse, which is the safe direction. The split is inside
+            # the boundary because it is where a surviving non-text value
+            # would raise.
             normalized = os.path.normcase(resolved)
+            parts = [part for part
+                     in normalized.replace("\\", "/").split("/")
+                     if part]
         except (OSError, ValueError, TypeError):
             return False
-        # Components, never a string prefix. Both separators are split so
-        # one canonical sequence comes out whatever spelling arrived; on
-        # POSIX a backslash inside a name can only make this refuse, which
-        # is the safe direction.
-        canonical.append([part for part
-                          in normalized.replace("\\", "/").split("/")
-                          if part])
+        canonical.append(parts)
     target_parts, lock_parts = canonical
     if not target_parts:
         return False
