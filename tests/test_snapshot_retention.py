@@ -7837,3 +7837,339 @@ def test_the_survey_correction_adds_no_symbol_of_any_kind(tmp_path):
     assert code.co_argcount == 1
     assert code.co_kwonlyargcount == 1
     assert code.co_varnames[:2] == ("pass_directory", "policy")
+
+
+# ===========================================================================
+# P1 -- the LOCK must be proved OUTSIDE the maintained directory before it is
+# opened
+# ===========================================================================
+#
+# `main()` selects the lock and enters `single_instance_lock()` BEFORE
+# `run_pass()` ever scans the target:
+#
+#     lock_path = args.lock or default_lock_path(args.directory)
+#     with single_instance_lock(lock_path) as acquired:
+#
+# `_LockHandle.acquire()` opens with `os.O_CREAT`, so a `--lock` inside the
+# maintained directory CREATES an entry there -- in PLAN mode too, which is
+# supposed to measure the directory without touching it. Worse, a target
+# already at `max_directory_entries` is pushed OVER the scanner limit by that
+# one new entry, and every subsequent pass then refuses with
+# `entry_limit_exceeded` before retention can deliver any relief. The
+# directory becomes wedged at exactly the moment maintenance is needed.
+#
+# The default lock path is normally in the system temporary directory, but
+# nothing proves that directory is outside the target, so the default is run
+# through the same decision rather than trusted.
+#
+# The refusal reuses the EXISTING `LOCK_UNAVAILABLE` code. That is not a
+# stretch of its meaning: `acquire()` already returns it when the lock cannot
+# be opened at all ("Cannot even open the lock: report the fixed code and do
+# nothing"). Declining to open a lock whose placement is unsafe is the same
+# class of outcome, and the closed reason set therefore stays at twenty.
+
+
+def _inside_lock(target):
+    """A lock path directly inside the maintained directory."""
+    return Path(os.fspath(target)) / "retention.lock"
+
+
+def _assert_refused_without_locator(status, printed, target, lock):
+    """The fixed, sanitized refusal: code only, no locator, nothing on stderr."""
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    for leak in (str(target), str(lock), "Traceback", "Errno", "errno"):
+        assert leak not in printed.out
+        assert leak not in printed.err
+
+
+def test_plan_refuses_a_lock_placed_inside_the_target(tmp_path, capsys):
+    """PLAN must not create an entry in the directory it is measuring."""
+    root = _scanned_root(tmp_path, snapshots=3)
+    lock = _inside_lock(root)
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    _assert_refused_without_locator(status, printed, root, lock)
+    assert _listing(root) == before
+    assert not lock.exists()
+
+
+def test_quarantine_refuses_a_lock_placed_inside_the_target(tmp_path, capsys):
+    """The same decision guards the acting mode, not just the dry run."""
+    root = _scanned_root(tmp_path, snapshots=3)
+    lock = _inside_lock(root)
+    before = _listing(root)
+    status = retention.main([str(root), "--quarantine", "--lock", str(lock)])
+    printed = capsys.readouterr()
+    _assert_refused_without_locator(status, printed, root, lock)
+    assert _listing(root) == before
+    assert not lock.exists()
+    assert not _quarantine_root(root).exists()
+
+
+def test_the_target_itself_as_the_lock_path_is_refused(tmp_path, monkeypatch,
+                                                       capsys):
+    """The directory is not outside itself.
+
+    Opening a directory fails on its own, so a status check alone would pass
+    vacuously against the unfixed code. The control therefore also proves the
+    target was never OPENED as a lock -- the decision has to come first.
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    opened = []
+    genuine = retention.os.open
+
+    def _recording(path, *args, **kwargs):
+        opened.append(os.fspath(path))
+        return genuine(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "open", _recording)
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", str(root)])
+    printed = capsys.readouterr()
+    _assert_refused_without_locator(status, printed, root, root)
+    assert os.fspath(root) not in opened
+    assert _listing(root) == before
+
+
+@pytest.mark.parametrize("alias", [
+    "./retention.lock",
+    "sub/../retention.lock",
+    ".//retention.lock",
+])
+def test_a_normalized_alias_inside_the_target_is_refused(tmp_path, capsys,
+                                                         alias):
+    """`.` and `..` must be normalized away before the decision, so a lock
+    that merely LOOKS external cannot smuggle itself inside."""
+    root = _scanned_root(tmp_path, snapshots=2)
+    (root / "sub").mkdir()
+    lock = Path(os.fspath(root)) / alias
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    assert _listing(root) == before
+    assert not (root / "retention.lock").exists()
+
+
+def test_a_parent_alias_resolving_into_the_target_is_refused(tmp_path, capsys):
+    """Containment reached through an ALIAS must be refused too.
+
+    A real symlink is used where the platform grants it; where it does not,
+    the same relationship is presented through `os.path.realpath`, which is
+    the function the decision must consult. Either way the control runs -- it
+    is never skipped -- and both forms assert the identical refusal.
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    alias = tmp_path / "alias"
+    real_symlink = True
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        real_symlink = False
+        # A REAL, WRITABLE directory. If the alias did not exist the lock open
+        # would fail on its own and the control would pass vacuously against
+        # the unfixed code, proving nothing about alias resolution.
+        alias.mkdir()
+
+    lock = alias / "retention.lock"
+    if not real_symlink:
+        genuine = os.path.realpath
+
+        def _aliased(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(lock):
+                return os.fspath(Path(os.fspath(root)) / "retention.lock")
+            return genuine(path, *args, **kwargs)
+
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(retention.os.path, "realpath", _aliased)
+    else:
+        monkey = None
+
+    before = _listing(root)
+    try:
+        status = retention.main([str(root), "--lock", str(lock)])
+        printed = capsys.readouterr()
+    finally:
+        if monkey is not None:
+            monkey.undo()
+
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    assert _listing(root) == before
+    assert not (root / "retention.lock").exists()
+
+
+def test_a_default_temporary_directory_inside_the_target_is_refused(
+        tmp_path, monkeypatch, capsys):
+    """The DEFAULT lock goes through the same decision as an override.
+
+    If the system temporary directory happens to sit inside the maintained
+    directory, the opaque default name is no protection at all.
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    inside_tmp = root / "tmp"
+    inside_tmp.mkdir()
+    monkeypatch.setattr(retention.tempfile, "gettempdir",
+                        lambda: str(inside_tmp))
+    before = _listing(root)
+    status = retention.main([str(root)])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    assert _listing(root) == before
+    assert _listing(inside_tmp) == []
+
+
+def test_an_exactly_full_target_is_not_wedged_by_a_rejected_lock(
+        tmp_path, monkeypatch, capsys):
+    """The concrete harm: one lock entry pushes a full directory over the
+    scanner limit, and then EVERY pass refuses before relief is possible.
+
+    The production policy is replaced with one whose entry bound equals the
+    directory's current population, so the target is exactly full. Rejecting
+    the lock must leave it exactly full -- not one over.
+    """
+    root = _scanned_root(tmp_path, snapshots=4)
+    full = len(_listing(root))
+    monkeypatch.setattr(retention, "PRODUCTION_RETENTION_POLICY",
+                        _tiny(entries=full, combined=1000))
+    lock = _inside_lock(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert (retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED.value
+            not in printed.out)
+    assert len(_listing(root)) == full
+    assert not lock.exists()
+
+
+def test_the_same_full_target_still_passes_with_a_lock_outside_it(
+        tmp_path, monkeypatch, capsys):
+    """The other half of the wedging proof: with the lock outside, the
+    exactly-full directory is still scannable and is NOT refused."""
+    root = _scanned_root(tmp_path, snapshots=4)
+    full = len(_listing(root))
+    monkeypatch.setattr(retention, "PRODUCTION_RETENTION_POLICY",
+                        _tiny(entries=full, combined=1000))
+    lock = tmp_path / "outside.lock"
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert (retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED.value
+            not in printed.out)
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            not in printed.out)
+    assert len(_listing(root)) == full
+    assert status == 0
+
+
+def test_a_sibling_lock_outside_the_target_still_works(tmp_path, capsys):
+    """Valid outside placement is untouched: the lock is created and used."""
+    root = _scanned_root(tmp_path, snapshots=3)
+    lock = tmp_path / "sibling.lock"
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert status == 0
+    assert "refused=none" in printed.out
+    assert lock.exists()
+    assert _listing(root) == before
+
+
+def test_a_sibling_sharing_a_name_prefix_is_not_treated_as_inside(
+        tmp_path, capsys):
+    """Containment is by PATH COMPONENT, never by string prefix.
+
+    `.../database.lock` starts with the characters of `.../data`, so a naive
+    `startswith` refuses a perfectly valid sibling. This control fails on any
+    such implementation and holds identically before and after the fix.
+    """
+    root = _scanned_root(tmp_path, name="data", snapshots=2)
+    lock = tmp_path / "database.lock"
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert status == 0
+    assert "refused=none" in printed.out
+    assert lock.exists()
+
+
+def test_a_failure_to_compute_the_path_relation_refuses_rather_than_raises(
+        tmp_path, monkeypatch, capsys):
+    """Fail closed. If the relationship cannot be established, the pass
+    refuses with the fixed code -- it does not proceed, and it does not let an
+    OSError escape as a traceback."""
+    root = _scanned_root(tmp_path, snapshots=2)
+
+    def _unresolvable(path, *args, **kwargs):
+        raise OSError(errno.EIO, "cannot resolve")
+
+    monkeypatch.setattr(retention.os.path, "realpath", _unresolvable)
+    lock = tmp_path / "outside.lock"
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    assert "Traceback" not in printed.out
+    assert _listing(root) == before
+
+
+def test_a_rejected_lock_placement_changes_no_byte_of_the_target(tmp_path,
+                                                                 capsys):
+    """Not merely the same NAMES: the same bytes and the same sizes."""
+    root = _scanned_root(tmp_path, snapshots=3)
+    before = {name: (root / name).read_bytes() for name in _listing(root)}
+    status = retention.main([str(root), "--lock", str(_inside_lock(root))])
+    capsys.readouterr()
+    assert status == 1
+    after = {name: (root / name).read_bytes() for name in _listing(root)}
+    assert after == before
+
+
+def test_the_lock_decision_precedes_any_open(tmp_path, monkeypatch, capsys):
+    """Nothing is opened at all when the placement is unsafe.
+
+    `os.open` is replaced by a recorder that fails the control if the lock is
+    ever opened. This is what separates "created then removed" from "never
+    created".
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    opened = []
+    genuine = retention.os.open
+
+    def _recording(path, *args, **kwargs):
+        opened.append(os.fspath(path))
+        return genuine(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "open", _recording)
+    lock = _inside_lock(root)
+    status = retention.main([str(root), "--lock", str(lock)])
+    capsys.readouterr()
+    assert status == 1
+    assert os.fspath(lock) not in opened
+
+
+def test_an_existing_outside_lock_is_untouched_by_a_rejected_run(tmp_path,
+                                                                 capsys):
+    """A rejection must not disturb an unrelated, valid lock file."""
+    root = _scanned_root(tmp_path, snapshots=2)
+    keeper = tmp_path / "keeper.lock"
+    keeper.write_bytes(b"held")
+    status = retention.main([str(root), "--lock", str(_inside_lock(root))])
+    capsys.readouterr()
+    assert status == 1
+    assert keeper.read_bytes() == b"held"
