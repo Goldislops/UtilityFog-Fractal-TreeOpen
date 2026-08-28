@@ -786,6 +786,49 @@ def default_lock_path(directory):
         "uft-retention-%s.lock" % digest.hexdigest()[:32])
 
 
+def _lock_path_is_outside(lock_path, directory) -> bool:
+    """Whether `lock_path` is PROVED to lie outside `directory`.
+
+    The lock is opened with `O_CREAT` before the target is ever scanned,
+    so a lock inside the maintained directory creates an entry in the very
+    directory being measured -- in `PLAN` too. A target already at
+    `max_directory_entries` is then pushed OVER the scanner limit by that
+    one entry, and every later pass refuses before retention can deliver
+    any relief. So the relationship is settled BEFORE anything is opened.
+
+    Both paths go through `os.path.realpath`, so `.`/`..` are normalized
+    away and existing symlink, junction and reparse-point parents are
+    resolved to what they actually name. Comparison is by PATH COMPONENT,
+    never by string prefix: `.../database.lock` starts with the characters
+    of `.../data` while being a perfectly valid sibling, and a `startswith`
+    test would refuse it.
+
+    Fails CLOSED. Any resolution failure returns False, because an
+    unprovable relationship is not a safe one. The default lock path is
+    run through this same decision rather than trusted, since nothing
+    guarantees the system temporary directory is outside the target.
+
+    This is a NAMESPACE check, not an atomic one. It establishes the
+    relationship at the instant it is asked; a path component replaced
+    between this call and the open is not detected, and no filesystem
+    primitive available here would close that window. It removes a
+    foreseeable operator error and a self-inflicted wedge -- it is not an
+    adversarial guarantee, and does not claim to be.
+    """
+    try:
+        target = os.path.realpath(os.fspath(directory))
+        lock = os.path.realpath(os.fspath(lock_path))
+    except (OSError, ValueError, TypeError):
+        return False
+    try:
+        target_parts = Path(os.path.normcase(target)).parts
+        lock_parts = Path(os.path.normcase(lock)).parts
+    except (OSError, ValueError, TypeError):
+        return False
+    if not target_parts:
+        return False
+    return lock_parts[:len(target_parts)] != target_parts
+
 class _LockHandle:
     """An operating-system-held exclusive lock on one file.
 
@@ -1990,6 +2033,16 @@ def main(argv=None) -> int:
     mode = (RetentionMode.QUARANTINE if args.quarantine
             else RetentionMode.PLAN)
     lock_path = args.lock or default_lock_path(args.directory)
+    # Proved outside the maintained directory BEFORE any open, so an
+    # unsafe placement creates nothing in the target and cannot wedge a
+    # directory that is already at its entry bound. The existing
+    # `lock_unavailable` code is reused: `acquire` already reports it when
+    # the lock cannot be opened at all, and declining to open one whose
+    # placement is unsafe is the same class of outcome.
+    if not _lock_path_is_outside(lock_path, args.directory):
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
     with single_instance_lock(lock_path) as acquired:
         if not acquired:
             print("retention refused=%s"
