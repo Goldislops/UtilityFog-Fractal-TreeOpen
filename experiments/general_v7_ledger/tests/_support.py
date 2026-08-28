@@ -1,13 +1,14 @@
 """Shared support for the ``general-v7-technology-ledger-v1`` acceptance suite.
 
-Nothing here imports an implementation module at import time. Every
-implementation dependency is resolved *inside* a test through
-``require_module`` and its wrappers, so ``--collect-only`` succeeds against an
-empty laboratory and the full run fails for one clearly attributable reason.
+Nothing here imports an implementation module at import time, so
+``--collect-only`` succeeds against an empty laboratory.
 
-Missing implementation is reported as an ordinary assertion failure. It is
-never skipped and never marked xfail: an absent implementation is a red
-acceptance surface, not an excused one.
+**Absence is detected precisely.** Only the exact absence of an expected file
+is reported as ``implementation-absent``. An import error raised *inside* a
+present module, a permission failure, a wrong type, or a malformed ledger all
+propagate unchanged: a broken implementation must never be able to disguise
+itself as an unwritten one. Missing implementation is an ordinary assertion
+failure — never skipped, never xfail.
 
 Nothing in this module retrieves, opens, resolves, or contacts a locator, and
 no locator string here refers to a real resource.
@@ -15,9 +16,14 @@ no locator string here refers to a real resource.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
+import os
 import pathlib
 import re
+import stat
+import subprocess
 import sys
 
 # --------------------------------------------------------------------------
@@ -30,6 +36,8 @@ EXPERIMENTS_DIR = LAB_DIR.parent
 REPO_ROOT = EXPERIMENTS_DIR.parent
 
 CONTRACT_PATH = LAB_DIR / "CONTRACT.md"
+SCHEMA_PATH = LAB_DIR / "schema.py"
+VALIDATE_PATH = LAB_DIR / "validate.py"
 LEDGER_PATH = LAB_DIR / "ledger.json"
 BIBLIOGRAPHY_PATH = LAB_DIR / "BIBLIOGRAPHY.md"
 INTAKE_REPORT_PATH = LAB_DIR / "INTAKE_REPORT.md"
@@ -39,7 +47,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # --------------------------------------------------------------------------
-# Implementation-absent reporting.
+# Precise absence detection.
 # --------------------------------------------------------------------------
 
 IMPLEMENTATION_ABSENT = "implementation-absent"
@@ -48,56 +56,143 @@ SCHEMA_MODULE = "experiments.general_v7_ledger.schema"
 VALIDATE_MODULE = "experiments.general_v7_ledger.validate"
 
 
-def require_module(dotted_name: str):
-    try:
-        return importlib.import_module(dotted_name)
-    except ImportError:
-        raise AssertionError(
-            f"{IMPLEMENTATION_ABSENT}: {dotted_name} is not present; "
-            f"implementation is not yet authorized"
-        ) from None
+def absent(label: str) -> AssertionError:
+    return AssertionError(
+        f"{IMPLEMENTATION_ABSENT}: {label} is not present; implementation is "
+        f"not yet authorized"
+    )
+
+
+def require_module(dotted_name: str, module_path: pathlib.Path):
+    """Import an expected module.
+
+    Only the exact non-existence of ``module_path`` is absence. Once the file
+    exists, ``import_module`` runs unguarded: an ``ImportError`` raised inside
+    it, a syntax error, or any other failure propagates and is reported as
+    itself.
+    """
+    if not module_path.exists():
+        raise absent(module_path.name)
+    return importlib.import_module(dotted_name)
 
 
 def require_schema():
-    return require_module(SCHEMA_MODULE)
+    return require_module(SCHEMA_MODULE, SCHEMA_PATH)
 
 
 def require_validate():
-    return require_module(VALIDATE_MODULE)
+    return require_module(VALIDATE_MODULE, VALIDATE_PATH)
 
 
 def require_file(path: pathlib.Path, label: str) -> str:
-    """Return a required future file's text, or fail the calling test clearly.
+    """Return an expected file's text.
 
-    This asserts a file is *required*. It never asserts a file is absent: this
-    is a sparse worktree, so on-disk absence proves nothing about the
-    repository.
+    Absence is absence. A permission failure or any other ``OSError``
+    propagates unchanged.
     """
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        raise AssertionError(
-            f"{IMPLEMENTATION_ABSENT}: {label} is not present; "
-            f"implementation is not yet authorized"
-        ) from None
+    if not path.exists():
+        raise absent(label)
+    return path.read_text(encoding="utf-8")
+
+
+def load_json_file(path: pathlib.Path, label: str):
+    """Parse an expected JSON file.
+
+    Absence is absence. **A malformed document is not absence**: the parser's
+    ``ValueError`` propagates, so a broken ledger can never be mistaken for an
+    unwritten one.
+    """
+    if not path.exists():
+        raise absent(label)
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def require_ledger() -> dict:
-    """Return the parsed committed ledger, or fail the calling test clearly."""
-    import json
-
-    text = require_file(LEDGER_PATH, "ledger.json")
-    try:
-        return json.loads(text)
-    except ValueError:
-        raise AssertionError(
-            f"{IMPLEMENTATION_ABSENT}: ledger.json is not parseable JSON"
-        ) from None
+    return load_json_file(LEDGER_PATH, "ledger.json")
 
 
 # --------------------------------------------------------------------------
-# Frozen identity and vocabularies, mirrored from CONTRACT.md so a drift
-# between the suite and the implementation is itself detectable.
+# Canonical form and digest. CONTRACT.md section 6i.
+# --------------------------------------------------------------------------
+
+
+def canonical_bytes(obj) -> bytes:
+    return json.dumps(
+        obj, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def canonical_digest(obj) -> str:
+    return hashlib.sha256(canonical_bytes(obj)).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Deterministic reparse-point fixture, following the accepted neutral
+# source-record approach. tmp_path only; never inside the repository.
+# --------------------------------------------------------------------------
+
+
+def make_reparse_directory(link: pathlib.Path, target: pathlib.Path) -> str:
+    """Create a directory link-or-junction at ``link`` pointing at ``target``.
+
+    Returns the mechanism used. Raises ``AssertionError`` if none is
+    available: this control is never skipped, never marked xfail, and never
+    passes conditionally. It changes no machine setting and needs no
+    Developer Mode or administrator privilege — a Windows directory junction
+    is creatable unprivileged, and it is the harder fixture besides, because
+    ``os.path.islink`` and ``Path.is_symlink`` both report it as False.
+    """
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return "os.symlink"
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0 and link.exists():
+            return "mklink-junction"
+    raise AssertionError(
+        "no deterministic reparse-point mechanism is available on this "
+        "platform; the path-security control cannot be constructed and must "
+        "not be skipped"
+    )
+
+
+def is_reparse_point(path: pathlib.Path) -> bool:
+    """True for a symbolic link or a Windows reparse point."""
+    if path.is_symlink():
+        return True
+    try:
+        attributes = os.lstat(path).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+# --------------------------------------------------------------------------
+# Recursive string-leaf walk, for payload screening that is not defeated by
+# JSON escaping of a whole-document rendering.
+# --------------------------------------------------------------------------
+
+
+def string_leaves(obj, path=()):
+    """Yield ``(path, value)`` for every string leaf, recursively."""
+    if isinstance(obj, str):
+        yield path, obj
+    elif isinstance(obj, dict):
+        for key in sorted(obj):
+            yield from string_leaves(obj[key], path + (key,))
+    elif isinstance(obj, list):
+        for index, item in enumerate(obj):
+            yield from string_leaves(item, path + (index,))
+
+
+# --------------------------------------------------------------------------
+# Frozen identity and vocabularies, mirrored from CONTRACT.md.
 # --------------------------------------------------------------------------
 
 SCHEMA_ID = "source-record-v3"
@@ -108,6 +203,7 @@ INTAKE_STATE = "intake-complete"
 ID_PATTERN = r"\AGV7-(BAT|SRC|CLM|REL|UNR|ART|COR)-[0-9]{4}\Z"
 ID_RE = re.compile(ID_PATTERN)
 DIGEST_PATTERN = r"\A[0-9a-f]{64}\Z"
+DIGEST_RE = re.compile(DIGEST_PATTERN)
 
 ROOT_KEYS = frozenset(
     {
@@ -134,6 +230,16 @@ COLLECTION_KEYS = (
     "artifacts",
     "corrections",
 )
+
+ID_FIELD_BY_COLLECTION = {
+    "batches": "batch_id",
+    "sources": "source_id",
+    "claims": "claim_id",
+    "relationships": "relationship_id",
+    "unresolved": "unresolved_id",
+    "artifacts": "artifact_id",
+    "corrections": "correction_id",
+}
 
 BATCH_KEYS = frozenset(
     {
@@ -166,7 +272,7 @@ SOURCE_KEYS = frozenset(
         "retrieval_state",
         "verification_state",
         "limitations",
-        "safety_disposition",
+        "safety_dispositions",
         "supersedes",
     }
 )
@@ -180,7 +286,7 @@ CLAIM_KEYS = frozenset(
         "attribution_class",
         "evidence_basis",
         "limitations",
-        "safety_disposition",
+        "safety_dispositions",
         "verification_state",
         "supersedes",
     }
@@ -193,6 +299,9 @@ RELATIONSHIP_KEYS = frozenset(
         "right_ref",
         "relationship_type",
         "basis",
+        "attribution_class",
+        "verification_state",
+        "limitations",
         "recorded_by_role",
         "recorded_by_label",
     }
@@ -220,7 +329,7 @@ ARTIFACT_KEYS = frozenset(
         "preservation_status",
         "rejection_basis",
         "executable_status",
-        "safety_disposition",
+        "safety_dispositions",
         "summary",
     }
 )
@@ -238,6 +347,16 @@ CORRECTION_KEYS = frozenset(
 
 SUPERSEDES_KEYS = frozenset({"record_id", "content_digest"})
 
+KEYS_BY_COLLECTION = {
+    "batches": BATCH_KEYS,
+    "sources": SOURCE_KEYS,
+    "claims": CLAIM_KEYS,
+    "relationships": RELATIONSHIP_KEYS,
+    "unresolved": UNRESOLVED_KEYS,
+    "artifacts": ARTIFACT_KEYS,
+    "corrections": CORRECTION_KEYS,
+}
+
 BATCH_KINDS = ("source-bearing", "artifact-bearing", "bibliography-metadata")
 
 ROLES = (
@@ -249,22 +368,37 @@ ROLES = (
     "unattributed",
 )
 
+#: Eleven classes. ``kev-observation`` and ``kev-authorization`` are distinct:
+#: an attributed historical authorization is evidence that authorization
+#: language was supplied, never current runtime authority.
 ATTRIBUTION_CLASSES = (
     "direct-source",
     "source-derived-excerpt",
     "aura-summary",
     "aura-inference",
     "aura-capability-claim",
-    "kev-observation-or-authorization",
+    "kev-observation",
+    "kev-authorization",
     "jack-inference-or-audit",
     "eighty-four-inference",
     "implementation-proposal",
     "verified-implementation-evidence",
 )
 
+#: The retired compound token. It must never validate again.
+RETIRED_ATTRIBUTION_CLASSES = ("kev-observation-or-authorization",)
+
+#: A relationship records who noticed a relation. It can never be evidence.
+RELATIONSHIP_ATTRIBUTION_CLASSES = tuple(
+    value
+    for value in ATTRIBUTION_CLASSES
+    if value != "verified-implementation-evidence"
+)
+
 RETRIEVAL_STATES = ("not-attempted",)
 SOURCE_VERIFICATION_STATES = ("supplied-unretrieved",)
 CLAIM_VERIFICATION_STATES = ("unverified",)
+RELATIONSHIP_VERIFICATION_STATES = ("unverified",)
 UNRESOLVED_STATES = ("unresolved",)
 PRESERVATION_STATES = ("preserved",)
 EXECUTABLE_STATES = ("non-executable",)
@@ -305,6 +439,8 @@ ARTIFACT_CLASSES = (
     "premature-master-prompt",
     "premature-authorization",
 )
+
+ORDINARY_DISPOSITION = "ordinary"
 
 SAFETY_DISPOSITIONS = (
     "ordinary",
@@ -354,24 +490,26 @@ EXPECTED_VERIFIED_SOURCES = 0
 EXPECTED_VERIFIED_CLAIMS = 0
 EXPECTED_BRIDGE_RECORDS = 0
 
-ARTIFACT_IDS = ("GV7-ART-0001", "GV7-ART-0002", "GV7-ART-0003")
+#: Actual artifact provenance. The three artifacts arrived in three different
+#: batches; only the third arrived in batch 62.
+ARTIFACT_BATCHES = {
+    "GV7-ART-0001": "GV7-BAT-0010",
+    "GV7-ART-0002": "GV7-BAT-0022",
+    "GV7-ART-0003": "GV7-BAT-0062",
+}
+ARTIFACT_IDS = tuple(sorted(ARTIFACT_BATCHES))
 ARTIFACT_BEARING_BATCH = "GV7-BAT-0062"
 BIBLIOGRAPHY_BATCH = "GV7-BAT-0063"
 
-#: GV7-SRC-0001 .. GV7-SRC-0035 carry no exact supplied locator.
 SOURCES_WITHOUT_LOCATOR = tuple(f"GV7-SRC-{n:04d}" for n in range(1, 36))
-#: GV7-SRC-0036 .. GV7-SRC-0061 carry supplied URL/title/channel metadata.
 SOURCES_WITH_LOCATOR = tuple(f"GV7-SRC-{n:04d}" for n in range(36, 62))
 ALL_SOURCE_IDS = SOURCES_WITHOUT_LOCATOR + SOURCES_WITH_LOCATOR
 
-#: Modules a read-only, never-retrieving validator may never import.
 NETWORK_CAPABLE_MODULES = (
     "socket",
     "ssl",
     "http",
-    "http.client",
     "urllib",
-    "urllib.request",
     "requests",
     "httpx",
     "ftplib",
@@ -384,7 +522,6 @@ NETWORK_CAPABLE_MODULES = (
     "xmlrpc",
 )
 
-#: Tokens that would promote a record by assertion. None may exist.
 FORBIDDEN_PROMOTION_FRAGMENTS = (
     "corrobor",
     "confirm",
@@ -405,9 +542,16 @@ MARKERS = (MARKER_VALUE, MARKER_KEY)
 
 def collection_of(ledger: dict, key: str) -> list:
     value = ledger.get(key)
-    assert isinstance(value, list), f"{key}: expected a list, got {type(value)!r}"
+    assert isinstance(value, list), f"{key}: expected a list"
     return value
 
 
 def identifiers(records: list, field: str) -> list:
     return [record[field] for record in records]
+
+
+def all_identifiers(ledger: dict) -> set:
+    found = set()
+    for collection, field in ID_FIELD_BY_COLLECTION.items():
+        found |= set(identifiers(ledger.get(collection, []), field))
+    return found

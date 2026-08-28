@@ -134,6 +134,20 @@ def test_gv7_s_004_every_nested_block_key_set_is_closed_and_exact():
         hostile[collection][0]["an_undeclared_nested_key"] = "synthetic"
         refuse(schema, hostile, "undeclared-key")
 
+    # `corrections` may legitimately be empty, so its closed shape is exercised
+    # through a synthetic record rather than by hoping one is committed.
+    for record in sup.collection_of(ledger, "corrections"):
+        assert set(record) == sup.CORRECTION_KEYS, sorted(
+            set(record) ^ sup.CORRECTION_KEYS
+        )
+    good = with_correction(ledger, synthetic_correction(ledger))
+    schema.validate_ledger(good)
+    hostile = with_correction(
+        ledger, synthetic_correction(ledger, **{"statement": "synthetic"})
+    )
+    hostile["corrections"][0]["an_undeclared_nested_key"] = "synthetic"
+    refuse(schema, hostile, "undeclared-key")
+
 
 def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
     schema = sup.require_schema()
@@ -334,8 +348,23 @@ def test_gv7_s_018_the_byte_ceiling_is_enforced_before_parsing(tmp_path):
     assert excinfo.value.token == "ledger-bytes-ceiling"
 
 
-def test_gv7_s_019_input_is_file_only_and_path_confined(tmp_path):
+def test_gv7_s_019_the_interface_is_exactly_one_supplied_file_path(tmp_path):
+    """A path outside the repository is legitimate; a non-file is not.
+
+    CONTRACT.md section 9 withdraws the old "beneath an accepted repository
+    root" rule: it was unsatisfiable alongside isolated temporary-file testing,
+    and reading exactly one named file is what actually protects the validator.
+    """
     validate = sup.require_validate()
+
+    # An isolated temporary file, entirely outside the repository, is accepted
+    # as far as the parser — proving the interface is satisfiable.
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    assert str(sup.REPO_ROOT) not in str(outside.resolve())
+    with pytest.raises(validate.LedgerInputError):
+        validate.validate_ledger_file(outside)
+
     with pytest.raises(validate.LedgerPathError) as excinfo:
         validate.validate_ledger_file(tmp_path)
     assert excinfo.value.token == "path-not-file"
@@ -344,28 +373,29 @@ def test_gv7_s_019_input_is_file_only_and_path_confined(tmp_path):
     assert excinfo.value.token == "path-missing"
 
 
-def test_gv7_s_020_a_reparse_point_input_is_refused(tmp_path):
+def test_gv7_s_020_a_reparse_point_in_the_supplied_path_is_refused(tmp_path):
+    """Deterministic on Windows without privilege: a directory junction.
+
+    The fixture links a *directory* — the accepted neutral approach — and the
+    supplied ledger path passes through it. A junction is a reparse point that
+    ``os.path.islink`` and ``Path.is_symlink`` both report as False, so a
+    validator inspecting only that predicate would follow it. Cleanup is
+    bounded to the temporary fixture; no machine setting is changed and no
+    Developer Mode or administrator privilege is required.
+    """
     validate = sup.require_validate()
-    real = tmp_path / "real.json"
-    real.write_text("{}", encoding="utf-8")
-    link = tmp_path / "linked.json"
-    made = False
-    try:
-        os.symlink(real, link)
-        made = True
-    except (OSError, NotImplementedError, AttributeError):
-        completed = subprocess.run(
-            ["cmd", "/c", "mklink", str(link), str(real)],
-            capture_output=True,
-            text=True,
-        )
-        made = completed.returncode == 0 and link.exists()
-    assert made, (
-        "no deterministic link mechanism is available; the path-security "
-        "control cannot be constructed and must not be skipped"
-    )
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "ledger.json").write_text("{}", encoding="utf-8")
+
+    link_dir = tmp_path / "linked"
+    mechanism = sup.make_reparse_directory(link_dir, real_dir)
+    assert sup.is_reparse_point(link_dir), mechanism
+
+    through = link_dir / "ledger.json"
+    assert through.exists()
     with pytest.raises(validate.LedgerPathError) as excinfo:
-        validate.validate_ledger_file(link)
+        validate.validate_ledger_file(through)
     assert excinfo.value.token == "path-symlink-refused"
 
 
@@ -374,8 +404,9 @@ def test_gv7_s_021_no_environment_variable_or_cwd_locates_the_input(
 ):
     validate = sup.require_validate()
     monkeypatch.chdir(tmp_path)
-    for name in ("LEDGER", "LEDGER_PATH", "GV7_LEDGER", "PWD"):
+    for name in ("LEDGER", "LEDGER_PATH", "GV7_LEDGER"):
         monkeypatch.setenv(name, str(tmp_path))
+    (tmp_path / "ledger.json").write_text("{}", encoding="utf-8")
     with pytest.raises(validate.LedgerPathError) as excinfo:
         validate.validate_ledger_file(tmp_path / "absent.json")
     assert excinfo.value.token == "path-missing"
@@ -505,3 +536,294 @@ def test_gv7_s_030_emitted_counts_equal_the_actual_collection_lengths(capsys):
     for key in sup.COLLECTION_KEYS:
         assert counts[key] == len(ledger[key]), key
     assert set(counts) == set(sup.COLLECTION_KEYS)
+
+
+# --------------------------------------------------------------------------
+# Reference integrity, per reference field. CONTRACT.md sections 6b-6h.
+# --------------------------------------------------------------------------
+
+REFERENCE_CASES = (
+    ("batches", "introduces_sources", "GV7-SRC-9999", "GV7-BAT-0001"),
+    ("batches", "introduces_artifacts", "GV7-ART-9999", "GV7-BAT-0001"),
+    ("batches", "updates_sources", "GV7-SRC-9999", "GV7-BAT-0001"),
+    ("sources", "batch_ref", "GV7-BAT-9999", "GV7-SRC-9999"),
+    ("claims", "source_ref", "GV7-SRC-9999", "GV7-BAT-0001"),
+    ("claims", "batch_ref", "GV7-BAT-9999", "GV7-CLM-9999"),
+    ("artifacts", "introducing_batch", "GV7-BAT-9999", "GV7-SRC-0001"),
+    ("relationships", "left_ref", "GV7-SRC-9999", "GV7-BAT-0001"),
+    ("relationships", "right_ref", "GV7-CLM-9999", "GV7-BAT-0001"),
+    ("unresolved", "refs", "GV7-SRC-9999", "GV7-BAT-0001"),
+    ("corrections", "target_ref", "GV7-SRC-9999", None),
+)
+
+
+def test_gv7_s_031_every_reference_field_refuses_an_unresolvable_target():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    for collection, field, dangling, _wrong in REFERENCE_CASES:
+        records = ledger.get(collection) or []
+        if not records:
+            continue
+        payload = json.loads(json.dumps(ledger))
+        target = payload[collection][0]
+        if isinstance(target[field], list):
+            target[field] = [dangling]
+        else:
+            target[field] = dangling
+        refuse(schema, payload, "reference-not-found")
+
+
+def test_gv7_s_032_every_reference_field_refuses_a_wrong_kind_target():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    for collection, field, _dangling, wrong in REFERENCE_CASES:
+        if wrong is None:
+            continue
+        records = ledger.get(collection) or []
+        if not records:
+            continue
+        payload = json.loads(json.dumps(ledger))
+        target = payload[collection][0]
+        if isinstance(target[field], list):
+            target[field] = [wrong]
+        else:
+            target[field] = wrong
+        refuse(schema, payload, "reference-wrong-kind")
+
+
+def test_gv7_s_033_batch_and_record_introduction_must_stay_reciprocal():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = json.loads(json.dumps(ledger))
+    for batch in payload["batches"]:
+        if batch["introduces_sources"]:
+            batch["introduces_sources"] = list(batch["introduces_sources"])[1:]
+            break
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+    payload = json.loads(json.dumps(ledger))
+    for batch in payload["batches"]:
+        if batch["introduces_artifacts"]:
+            batch["introduces_artifacts"] = []
+            break
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+
+# --------------------------------------------------------------------------
+# Correction and supersession. Synthetic throughout: these rules must hold
+# whether or not the committed ledger happens to carry a correction.
+# --------------------------------------------------------------------------
+
+
+def synthetic_correction(ledger, **overrides):
+    target = ledger["sources"][0]["source_id"]
+    record = {
+        "correction_id": "GV7-COR-0001",
+        "target_ref": target,
+        "correction_kind": "correction",
+        "statement": "synthetic additive correction for control purposes",
+        "recorded_by_role": "auditor",
+        "recorded_by_label": "synthetic recorder",
+    }
+    record.update(overrides)
+    return record
+
+
+def with_correction(ledger, record):
+    payload = json.loads(json.dumps(ledger))
+    payload["corrections"] = [record]
+    return payload
+
+
+def test_gv7_s_034_a_well_formed_synthetic_correction_is_accepted():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = with_correction(ledger, synthetic_correction(ledger))
+    schema.validate_ledger(payload)
+    assert set(payload["corrections"][0]) == sup.CORRECTION_KEYS
+
+
+def test_gv7_s_035_a_correction_with_a_wrong_key_set_is_refused():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    record = synthetic_correction(ledger)
+    record["an_undeclared_nested_key"] = "synthetic"
+    refuse(schema, with_correction(ledger, record), "undeclared-key")
+    for key in sorted(sup.CORRECTION_KEYS):
+        record = synthetic_correction(ledger)
+        del record[key]
+        refuse(schema, with_correction(ledger, record), "missing-key")
+
+
+def test_gv7_s_036_a_correction_with_a_bad_id_kind_or_target_is_refused():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    refuse(
+        schema,
+        with_correction(ledger, synthetic_correction(ledger, correction_id="COR-1")),
+        "identifier-malformed",
+    )
+    refuse(
+        schema,
+        with_correction(ledger, synthetic_correction(ledger, correction_kind="edit")),
+        "enum-value-invalid",
+    )
+    refuse(
+        schema,
+        with_correction(
+            ledger, synthetic_correction(ledger, target_ref="GV7-SRC-9999")
+        ),
+        "reference-not-found",
+    )
+
+
+def test_gv7_s_037_a_correction_never_removes_or_edits_its_target():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    target_id = ledger["sources"][0]["source_id"]
+    payload = with_correction(ledger, synthetic_correction(ledger))
+    before = sup.canonical_bytes(payload["sources"][0])
+    schema.validate_ledger(payload)
+    survivors = [s for s in payload["sources"] if s["source_id"] == target_id]
+    assert len(survivors) == 1, "the corrected record must remain present"
+    assert sup.canonical_bytes(survivors[0]) == before, "corrections are additive"
+
+
+def test_gv7_s_038_a_valid_synthetic_supersession_chain_is_accepted():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = json.loads(json.dumps(ledger))
+    predecessor = payload["sources"][0]
+    successor = json.loads(json.dumps(predecessor))
+    successor["source_id"] = "GV7-SRC-0099"
+    successor["supersedes"] = {
+        "record_id": predecessor["source_id"],
+        "content_digest": sup.canonical_digest(predecessor),
+    }
+    payload["sources"].append(successor)
+    schema.validate_ledger(payload)
+    assert any(
+        s["source_id"] == predecessor["source_id"] for s in payload["sources"]
+    ), "the predecessor must remain present"
+
+
+def test_gv7_s_039_a_supersedes_block_of_the_wrong_shape_is_refused():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    predecessor = ledger["sources"][0]
+    good = {
+        "record_id": predecessor["source_id"],
+        "content_digest": sup.canonical_digest(predecessor),
+    }
+    for key in sorted(sup.SUPERSEDES_KEYS):
+        payload = json.loads(json.dumps(ledger))
+        block = dict(good)
+        del block[key]
+        payload["sources"][1]["supersedes"] = block
+        refuse(schema, payload, "missing-key")
+    payload = json.loads(json.dumps(ledger))
+    block = dict(good)
+    block["an_undeclared_nested_key"] = "synthetic"
+    payload["sources"][1]["supersedes"] = block
+    refuse(schema, payload, "undeclared-key")
+
+
+def test_gv7_s_040_a_supersedes_digest_mismatch_is_refused():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = json.loads(json.dumps(ledger))
+    payload["sources"][1]["supersedes"] = {
+        "record_id": payload["sources"][0]["source_id"],
+        "content_digest": "0" * 64,
+    }
+    refuse(schema, payload, "supersedes-digest-mismatch")
+    payload = json.loads(json.dumps(ledger))
+    payload["sources"][1]["supersedes"] = {
+        "record_id": payload["sources"][0]["source_id"],
+        "content_digest": "G" * 64,
+    }
+    refuse(schema, payload, "digest-format-invalid")
+
+
+def test_gv7_s_041_a_missing_or_cross_collection_predecessor_is_refused():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = json.loads(json.dumps(ledger))
+    payload["sources"][1]["supersedes"] = {
+        "record_id": "GV7-SRC-9999",
+        "content_digest": "a" * 64,
+    }
+    refuse(schema, payload, "supersedes-target-missing")
+
+    payload = json.loads(json.dumps(ledger))
+    claim = payload["claims"][0]
+    payload["sources"][1]["supersedes"] = {
+        "record_id": claim["claim_id"],
+        "content_digest": sup.canonical_digest(claim),
+    }
+    refuse(schema, payload, "supersedes-collection-mismatch")
+
+
+def test_gv7_s_042_a_supersession_cannot_promote_verification_state():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = json.loads(json.dumps(ledger))
+    predecessor = payload["sources"][0]
+    successor = json.loads(json.dumps(predecessor))
+    successor["source_id"] = "GV7-SRC-0099"
+    successor["verification_state"] = "identity-verified"
+    successor["supersedes"] = {
+        "record_id": predecessor["source_id"],
+        "content_digest": sup.canonical_digest(predecessor),
+    }
+    payload["sources"].append(successor)
+    refuse(schema, payload, "enum-value-invalid")
+
+
+def test_gv7_s_043_a_relationship_carries_its_own_unverified_provenance():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    for field, value, token in (
+        ("verification_state", "identity-verified", "enum-value-invalid"),
+        ("attribution_class", "verified-implementation-evidence",
+         "enum-value-invalid"),
+        ("limitations", [], "list-length-invalid"),
+    ):
+        payload = json.loads(json.dumps(ledger))
+        payload["relationships"][0][field] = value
+        refuse(schema, payload, token)
+    payload = json.loads(json.dumps(ledger))
+    first = payload["relationships"][0]["limitations"][0]
+    payload["relationships"][0]["limitations"] = [first, first]
+    refuse(schema, payload, "list-duplicate-item")
+
+
+def test_gv7_s_044_safety_dispositions_is_a_bounded_exclusive_list():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    for collection in ("sources", "claims", "artifacts"):
+        payload = json.loads(json.dumps(ledger))
+        payload[collection][0]["safety_dispositions"] = []
+        refuse(schema, payload, "list-length-invalid")
+
+        payload = json.loads(json.dumps(ledger))
+        payload[collection][0]["safety_dispositions"] = [
+            "quarantined-covert-communication",
+            "quarantined-covert-communication",
+        ]
+        refuse(schema, payload, "list-duplicate-item")
+
+        payload = json.loads(json.dumps(ledger))
+        payload[collection][0]["safety_dispositions"] = ["not-a-disposition"]
+        refuse(schema, payload, "enum-value-invalid")
+
+        payload = json.loads(json.dumps(ledger))
+        payload[collection][0]["safety_dispositions"] = [
+            "ordinary",
+            "quarantined-hidden-monitoring",
+        ]
+        refuse(schema, payload, "disposition-ordinary-not-exclusive")
+
+        payload = json.loads(json.dumps(ledger))
+        payload[collection][0]["safety_dispositions"] = "ordinary"
+        refuse(schema, payload, "type-not-exact")

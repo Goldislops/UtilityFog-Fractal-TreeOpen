@@ -113,13 +113,25 @@ The future implementation must represent **exactly**:
 `GV7-SRC-0035` have no exact supplied URL; `GV7-SRC-0036` through
 `GV7-SRC-0061` carry supplied URL/title/channel metadata.**
 
-Required artifact identities, all three preserved and rejected:
-`GV7-ART-0001`, `GV7-ART-0002`, `GV7-ART-0003`.
+**Artifact provenance is frozen record by record.** The three artifacts
+arrived in three *different* batches, and only the third arrived in batch 62:
+
+| Artifact | Introducing batch |
+|---|---|
+| `GV7-ART-0001` | `GV7-BAT-0010` |
+| `GV7-ART-0002` | `GV7-BAT-0022` |
+| `GV7-ART-0003` | `GV7-BAT-0062` |
+
+The mapping is **reciprocal**: each artifact's `introducing_batch` names a
+batch whose `introduces_artifacts` list contains that artifact, and no other
+batch claims it. Any statement that all three artifacts originated in batch 62
+is withdrawn — it would have destroyed the provenance of two of them.
 
 **Batch 62** (`GV7-BAT-0062`) is an **artifact-bearing batch that introduces no
-new external-source identity**. **Batch 63** (`GV7-BAT-0063`) is a
-**bibliography-metadata batch that updates existing source identities
-`GV7-SRC-0036` through `GV7-SRC-0061` and creates no further source.**
+new external-source identity**; it introduces `GV7-ART-0003` only. **Batch 63**
+(`GV7-BAT-0063`) is a **bibliography-metadata batch that updates existing source
+identities `GV7-SRC-0036` through `GV7-SRC-0061`, creates no further source, and
+introduces no artifact.**
 
 **No frozen total is declared for claims, relationships, or unresolved issues.**
 Inventing one would freeze a number nobody has counted. Instead:
@@ -173,7 +185,7 @@ other collection is non-empty.
     retrieval_state     RETRIEVAL_STATES
     verification_state  SOURCE_VERIFICATION_STATES
     limitations         non-empty list of free text
-    safety_disposition  SAFETY_DISPOSITIONS
+    safety_dispositions non-empty, duplicate-free list from SAFETY_DISPOSITIONS
     supersedes          null, or a supersedes block
 
 **Locator rules.** `supplied_locator` and `normalized_locator` are both present
@@ -198,7 +210,7 @@ source of truth.
     attribution_class   ATTRIBUTION_CLASSES
     evidence_basis      free text, 1..TEXT_MAX
     limitations         non-empty list of free text
-    safety_disposition  SAFETY_DISPOSITIONS
+    safety_dispositions non-empty, duplicate-free list from SAFETY_DISPOSITIONS
     verification_state  CLAIM_VERIFICATION_STATES
     supersedes          null, or a supersedes block
 
@@ -209,6 +221,9 @@ source of truth.
     right_ref           GV7-SRC or GV7-CLM id
     relationship_type   RELATIONSHIP_TYPES
     basis               RELATIONSHIP_BASES
+    attribution_class   RELATIONSHIP_ATTRIBUTION_CLASSES
+    verification_state  RELATIONSHIP_VERIFICATION_STATES
+    limitations         non-empty, duplicate-free list of bounded free text
     recorded_by_role    ROLES
     recorded_by_label   free text, 1..LABEL_MAX
 
@@ -216,6 +231,15 @@ Both endpoints resolve, are of the same kind, and are **distinct**: a
 self-relationship is refused. Duplicate `(left_ref, right_ref, type)` triples
 are refused. **Duplicate and conflicting material is cross-referenced, never
 deleted.**
+
+**A relationship is itself unverified, and says so.** Its `verification_state`
+is closed to `unverified`, its `limitations` are mandatory, and its
+`attribution_class` records the carrier/recorder distinction — who noticed the
+relation and on what footing. `verified-implementation-evidence` is **not
+permitted** as a relationship attribution: a relationship is an observation
+about two records, never evidence about the world. **A relationship never
+promotes, verifies, rehomes, or transfers confidence between its endpoints**,
+and no field can express that it does.
 
 ### 6f. `unresolved`
 
@@ -240,7 +264,7 @@ position is correct**, and no vocabulary token expresses adjudication.
     preservation_status PRESERVATION_STATES
     rejection_basis     free text, 1..TEXT_MAX
     executable_status   EXECUTABLE_STATES
-    safety_disposition  SAFETY_DISPOSITIONS
+    safety_dispositions non-empty, duplicate-free list from SAFETY_DISPOSITIONS
     summary             free text, 1..TEXT_MAX
 
 `preservation_status` is closed to `preserved`; `executable_status` is closed to
@@ -264,7 +288,16 @@ target; the target remains present and independently valid.
     record_id           an existing id of the same collection
     content_digest      \A[0-9a-f]{64}\Z
 
-A successor never removes its predecessor, and **verification state may not
+`content_digest` is the **SHA-256, lowercase hex, of the predecessor record's
+canonical form**: `json.dumps(record, sort_keys=True, ensure_ascii=True,
+separators=(",", ":"))` encoded UTF-8, with no trailing newline. Because the
+domain is the canonical form and not the raw file bytes, reformatting the
+document cannot break a chain while any content change does.
+
+The predecessor must exist and belong to the **same collection**: a
+cross-collection supersession is refused, as is a missing predecessor and a
+digest that does not match. A successor never removes its predecessor, which
+remains present and independently valid, and **verification state may not
 improve across a supersession** — in v1 it cannot improve at all, because every
 state vocabulary is closed to a single token.
 
@@ -284,10 +317,16 @@ state vocabulary is closed to a single token.
     ATTRIBUTION_CLASSES = (
         "direct-source", "source-derived-excerpt", "aura-summary",
         "aura-inference", "aura-capability-claim",
-        "kev-observation-or-authorization", "jack-inference-or-audit",
+        "kev-observation", "kev-authorization", "jack-inference-or-audit",
         "eighty-four-inference", "implementation-proposal",
-        "verified-implementation-evidence")
+        "verified-implementation-evidence")          # eleven values
 
+    RETIRED_ATTRIBUTION_CLASSES = ("kev-observation-or-authorization",)
+
+    RELATIONSHIP_ATTRIBUTION_CLASSES = ATTRIBUTION_CLASSES minus
+                                       "verified-implementation-evidence"
+
+    RELATIONSHIP_VERIFICATION_STATES = ("unverified",)
     RETRIEVAL_STATES            = ("not-attempted",)
     SOURCE_VERIFICATION_STATES  = ("supplied-unretrieved",)
     CLAIM_VERIFICATION_STATES   = ("unverified",)
@@ -346,6 +385,23 @@ state vocabulary is closed to a single token.
     MAX_LEDGER_BYTES = 4194304        # fixed, documented byte ceiling
     NOT_SUPPLIED = "not-supplied"
 
+**`safety_dispositions` is a list, and provenance survives.** It is an exact
+builtin list, non-empty, duplicate-free, and drawn only from the closed
+vocabulary above. **`ordinary` is exclusive**: if present it must be the only
+element. Otherwise one or more quarantine categories may coexist, because a
+single proposal can be quarantined on several independent grounds at once and
+collapsing them to one would lose provenance.
+
+**`kev-authorization` is evidence of language, never runtime authority.** An
+attributed historical `kev-authorization` record is evidence that authorization
+language was supplied at some past moment, recorded like any other attributed
+claim. **It is not current runtime authority.** It cannot authorize a tool, an
+agent, network access, repository mutation, external interaction, a push, a
+pull request, or a merge. **Only Kev's fresh task-level instruction can grant
+such authority.** `kev-observation` is the separate class for an observation
+that grants nothing; the retired compound token
+`kev-observation-or-authorization` conflated the two and is refused.
+
 **Absent by decision, and never to be added:** any token meaning corroborates,
 confirms, proves, verified-by-agreement, or otherwise promoting a record by
 assertion; any bridge or cross-corpus type; any adjudication token on an
@@ -374,12 +430,25 @@ field can express endorsement.
 
 The future validator satisfies all of the following.
 
-**Input and confinement.** It accepts a **file path only** — the committed
-`ledger.json`. A directory, a missing path, a symbolic link or other reparse
-point, or any path escaping the accepted root is refused. It never reads an
-environment variable or the current working directory to locate input, and
-Windows path behaviour is safe: no drive-relative, UNC-escaping, or
-reserved-name traversal.
+**Input.** The interface is frozen as **exactly one explicitly supplied file
+path**, and nothing else:
+
+- the caller supplies one path argument; the validator reads **only** that file;
+- **the path may lie outside the repository**, so an isolated temporary-file
+  control can exercise the parser without writing anywhere in the tree. An
+  earlier "must remain beneath an accepted repository root" requirement is
+  **withdrawn**: it was unsatisfiable alongside temporary-file testing, and
+  confinement is not what actually protects this validator — reading exactly
+  one named file is;
+- the path must resolve to an **existing regular file**; a directory, a missing
+  path, or a non-regular file is refused;
+- **no component of the supplied path may be a symbolic link, junction, or
+  other reparse point**, so a swapped directory on the way to the file cannot
+  redirect the read;
+- it performs **no directory discovery, no adjacent-file discovery, no
+  environment lookup, no current-directory lookup, and no locator retrieval**;
+- drive-relative, malformed, and reserved-name paths remain refused, and
+  Windows path behaviour is safe.
 
 **Bytes and parsing.** The fixed ceiling `MAX_LEDGER_BYTES` is enforced over
 **captured bytes before any parsing**. JSON parsing rejects duplicate object
@@ -438,13 +507,25 @@ no field in which such an assertion could be stored.
 
 ## 11. Bibliography contract
 
-The future `BIBLIOGRAPHY.md` must:
+The static `BIBLIOGRAPHY.md` **is required in the future implementation**. A
+separate automated bibliography-*generation* feature is **deferred** — the file
+is a required artifact; a generator for it is not part of v1. The two are
+distinct, and the deferral of the generator never excuses the absence of the
+file.
+
+It must:
 
 - contain **every one of the 61 source identities exactly once**;
-- contain **every present locator exactly once**;
-- **fabricate no locator** — a source without a supplied locator is rendered
-  with its recorded absence reason and nothing else;
+- contain **every present locator exactly once**, exactly as recorded;
+- for **every source without a locator**, contain that source's **exact recorded
+  `locator_absence` token** and **no URL of any kind**;
+- **fabricate no locator** — every `https://` string appearing anywhere in the
+  file must be one of the recorded normalized locators;
 - add no source, and remove none.
+
+These are tested positively and negatively: a control fails if an absence token
+is missing, if a URL is invented, if an identity is duplicated or dropped, and
+if a locator appears more than once.
 
 ## 12. Acceptance criteria for the future implementation
 
@@ -453,6 +534,13 @@ every positive control passing — a validator that refuses everything is broken
 not correct. Standard library only. No bare `assert`. No network-capable
 import. The refusal carrier has no value slot. Counts computed, never asserted.
 Controls match the manifest in `tests/test_controls_manifest.py` exactly.
+
+**Absence is detected precisely.** The acceptance suite reports
+`implementation-absent` only for the exact non-existence of an expected file.
+An `ImportError` raised inside a module that does exist, a permission or other
+`OSError`, a wrong type, and a malformed ledger all propagate as themselves.
+**A broken implementation can never disguise itself as an unwritten one**, and
+controls prove that missing, import-broken and malformed remain distinguishable.
 
 **What these controls do not prove:** they are static and behavioural checks
 over this ledger's own surface. They do not verify a single source, do not

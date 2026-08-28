@@ -16,6 +16,25 @@ from experiments.general_v7_ledger.tests import _support as sup
 HTTPS_SHAPE = re.compile(r"\Ahttps://[^\s/?#]+[^\s]*\Z")
 
 
+def bibliography_entries(text: str, ledger: dict) -> dict:
+    """Split the bibliography into one text block per source identity.
+
+    Each block runs from its own identity to the next identity in file order,
+    so a per-entry rule can be checked instead of a whole-file substring test.
+    """
+    positions = []
+    for source in ledger["sources"]:
+        index = text.find(source["source_id"])
+        assert index >= 0, f"{source['source_id']} missing from the bibliography"
+        positions.append((index, source["source_id"]))
+    positions.sort()
+    blocks = {}
+    for order, (index, source_id) in enumerate(positions):
+        end = positions[order + 1][0] if order + 1 < len(positions) else len(text)
+        blocks[source_id] = text[index:end]
+    return blocks
+
+
 def test_gv7_i_001_the_ledger_holds_exactly_sixty_three_batches():
     ledger = sup.require_ledger()
     batches = sup.collection_of(ledger, "batches")
@@ -127,7 +146,9 @@ def test_gv7_i_012_batch_sixty_two_bears_artifacts_and_introduces_no_source():
     )
     assert batch["batch_kind"] == "artifact-bearing"
     assert batch["introduces_sources"] == []
-    assert batch["introduces_artifacts"], "an artifact-bearing batch must bear one"
+    assert batch["introduces_artifacts"] == ["GV7-ART-0003"], (
+        "batch 62 introduces the third artifact only"
+    )
     assert not [
         s for s in ledger["sources"] if s["batch_ref"] == sup.ARTIFACT_BEARING_BATCH
     ]
@@ -163,6 +184,29 @@ def test_gv7_i_015_every_artifact_is_introduced_by_exactly_one_batch():
         introduced.extend(batch["introduces_artifacts"])
     assert sorted(introduced) == sorted(sup.ARTIFACT_IDS)
     assert len(introduced) == len(set(introduced))
+
+
+def test_gv7_i_021_artifact_provenance_matches_the_frozen_batch_mapping():
+    """The three artifacts arrived in three different batches, not all in 62."""
+    ledger = sup.require_ledger()
+    for artifact in ledger["artifacts"]:
+        expected = sup.ARTIFACT_BATCHES[artifact["artifact_id"]]
+        assert artifact["introducing_batch"] == expected, artifact["artifact_id"]
+    assert len(set(sup.ARTIFACT_BATCHES.values())) == 3
+
+
+def test_gv7_i_022_artifact_and_batch_introduction_are_reciprocal():
+    ledger = sup.require_ledger()
+    by_batch = {b["batch_id"]: b for b in ledger["batches"]}
+    for artifact_id, batch_id in sorted(sup.ARTIFACT_BATCHES.items()):
+        batch = by_batch[batch_id]
+        assert artifact_id in batch["introduces_artifacts"], (artifact_id, batch_id)
+        for other_id, other in sorted(by_batch.items()):
+            if other_id == batch_id:
+                continue
+            assert artifact_id not in other["introduces_artifacts"], (
+                artifact_id, other_id
+            )
 
 
 def test_gv7_i_016_every_source_carries_at_least_one_attributed_limited_claim():
@@ -217,8 +261,50 @@ def test_gv7_i_020_the_bibliography_fabricates_no_locator():
     }
     rendered = set(re.findall(r"https://[^\s)\]]+", text))
     assert rendered <= present, sorted(rendered - present)
+
+
+def test_gv7_i_023_every_locatorless_source_shows_its_exact_absence_token():
+    """No tautology: the entry must carry the recorded token and no URL."""
+    ledger = sup.require_ledger()
+    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
+    entries = bibliography_entries(text, ledger)
     for source in ledger["sources"]:
         if source["supplied_locator"] is not None:
             continue
-        assert source["locator_absence"] in text or True
-        assert source["source_id"] in text
+        entry = entries[source["source_id"]]
+        token = source["locator_absence"]
+        assert token, source["source_id"]
+        assert token in entry, (source["source_id"], token)
+        assert "http://" not in entry and "https://" not in entry, source["source_id"]
+
+
+def test_gv7_i_024_the_bibliography_rules_reject_a_violating_rendering():
+    """Negative controls: the rules must actually fail on bad renderings."""
+    ledger = sup.require_ledger()
+    good = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
+    entries = bibliography_entries(good, ledger)
+
+    first_absent = next(
+        s for s in ledger["sources"] if s["supplied_locator"] is None
+    )
+    fabricated = good.replace(
+        entries[first_absent["source_id"]],
+        entries[first_absent["source_id"]] + " https://synthetic.invalid/fabricated",
+    )
+    present = {
+        s["normalized_locator"] for s in ledger["sources"]
+        if s["normalized_locator"] is not None
+    }
+    rendered = set(re.findall(r"https://[^\s)\]]+", fabricated))
+    assert not rendered <= present, "a fabricated URL must be detectable"
+
+    stripped = good.replace(first_absent["locator_absence"], "", 1)
+    bad_entries = bibliography_entries(stripped, ledger)
+    assert first_absent["locator_absence"] not in bad_entries[
+        first_absent["source_id"]
+    ], "a missing absence token must be detectable"
+
+    duplicated = good + chr(10) + entries[sup.ALL_SOURCE_IDS[0]]
+    assert duplicated.count(sup.ALL_SOURCE_IDS[0]) > 1, (
+        "a duplicated identity must be detectable"
+    )

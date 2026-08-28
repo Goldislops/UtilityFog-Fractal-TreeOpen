@@ -2,7 +2,8 @@
 
 Every control authored for this phase is named in ``AUTHORED_CONTROLS``.
 Adding or removing one requires an intentional manifest edit; a numeric test
-count is never the acceptance claim.
+count is never the acceptance claim, and the manifest is never padded to
+reproduce an earlier total.
 
 Nothing here claims a file is absent from the *repository*: this is a sparse
 worktree. The forbidden-path control asserts that **this phase did not create**
@@ -17,14 +18,16 @@ import ast
 import pathlib
 import re
 
+import pytest
+
 from experiments.general_v7_ledger.tests import _support as sup
 
 AUTHORED_CONTROLS = {
-    "test_contract.py": tuple(f"GV7-D-{n:03d}" for n in range(1, 21)),
-    "test_ledger_structure.py": tuple(f"GV7-S-{n:03d}" for n in range(1, 31)),
-    "test_inventory.py": tuple(f"GV7-I-{n:03d}" for n in range(1, 21)),
-    "test_provenance.py": tuple(f"GV7-P-{n:03d}" for n in range(1, 23)),
-    "test_controls_manifest.py": tuple(f"GV7-M-{n:03d}" for n in range(1, 13)),
+    "test_contract.py": tuple(f"GV7-D-{n:03d}" for n in range(1, 28)),
+    "test_ledger_structure.py": tuple(f"GV7-S-{n:03d}" for n in range(1, 45)),
+    "test_inventory.py": tuple(f"GV7-I-{n:03d}" for n in range(1, 25)),
+    "test_provenance.py": tuple(f"GV7-P-{n:03d}" for n in range(1, 27)),
+    "test_controls_manifest.py": tuple(f"GV7-M-{n:03d}" for n in range(1, 17)),
 }
 
 #: This phase authors contract and tests only. None of these may be created here.
@@ -56,11 +59,13 @@ SUITE_ALLOWED_IMPORTS = frozenset(
     {
         "__future__",
         "ast",
+        "hashlib",
         "importlib",
         "json",
         "os",
         "pathlib",
         "re",
+        "stat",
         "subprocess",
         "sys",
         "pytest",
@@ -207,14 +212,16 @@ def test_gv7_m_010_the_frozen_constants_are_internally_consistent():
     assert len(sup.ALL_SOURCE_IDS) == sup.EXPECTED_SOURCES
     assert len(set(sup.ALL_SOURCE_IDS)) == sup.EXPECTED_SOURCES
     assert len(sup.ARTIFACT_IDS) == sup.EXPECTED_ARTIFACTS
+    assert len(sup.ARTIFACT_BATCHES) == sup.EXPECTED_ARTIFACTS
+    assert len(set(sup.ARTIFACT_BATCHES.values())) == sup.EXPECTED_ARTIFACTS
     assert sup.EXPECTED_RETRIEVED == 0
     assert sup.EXPECTED_VERIFIED_SOURCES == 0
     assert sup.EXPECTED_VERIFIED_CLAIMS == 0
     assert sup.EXPECTED_BRIDGE_RECORDS == 0
-    for source_id in sup.ALL_SOURCE_IDS:
-        assert sup.ID_RE.match(source_id), source_id
-    for artifact_id in sup.ARTIFACT_IDS:
-        assert sup.ID_RE.match(artifact_id), artifact_id
+    for identifier in sup.ALL_SOURCE_IDS + sup.ARTIFACT_IDS:
+        assert sup.ID_RE.match(identifier), identifier
+    for batch_id in sup.ARTIFACT_BATCHES.values():
+        assert sup.ID_RE.match(batch_id), batch_id
 
 
 def test_gv7_m_011_no_frozen_total_is_declared_for_uncounted_collections():
@@ -241,3 +248,92 @@ def test_gv7_m_012_the_meta_controls_detect_the_removal_of_a_control():
     assert "GV7-D-001" not in reduced
     declared = set(AUTHORED_CONTROLS["test_contract.py"])
     assert sorted(declared - reduced) == ["GV7-D-001"]
+
+
+# --------------------------------------------------------------------------
+# Absence must be precise. A broken implementation must never be able to
+# disguise itself as an unwritten one.
+# --------------------------------------------------------------------------
+
+
+def test_gv7_m_013_only_an_absent_file_is_reported_as_implementation_absent(tmp_path):
+    with pytest.raises(AssertionError) as excinfo:
+        sup.require_module("gv7_probe_missing_module", tmp_path / "absent.py")
+    assert sup.IMPLEMENTATION_ABSENT in str(excinfo.value)
+
+    with pytest.raises(AssertionError) as excinfo:
+        sup.require_file(tmp_path / "absent.md", "absent.md")
+    assert sup.IMPLEMENTATION_ABSENT in str(excinfo.value)
+
+    with pytest.raises(AssertionError) as excinfo:
+        sup.load_json_file(tmp_path / "absent.json", "absent.json")
+    assert sup.IMPLEMENTATION_ABSENT in str(excinfo.value)
+
+
+def test_gv7_m_014_an_import_broken_module_propagates_its_own_error(
+    tmp_path, monkeypatch
+):
+    """A module that exists but fails to import is broken, not absent."""
+    module_path = tmp_path / "gv7_probe_import_broken.py"
+    module_path.write_text(
+        "raise ImportError('synthetic broken import')\n", encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ImportError) as excinfo:
+        sup.require_module("gv7_probe_import_broken", module_path)
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+    assert "synthetic broken import" in str(excinfo.value)
+
+    other = tmp_path / "gv7_probe_name_broken.py"
+    other.write_text("import gv7_probe_no_such_module\n", encoding="utf-8")
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        sup.require_module("gv7_probe_name_broken", other)
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+
+def test_gv7_m_015_a_malformed_ledger_propagates_a_parse_error(tmp_path):
+    """A malformed document is malformed, not absent."""
+    bad = tmp_path / "malformed.json"
+    bad.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        sup.load_json_file(bad, "malformed.json")
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+    oversized = tmp_path / "oversized.json"
+    oversized.write_text('{"n": ' + "9" * 6000 + "}", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        sup.load_json_file(oversized, "oversized.json")
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+
+def test_gv7_m_016_missing_import_broken_and_malformed_stay_distinguishable(
+    tmp_path, monkeypatch
+):
+    outcomes = {}
+
+    try:
+        sup.load_json_file(tmp_path / "absent.json", "absent.json")
+    except BaseException as error:  # noqa: BLE001 - probe records the class
+        outcomes["missing"] = type(error)
+
+    broken = tmp_path / "gv7_probe_three_way.py"
+    broken.write_text("raise ImportError('synthetic')\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        sup.require_module("gv7_probe_three_way", broken)
+    except BaseException as error:  # noqa: BLE001 - probe records the class
+        outcomes["import_broken"] = type(error)
+
+    malformed = tmp_path / "three_way.json"
+    malformed.write_text("{not json", encoding="utf-8")
+    try:
+        sup.load_json_file(malformed, "three_way.json")
+    except BaseException as error:  # noqa: BLE001 - probe records the class
+        outcomes["malformed"] = type(error)
+
+    assert set(outcomes) == {"missing", "import_broken", "malformed"}
+    assert outcomes["missing"] is AssertionError
+    assert issubclass(outcomes["import_broken"], ImportError)
+    assert issubclass(outcomes["malformed"], ValueError)
+    assert outcomes["import_broken"] is not AssertionError
+    assert outcomes["malformed"] is not AssertionError
