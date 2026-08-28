@@ -799,7 +799,7 @@ def default_lock_path(directory):
 
 
 def _lock_path_is_outside(lock_path, directory) -> bool:
-    """Whether `lock_path` is PROVED to lie outside `directory`.
+    r"""Whether `lock_path` is PROVED to lie outside `directory`.
 
     The lock is opened with `O_CREAT` before the target is ever scanned,
     so a lock inside the maintained directory creates an entry in the very
@@ -815,28 +815,69 @@ def _lock_path_is_outside(lock_path, directory) -> bool:
     of `.../data` while being a perfectly valid sibling, and a `startswith`
     test would refuse it.
 
-    Fails CLOSED. Any resolution failure returns False, because an
-    unprovable relationship is not a safe one. The default lock path is
-    run through this same decision rather than trusted, since nothing
-    guarantees the system temporary directory is outside the target.
+    Resolution alone is not enough on Windows, because `realpath` KEEPS an
+    extended-length prefix. A drive-letter path and its `\\?\` spelling
+    name one file yet resolve to two different roots, so the guard answered
+    "outside" for a lock that was inside -- and `\\?\` is the ordinary
+    MAX_PATH workaround, not an exotic spelling. Both paths are therefore
+    reduced to one canonical form first: an extended drive path loses the
+    prefix, and `\\?\UNC\server\share\x` becomes `\\server\share\x`.
+    Any other device namespace -- `\\.\anything`, `\\?\Volume{...}`,
+    `\\?\GLOBALROOT\...` -- is NOT mapped onto an ordinary path here and
+    is refused instead of guessed at.
+
+    Fails CLOSED on the failures it actually contains: `OSError`,
+    `ValueError` and `TypeError`, which is what `os.fspath`, `realpath`
+    and `normcase` raise for an unusable path, an embedded NUL or a
+    non-path object, together with the unmapped namespaces above. Each
+    returns False, because an unprovable relationship is not a safe one.
+    Exceptions outside that set are deliberately not caught here and
+    propagate. The default lock path is run through this same decision
+    rather than trusted, since nothing guarantees the system temporary
+    directory is outside the target.
 
     This is a NAMESPACE check, not an atomic one. It establishes the
     relationship at the instant it is asked; a path component replaced
     between this call and the open is not detected, and no filesystem
-    primitive available here would close that window. It removes a
-    foreseeable operator error and a self-inflicted wedge -- it is not an
-    adversarial guarantee, and does not claim to be.
+    primitive available here would close that window. Nor does it see a
+    POSIX bind mount, which presents one directory under two names that
+    `realpath` collapses in neither direction. It removes a foreseeable
+    operator error and a self-inflicted wedge -- it is not an adversarial
+    guarantee, and does not claim to be.
     """
-    try:
-        target = os.path.realpath(os.fspath(directory))
-        lock = os.path.realpath(os.fspath(lock_path))
-    except (OSError, ValueError, TypeError):
-        return False
-    try:
-        target_parts = Path(os.path.normcase(target)).parts
-        lock_parts = Path(os.path.normcase(lock)).parts
-    except (OSError, ValueError, TypeError):
-        return False
+    canonical = []
+    for candidate in (directory, lock_path):
+        try:
+            resolved = os.path.realpath(os.fspath(candidate))
+        except (OSError, ValueError, TypeError):
+            return False
+        # A device namespace is never mapped onto an ordinary path here.
+        if resolved[:4] == "\\\\.\\":
+            return False
+        # The extended-length forms are spellings of ordinary paths, and
+        # `realpath` keeps the prefix -- so without this the same
+        # directory spelled two ways compares as two different roots and
+        # containment is missed entirely.
+        if resolved[:4] == "\\\\?\\":
+            rest = resolved[4:]
+            if len(rest) > 4 and rest[:4].upper() == "UNC\\":
+                resolved = "\\\\" + rest[4:]
+            elif len(rest) >= 2 and rest[1] == ":" and rest[0].isalpha():
+                resolved = rest
+            else:
+                return False
+        try:
+            normalized = os.path.normcase(resolved)
+        except (OSError, ValueError, TypeError):
+            return False
+        # Components, never a string prefix. Both separators are split so
+        # one canonical sequence comes out whatever spelling arrived; on
+        # POSIX a backslash inside a name can only make this refuse, which
+        # is the safe direction.
+        canonical.append([part for part
+                          in normalized.replace("\\", "/").split("/")
+                          if part])
+    target_parts, lock_parts = canonical
     if not target_parts:
         return False
     return lock_parts[:len(target_parts)] != target_parts
