@@ -15,19 +15,21 @@ Control ids GV7-M-NNN are declared below alongside every other control.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import re
+import sys
 
 import pytest
 
 from experiments.general_v7_ledger.tests import _support as sup
 
 AUTHORED_CONTROLS = {
-    "test_contract.py": tuple(f"GV7-D-{n:03d}" for n in range(1, 28)),
-    "test_ledger_structure.py": tuple(f"GV7-S-{n:03d}" for n in range(1, 45)),
-    "test_inventory.py": tuple(f"GV7-I-{n:03d}" for n in range(1, 25)),
+    "test_contract.py": tuple(f"GV7-D-{n:03d}" for n in range(1, 29)),
+    "test_ledger_structure.py": tuple(f"GV7-S-{n:03d}" for n in range(1, 47)),
+    "test_inventory.py": tuple(f"GV7-I-{n:03d}" for n in range(1, 26)),
     "test_provenance.py": tuple(f"GV7-P-{n:03d}" for n in range(1, 27)),
-    "test_controls_manifest.py": tuple(f"GV7-M-{n:03d}" for n in range(1, 17)),
+    "test_controls_manifest.py": tuple(f"GV7-M-{n:03d}" for n in range(1, 23)),
 }
 
 #: This phase authors contract and tests only. None of these may be created here.
@@ -283,6 +285,10 @@ def test_gv7_m_014_an_import_broken_module_propagates_its_own_error(
         sup.require_module("gv7_probe_import_broken", module_path)
     assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
     assert "synthetic broken import" in str(excinfo.value)
+    # ``ModuleNotFoundError`` subclasses ``ImportError``, so the base class
+    # alone would be satisfied by the very confusion this control excludes.
+    assert not isinstance(excinfo.value, ModuleNotFoundError)
+    assert type(excinfo.value) is ImportError
 
     other = tmp_path / "gv7_probe_name_broken.py"
     other.write_text("import gv7_probe_no_such_module\n", encoding="utf-8")
@@ -298,12 +304,18 @@ def test_gv7_m_015_a_malformed_ledger_propagates_a_parse_error(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         sup.load_json_file(bad, "malformed.json")
     assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+    assert isinstance(excinfo.value, json.JSONDecodeError), "a syntax fault"
 
+    # A different mechanism, not a second syntax fault: the integer-conversion
+    # digit limit raises a plain ``ValueError``. ``JSONDecodeError`` subclasses
+    # ``ValueError``, so the base class alone would collapse the two together.
     oversized = tmp_path / "oversized.json"
     oversized.write_text('{"n": ' + "9" * 6000 + "}", encoding="utf-8")
     with pytest.raises(ValueError) as excinfo:
         sup.load_json_file(oversized, "oversized.json")
     assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+    assert "digits" in str(excinfo.value)
 
 
 def test_gv7_m_016_missing_import_broken_and_malformed_stay_distinguishable(
@@ -337,3 +349,243 @@ def test_gv7_m_016_missing_import_broken_and_malformed_stay_distinguishable(
     assert issubclass(outcomes["malformed"], ValueError)
     assert outcomes["import_broken"] is not AssertionError
     assert outcomes["malformed"] is not AssertionError
+
+
+def test_gv7_m_017_a_permission_failure_is_never_reported_as_absence(
+    tmp_path, monkeypatch
+):
+    """``Path.exists()`` would have swallowed this into a bare False.
+
+    ``entry_is_absent`` uses ``lstat`` and converts only ``FileNotFoundError``,
+    so an unreadable entry surfaces as the ``PermissionError`` it is.
+    """
+    probe = tmp_path / "unreadable.json"
+    probe.write_text("{}", encoding="utf-8")
+    real_lstat = sup.os.lstat
+
+    def denying_lstat(path, *args, **kwargs):
+        if sup.os.fspath(path) == sup.os.fspath(probe):
+            raise PermissionError(13, "synthetic permission denial")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(sup.os, "lstat", denying_lstat)
+    for call in (
+        lambda: sup.entry_is_absent(probe),
+        lambda: sup.require_file(probe, "unreadable.json"),
+        lambda: sup.load_json_file(probe, "unreadable.json"),
+        lambda: sup.require_module("gv7_probe_denied", probe),
+    ):
+        with pytest.raises(PermissionError) as excinfo:
+            call()
+        assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+
+def test_gv7_m_018_a_present_but_invalid_entry_is_never_reported_as_absence(
+    tmp_path,
+):
+    """Present-but-invalid is not absent, in two independent shapes.
+
+    Both assertions are about **the entry itself**. A path *beneath* a dangling
+    reparse point is a different fact -- the operating system cannot resolve it
+    at all and reports ``ENOENT`` -- and it is pinned separately by
+    ``GV7-M-020``.
+    """
+    # (a) a directory where a file is expected: the entry exists.
+    as_directory = tmp_path / "ledger.json"
+    as_directory.mkdir()
+    assert sup.entry_is_absent(as_directory) is False
+    for call in (
+        lambda: sup.load_json_file(as_directory, "ledger.json"),
+        lambda: sup.require_file(as_directory, "ledger.json"),
+    ):
+        with pytest.raises(OSError) as excinfo:
+            call()
+        assert not isinstance(excinfo.value, AssertionError)
+        assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+    # (b) a dangling reparse entry: lstat does not follow, so it is present.
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "dangling"
+    sup.make_reparse_directory(link, target)
+    assert sup.is_reparse_point(link)
+    target.rmdir()
+    assert sup.entry_is_absent(link) is False, (
+        "a dangling link is present but invalid, never absent"
+    )
+    with pytest.raises(OSError) as excinfo:
+        sup.require_file(link, "dangling")
+    assert not isinstance(excinfo.value, AssertionError)
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+
+def test_gv7_m_019_absence_detection_uses_lstat_and_converts_only_not_found():
+    """The rule is visible in the source, not merely in behaviour.
+
+    This scan is a **tripwire, not a detector**. A name-based check cannot
+    exclude ``os.path.isfile``, ``os.access``, ``Path.is_file``, a bare
+    ``try: open(...)``, or one level of indirection through a helper. What
+    establishes the rule is the behavioural set ``GV7-M-013`` through
+    ``GV7-M-022``; this control only makes the obvious rewrite loud.
+    """
+    source = (sup.TESTS_DIR / "_support.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "entry_is_absent"
+    )
+    handlers = [n for n in ast.walk(target) if isinstance(n, ast.ExceptHandler)]
+    assert handlers, "entry_is_absent must handle exactly one error class"
+    for handler in handlers:
+        assert isinstance(handler.type, ast.Name), "no broad or tuple catch"
+        assert handler.type.id == "FileNotFoundError", handler.type.id
+    calls = {
+        node.func.attr
+        for node in ast.walk(target)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "lstat" in calls, "absence must be decided by lstat, not exists()"
+    assert "exists" not in calls
+    # No other helper may fall back to the swallowing predicate.
+    for name in ("require_module", "require_file", "load_json_file"):
+        helper = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        used = {
+            node.func.attr
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert "exists" not in used, name
+    # Every absence signal is actually raised: ``absent`` is a factory, so a
+    # bare ``absent(label)`` at a new call site would be a silent no-op.
+    raised_exprs = {
+        id(node.exc)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise) and node.exc is not None
+    }
+    absent_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "absent"
+    ]
+    assert absent_calls, "the absence factory is never called"
+    for node in absent_calls:
+        assert id(node) in raised_exprs, "absent(...) must always be raised"
+
+
+def test_gv7_m_020_an_unresolvable_ancestor_reads_as_absence_by_decision(
+    tmp_path,
+):
+    """The decided semantics for a path the OS cannot resolve at all.
+
+    A missing ancestor directory and a dangling ancestor reparse point both
+    surface as ``ENOENT``, so both read as absence. That is stated in
+    ``entry_is_absent``'s own docstring rather than left implicit, and the
+    roots the suite actually asks about are asserted present here -- so a
+    misconfigured root fails loudly instead of reporting a broken harness as
+    an unwritten implementation.
+    """
+    assert sup.entry_is_absent(tmp_path / "no_such_dir" / "ledger.json") is True
+
+    target = tmp_path / "ancestor_target"
+    target.mkdir()
+    link = tmp_path / "ancestor_link"
+    sup.make_reparse_directory(link, target)
+    target.rmdir()
+    assert sup.entry_is_absent(link / "ledger.json") is True
+
+    # The semantics is documented, not silent.
+    assert "ancestor" in (sup.entry_is_absent.__doc__ or "")
+
+    # Absence therefore always means "the leaf under a present laboratory",
+    # never "the suite was pointed at the wrong root".
+    assert sup.entry_is_absent(sup.LAB_DIR) is False
+    assert sup.entry_is_absent(sup.TESTS_DIR) is False
+
+
+def test_gv7_m_021_a_race_time_disappearance_is_never_recategorized(
+    tmp_path, monkeypatch
+):
+    """The entry passed ``lstat`` and vanished before the read.
+
+    The read and the import run unguarded, so the race surfaces as the
+    ``FileNotFoundError`` it is and never as absence.
+    """
+    probe = tmp_path / "raced.json"
+    probe.write_text("{}", encoding="utf-8")
+    real_read_text = sup.pathlib.Path.read_text
+
+    def vanishing_read_text(self, *args, **kwargs):
+        if sup.os.fspath(self) == sup.os.fspath(probe):
+            raise FileNotFoundError(2, "synthetic race after the check")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(sup.pathlib.Path, "read_text", vanishing_read_text)
+    for call in (
+        lambda: sup.require_file(probe, "raced.json"),
+        lambda: sup.load_json_file(probe, "raced.json"),
+    ):
+        with pytest.raises(FileNotFoundError) as excinfo:
+            call()
+        assert not isinstance(excinfo.value, AssertionError)
+        assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+    monkeypatch.undo()
+
+    module_probe = tmp_path / "gv7_probe_raced_module.py"
+    module_probe.write_text("VALUE = 1\n", encoding="utf-8")
+
+    def vanishing_import(name, *args, **kwargs):
+        raise FileNotFoundError(2, "synthetic race during import")
+
+    monkeypatch.setattr(sup.importlib, "import_module", vanishing_import)
+    with pytest.raises(FileNotFoundError) as excinfo:
+        sup.require_module("gv7_probe_raced_module", module_probe)
+    assert not isinstance(excinfo.value, AssertionError)
+    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+
+
+def test_gv7_m_022_an_imported_module_must_be_the_entry_that_was_inspected(
+    tmp_path, monkeypatch
+):
+    """The entry is checked by path but imported by dotted name.
+
+    A stale ``sys.modules`` entry, a shadowing ``sys.path`` root, a PEP-420
+    namespace portion or a compiled artifact can bind a different module than
+    the one that was inspected. That is a harness fault: it must be reported
+    as neither a working implementation nor an absent one.
+    """
+    name = "gv7_probe_identity"
+    sys.modules.pop(name, None)
+    try:
+        real_root = tmp_path / "real"
+        real_root.mkdir()
+        real_module = real_root / f"{name}.py"
+        real_module.write_text("VALUE = 'real'\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(real_root))
+
+        # The agreeing case must still succeed: a check that only refuses is
+        # broken, not correct.
+        module = sup.require_module(name, real_module)
+        assert module.VALUE == "real"
+        assert pathlib.Path(module.__file__).resolve() == real_module.resolve()
+
+        # A second, genuinely present entry of the same name. The import
+        # resolves by name to the module already bound, so the path that was
+        # inspected and the module that came back diverge.
+        decoy_root = tmp_path / "decoy"
+        decoy_root.mkdir()
+        decoy_module = decoy_root / f"{name}.py"
+        decoy_module.write_text("VALUE = 'decoy'\n", encoding="utf-8")
+        assert sup.entry_is_absent(decoy_module) is False
+
+        with pytest.raises(AssertionError) as excinfo:
+            sup.require_module(name, decoy_module)
+        assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+        assert "identity divergence" in str(excinfo.value)
+    finally:
+        sys.modules.pop(name, None)

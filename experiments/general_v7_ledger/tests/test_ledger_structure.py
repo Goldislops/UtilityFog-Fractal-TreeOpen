@@ -591,21 +591,70 @@ def test_gv7_s_032_every_reference_field_refuses_a_wrong_kind_target():
         refuse(schema, payload, "reference-wrong-kind")
 
 
-def test_gv7_s_033_batch_and_record_introduction_must_stay_reciprocal():
+def find_batch(payload, batch_id):
+    return next(b for b in payload["batches"] if b["batch_id"] == batch_id)
+
+
+def other_batch(payload, batch_id, list_field):
+    return next(
+        b for b in payload["batches"]
+        if b["batch_id"] != batch_id and not b[list_field]
+    )
+
+
+def test_gv7_s_033_source_introduction_must_be_reciprocal_in_both_directions():
+    """Existence is not reciprocity: both sides must agree, and only once."""
     schema = sup.require_schema()
     ledger = sup.require_ledger()
+    source_id = ledger["sources"][0]["source_id"]
+    batch_id = ledger["sources"][0]["batch_ref"]
+
+    # (a) the record names its batch, but the batch omits it.
     payload = json.loads(json.dumps(ledger))
-    for batch in payload["batches"]:
-        if batch["introduces_sources"]:
-            batch["introduces_sources"] = list(batch["introduces_sources"])[1:]
-            break
+    batch = find_batch(payload, batch_id)
+    batch["introduces_sources"] = [
+        value for value in batch["introduces_sources"] if value != source_id
+    ]
     refuse(schema, payload, "introduction-not-reciprocal")
 
+    # (b) a batch lists a valid existing record whose own field points elsewhere.
     payload = json.loads(json.dumps(ledger))
-    for batch in payload["batches"]:
-        if batch["introduces_artifacts"]:
-            batch["introduces_artifacts"] = []
-            break
+    spare = other_batch(payload, batch_id, "introduces_sources")
+    spare["introduces_sources"] = [source_id]
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+    # (c) the same valid record is listed by two batches.
+    payload = json.loads(json.dumps(ledger))
+    spare = other_batch(payload, batch_id, "introduces_sources")
+    spare["introduces_sources"] = [source_id]
+    find_batch(payload, batch_id)  # the original listing stays in place
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+
+def test_gv7_s_046_artifact_introduction_must_be_reciprocal_in_both_directions():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    artifact_id = "GV7-ART-0001"
+    batch_id = sup.ARTIFACT_BATCHES[artifact_id]
+
+    # (a) the artifact names its batch, but the batch omits it.
+    payload = json.loads(json.dumps(ledger))
+    batch = find_batch(payload, batch_id)
+    batch["introduces_artifacts"] = [
+        value for value in batch["introduces_artifacts"] if value != artifact_id
+    ]
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+    # (b) a batch lists a valid existing artifact whose own field points elsewhere.
+    payload = json.loads(json.dumps(ledger))
+    spare = other_batch(payload, batch_id, "introduces_artifacts")
+    spare["introduces_artifacts"] = [artifact_id]
+    refuse(schema, payload, "introduction-not-reciprocal")
+
+    # (c) the same valid artifact is listed by two batches.
+    payload = json.loads(json.dumps(ledger))
+    spare = other_batch(payload, batch_id, "introduces_artifacts")
+    spare["introduces_artifacts"] = [artifact_id]
     refuse(schema, payload, "introduction-not-reciprocal")
 
 
@@ -689,22 +738,65 @@ def test_gv7_s_037_a_correction_never_removes_or_edits_its_target():
     assert sup.canonical_bytes(survivors[0]) == before, "corrections are additive"
 
 
-def test_gv7_s_038_a_valid_synthetic_supersession_chain_is_accepted():
-    schema = sup.require_schema()
-    ledger = sup.require_ledger()
+def attach_supersession(ledger, **successor_overrides):
+    """Make the EXISTING second source supersede the first.
+
+    Appending a brand-new source id would break batch reciprocity and inventory
+    count, so a refusal could come from that unrelated defect rather than from
+    the rule under test. Reusing ``sources[1]`` — its own identity, its own
+    introducing batch — changes nothing but the ``supersedes`` block.
+    """
     payload = json.loads(json.dumps(ledger))
     predecessor = payload["sources"][0]
-    successor = json.loads(json.dumps(predecessor))
-    successor["source_id"] = "GV7-SRC-0099"
+    successor = payload["sources"][1]
     successor["supersedes"] = {
         "record_id": predecessor["source_id"],
         "content_digest": sup.canonical_digest(predecessor),
     }
-    payload["sources"].append(successor)
+    successor.update(successor_overrides)
+    return payload
+
+
+def test_gv7_s_038_a_valid_synthetic_supersession_chain_is_accepted():
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = attach_supersession(ledger)
     schema.validate_ledger(payload)
     assert any(
-        s["source_id"] == predecessor["source_id"] for s in payload["sources"]
+        s["source_id"] == ledger["sources"][0]["source_id"]
+        for s in payload["sources"]
     ), "the predecessor must remain present"
+    assert any(
+        s["source_id"] == ledger["sources"][1]["source_id"]
+        for s in payload["sources"]
+    ), "the successor keeps its own identity"
+
+
+def test_gv7_s_045_the_valid_supersession_fixture_breaks_no_other_rule():
+    """The fixture must be valid for the right reason, not by luck."""
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    payload = attach_supersession(ledger)
+    schema.validate_ledger(payload)
+
+    # Inventory and reciprocity are untouched by the fixture.
+    assert len(payload["sources"]) == sup.EXPECTED_SOURCES
+    assert len(payload["batches"]) == sup.EXPECTED_BATCHES
+    assert sorted(sup.identifiers(payload["sources"], "source_id")) == sorted(
+        sup.ALL_SOURCE_IDS
+    )
+    introduced = []
+    for batch in payload["batches"]:
+        introduced.extend(batch["introduces_sources"])
+    assert sorted(introduced) == sorted(sup.ALL_SOURCE_IDS)
+    successor = payload["sources"][1]
+    assert successor["batch_ref"] == ledger["sources"][1]["batch_ref"]
+    # Only the supersedes block differs from the committed record.
+    before = json.loads(json.dumps(ledger["sources"][1]))
+    after = json.loads(json.dumps(successor))
+    before.pop("supersedes")
+    after.pop("supersedes")
+    assert before == after, "the fixture altered more than the supersedes block"
 
 
 def test_gv7_s_039_a_supersedes_block_of_the_wrong_shape_is_refused():
@@ -765,19 +857,16 @@ def test_gv7_s_041_a_missing_or_cross_collection_predecessor_is_refused():
 
 
 def test_gv7_s_042_a_supersession_cannot_promote_verification_state():
+    """The promoted state must be what refuses it, not a stray introduction."""
     schema = sup.require_schema()
     ledger = sup.require_ledger()
-    payload = json.loads(json.dumps(ledger))
-    predecessor = payload["sources"][0]
-    successor = json.loads(json.dumps(predecessor))
-    successor["source_id"] = "GV7-SRC-0099"
-    successor["verification_state"] = "identity-verified"
-    successor["supersedes"] = {
-        "record_id": predecessor["source_id"],
-        "content_digest": sup.canonical_digest(predecessor),
-    }
-    payload["sources"].append(successor)
+    # Same reciprocity-preserving fixture; only the state is illegal.
+    payload = attach_supersession(
+        ledger, verification_state="identity-verified"
+    )
     refuse(schema, payload, "enum-value-invalid")
+    # Control: the identical fixture without the promotion is accepted.
+    schema.validate_ledger(attach_supersession(ledger))
 
 
 def test_gv7_s_043_a_relationship_carries_its_own_unverified_provenance():

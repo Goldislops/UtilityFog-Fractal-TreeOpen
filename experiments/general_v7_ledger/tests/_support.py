@@ -63,17 +63,61 @@ def absent(label: str) -> AssertionError:
     )
 
 
+def entry_is_absent(path: pathlib.Path) -> bool:
+    """True only when the path entry is *genuinely* missing.
+
+    ``Path.exists()`` is unusable here: it swallows ``PermissionError`` and
+    every other ``OSError`` into a bare ``False``, so an unreadable directory
+    would be reported as an unwritten implementation. ``lstat`` is used instead
+    and **only ``FileNotFoundError`` counts as absence** — every other
+    ``OSError``, ``PermissionError`` first among them, propagates.
+
+    ``lstat`` does not follow links, so a dangling symlink or junction is
+    *present but invalid*, never absent. The subsequent import or read then
+    fails on its own terms.
+
+    The rule is about **the named entry**, not about paths beneath it. A path
+    the operating system cannot resolve at all -- one whose ancestor directory
+    is missing, or whose ancestor is a dangling reparse point -- is reported as
+    ``ENOENT`` and therefore reads as absence. That is a decided semantics, not
+    an accident: it is pinned by ``GV7-M-020``, and the laboratory root the
+    suite actually asks about is itself asserted present there, so a
+    misconfigured root cannot masquerade as an unwritten implementation.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def require_module(dotted_name: str, module_path: pathlib.Path):
     """Import an expected module.
 
-    Only the exact non-existence of ``module_path`` is absence. Once the file
-    exists, ``import_module`` runs unguarded: an ``ImportError`` raised inside
-    it, a syntax error, or any other failure propagates and is reported as
-    itself.
+    Only a genuinely missing entry is absence. Once the entry exists,
+    ``import_module`` runs unguarded: an ``ImportError`` raised inside it, a
+    syntax error, a decoding failure, or a race-time ``FileNotFoundError`` all
+    propagate as themselves and are never recategorized as absence.
+
+    The entry is checked by *path* but imported by *dotted name*, and those two
+    can diverge. The module that comes back is therefore required to be the
+    entry that was inspected; a divergence raises a plain ``AssertionError``
+    that does not carry the absence token.
     """
-    if not module_path.exists():
+    if entry_is_absent(module_path):
         raise absent(module_path.name)
-    return importlib.import_module(dotted_name)
+    module = importlib.import_module(dotted_name)
+    bound = getattr(module, "__file__", None)
+    if bound is None or pathlib.Path(bound).resolve() != module_path.resolve():
+        raise AssertionError(
+            f"module identity divergence: {dotted_name!r} bound to {bound!r}, "
+            f"which is not the entry that was inspected, "
+            f"{str(module_path)!r}; a stale sys.modules entry, a shadowing "
+            f"sys.path root, a namespace portion or a compiled artifact can "
+            f"cause this. It is a harness fault and never an unwritten "
+            f"implementation."
+        )
+    return module
 
 
 def require_schema():
@@ -87,10 +131,11 @@ def require_validate():
 def require_file(path: pathlib.Path, label: str) -> str:
     """Return an expected file's text.
 
-    Absence is absence. A permission failure or any other ``OSError``
-    propagates unchanged.
+    Absence is absence. A permission failure, a directory where a file was
+    expected, a decoding failure, and a race-time ``FileNotFoundError`` all
+    propagate unchanged.
     """
-    if not path.exists():
+    if entry_is_absent(path):
         raise absent(label)
     return path.read_text(encoding="utf-8")
 
@@ -102,7 +147,7 @@ def load_json_file(path: pathlib.Path, label: str):
     ``ValueError`` propagates, so a broken ledger can never be mistaken for an
     unwritten one.
     """
-    if not path.exists():
+    if entry_is_absent(path):
         raise absent(label)
     return json.loads(path.read_text(encoding="utf-8"))
 

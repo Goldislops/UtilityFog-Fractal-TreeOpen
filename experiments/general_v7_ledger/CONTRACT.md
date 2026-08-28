@@ -141,6 +141,12 @@ Inventing one would freeze a number nobody has counted. Instead:
   length** — counts are computed, never asserted from a constant;
 - `relationships` and `unresolved` are **non-empty**, uniquely identified, and
   every reference resolves;
+- **introduction is reciprocal in both directions**, for sources and for
+  artifacts alike: a record naming an introducing batch that omits it is
+  refused; a batch listing a record whose own introducing field points elsewhere
+  is refused; and a record listed by two batches is refused. Checking only that
+  a reference resolves is not reciprocity, and the refusal token is
+  `introduction-not-reciprocal`;
 - the conflict families of section 10 are each covered by at least one
   unresolved record.
 
@@ -513,19 +519,31 @@ is a required artifact; a generator for it is not part of v1. The two are
 distinct, and the deferral of the generator never excuses the absence of the
 file.
 
-It must:
+**Both locator forms are preserved.** Normalisation never replaces what was
+supplied, and the bibliography is where that promise is most easily broken, so
+the rule names both forms explicitly:
 
-- contain **every one of the 61 source identities exactly once**;
-- contain **every present locator exactly once**, exactly as recorded;
-- for **every source without a locator**, contain that source's **exact recorded
-  `locator_absence` token** and **no URL of any kind**;
-- **fabricate no locator** — every `https://` string appearing anywhere in the
-  file must be one of the recorded normalized locators;
-- add no source, and remove none.
+- **every one of the 61 source identities appears exactly once**;
+- **every non-null original `supplied_locator` is preserved literally** and is
+  rendered exactly once;
+- **every non-null `normalized_locator` is rendered exactly once** when it is
+  distinct from the supplied form;
+- when the two forms are **identical**, a single occurrence satisfies both, and
+  where the shorter form is nested inside the longer, that one occurrence
+  satisfies it;
+- each form is rendered in **exactly one entry**, never repeated across entries;
+- for **every source without a locator**, the entry contains that source's
+  **exact recorded `locator_absence` token** and **no URL of any kind**;
+- **no URL-like value may appear that is absent from the union of the recorded
+  supplied and normalized locators** — nothing is fabricated;
+- no source is added, and none removed.
 
-These are tested positively and negatively: a control fails if an absence token
-is missing, if a URL is invented, if an identity is duplicated or dropped, and
-if a locator appears more than once.
+Testing only `normalized_locator` would let the original supplied string be
+silently dropped or rewritten, which is exactly the provenance this ledger
+exists to keep. The controls are positive and negative, and detect: loss or
+alteration of the supplied form; loss or alteration of a distinct normalized
+form; duplicate locator rendering; a fabricated locator; a missing absence
+token; a URL added to a locatorless entry; and a duplicated identity.
 
 ## 12. Acceptance criteria for the future implementation
 
@@ -535,12 +553,36 @@ not correct. Standard library only. No bare `assert`. No network-capable
 import. The refusal carrier has no value slot. Counts computed, never asserted.
 Controls match the manifest in `tests/test_controls_manifest.py` exactly.
 
-**Absence is detected precisely.** The acceptance suite reports
-`implementation-absent` only for the exact non-existence of an expected file.
-An `ImportError` raised inside a module that does exist, a permission or other
-`OSError`, a wrong type, and a malformed ledger all propagate as themselves.
-**A broken implementation can never disguise itself as an unwritten one**, and
-controls prove that missing, import-broken and malformed remain distinguishable.
+**Absence is detected precisely, by `lstat` and not by `exists()`.**
+`Path.exists()` swallows `PermissionError` and every other `OSError` into a bare
+`False`, so an unreadable entry would be reported as an unwritten
+implementation. The acceptance suite inspects the expected path entry with
+`lstat` and converts **only `FileNotFoundError`** into `implementation-absent`.
+`PermissionError` and every other `OSError` propagate. Because `lstat` does not
+follow links, a dangling symlink or junction is **present but invalid, never
+absent**. That rule is about the named entry, and it is not about paths beneath
+it: a path the operating system cannot resolve at all -- one whose ancestor
+directory is missing, or whose ancestor is a dangling reparse point -- is
+reported as `ENOENT` and therefore reads as absence. That is a decided
+semantics, not an accident, and the laboratory root every check is taken
+relative to is itself asserted present, so a misconfigured root fails loudly
+instead of reporting a broken harness as an unwritten implementation.
+
+The subsequent import or read runs unguarded, so an `ImportError`
+raised inside a module that does exist, a syntax or decoding failure, a
+malformed ledger, and a race-time `FileNotFoundError` all propagate as
+themselves. An expected module is inspected by *path* but imported by *dotted
+name*, and a stale `sys.modules` entry, a shadowing `sys.path` root, a
+namespace portion or a compiled artifact can bind a module other than the one
+inspected; the imported module is therefore required to be the entry that was
+inspected, and **a divergence is a harness fault, never absence**.
+**A broken implementation can never disguise itself as an unwritten
+one**, and controls prove that missing, permission-denied, import-broken,
+malformed and present-but-invalid all remain distinguishable.
+
+The static scan over the absence helper is a **tripwire, not a detector**: a
+name-based check cannot exclude every swallowing predicate, and what
+establishes the rule is the behavioural set of controls, not the scan.
 
 **What these controls do not prove:** they are static and behavioural checks
 over this ledger's own surface. They do not verify a single source, do not

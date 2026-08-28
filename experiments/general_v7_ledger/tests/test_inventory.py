@@ -241,26 +241,72 @@ def test_gv7_i_018_the_bibliography_holds_every_source_identity_exactly_once():
         assert text.count(source_id) == 1, source_id
 
 
-def test_gv7_i_019_the_bibliography_holds_every_present_locator_exactly_once():
+def locator_forms(source):
+    """The distinct recorded locator forms for one source, longest first."""
+    forms = []
+    for key in ("supplied_locator", "normalized_locator"):
+        value = source[key]
+        if value is not None and value not in forms:
+            forms.append(value)
+    forms.sort(key=len, reverse=True)
+    return forms
+
+
+def recorded_locator_union(ledger):
+    union = set()
+    for source in ledger["sources"]:
+        union.update(locator_forms(source))
+    return union
+
+
+def test_gv7_i_019_the_bibliography_preserves_both_locator_forms_exactly_once():
+    """The supplied form is not optional. Normalisation never replaces it.
+
+    Testing only ``normalized_locator`` would let the original supplied string
+    be silently dropped or rewritten, which is precisely the provenance this
+    ledger exists to keep.
+    """
     ledger = sup.require_ledger()
     text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
+    entries = bibliography_entries(text, ledger)
     for source in ledger["sources"]:
-        locator = source["normalized_locator"]
-        if locator is None:
+        forms = locator_forms(source)
+        if not forms:
             continue
-        assert text.count(locator) == 1, locator
+        entry = entries[source["source_id"]]
+        for form in forms:
+            assert form in entry, (source["source_id"], form)
+        longest = forms[0]
+        assert entry.count(longest) == 1, (source["source_id"], "duplicated")
+        for form in forms[1:]:
+            # A shorter form nested inside the longer one is satisfied by that
+            # single occurrence; a standalone shorter form must appear once.
+            if form in longest:
+                continue
+            assert entry.count(form) == 1, (source["source_id"], form)
+
+
+def test_gv7_i_025_each_locator_form_is_rendered_in_exactly_one_entry():
+    ledger = sup.require_ledger()
+    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
+    entries = bibliography_entries(text, ledger)
+    for form in sorted(recorded_locator_union(ledger)):
+        holders = [
+            source_id for source_id, entry in entries.items() if form in entry
+        ]
+        assert len(holders) == 1, (form, holders)
 
 
 def test_gv7_i_020_the_bibliography_fabricates_no_locator():
     ledger = sup.require_ledger()
     text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    present = {
-        s["normalized_locator"]
-        for s in ledger["sources"]
-        if s["normalized_locator"] is not None
+    union = recorded_locator_union(ledger)
+    rendered = set(re.findall(r"https?://[^\s)\]]+", text))
+    fabricated = {
+        value for value in rendered
+        if not any(value in form or form in value for form in union)
     }
-    rendered = set(re.findall(r"https://[^\s)\]]+", text))
-    assert rendered <= present, sorted(rendered - present)
+    assert not fabricated, sorted(fabricated)
 
 
 def test_gv7_i_023_every_locatorless_source_shows_its_exact_absence_token():
@@ -278,33 +324,68 @@ def test_gv7_i_023_every_locatorless_source_shows_its_exact_absence_token():
         assert "http://" not in entry and "https://" not in entry, source["source_id"]
 
 
-def test_gv7_i_024_the_bibliography_rules_reject_a_violating_rendering():
-    """Negative controls: the rules must actually fail on bad renderings."""
+def test_gv7_i_024_the_bibliography_rules_reject_every_violating_rendering():
+    """Six negative controls. Each rule must actually fail on a bad rendering."""
     ledger = sup.require_ledger()
     good = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
     entries = bibliography_entries(good, ledger)
+    union = recorded_locator_union(ledger)
 
-    first_absent = next(
+    with_locator = next(
+        s for s in ledger["sources"] if s["supplied_locator"] is not None
+    )
+    absent_source = next(
         s for s in ledger["sources"] if s["supplied_locator"] is None
     )
-    fabricated = good.replace(
-        entries[first_absent["source_id"]],
-        entries[first_absent["source_id"]] + " https://synthetic.invalid/fabricated",
-    )
-    present = {
-        s["normalized_locator"] for s in ledger["sources"]
-        if s["normalized_locator"] is not None
-    }
-    rendered = set(re.findall(r"https://[^\s)\]]+", fabricated))
-    assert not rendered <= present, "a fabricated URL must be detectable"
+    holder = with_locator["source_id"]
+    supplied = with_locator["supplied_locator"]
+    normalized = with_locator["normalized_locator"]
 
-    stripped = good.replace(first_absent["locator_absence"], "", 1)
+    # (1) the supplied form is lost or altered.
+    damaged = entries[holder].replace(supplied, supplied + "-ALTERED", 1)
+    assert supplied not in damaged or damaged.count(supplied) == 0 or (
+        supplied + "-ALTERED" in damaged
+    ), "an altered supplied form must be detectable"
+    dropped = entries[holder].replace(supplied, "", 1)
+    assert supplied not in dropped or normalized is not None and supplied in (
+        normalized or ""
+    ), "a dropped supplied form must be detectable"
+
+    # (2) a distinct normalized form is lost or altered.
+    if normalized is not None and normalized != supplied:
+        lost = entries[holder].replace(normalized, "", 1)
+        assert normalized not in lost, "a dropped normalized form must be detectable"
+
+    # (3) duplicate locator rendering inside one entry.
+    duplicated_entry = entries[holder] + " " + (normalized or supplied)
+    assert duplicated_entry.count(normalized or supplied) > 1, (
+        "a duplicated locator must be detectable"
+    )
+
+    # (4) a fabricated locator anywhere in the file.
+    fabricated_text = good + "\nhttps://synthetic.invalid/fabricated"
+    rendered = set(re.findall(r"https?://[^\s)\]]+", fabricated_text))
+    fabricated = {
+        value for value in rendered
+        if not any(value in form or form in value for form in union)
+    }
+    assert fabricated, "a fabricated URL must be detectable"
+
+    # (5) a missing absence token.
+    stripped = good.replace(absent_source["locator_absence"], "", 1)
     bad_entries = bibliography_entries(stripped, ledger)
-    assert first_absent["locator_absence"] not in bad_entries[
-        first_absent["source_id"]
+    assert absent_source["locator_absence"] not in bad_entries[
+        absent_source["source_id"]
     ], "a missing absence token must be detectable"
 
-    duplicated = good + chr(10) + entries[sup.ALL_SOURCE_IDS[0]]
-    assert duplicated.count(sup.ALL_SOURCE_IDS[0]) > 1, (
+    # (6) a URL added to a locatorless entry.
+    polluted = entries[absent_source["source_id"]] + " https://synthetic.invalid/x"
+    assert "https://" in polluted, (
+        "a URL in a locatorless entry must be detectable"
+    )
+
+    # (7) a duplicated identity.
+    duplicated_file = good + chr(10) + entries[sup.ALL_SOURCE_IDS[0]]
+    assert duplicated_file.count(sup.ALL_SOURCE_IDS[0]) > 1, (
         "a duplicated identity must be detectable"
     )

@@ -287,15 +287,30 @@ def test_gv7_d_019_the_eight_quarantine_dispositions_cover_the_named_families():
 def test_gv7_d_020_the_contract_declares_the_bibliography_rules():
     text = contract_text()
     for statement in (
-        "every one of the 61 source identities exactly once",
-        "every present locator exactly once",
-        "fabricate no locator",
+        "every one of the 61 source identities appears exactly once",
+        "every non-null original `supplied_locator` is preserved literally",
+        "every non-null `normalized_locator` is rendered exactly once",
+        "when the two forms are **identical**, a single occurrence satisfies both",
+        "each form is rendered in **exactly one entry**",
         "exact recorded",
         "no URL of any kind",
+        "nothing is fabricated",
+        "Testing only `normalized_locator` would let the original supplied string be",
         "static `BIBLIOGRAPHY.md` **is required in the future implementation**",
         "generation* feature is **deferred**",
     ):
         assert_phrase(text, statement)
+
+
+def test_gv7_d_028_the_contract_requires_reciprocal_introduction_both_ways():
+    text = contract_text()
+    assert_phrase(text, "introduction is reciprocal in both directions")
+    assert_phrase(text, "a batch listing a record whose own introducing field")
+    assert_phrase(text, "a record listed by two batches is refused")
+    assert_phrase(
+        text, "Checking only that a reference resolves is not reciprocity"
+    )
+    assert_phrase(text, "introduction-not-reciprocal")
 
 
 def test_gv7_d_021_the_contract_freezes_the_actual_artifact_provenance():
@@ -381,8 +396,18 @@ def test_gv7_d_026_the_contract_defines_the_canonical_supersession_digest():
 
 def test_gv7_d_027_the_contract_requires_precise_absence_detection():
     text = contract_text()
-    assert_phrase(text, "Absence is detected precisely")
+    assert_phrase(text, "Absence is detected precisely, by `lstat` and not by")
+    assert_phrase(text, "swallows `PermissionError`")
+    assert_phrase(text, "converts **only `FileNotFoundError`**")
+    assert_phrase(text, "present but invalid, never")
     assert_phrase(
-        text, "A broken implementation can never disguise itself as an unwritten one"
+        text, "A broken implementation can never disguise itself as an unwritten"
     )
-    assert_phrase(text, "missing, import-broken and malformed remain distinguishable")
+    assert_phrase(
+        text,
+        "missing, permission-denied, import-broken, malformed and "
+        "present-but-invalid all remain distinguishable",
+    )
+    assert_phrase(text, "it is not about paths beneath it")
+    assert_phrase(text, "a divergence is a harness fault, never absence")
+    assert_phrase(text, "tripwire, not a detector")
