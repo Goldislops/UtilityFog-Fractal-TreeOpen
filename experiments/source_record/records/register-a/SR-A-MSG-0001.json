@@ -1,0 +1,15 @@
+{
+ "carrier_label": "synthetic exemplar carrier alpha",
+ "carrier_role": "relay-agent",
+ "origin": "synthetic-fixture",
+ "received_date": "2026-08-28",
+ "record_id": "SR-A-MSG-0001",
+ "record_type": "message",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "register-a",
+ "schema": "source-record-v1",
+ "sequence_ordinal": 1,
+ "supersedes": null
+}

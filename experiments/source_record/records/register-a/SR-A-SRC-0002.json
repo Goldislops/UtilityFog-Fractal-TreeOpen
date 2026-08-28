@@ -1,0 +1,24 @@
+{
+ "issuer_claim": {
+  "claimed_issuer": "unknown",
+  "verification_evidence": null,
+  "verification_state": "unverified"
+ },
+ "locators": [
+  {
+   "resolution": "unattempted",
+   "scheme": "opaque-handle",
+   "value": "synthetic-exemplar-a-0002"
+  }
+ ],
+ "neutral_label": "synthetic exemplar source beta",
+ "origin": "synthetic-fixture",
+ "record_id": "SR-A-SRC-0002",
+ "record_type": "source",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "register-a",
+ "schema": "source-record-v1",
+ "supersedes": null
+}
