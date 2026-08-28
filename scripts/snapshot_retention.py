@@ -729,11 +729,16 @@ def snapshot_reserve_available(scan: ScanResult, *, policy: RetentionPolicy,
                                data_dir, admit=None) -> bool:
     """Whether enough preflight-admissible archives remain to act on snapshots.
 
-    Probes newest-first through at most ``reserve_window`` strict snapshot
-    entries and stops as soon as ``reserve_required`` have passed admission.
-    At the production values that is at most eight bounded preflights per
-    pass -- a central-directory and NPY-header read each, never a payload
-    materialisation.
+    Probes newest-first through snapshots the planner cannot take, and
+    stops as soon as ``reserve_required`` have passed admission. The depth
+    is bounded by ``reserve_window`` AND by ``snapshot.recovery_floor``:
+    past the floor the planner makes entries ELIGIBLE, so counting them
+    would certify a reserve out of the very archives the same pass is
+    about to quarantine. At the production values the floor is 512 and the
+    window is 8, so the protected prefix already contains the whole window
+    and this bound changes nothing there: at most eight bounded preflights
+    per pass -- a central-directory and NPY-header read each, never a
+    payload materialisation.
 
     The guarantee is exactly "preflight-admissible", and no more.
     ``admit_snapshot`` is bounded structural preflight; a valid header over a
@@ -749,7 +754,14 @@ def snapshot_reserve_available(scan: ScanResult, *, policy: RetentionPolicy,
     probe = admit if admit is not None else admit_snapshot
     root = Path(os.fspath(data_dir))
     found = 0
-    for entry in rank(scan.snapshots)[:policy.reserve_window]:
+    # Both bounds apply. The window caps the work; the recovery floor caps
+    # WHAT MAY BE COUNTED, because only entries inside the protected prefix
+    # are guaranteed absent from the snapshot action set this same pass
+    # will plan. Narrowing the probe keeps every accepted policy
+    # constructible -- an unsafe SHAPE simply stays reserve-blocked
+    # instead of certifying a reserve it cannot keep.
+    depth = min(policy.reserve_window, policy.snapshot.recovery_floor)
+    for entry in rank(scan.snapshots)[:depth]:
         try:
             with probe(root / entry.basename, data_dir=root,
                        policy=SNAPSHOT_ARCHIVE_POLICY):
