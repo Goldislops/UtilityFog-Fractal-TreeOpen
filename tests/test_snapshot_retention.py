@@ -8366,5 +8366,241 @@ def test_the_narrowed_probe_never_materializes_a_payload():
     policy = _vulnerable_policy()
     admit = _Admit({0})
     _reserve(_five_old_snapshots(), admit, policy=policy)
-    assert len(admit.calls) <= 1
+    assert len(admit.calls) == 1
     assert all(name.endswith(".npz") for name in admit.calls)
+
+
+# ===========================================================================
+# P1 follow-up -- the Windows EXTENDED-LENGTH namespace defeated the guard
+# ===========================================================================
+#
+# `_lock_path_is_outside` resolves both paths with `os.path.realpath` and then
+# compares components. On Windows `realpath` PRESERVES the extended-length
+# prefix, so the same directory spelled two ways produces two different roots:
+#
+#     realpath(r"C:\data\x.lock")       -> "C:\\data\\x.lock"
+#     realpath(r"\\?\C:\data\x.lock")   -> "\\\\?\\C:\\data\\x.lock"
+#
+# The component sequences then share no prefix, the guard answers "outside",
+# and the lock is created INSIDE the maintained directory. Measured through
+# `main()` in PLAN mode against the uncorrected code:
+#
+#     plain     : retention refused=lock_unavailable   rc=1  target after=[]
+#     extended  : retention mode=plan refused=none processed=1
+#                 rc=0  target after=['sneak.lock']
+#
+# `processed=1` is the pass counting the lock file it had just created -- the
+# exact entry inflation that wedges a directory at `max_directory_entries`.
+#
+# `\\?\` is the ordinary Windows workaround for MAX_PATH on deep paths, so
+# this is a foreseeable operator spelling rather than an attack, and Windows is
+# this module's stated operational target. It is also invisible to Linux CI,
+# which is why the deterministic control below drives the canonicalization
+# through a substituted `realpath` and therefore runs identically everywhere.
+
+_EXTENDED_PREFIX = "\\\\?\\"
+_DEVICE_PREFIX = "\\\\.\\"
+
+
+def _extended(path):
+    """The extended-length spelling of an ordinary Windows path."""
+    return _EXTENDED_PREFIX + os.fspath(path)
+
+
+def _fixed_realpath(mapping):
+    """A `realpath` double returning canonical Windows spellings.
+
+    The point is to exercise the namespace canonicalization on EVERY platform.
+    Windows path handling is not available on POSIX, so the resolved forms are
+    supplied directly and the code under test must reconcile them itself.
+    """
+    def _resolver(path, *args, **kwargs):
+        return mapping[os.fspath(path)]
+    return _resolver
+
+
+# -- the guard, decided directly ---------------------------------------------
+
+def test_a_plain_lock_inside_a_plain_target_is_refused(tmp_path):
+    """The control case the extended spellings are measured against."""
+    root = _scanned_root(tmp_path, snapshots=1)
+    assert retention._lock_path_is_outside(
+        Path(os.fspath(root)) / "x.lock", root) is False
+
+
+def test_an_extended_lock_inside_a_plain_target_is_refused(tmp_path):
+    """`\\\\?\\C:\\...` names the same file as `C:\\...` and must not escape."""
+    root = _scanned_root(tmp_path, snapshots=1)
+    lock = _extended(Path(os.fspath(root)) / "x.lock")
+    assert retention._lock_path_is_outside(lock, root) is False
+
+
+def test_a_plain_lock_inside_an_extended_target_is_refused(tmp_path):
+    """The prefix on the TARGET must not defeat the guard either."""
+    root = _scanned_root(tmp_path, snapshots=1)
+    lock = Path(os.fspath(root)) / "x.lock"
+    assert retention._lock_path_is_outside(lock, _extended(root)) is False
+
+
+def test_both_paths_in_extended_form_are_refused(tmp_path):
+    """Equivalent spellings on both sides still resolve to containment."""
+    root = _scanned_root(tmp_path, snapshots=1)
+    lock = _extended(Path(os.fspath(root)) / "x.lock")
+    assert retention._lock_path_is_outside(lock, _extended(root)) is False
+
+
+def test_an_extended_sibling_outside_the_target_is_still_accepted(tmp_path):
+    """Canonicalization must not turn every extended path into a refusal."""
+    root = _scanned_root(tmp_path, snapshots=1)
+    lock = _extended(tmp_path / "outside.lock")
+    assert retention._lock_path_is_outside(lock, root) is True
+
+
+def test_an_extended_sibling_sharing_a_name_prefix_is_accepted(tmp_path):
+    """Component containment must survive canonicalization: `...database.lock`
+    is not inside `...data` however either side is spelled."""
+    root = _scanned_root(tmp_path, name="data", snapshots=1)
+    lock = _extended(tmp_path / "database.lock")
+    assert retention._lock_path_is_outside(lock, root) is True
+
+
+# -- deterministic canonicalization, running on every platform ---------------
+
+@pytest.mark.parametrize("target,lock,expected", [
+    # extended drive form against its ordinary equivalent, both directions
+    ("\\\\?\\C:\\data", "C:\\data\\x.lock", False),
+    ("C:\\data", "\\\\?\\C:\\data\\x.lock", False),
+    ("\\\\?\\C:\\data", "\\\\?\\C:\\data\\x.lock", False),
+    # extended UNC form against its ordinary equivalent, both directions
+    ("\\\\?\\UNC\\server\\share\\data", "\\\\server\\share\\data\\x.lock", False),
+    ("\\\\server\\share\\data", "\\\\?\\UNC\\server\\share\\data\\x.lock", False),
+    ("\\\\?\\UNC\\server\\share\\data",
+     "\\\\?\\UNC\\server\\share\\data\\x.lock", False),
+    # genuinely outside, in every spelling
+    ("\\\\?\\C:\\data", "C:\\elsewhere\\x.lock", True),
+    ("C:\\data", "\\\\?\\C:\\elsewhere\\x.lock", True),
+    ("\\\\?\\UNC\\server\\share\\data", "\\\\server\\share\\other\\x.lock", True),
+    # a name that merely starts with the target's characters
+    ("\\\\?\\C:\\data", "\\\\?\\C:\\database.lock", True),
+])
+def test_equivalent_windows_spellings_reach_one_answer(monkeypatch, target,
+                                                       lock, expected):
+    """The canonicalization itself, decided without any Windows API.
+
+    `realpath` is replaced by a double returning the spellings verbatim, so
+    this control exercises the namespace reconciliation on Linux CI exactly as
+    on the Windows seat. Without it the defect would be visible only on the
+    platform that suffers from it.
+    """
+    monkeypatch.setattr(retention.os.path, "realpath",
+                        _fixed_realpath({target: target, lock: lock}))
+    assert retention._lock_path_is_outside(lock, target) is expected
+
+
+@pytest.mark.parametrize("spelling", [
+    "\\\\.\\C:\\data\\x.lock",          # device namespace
+    "\\\\.\\PhysicalDrive0",            # device namespace, not a file at all
+    "\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\x.lock",
+    "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x.lock",
+    "\\\\?\\",                          # prefix with nothing after it
+    "\\\\?\\UNC\\",                     # UNC prefix with no server or share
+])
+def test_an_unsupported_windows_namespace_fails_closed(monkeypatch, spelling):
+    """A namespace that cannot be mapped onto an ordinary drive or UNC path is
+    not proved outside anything, so it must refuse rather than guess."""
+    target = "C:\\data"
+    monkeypatch.setattr(retention.os.path, "realpath",
+                        _fixed_realpath({target: target, spelling: spelling}))
+    assert retention._lock_path_is_outside(spelling, target) is False
+
+
+def test_an_unsupported_namespace_on_the_target_side_also_fails_closed(
+        monkeypatch):
+    target = "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\data"
+    lock = "C:\\elsewhere\\x.lock"
+    monkeypatch.setattr(retention.os.path, "realpath",
+                        _fixed_realpath({target: target, lock: lock}))
+    assert retention._lock_path_is_outside(lock, target) is False
+
+
+# -- end to end through the CLI ----------------------------------------------
+
+def test_plan_refuses_an_extended_lock_inside_the_target(tmp_path, capsys):
+    """The whole harm, through `main`, in the mode that promises to touch
+    nothing.
+
+    On Windows the extended spelling is the genuine bypass vector. On POSIX the
+    same string is a namespace that cannot be mapped to a drive or UNC path, so
+    it fails closed there instead. Both platforms must refuse, and the control
+    runs on both -- it is never skipped.
+    """
+    root = _scanned_root(tmp_path, snapshots=3)
+    lock = _extended(Path(os.fspath(root)) / "sneak.lock")
+    before = _listing(root)
+    status = retention.main([str(root), "--lock", lock])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert printed.err == ""
+    assert _listing(root) == before
+    assert not (Path(os.fspath(root)) / "sneak.lock").exists()
+    assert "refused=none" not in printed.out
+    assert "processed=" not in printed.out
+
+
+def test_the_extended_refusal_leaks_no_locator_or_namespace(tmp_path, capsys):
+    """No path, no prefix, no errno, no traceback."""
+    root = _scanned_root(tmp_path, snapshots=2)
+    lock = _extended(Path(os.fspath(root)) / "sneak.lock")
+    retention.main([str(root), "--lock", lock])
+    printed = capsys.readouterr()
+    for leak in (str(root), "sneak.lock", _EXTENDED_PREFIX, _DEVICE_PREFIX,
+                 "Traceback", "Errno", "errno"):
+        assert leak not in printed.out
+        assert leak not in printed.err
+
+
+def test_an_exactly_full_target_is_not_wedged_by_an_extended_lock(
+        tmp_path, monkeypatch, capsys):
+    """The wedge, reached through the extended spelling.
+
+    The directory is exactly at its entry bound. Creating one lock entry would
+    push it over and every later pass would refuse before retention could give
+    relief, so the refusal must leave it exactly full.
+    """
+    root = _scanned_root(tmp_path, snapshots=4)
+    full = len(_listing(root))
+    monkeypatch.setattr(retention, "PRODUCTION_RETENTION_POLICY",
+                        _tiny(entries=full, combined=1000))
+    lock = _extended(Path(os.fspath(root)) / "sneak.lock")
+    status = retention.main([str(root), "--lock", lock])
+    printed = capsys.readouterr()
+    assert status == 1
+    assert (retention.RetentionFailureReason.LOCK_UNAVAILABLE.value
+            in printed.out)
+    assert (retention.RetentionFailureReason.ENTRY_LIMIT_EXCEEDED.value
+            not in printed.out)
+    assert len(_listing(root)) == full
+
+
+def test_an_extended_lock_outside_the_target_still_locks_the_pass(tmp_path,
+                                                                  capsys):
+    """Valid extended-path placement keeps working end to end."""
+    root = _scanned_root(tmp_path, snapshots=3)
+    lock = tmp_path / "outside.lock"
+    status = retention.main([str(root), "--lock", _extended(lock)
+                             if os.name == "nt" else str(lock)])
+    printed = capsys.readouterr()
+    assert status == 0
+    assert "refused=none" in printed.out
+    assert lock.exists()
+
+
+def test_the_extended_correction_adds_no_public_surface():
+    """The repair stays private: no export, no reason, no signature change."""
+    assert len(retention.__all__) == 34
+    assert len(list(retention.RetentionFailureReason)) == 20
+    assert "_lock_path_is_outside" not in retention.__all__
+    code = retention.single_instance_lock.__init__.__code__
+    assert code.co_varnames[:2] == ("self", "path")
