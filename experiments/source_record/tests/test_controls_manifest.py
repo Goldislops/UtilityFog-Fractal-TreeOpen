@@ -60,7 +60,8 @@ AUTHORED_CONTROLS = {
         "SR-C-016", "SR-C-017", "SR-C-018", "SR-C-019", "SR-C-020",
         "SR-C-021", "SR-C-022", "SR-C-023", "SR-C-024", "SR-C-025",
         "SR-C-026", "SR-C-027", "SR-C-028", "SR-C-029", "SR-C-030",
-        "SR-C-031", "SR-C-032", "SR-C-033", "SR-C-034",
+        "SR-C-031", "SR-C-032", "SR-C-033", "SR-C-034", "SR-C-035",
+        "SR-C-036", "SR-C-037", "SR-C-038", "SR-C-039",
     ),
     "test_import_quarantine.py": (
         "SR-Q-001", "SR-Q-002", "SR-Q-003", "SR-Q-004", "SR-Q-005",
@@ -83,7 +84,9 @@ TOKEN_CONTROLS = {
     "path-missing": ("SR-C-004",),
     "path-not-directory": ("SR-C-004",),
     "path-symlink-refused": ("SR-C-030", "SR-C-031"),
-    "path-binding-failed": ("SR-C-032",),
+    "path-binding-failed": (
+        "SR-C-032", "SR-C-036", "SR-C-037", "SR-C-038", "SR-C-039",
+    ),
     "records-root-missing-directory": ("SR-R-007",),
     "records-root-unexpected-entry": ("SR-R-006",),
     "record-directory-unexpected-entry": ("SR-R-008", "SR-C-026"),
@@ -92,7 +95,7 @@ TOKEN_CONTROLS = {
     "record-bytes-ceiling": ("SR-C-023",),
     "total-bytes-ceiling": ("SR-C-024",),
     # parse, schema and record, exit 2
-    "json-malformed": ("SR-C-006",),
+    "json-malformed": ("SR-C-006", "SR-C-035"),
     "json-duplicate-key": ("SR-C-006",),
     "root-not-object": ("SR-S-011",),
     "key-not-exact-str": ("SR-S-008",),

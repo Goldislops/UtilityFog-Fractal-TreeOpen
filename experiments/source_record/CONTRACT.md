@@ -215,6 +215,48 @@ The protocol is private in the same sense as the seam: no environment switch,
 no verbose mode, no public configuration, and no escape hatch that would let an
 implementation opt out of it.
 
+### 4d. Fail-closed mapping for hostile parses and binding faults
+
+Every rule below is a **refusal mapping**, not an optional hardening. A raw
+`ValueError`, `OSError` or `AttributeError` reaching a caller is a defect: it
+discloses a diagnostic, carries a chained cause, and escapes the exit-class map.
+
+**Parser-originated `ValueError` maps to `json-malformed`.** `json.JSONDecodeError`
+is not the only `ValueError` the parser raises. An integer literal whose decimal
+representation exceeds the interpreter's configured integer-conversion digit
+limit raises a plain `ValueError` that is **not** a `JSONDecodeError`. Every
+`ValueError` originating in the parse step is refused as `json-malformed` with
+the static empty path, `from None`, and no digit count, literal, or parser
+diagnostic in any output.
+
+**Enumeration and cleanup faults map to `path-binding-failed`.**
+
+- An `OSError` from **records-root enumeration** refuses as
+  `path-binding-failed` with the static empty path.
+- An `OSError` from a **held binding's `entries()`** refuses as
+  `path-binding-failed` with the path carrying only the declared register name.
+- An `OSError` from a **held binding's `close()`** refuses the same way.
+
+**Cleanup failure takes precedence.** If `close()` fails, the secure binding
+lifecycle did not complete, so the run cannot be trusted whatever else
+happened. A close failure **supersedes** an otherwise successful capture *and*
+any in-flight input or ceiling refusal raised inside the bound region. `close()`
+is attempted exactly once.
+
+**An unavailable or incomplete platform primitive fails closed.** If the POSIX
+directory-binding flag set is incomplete and no Windows fallback is available,
+the primitive is unavailable. The implementation refuses with
+`path-binding-failed` and the declared-register path. It must never leak
+`AttributeError`, and must never silently substitute an identity re-check or an
+unbound path traversal for a real binding.
+
+**Scope of these controls.** They are **synthetic regression controls**: they
+inject faults through the frozen private seam and through monkeypatched
+platform attributes. They exercise the refusal mapping and nothing else. They
+are **not operational filesystem proof** — they do not demonstrate how a real
+filesystem, kernel, or platform behaves under fault, and no reading of them
+should claim otherwise.
+
 ## 5. Field inventory
 
 ### 5a. Common root keys, present on all six record types, in declared order
@@ -664,6 +706,31 @@ without renumbering noise.
   read, and content reachable only through the original path cannot replace or
   augment the bound view. Controls substitute a recording binding whose view
   differs from the on-disk content and assert the outcome follows the binding.
+
+**Amendments added after the implementation source audit.** Section 4d states
+the mapping; these five freeze it as invariants.
+
+- **I94** Every `ValueError` originating in the parse step — including the
+  integer-conversion digit-limit case, which is not a `JSONDecodeError` — is
+  refused as `json-malformed`, static empty path, `from None`, exit class 2,
+  exactly one sanitized stderr line, and no digit count, literal, or parser
+  diagnostic disclosed.
+- **I95** An `OSError` from records-root enumeration is refused as
+  `path-binding-failed`, static empty path, exit class 4, chain suppressed, and
+  neither the input path nor the exception text disclosed.
+- **I96** An `OSError` from a held binding's `entries()` is refused as
+  `path-binding-failed` with the declared-register path; `close()` is still
+  attempted exactly once; no raw `OSError`, input path, or exception text
+  escapes.
+- **I97** An `OSError` from a held binding's `close()` is refused as
+  `path-binding-failed` with the declared-register path, and **supersedes** an
+  otherwise successful capture and any in-flight input or ceiling refusal
+  raised inside the bound region, because the secure lifecycle did not
+  complete. `close()` is attempted exactly once.
+- **I98** An unavailable or incomplete platform binding primitive fails closed
+  as `path-binding-failed` with the declared-register path. `AttributeError`
+  never escapes, and no identity re-check or unbound path traversal is
+  substituted for a binding.
 - **I91** The Phase 2 ordering of section 9 is observable: supersession
   acyclicity is decided before digest matching, so `supersedes-cycle` is
   reachable. A control asserts each of the two tokens exactly, on fixtures that
@@ -848,7 +915,7 @@ All three error classes carry `token` and `path`, as `SourceRecordError` does.
 ## 12. Acceptance criteria for the future implementation
 
 A conforming implementation satisfies **every retained invariant, I01 through
-I93** — the original set together with the amendments I83 through I93 — with a
+I98** — the original set together with the amendments I83 through I98 — with a
 failing-input control for each and every positive control passing — a validator that refuses
 everything is broken, not correct. It is standard-library only; contains no bare
 `assert`; contains **no bare `except:`, no `except Exception` and no

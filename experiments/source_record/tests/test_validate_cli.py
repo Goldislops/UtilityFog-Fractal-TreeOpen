@@ -500,6 +500,240 @@ def test_sr_c_034_the_binding_stays_live_across_capture_and_closes_exactly_once(
     check(bindings)
 
 
+# --------------------------------------------------------------------------
+# Hostile parse and binding faults. CONTRACT.md section 4d, I94 through I98.
+#
+# These are SYNTHETIC regression controls. They inject faults through the
+# frozen private seam and through monkeypatched platform attributes, and they
+# exercise the refusal mapping and nothing else. They are not operational
+# filesystem proof: they say nothing about how a real filesystem, kernel, or
+# platform behaves under fault.
+# --------------------------------------------------------------------------
+
+
+def assert_no_disclosure(error, extra=()):
+    """A refusal discloses no marker, no synthetic text, and carries no chain."""
+    rendered = str(error)
+    for marker in sup.MARKERS:
+        assert marker not in rendered
+    for fragment in extra:
+        assert fragment not in rendered
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+
+
+class FailingEntriesBinding(RecordingBinding):
+    """A held binding whose enumeration fails with a synthetic OSError."""
+
+    def entries(self):
+        self.calls.append(("entries",))
+        raise OSError(sup.MARKER_SECRET_SHAPED)
+
+
+class FailingCloseBinding(RecordingBinding):
+    """A held binding that enumerates and reads, then fails to close."""
+
+    def close(self):
+        self.calls.append(("close",))
+        self.closed = True
+        raise OSError(sup.MARKER_SECRET_SHAPED)
+
+
+def test_sr_c_035_an_oversized_json_integer_is_refused_as_malformed(
+    tmp_path, capsys
+):
+    """The digit-limit ValueError is not a JSONDecodeError, and must not escape.
+
+    An integer literal longer than the interpreter's integer-conversion digit
+    limit raises a plain ``ValueError`` from the parser. Catching only
+    ``json.JSONDecodeError`` lets it through, so a raw parser diagnostic —
+    including the digit count — reaches the caller and the exit-class map is
+    bypassed. CONTRACT.md I94 maps every parse-step ``ValueError`` to
+    ``json-malformed``.
+    """
+    validate = sup.require_validate()
+
+    original_limit = sys.get_int_max_str_digits()
+    try:
+        if original_limit == 0:
+            sys.set_int_max_str_digits(4300)
+        limit = sys.get_int_max_str_digits()
+        digits = limit + 64
+        literal = "1" + "0" * (digits - 1)
+        payload = '{"schema":"source-record-v1","n":' + literal + "}"
+        assert len(payload) < validate.MAX_RECORD_BYTES
+
+        root = build_root(tmp_path, minimal_valid_set())
+        (root / "register-a" / "SR-A-SRC-0009.json").write_text(
+            payload, encoding="utf-8"
+        )
+
+        with pytest.raises(validate.RecordsInputError) as excinfo:
+            validate.validate_records_root(root)
+        error = excinfo.value
+        assert error.token == "json-malformed"
+        assert tuple(error.path) == ()
+        assert_no_disclosure(
+            error, extra=("Exceeds the limit", str(digits), literal[:40])
+        )
+
+        assert validate.main([str(root)]) == 2
+        captured = capsys.readouterr()
+        assert len(captured.err.splitlines()) == 1
+        assert "Exceeds the limit" not in captured.err
+        assert str(digits) not in captured.err
+        assert literal[:40] not in captured.err
+    finally:
+        sys.set_int_max_str_digits(original_limit)
+
+
+def test_sr_c_036_a_records_root_enumeration_failure_is_refused_as_binding_failed(
+    tmp_path, capsys, monkeypatch
+):
+    """CONTRACT.md I95. Only the root enumeration is made to fail."""
+    validate = sup.require_validate()
+    root = build_root(tmp_path, minimal_valid_set())
+    real_listdir = os.listdir
+    target = os.fspath(root)
+
+    def listdir(path, *args, **kwargs):
+        if os.fspath(path) == target:
+            raise OSError(sup.MARKER_SECRET_SHAPED)
+        return real_listdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(root)
+    error = excinfo.value
+    assert error.token == "path-binding-failed"
+    assert tuple(error.path) == ()
+    assert_no_disclosure(error, extra=(target,))
+
+    assert validate.main([str(root)]) == 4
+    captured = capsys.readouterr()
+    assert len(captured.err.splitlines()) == 1
+    assert target not in captured.err
+    assert sup.MARKER_SECRET_SHAPED not in captured.err
+
+
+def test_sr_c_037_a_bound_enumeration_failure_is_refused_as_binding_failed(
+    tmp_path, monkeypatch
+):
+    """CONTRACT.md I96. close() is still attempted exactly once."""
+    validate = sup.require_validate()
+    records = minimal_valid_set()
+    root = build_root(tmp_path, records)
+    views = bound_views(records)
+    created = {}
+
+    def acquire(path):
+        name = pathlib.Path(path).name
+        binding = FailingEntriesBinding(name, views[name])
+        created[name] = binding
+        return binding
+
+    monkeypatch.setattr(validate, "_acquire_directory_binding", acquire)
+
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(root)
+    error = excinfo.value
+    assert error.token == "path-binding-failed"
+    assert tuple(error.path) == ("register-a",)
+    assert_no_disclosure(error, extra=(os.fspath(root),))
+    assert not isinstance(error, OSError)
+
+    binding = created["register-a"]
+    assert [call[0] for call in binding.calls].count("close") == 1
+    assert binding.closed is True
+
+
+def test_sr_c_038_a_binding_cleanup_failure_supersedes_and_is_refused(
+    tmp_path, monkeypatch
+):
+    """CONTRACT.md I97. A failed close means the secure lifecycle did not end.
+
+    Asserted twice: over an otherwise clean capture, and over a capture with a
+    ceiling refusal already in flight inside the bound region. The cleanup
+    failure must win in both, because the binding was never released safely.
+    """
+    validate = sup.require_validate()
+    records = minimal_valid_set()
+
+    def install(views):
+        created = {}
+
+        def acquire(path):
+            name = pathlib.Path(path).name
+            binding = FailingCloseBinding(name, views[name])
+            created[name] = binding
+            return binding
+
+        monkeypatch.setattr(validate, "_acquire_directory_binding", acquire)
+        return created
+
+    # (a) capture would otherwise succeed.
+    clean_root = build_root(tmp_path / "clean", records)
+    created = install(bound_views(records))
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(clean_root)
+    error = excinfo.value
+    assert error.token == "path-binding-failed"
+    assert tuple(error.path) == ("register-a",)
+    assert_no_disclosure(error, extra=(os.fspath(clean_root),))
+    assert [call[0] for call in created["register-a"].calls].count("close") == 1
+
+    # (b) a ceiling refusal is already in flight inside the bound region.
+    ceiling_root = build_root(tmp_path / "ceiling", records)
+    views = bound_views(records)
+    views["register-a"]["SR-A-SRC-0009.json"] = b"x" * (
+        validate.MAX_RECORD_BYTES + 1
+    )
+    created = install(views)
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(ceiling_root)
+    error = excinfo.value
+    assert error.token == "path-binding-failed"
+    assert tuple(error.path) == ("register-a",)
+    assert not isinstance(error, validate.RecordsCeilingError)
+    assert_no_disclosure(error)
+    assert [call[0] for call in created["register-a"].calls].count("close") == 1
+
+
+def test_sr_c_039_an_incomplete_platform_binding_primitive_fails_closed(
+    tmp_path, monkeypatch
+):
+    """CONTRACT.md I98. An incomplete flag set must not leak AttributeError.
+
+    ``O_DIRECTORY`` is made to exist so the descriptor path is selected, while
+    the flags it composes with are removed and the Windows fallback is taken
+    away. The primitive is then unavailable, and the only admissible outcome is
+    a fail-closed refusal — never an ``AttributeError``, never a silent
+    substitution of an identity re-check or an unbound traversal.
+
+    Every platform attribute is restored deterministically by monkeypatch.
+    """
+    validate = sup.require_validate()
+    root = build_root(tmp_path, minimal_valid_set())
+
+    monkeypatch.setattr(os, "O_DIRECTORY", 0x10000, raising=False)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(os, "O_CLOEXEC", raising=False)
+    monkeypatch.setattr(validate, "_winapi", None, raising=False)
+
+    assert hasattr(os, "O_DIRECTORY")
+    assert not hasattr(os, "O_NOFOLLOW")
+    assert not hasattr(os, "O_CLOEXEC")
+
+    with pytest.raises(validate.RecordsPathError) as excinfo:
+        validate.validate_records_root(root)
+    error = excinfo.value
+    assert error.token == "path-binding-failed"
+    assert tuple(error.path) == ("register-a",)
+    assert not isinstance(error, AttributeError)
+    assert_no_disclosure(error, extra=("O_NOFOLLOW", "O_CLOEXEC", "O_DIRECTORY"))
+
+
 def test_sr_c_008_an_argparse_usage_error_keeps_its_own_systemexit_two(capsys):
     validate = sup.require_validate()
     with pytest.raises(SystemExit) as excinfo:
