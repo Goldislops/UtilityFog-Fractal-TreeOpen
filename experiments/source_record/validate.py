@@ -91,6 +91,33 @@ def _is_reparse(details):
     return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
+def _descriptor_binding_available():
+    """True only when the POSIX descriptor lane is COMPLETE (I98).
+
+    Every constant the lane actually composes must exist, and both
+    descriptor-relative operations it depends on must be supported. A partial
+    flag set must never select the lane: accessing the missing attribute later
+    would leak ``AttributeError`` instead of failing closed.
+    """
+    for flag_name in ("O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"):
+        if not hasattr(os, flag_name):
+            return False
+    return os.open in os.supports_dir_fd and os.listdir in os.supports_fd
+
+
+def _hold_binding_available():
+    """True only when the Windows directory-hold lane is COMPLETE (I98)."""
+    if _winapi is None:
+        return False
+    for function_name in ("CreateFile", "CloseHandle"):
+        if not hasattr(_winapi, function_name):
+            return False
+    for flag_name in ("O_RDONLY", "O_BINARY", "O_NOINHERIT"):
+        if not hasattr(os, flag_name):
+            return False
+    return True
+
+
 class _DirectoryBinding:
     """A read-only directory binding held across enumeration and capture.
 
@@ -98,21 +125,23 @@ class _DirectoryBinding:
     go through it (``dir_fd``), so the bound directory cannot be swapped
     between enumeration and capture. Windows: a directory handle opened with a
     share mode that denies delete and rename, held for the binding's whole
-    lifetime. Where neither primitive exists, construction raises ``OSError``
-    and the validator fails closed; an identity re-check is never presented as
-    a binding.
+    lifetime. A lane is selected only when its primitive is COMPLETE — every
+    constant and function it needs present and supported. Where no complete
+    primitive exists, construction raises ``OSError`` and the validator fails
+    closed; an identity re-check or unbound path traversal is never presented
+    as a binding.
     """
 
     def __init__(self, path):
         self._path = os.fspath(path)
         self.closed = False
-        if hasattr(os, "O_DIRECTORY"):
+        if _descriptor_binding_available():
             self._mode = "descriptor"
             self._fd = os.open(
                 self._path,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
             )
-        elif _winapi is not None:
+        elif _hold_binding_available():
             self._mode = "hold"
             self._handle = _winapi.CreateFile(
                 self._path,
@@ -124,7 +153,9 @@ class _DirectoryBinding:
                 0,
             )
         else:
-            raise OSError("no directory binding primitive is available")
+            raise OSError(
+                "no complete directory binding primitive is available"
+            )
 
     def entries(self):
         if self._mode == "descriptor":
@@ -196,6 +227,11 @@ def _parse_record(data):
         raise RecordsInputError("json-duplicate-key", ()) from None
     except (json.JSONDecodeError, RecursionError):
         raise RecordsInputError("json-malformed", ()) from None
+    except ValueError:
+        # I94: every other parse-step ValueError — the integer digit-limit
+        # failure included — is a hostile parse, not a programming error. The
+        # parser diagnostic (which embeds a digit count) is never exposed.
+        raise RecordsInputError("json-malformed", ()) from None
 
 
 def _capture(root_path):
@@ -209,7 +245,11 @@ def _capture(root_path):
         raise RecordsPathError("path-symlink-refused", ()) from None
     if not stat.S_ISDIR(details.st_mode):
         raise RecordsPathError("path-not-directory", ()) from None
-    children = os.listdir(root_path)
+    try:
+        children = os.listdir(root_path)
+    except OSError:
+        # I95: a failed records-root enumeration is a binding-layer fault.
+        raise RecordsPathError("path-binding-failed", ()) from None
     for name in sorted(children):
         if name not in _EXPECTED_DIR_SET:
             raise RecordsPathError("records-root-unexpected-entry", ()) from None
@@ -245,7 +285,14 @@ def _capture(root_path):
             ) from None
         files = []
         try:
-            names = tuple(binding.entries())
+            try:
+                names = tuple(binding.entries())
+            except OSError:
+                # I96: a failed bound enumeration is a binding fault; the
+                # finally clause below still closes the binding exactly once.
+                raise RecordsPathError(
+                    "path-binding-failed", (dir_name,)
+                ) from None
             for name in names:
                 if not name.endswith(".json"):
                     raise RecordsPathError(
@@ -273,7 +320,15 @@ def _capture(root_path):
                     ) from None
                 files.append((name, data))
         finally:
-            binding.close()
+            # I97: a failed close means the secure lifecycle never ended, so
+            # it supersedes an otherwise successful capture and any refusal
+            # already in flight. close() is called exactly once.
+            try:
+                binding.close()
+            except OSError:
+                raise RecordsPathError(
+                    "path-binding-failed", (dir_name,)
+                ) from None
         captured.append((dir_name, files))
     return captured
 
