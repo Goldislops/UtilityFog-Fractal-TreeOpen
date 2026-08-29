@@ -486,9 +486,77 @@ def test_gv7_i_025_shared_and_prefix_nested_locators_are_never_conflated():
 
 
 def test_gv7_i_024_the_committed_bibliography_has_no_violation_at_all():
+    """And every shipped document carries its own acceptance boundary.
+
+    Each of ``BIBLIOGRAPHY.md``, ``INTAKE_REPORT.md`` and ``README.md`` is
+    separately liftable -- pasted into a ticket, an appendix, a slide -- and a
+    reader who receives one does not receive the other two. So each must state
+    for itself, before its substantive content, that it is synthetic
+    calibration material and that it is not merge-authorized. A bibliography of
+    sixty-one entries with live-looking ``https://`` URLs is the most liftable
+    artifact of all, and the least self-describing unless it says so.
+    """
     ledger = sup.require_ledger()
     violations = bibliography_violations(bibliography_text(), ledger)
     assert not violations, violations
+
+    boundary = []
+    for name in sup.ACCEPTANCE_BOUNDARY_DOCUMENTS:
+        text = sup.require_file(sup.LAB_DIR / name, name)
+        boundary.extend(sup.acceptance_boundary_violations(name, text))
+    assert not boundary, boundary
+
+    # The predicate discriminates, proved on self-contained fixtures rather
+    # than assumed: a document that says neither, or only one, is refused, and
+    # a statement placed after the first record does not count as a boundary.
+    compliant = (
+        "# Doc\n\nThis is synthetic calibration material and is "
+        "not merge-authorized.\n\n## Body\n\ncontent\n"
+    )
+    assert not sup.acceptance_boundary_violations("probe", compliant)
+    for label, fixture in (
+        ("neither statement", "# Doc\n\n## Body\n\ncontent\n"),
+        (
+            "synthetic only",
+            "# Doc\n\nWholly synthetic.\n\n## Body\n\ncontent\n",
+        ),
+        (
+            "boundary only",
+            "# Doc\n\nThis is not merge-authorized.\n\n## Body\n\ncontent\n",
+        ),
+        (
+            "both, but after the first record",
+            "# Doc\n\n## Body\n\nsynthetic calibration material, "
+            "not merge-authorized\n",
+        ),
+        # SHAPE faults, not content faults. Both were reachable before.
+        (
+            "a record heading on the very first line",
+            "### GV7-SRC-0001\n- supplied_locator: "
+            '"https://example.invalid/synthetic/item-0001"\n'
+            "- note: not merge-authorized\n",
+        ),
+        (
+            "no substantive line at all",
+            "# Doc\n\nordinary prose\n\nsynthetic calibration material, "
+            "not merge-authorized\n",
+        ),
+        (
+            "the phrase satisfied only by a locator",
+            "# Doc\n\nSee https://example.invalid/synthetic/item-0001 "
+            "-- not merge-authorized.\n\n## Body\n\ncontent\n",
+        ),
+        (
+            "a negated declaration",
+            "# Doc\n\nThis is non-synthetic calibration material and is "
+            "not merge-authorized.\n\n## Body\n\ncontent\n",
+        ),
+    ):
+        assert sup.acceptance_boundary_violations("probe", fixture), label
+    # British orthography, which this repository also uses, must be accepted.
+    assert not sup.acceptance_boundary_violations(
+        "probe", compliant.replace("merge-authorized", "merge-authorised")
+    )
 
 
 # --------------------------------------------------------------------------

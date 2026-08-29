@@ -689,6 +689,138 @@ subclass and is refused `type-not-exact`; every other root is refused
 `root-not-object`. **No hook supplied on the object, on its class, or on its
 metaclass runs at any point in that decision.**
 
+**The mechanism is pinned by the executable decision BLOCK, not by hostile
+fixtures and not by its expressions alone.** A fixture set is a **deny-list over
+the routes somebody thought of**, and a deny-list is not a detector:
+`type.__getattribute__(type(payload), "__bases__")`, an identity scan over
+`type(payload).mro()`, `type(payload) in dict.__subclasses__()` and duck-typing
+on `keys` each evade any fixture set that does not happen to name them.
+
+**Matching only the two decision expressions was also insufficient, and that
+claim is withdrawn.** It accepted a source whose nested `if` was compliant but
+**dead** — its body a bare `pass` — with the real classification performed by an
+identity scan over `type.mro(...)` immediately afterwards. Two correct
+expressions in a block that decides nothing are not the mechanism.
+
+The acceptance surface therefore requires that the **sole** production
+`validate_ledger` definition carries, as the **first executable statement after
+an optional docstring**, a block structurally identical to:
+
+    if type(<parameter>) is not dict:
+        if issubclass(type(<parameter>), dict):
+            _refuse("type-not-exact")
+        _refuse("root-not-object")
+
+exactly — the outer test, an **empty** outer `else`, an outer body of **exactly
+those two statements**, the nested test, a nested body of **exactly**
+`_refuse("type-not-exact")`, an **empty** nested `else`, and the second call.
+No `pass`, no decoy condition, no conditional expression, no additional decision
+statement and no alternate classifier may appear inside it, and no classifier
+may run before it. The definition itself carries **no decorator** — a decorator
+can wrap the function or replace it outright, leaving the block below it dead in
+the same way a dead nested `if` does — is a plain `def` rather than `async`, and
+takes **exactly one plain positional parameter**.
+
+**What is pinned is the exported binding, not merely a `def` statement.** A
+conforming block is worth nothing if the module does not run it, so the
+definition must be a **single module-scope** one — not nested in a factory, not
+a class method, not behind a module-scope condition — and the name must **not
+be bound anywhere else in the package**. The census is **order-insensitive**: a
+binding that precedes the definition is refused exactly as firmly as one that
+follows it, and the forms are enumerated in full below rather than sampled here.
+**One shape is permitted, and only in a module that does not define it**:
+`validate_ledger = _core.validate_ledger`, by which a surface re-exports the
+core's own attribute. It can substitute nothing, because it names the attribute
+of the very module the frozen block lives in — **and that is now verified rather
+than assumed**: the re-exporting module's `_core` must itself be bound exactly
+once, by the frozen `_core = sys.modules[...]` self-binding. Pinning the
+spelling `_core` while never asking what it named was the very defect
+Correction 5 closed for `sys`, re-committed one control over. As before,
+the defining module may not carry it, and the package now carries **at most one**
+of it: permitting one per module made the count below false the moment a second
+surface existed. A conforming block followed by
+`validate_ledger = _real` is the Correction 4 defeat pattern moved one scope
+outward, and is refused. **`_refuse` must itself raise**: a `_refuse` that
+returns leaves both calls falling through and hands the decision to whatever
+follows the block, which is again a conforming block that decides nothing. The hostile fixtures remain as defence in depth and as
+evidence that the shape behaves as claimed.
+
+**`_refuse` is pinned as an executable helper, not as a name with a `raise`
+somewhere inside it.** Requiring only that a `raise` appear *somewhere* accepted
+a helper whose `raise` sat under `if False:` and which then returned `token`:
+both calls in the frozen block fell through, and the statement after the block
+did the deciding. So exactly **one** production `_refuse` may be defined, at
+module scope, **in the same module as the sole `validate_ledger` definition** —
+a helper that module does not itself define is not demonstrably the helper its
+block calls. Its signature is exactly `_refuse(token, path=())` and its body is
+**exactly one executable statement**, `raise LedgerError(token, path) from
+None`, both compared structurally. A dead or conditional `raise`, a `return`
+before or instead of raising, an extra executable statement, and a nested,
+conditional, `async`, decorated, duplicated, imported, assigned or class-based
+`_refuse` are each refused, as is any later rebinding of the name.
+
+**The exported binding is decided by a census, not by a top-level scan.** A scan
+reading only the module's top level accepts an assignment one indent inside
+`if True:`; a scan looking only for assignments accepts a class definition of
+the same name. Both were reproduced against the previous matcher, and neither is
+exotic — they are the two most ordinary ways to rebind a name that a narrow scan
+does not happen to look at. Every enumerated binding of the name is therefore
+collected wherever it occurs, and **exactly two nodes are permitted across the
+whole package**: the sole module-scope definition carrying the frozen block, and
+the exact public re-export `validate_ledger = _core.validate_ledger`, once in
+the package, in a production module that does not define the function and whose
+`_core` is demonstrably this package's own module. Every other enumerated binding is
+refused — an assignment nested beneath a module-level `if`, loop, `try`, `with`
+or `match`; a class definition; a PEP 695 `type` alias, which binds the module
+attribute as surely as a class statement does; a nested function definition; a
+deletion,
+annotated or augmented assignment; a loop, comprehension, context-manager,
+`except`, `match` or named-expression target; an import or alias; a parameter; a
+`global` or `nonlocal` declaration; a write through a literal `globals()`,
+`vars()` or `locals()` key; a second definition or re-export; a re-export inside
+the defining module; and a re-export of anything but `_core.validate_ledger`.
+
+**Three independent reviews defeated the first version of this census, and what
+they found is refused rather than described.** `_refuse.__code__ =
+_tame.__code__` replaces the helper's executable code while leaving its name,
+its signature and its source body untouched — an object mutation rather than a
+name binding, and invisible to any scan looking for a name in store position; so
+**no attribute of either pinned name may be read or written at all**.
+`from _hostile import *` keys as the literal `*`, which can never equal a name,
+so a **wildcard import is refused as itself**. And a namespace write spelled one
+token differently — `_g = globals()` first, a computed key,
+`globals().update(...)`, `globals().__setitem__(...)` — walked straight through
+a check aimed at a single literal subscript. That check was aimed at a spelling
+and not at the capability, so **the capability is refused instead: a production
+module may not call `globals`, `vars`, `locals`, `setattr`, `delattr`, `exec` or
+`eval`, and may not touch a `__dict__`.**
+
+**The residual is a builtin rebound before use.** `_g = globals` and then `_g()`
+defeats any check that works by name, exactly as it does for `getattr` in the
+`sys.modules` control. What is refused here is the **named vocabulary**, which is
+narrower than the capability itself, and the difference is stated rather than
+smoothed over.
+
+**This pins the enumerated direct static binding shapes and nothing further.**
+It is not a claim of exhaustiveness, and it has already been wrong more than
+once. The PEP 695 `type` alias above was missing from the first version of the
+list and was accepted, exactly as `class validate_ledger: pass` had been; the
+`__code__` swap, the wildcard import and four spellings of the namespace write
+were each accepted until a review reproduced them. Every one of those is
+recorded here rather than quietly repaired, because together they are the reason
+this section says *enumerated* wherever it could have said *every*.
+
+An earlier version of this paragraph claimed the disclosed routes "bind a module
+attribute without producing any node the census can see". **That was false and is
+withdrawn.** `sys.modules[__name__].__dict__["validate_ledger"] = …` and
+`_core.validate_ledger = _hostile` both produce nodes the walk visits: the census
+saw them and simply did not classify them as bindings, which is a different and
+less flattering fault than not seeing them. Both are now refused. What genuinely
+remains outside a static scan is a **builtin rebound before use**, and source
+constructed at runtime and executed by a call this vocabulary does not name.
+Those routes are disclosed rather than asserted away, and **the separate human
+audit remains required**.
+
 `bool` is refused wherever `int` is required, and `int` wherever `bool` is
 required. No float appears anywhere. Every integer carries an explicit bounded
 range.
@@ -774,18 +906,87 @@ separate processes, differing hash seeds, and **normal, `-O` and `-OO`**
 execution. No bare `assert` appears in any production module, so `-O` strips
 nothing load-bearing.
 
-**Imports.** Neither `schema` nor `validate` imports a network-capable module:
-no `socket`, `http`, `urllib`, `requests`, `ftplib`, `smtplib`, `asyncio`,
-`ssl`, `subprocess`, or dynamic-import mechanism. **No validator retrieves,
-opens, resolves, or contacts a locator**, and there is no code path that could.
+**Imports.** No production module imports a network-capable module: no
+`socket`, `http`, `urllib`, `requests`, `ftplib`, `smtplib`, `asyncio`, `ssl`,
+`subprocess`, or dynamic-import mechanism. **No validator retrieves, opens,
+resolves, or contacts a locator.** That is a **required behaviour of the
+implementation**, and it remains required in full. It is not the same thing as
+a property these static controls prove, and the two must not be conflated.
 
-**The import allowlist is the authoritative rule.** A scan for call *names* is
-at most a **heuristic tripwire** and establishes nothing: an alias, an attribute
-lookup, or one level of indirection defeats it. Generic names such as `get`,
-`run`, `post` and `request` also match `dict.get` and unrelated methods, and a
-screen that fires on `dict.get` teaches its readers to ignore it, so they are
-excluded. **No control claims that a call-name scan proves the absence of
-networking.**
+**The assurance is layered and static, and no layer of it is authoritative on
+its own.** Any statement that the import allowlist alone is "the authoritative
+rule", that it proves no code path could retrieve anything, or that there is no
+code path that could — is **withdrawn**. The allowlist walks `import` and
+`from … import` statements only, and both public surfaces obtain the shared
+core through a `sys.modules` subscript that no import walker sees; an allowlist
+over import statements therefore never covered the mechanism the implementation
+actually uses. The layers are:
+
+1. **Permitted direct imports** — every import root in every production module
+   lies inside a declared allowlist, and no relative import is permitted;
+2. **No dynamic-import mechanism** — `importlib` is outside the allowlist,
+   and `__import__`, `import_module`, `eval` and `exec` are named by the
+   tripwire. **`compile` is deliberately not named**: the tripwire matches an
+   attribute as well as a bare name, so listing it would fire on every
+   `re.compile(...)` in a schema built on frozen patterns — the exact
+   fires-on-`dict.get` failure this section warns against below;
+3. **Constrained direct `sys.modules` self-binding** — the one route by which a
+   surface may obtain a module object it did not import, narrowed to a single
+   exact form (below);
+4. **A deliberately limited call-name tripwire** — a heuristic that makes the
+   obvious form loud and establishes nothing by itself;
+5. **A separate human audit**, which remains required and is not optional.
+
+Together these constrain **what a production module can statically reach by a
+direct, named route**. They do not establish an absolute behavioural
+impossibility, and nothing in this contract should be read as claiming they do:
+an author with edit access to the production modules is constrained by review,
+not by a static scan.
+
+**A disclosed gap, recorded rather than quietly closed.** Indirect access to the
+module table is refused where it is named — `vars(sys)`, `sys.__dict__` and a
+literal `getattr(sys, "modules")` are all rejected — but a scan over names
+cannot close rebinding in general. A builtin bound to another name first, as in
+`_g = getattr` then `_g(sys, "modules")`, reaches the table without naming it,
+and no static layer here catches that. It is disclosed for the same reason the
+reserved-name and file-symlink gaps are: an undisclosed gap in an assurance is
+worse than a disclosed one, and the human audit is where it is caught.
+
+**The constrained `sys.modules` form pins the binding, not merely the
+spelling.** Checking that the receiver is spelled `sys` was **insufficient, and
+that claim is withdrawn**: a module could `import sys`, then rebind `sys` to a
+decoy object carrying its own `modules` mapping, and the subscript still read as
+conforming. The frozen shape is therefore:
+
+- the permitted `sys` name comes from **one module-scope `import sys` with no
+  alias**, and from nothing else;
+- **the enumerated binding forms may not shadow or replace it** — assignment,
+  deletion, parameter, loop or comprehension target, `with` target, `except`
+  target, `match` capture, star or mapping-rest pattern, named expression,
+  aliased import, shadowing definition, or a `globals()`/`vars()` subscript
+  store. **This is an enumeration, not an absolute**: `match` patterns were
+  missing from an earlier version of it and rebound `sys` undetected, which is
+  the reason it is stated as a list of named forms and the residual is
+  disclosed below;
+- in `schema.py` and `validate.py` the single permitted self-binding is **one
+  module-scope assignment** whose target is exactly `_core` and whose value is
+  exactly `sys.modules["experiments.general_v7_ledger"]`;
+- `__init__.py` carries **no** self-binding at all;
+- a conforming-looking subscript **nested in a function or sitting in dead
+  code** does not count toward that allowance;
+- a computed or non-constant key, any other literal key, a bare `sys.modules`
+  reference, and every other direct `sys.modules` form remain refused.
+
+**This pins the direct static production shape and nothing further.** It does
+not prove that no runtime mutation could occur, it establishes no absolute
+behavioural impossibility, and the separate human audit remains required.
+
+**The call-name tripwire is a heuristic and nothing more.** An alias, an
+attribute lookup, or one level of indirection defeats it. Generic names such as
+`get`, `run`, `post` and `request` also match `dict.get` and unrelated methods,
+and a screen that fires on `dict.get` teaches its readers to ignore it, so they
+are excluded. **No control claims that a call-name scan proves the absence of
+networking**, and none claims that any other single layer does either.
 
 **Emitted counts.** Every count in the output equals the actual validated
 collection length. No count is read from a constant, and the acceptance surface
@@ -877,6 +1078,39 @@ mapping, the bibliography renderings and the conflict coverage of section 10 are
 reciprocity, locator, date and path rules are **refused**. **An audit control is
 never described as a rejection control**, and no rule whose only control is an
 audit is claimed to be enforced by the validator.
+
+**Each shipped document carries its own acceptance boundary.**
+`BIBLIOGRAPHY.md`, `INTAKE_REPORT.md` and `README.md` must **each
+independently** state, **before any substantive record or report content**,
+that the material is **synthetic calibration material** and that it is **not
+merge-authorized**. Each of the three is separately liftable — pasted into a
+ticket, an appendix, a slide — and a reader who receives one of them does not
+receive the other two, so no document may rely on a sibling to disclaim on its
+behalf. A bibliography of sixty-one entries with live-looking `https://` URLs
+is the most liftable artifact of all, and the least self-describing unless it
+says so itself. A statement that appears only after the records is not a
+boundary: a reader who stops at the first entry never reaches it.
+
+**The rule is mechanical, so an implementer can satisfy it without guessing.**
+The declaration must appear **in prose**: URL-like spans are removed from the
+preamble before it is looked for, because a locator such as
+`https://example.invalid/synthetic/item-0001` would otherwise satisfy the rule
+with no prose anywhere, and **a check that a URL can satisfy is not a check**.
+The words that count are `synthetic` or `fabricated`, as whole words; a negated
+form — `non-` or `not ` immediately before the word — does not count. The
+boundary statement is
+**`not merge-authorized`**, in any ordinary spelling including the British
+`-ised`. Both must appear before the document's **first substantive line**: a
+`##`-or-deeper sub-heading, a `- label:` data line, or any URL-like line, **at
+any position including the very first**. A `# Title` line is not substantive
+and does not end the preamble, so a document whose first line is a record
+heading has an empty preamble and cannot satisfy the rule from inside its own
+records.
+
+**A disclosed limit.** A document containing no substantive line at all has
+nothing for the statements to precede. That case is **reported as a defect**
+rather than passed silently, because a silent pass would vacate the rule for
+exactly the shape it cannot police.
 
 **Line-ending provenance is read from Git, not from the checkout.** This
 repository is developed on a platform where `core.autocrlf` rewrites LF to CRLF
