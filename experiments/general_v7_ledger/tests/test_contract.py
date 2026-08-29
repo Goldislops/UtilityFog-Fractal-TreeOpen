@@ -573,9 +573,33 @@ def test_gv7_d_034_the_contract_freezes_refusal_order_classes_and_exit_codes():
         "hands control to attacker code",
         "a raw exception then escapes the closed refusal vocabulary",
         "return a forged answer",
-        "read through a primitive the metaclass cannot intercept",
+        # The three routes a bare `type.__getattribute__` does not close.
+        "Invoking `type.__getattribute__` directly does not make that read "
+        "safe, and any claim that it does is withdrawn",
+        "bypasses a metaclass's overridden `__getattribute__` and nothing else",
+        "does not bypass a `__mro__` **property** defined on the metaclass",
+        "plain `__mro__` attribute** shadowing the real one",
+        "needs no hook at all",
+        "compares class objects with `==` and therefore invokes the "
+        "metaclass's `__eq__`",
+        "on a genuine `dict` subclass alike",
+        # The frozen mechanism, and the three outcomes it must still produce.
+        "frozen as `issubclass(type(payload), dict)`, and this is the "
+        "required mechanism",
+        "reads **no** attribute of the candidate class",
+        "walks **no** method resolution order by hand",
+        "compares **no** candidate class object through Python equality",
+        "from the exact runtime type and builtin class information alone",
+        "`type(payload) is dict` accepts the exact builtin mapping",
+        "is a `dict` subclass and is refused `type-not-exact`",
+        "every other root is refused `root-not-object`",
+        "No hook supplied on the object, on its class, or on its metaclass "
+        "runs at any point in that decision",
     ):
         assert_phrase(text, statement)
+    # The withdrawn fallback must survive nowhere: it is what licensed the
+    # incomplete repair.
+    assert "primitive the metaclass cannot intercept" not in flat(text)
     # The withdrawn stage-6 placement must not survive anywhere in the text.
     assert "stage-6 rule" not in flat(text)
     assert "surrogate code point at stage 6" not in flat(text)
