@@ -324,6 +324,40 @@ def _build_backend_class():
     _RuntimeError = RuntimeError
     _ImportError = ImportError
     _RecursionError = RecursionError
+    _float = float
+    _INF = float("inf")
+
+    def _refuse_constant_token(_token: str) -> Any:
+        """``json.loads`` calls this for a ``NaN`` / ``Infinity`` /
+        ``-Infinity`` token inside a tool-call ``arguments`` string.
+
+        Raising ``_ValueError`` lands in the established except-branch of the
+        ``arguments`` decode, which folds the whole string into the
+        raw-fallback shape: the model's bytes stay available verbatim, and no
+        non-finite float enters a block. The hook receives a substring of a
+        proven exact ``str`` - no caller code runs.
+        """
+        raise _ValueError("non-finite")
+
+    def _finite_float_or_refuse(token: str) -> float:
+        """``json.loads`` calls this for every ``arguments`` number that is
+        not an integer.
+
+        The default decoder builds floats with ``float(token)``, which maps
+        an overflowing literal such as ``1e400`` to an infinity rather than
+        raising - the same gap OMI-V1 closed on its own inbound path. Here
+        the consequence is outbound: a non-finite float admitted into
+        ``ToolUseBlock.input`` re-serializes, on assistant replay, into the
+        ``arguments`` field the translation table promises is a JSON STRING -
+        as an ``Infinity`` / ``NaN`` token no strict parser accepts. Refusing
+        where the number is built folds the payload into the raw-fallback
+        shape instead. The guard is against non-finiteness itself, not a
+        spelling list.
+        """
+        value = _float(token)
+        if value != value or value == _INF or value == -_INF:
+            raise _ValueError("non-finite")
+        return value
 
 
     class OpenAICompatBackend(AgentBackend):
@@ -497,8 +531,13 @@ def _build_backend_class():
 
             Returns a :class:`StructuredCompletion` for every input reachable
             through the contract; it never raises to signal a refused request.
-            Transport-level errors from the SDK still propagate, matching
-            `complete()`.
+            Two exception families still propagate, both shared with
+            `complete()`: transport-level errors from the SDK, and - raised
+            before any transport - the fixed, non-disclosing error for a
+            message whose tool-call arguments cannot be encoded as strict
+            JSON (`_message_to_wire` serializes the history for both entry
+            points). Neither is a refusal; refusals are values, and the
+            refusal vocabulary is untouched by either.
 
             The refusal gate runs to completion BEFORE `self._client` is read at
             all. That ordering is the point of the method, not an implementation
@@ -578,12 +617,37 @@ def _build_backend_class():
                     if _isinstance(b, _TextBlock):
                         text_parts.append(b.text)
                     elif _isinstance(b, _ToolUseBlock):
+                        # The translation table promises `arguments` is a JSON
+                        # STRING; `allow_nan=False` is what makes that true.
+                        # The default encoder spells a non-finite float as the
+                        # Infinity / NaN token RFC 8259 forbids - and the
+                        # exact-dict `arguments` path above, or a caller-built
+                        # block, can put such a float in `input`.
+                        try:
+                            arguments = _json.dumps(
+                                b.input or {}, default=_str, allow_nan=False
+                            )
+                        except _ValueError:
+                            # Fixed, truthful, and cause-agnostic: the encoder
+                            # raises ValueError both for a non-finite float and
+                            # for a circular container, so the replacement
+                            # names the failure - not a presumed cause - and
+                            # discloses no value, name, or structure; `from
+                            # None` keeps the encoder's own text out. Loud
+                            # beats the ABC's stop_reason="error" translation
+                            # here: this is deterministic caller-side data the
+                            # wire cannot carry, not an API failure, and an
+                            # empty response would bury it.
+                            raise _ValueError(
+                                "tool-call arguments could not be encoded as "
+                                "strict JSON"
+                            ) from None
                         tool_calls.append({
                             "id": b.id,
                             "type": "function",
                             "function": {
                                 "name": b.name,
-                                "arguments": _json.dumps(b.input or {}, default=_str),
+                                "arguments": arguments,
                             },
                         })
                     # ToolResultBlock on assistant role doesn't make sense; skip.
@@ -701,19 +765,30 @@ def _build_backend_class():
                     # `arguments` is model/server-reachable and can be any value,
                     # so decoding is total and hook-free: the value's truthiness,
                     # iteration, mapping-conversion, and string-conversion hooks
-                    # are never invoked. Exact strings are parsed (JSON object →
-                    # kept; other valid JSON → {}; undecodable or parser
-                    # recursion → the established raw-fallback shape); exact
-                    # dicts continue into ToolUseBlock's hardened normalization;
-                    # every other value — absent included — becomes a fresh {}.
-                    # MemoryError is deliberately not caught.
+                    # are never invoked (the two decoder hooks bound above run
+                    # on substrings of a proven exact str - no caller code).
+                    # Exact strings are parsed (JSON object → kept; other valid
+                    # JSON → {}; undecodable, parser recursion, or any
+                    # non-finite number - a NaN/Infinity/-Infinity token or an
+                    # overflowing literal like 1e400 - → the established
+                    # raw-fallback shape, keeping the bytes available while no
+                    # non-finite float can reach a block and later re-serialize
+                    # into the `arguments` JSON STRING the translation table
+                    # promises); exact dicts continue into ToolUseBlock's
+                    # hardened normalization; every other value — absent
+                    # included — becomes a fresh {}. MemoryError is
+                    # deliberately not caught.
                     args_raw = _attr(fn, "arguments", None)
                     if _type(args_raw) is _str:
                         if args_raw == "":
                             args = {}
                         else:
                             try:
-                                parsed = _json.loads(args_raw)
+                                parsed = _json.loads(
+                                    args_raw,
+                                    parse_constant=_refuse_constant_token,
+                                    parse_float=_finite_float_or_refuse,
+                                )
                             except (_ValueError, _RecursionError):
                                 args = {"_raw_arguments": args_raw}
                             else:
