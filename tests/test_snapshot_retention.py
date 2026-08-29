@@ -2161,21 +2161,44 @@ def test_the_journal_write_loops_until_complete(tmp_path, monkeypatch):
 def test_a_manifest_validation_failure_closes_its_descriptor(tmp_path,
                                                              monkeypatch):
     _populate(tmp_path, snapshots=3)
+    real_open = os.open
     real_fstat = os.fstat
+    target = {"fd": None}
+
+    def _tracking_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        try:
+            is_manifest = (os.path.basename(os.fspath(path))
+                           == retention.MANIFEST_NAME)
+        except TypeError:
+            is_manifest = False
+        if is_manifest:
+            target["fd"] = fd
+        return fd
 
     def _not_regular(fd):
         info = real_fstat(fd)
+        if fd != target["fd"]:
+            return info
         return _Stat(mode=stat_module.S_IFIFO | 0o600, size=0, mtime_ns=0,
                      nlink=1, dev=info.st_dev, ino=info.st_ino)
 
+    monkeypatch.setattr(retention.os, "open", _tracking_open)
     monkeypatch.setattr(retention.os, "fstat", _not_regular)
     closed = []
     real_close = os.close
-    monkeypatch.setattr(retention.os, "close",
-                        lambda fd: (closed.append(fd), real_close(fd))[1])
+
+    def _tracking_close(fd):
+        if fd == target["fd"]:
+            closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(retention.os, "close", _tracking_close)
     report = _run(tmp_path)
     assert report.refused is retention.RetentionFailureReason.MANIFEST_CREATE_FAILED
-    assert closed, "the manifest descriptor was leaked on the failure path"
+    assert target["fd"] is not None, "the manifest descriptor was never opened"
+    assert closed == [target["fd"]], (
+        "the manifest descriptor was leaked or closed more than once")
 
 
 # -- 6. the destination must never be silently replaced ----------------------
@@ -4720,48 +4743,50 @@ def test_a_root_that_appears_after_an_empty_scan_is_not_accepted(
     assert list(live.iterdir()) == []
 
 
-def test_a_root_replaced_mid_batch_halts_before_the_next_move(tmp_path,
-                                                              monkeypatch):
-    """The per-move comparison is not dead code, and it halts rather than
-    skipping: a data root that is no longer the scanned one invalidates every
-    remaining action at once, not just this one.
+def test_a_root_replaced_mid_batch_stays_on_the_held_original(tmp_path):
+    """A pathname swap never redirects the remaining move lifecycle.
 
-    The replacement is driven through `directory_state` rather than by an
-    actual rename. On Windows an actual rename of the data root is REFUSED by
-    the operating system for the whole life of the move loop -- the pass holds
-    an open handle on the manifest inside it, and Windows will not rename a
-    directory with an open handle in its subtree -- so a real swap could not
-    reach this comparison on the operational platform at all. Driving the
-    comparison directly is what makes the control mean the same thing on both
-    platforms.
+    Windows may refuse the rename while the binding is live. Descriptor-based
+    POSIX hosts may allow it; there the pass continues on the held original and
+    must leave the unscanned replacement byte-for-byte untouched. Both outcomes
+    enforce the same boundary without requiring a halt merely because the
+    caller's pathname changed.
     """
     live = tmp_path / "live"
     live.mkdir()
     _populate(live, snapshots=6)
     moves = []
-    real_state = retention.directory_state
-
-    def _repointed_after_the_first_move(path):
-        result = real_state(path)
-        if (moves and result is not None
-                and os.fspath(path) == os.fspath(live)):
-            # The same NAME, a different object.
-            return (result[0], result[1] + 1)
-        return result
+    replacement = {"value": None, "blocked": None}
+    decoy_name = "unscanned-replacement.txt"
 
     def _recording_mover(source, destination):
         _injected_mover(source, destination)
         moves.append(os.path.basename(os.fspath(source)))
+        if len(moves) == 1:
+            try:
+                replacement["value"] = _replace_root_pathname(
+                    live, contents=(decoy_name,))
+            except OSError as error:
+                replacement["blocked"] = error
 
-    monkeypatch.setattr(retention, "directory_state",
-                        _repointed_after_the_first_move)
     report = _run(live, mover=_recording_mover)
-    assert report.moved == 1
-    assert report.halted is True
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert len(moves) == 1, "a move happened after the root was re-pointed"
-    assert len(list(live.glob("v070_gen*.npz"))) == 5
+    assert report.moved == report.planned_actions_count == len(moves) == 5
+    assert report.halted is False
+    assert report.refused is None
+    changed = replacement["value"]
+    if changed is None:
+        assert replacement["blocked"] is not None
+        assert _quarantine_root(live).is_dir()
+    else:
+        assert changed.before != changed.after
+        assert _listing(live) == [decoy_name]
+        assert not _quarantine_root(live).exists(), (
+            "the remaining lifecycle reached the unscanned replacement")
+        pass_directory = (_quarantine_root(changed.displaced)
+                          / "p20260101T000000")
+        assert pass_directory.is_dir()
+        assert len([path for path in pass_directory.iterdir()
+                    if path.name != retention.MANIFEST_NAME]) == report.moved
 
 
 def test_a_stable_root_is_completely_unaffected(tmp_path):
@@ -5881,7 +5906,11 @@ def _normalized_fs_path(value):
         except ValueError:  # pragma: no cover - decoding cannot fail this way
             return None
     try:
-        return os.path.normcase(os.path.abspath(text))
+        # Resolve the production descriptor route while its parent anchor is
+        # live. The original lexical pathname and `/proc/self/fd/<n>/name`
+        # identify one lock object, so an `abspath`-only oracle silently stops
+        # observing the descriptor that production actually opened on POSIX.
+        return os.path.normcase(os.path.realpath(text))
     except (OSError, ValueError):  # pragma: no cover - defensive
         return None
 
@@ -6226,6 +6255,19 @@ def test_the_lock_close_fault_never_targets_the_manifest_descriptor(
 
     monkeypatch.setattr(retention, "_open_manifest", _observed_open_manifest)
 
+    # Capture the completed journal while the manifest and its held-directory
+    # route are both still valid. Reading `seen["path"]` after `_run` returns
+    # dereferences a released `/proc/self/fd/<n>` route and tests descriptor
+    # recycling rather than manifest-close behavior.
+    delegated_close = retention.os.close
+
+    def _capture_manifest_before_close(fd):
+        if fd == seen.get("fd"):
+            seen["contents"] = seen["path"].read_text(encoding="utf-8")
+        return delegated_close(fd)
+
+    monkeypatch.setattr(retention.os, "close", _capture_manifest_before_close)
+
     with retention.single_instance_lock(lock_path) as acquired:
         assert acquired is True
         report = _run(data)
@@ -6239,7 +6281,7 @@ def test_the_lock_close_fault_never_targets_the_manifest_descriptor(
     assert fault.close_attempts == [lock_fd]
     assert _normalized_fs_path(seen["path"]) != fault.lock_path
     lines = [line for line
-             in seen["path"].read_text(encoding="utf-8").splitlines() if line]
+             in seen["contents"].splitlines() if line]
     assert len(lines) == report.moved, "the manifest close did not succeed"
 
 
@@ -9013,3 +9055,108 @@ def test_a_component_disjoint_distinct_directory_remains_outside(
     lock = outside / "retention.lock"
     _object_alias_identity_seam(monkeypatch, root, outside, same_object=False)
     assert retention._lock_path_is_outside(lock, root) is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-route contract")
+def test_trusted_held_routes_do_not_reenter_the_untrusted_path_proof(
+        tmp_path, monkeypatch, capsys):
+    """The user spellings are proved once; private descriptor routes are not.
+
+    `_lock_object_ancestry_is_outside` deliberately treats a non-followed
+    symlink as unprovable. That is correct for arbitrary input and wrong for a
+    route the process itself derived from a live held descriptor.
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    lock = tmp_path / "outside.lock"
+    genuine = retention._lock_object_ancestry_is_outside
+    calls = []
+
+    def _untrusted_path_proof(lock_path, directory):
+        spellings = (os.fspath(lock_path), os.fspath(directory))
+        calls.append(spellings)
+        assert not any("/proc/self/fd/" in value
+                       or "/dev/fd/" in value for value in spellings), (
+            "a trusted held route re-entered the arbitrary-path proof")
+        return genuine(lock_path, directory)
+
+    monkeypatch.setattr(retention, "_lock_object_ancestry_is_outside",
+                        _untrusted_path_proof)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+
+    assert calls == [(str(lock), str(root))]
+    assert status == 0
+    assert "refused=none" in printed.out
+    assert lock.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor ancestry")
+def test_held_posix_ancestry_rejects_a_contained_lock_before_the_sink(
+        tmp_path, monkeypatch, capsys):
+    """Held-object ancestry is authoritative after namespace validation.
+
+    The two pathname guards are replaced by permissive seams to model a
+    component-disjoint alias they cannot decide. Real held descriptors still
+    name a target and one of its descendants, so the final bounded `openat`
+    walk must refuse before the lock-file context manager is constructed.
+    """
+    root = _scanned_root(tmp_path, snapshots=2)
+    descendant = root / "nested"
+    descendant.mkdir()
+    lock = descendant / "retention.lock"
+    monkeypatch.setattr(retention, "_lock_path_is_outside",
+                        lambda lock_path, directory: True)
+    monkeypatch.setattr(retention, "_lock_object_ancestry_is_outside",
+                        lambda lock_path, directory: True)
+
+    def _lock_sink_was_reached(path):
+        raise AssertionError("held ancestry allowed the lock sink")
+
+    monkeypatch.setattr(retention, "single_instance_lock",
+                        _lock_sink_was_reached)
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+
+    assert status == 1
+    assert printed.out.strip() == "retention refused=lock_unavailable"
+    assert printed.err == ""
+    assert not lock.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor namespaces")
+@pytest.mark.parametrize("namespace", ["/proc/self/fd", "/dev/fd"])
+@pytest.mark.parametrize("alias_side", ["lock", "target"])
+def test_user_supplied_descriptor_routes_gain_no_containment_bypass(
+        tmp_path, monkeypatch, capsys, namespace, alias_side):
+    """Trusted internal descriptor routing does not bless the same text.
+
+    A caller-controlled descriptor spelling that reaches the maintained object
+    remains ordinary untrusted input. Whether it appears on the target or lock
+    side, containment is rejected before any production `os.open` call.
+    """
+    if not os.path.isdir(namespace):
+        pytest.skip("descriptor namespace unavailable")
+    root = _scanned_root(tmp_path, snapshots=2)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    held = os.open(root, flags)
+    try:
+        descriptor_route = Path(namespace) / str(held)
+        if alias_side == "lock":
+            directory_arg = str(root)
+            lock_arg = str(descriptor_route / "retention.lock")
+        else:
+            directory_arg = str(descriptor_route)
+            lock_arg = str(root / "retention.lock")
+        opened = _open_recorder(monkeypatch)
+        before = _listing(root)
+        status = retention.main([directory_arg, "--lock", lock_arg])
+        printed = capsys.readouterr()
+    finally:
+        os.close(held)
+
+    assert status == 1
+    assert printed.out.strip() == "retention refused=lock_unavailable"
+    assert printed.err == ""
+    assert opened == []
+    assert _listing(root) == before
+    assert not (root / "retention.lock").exists()
