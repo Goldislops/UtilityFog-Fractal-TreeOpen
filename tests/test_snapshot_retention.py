@@ -4888,7 +4888,8 @@ class _ScanThatReplacesItsRoot:
     `_scan_then_replace` control uses for a candidate FILE.
     """
 
-    __slots__ = ("_root", "_contents", "_real", "calls", "replacement")
+    __slots__ = ("_root", "_contents", "_real", "calls", "replacement",
+                 "blocked")
 
     def __init__(self, root, *, contents=()):
         self._root = Path(os.fspath(root))
@@ -4896,12 +4897,16 @@ class _ScanThatReplacesItsRoot:
         self._real = retention.scan_retention_candidates
         self.calls = 0
         self.replacement = None
+        self.blocked = None
 
     def __call__(self, directory, *, policy):
         observed = self._real(directory, policy=policy)
         self.calls += 1
-        self.replacement = _replace_root_pathname(self._root,
-                                                  contents=self._contents)
+        try:
+            self.replacement = _replace_root_pathname(
+                self._root, contents=self._contents)
+        except OSError as error:
+            self.blocked = error
         return observed
 
 
@@ -4944,7 +4949,7 @@ def test_per_entry_identity_alone_does_not_stop_the_directory_mutations(
     assert report.moved == 0
 
 
-def test_the_cli_exits_nonzero_when_the_root_is_replaced_under_it(
+def test_the_cli_never_reports_over_an_unscanned_root(
         tmp_path, monkeypatch, capsys):
     """The operator-visible consequence, through the real entry point.
 
@@ -4955,12 +4960,20 @@ def test_the_cli_exits_nonzero_when_the_root_is_replaced_under_it(
     swap = _replace_root_after_the_scan(monkeypatch, root)
     status = retention.main([str(root)])
     printed = capsys.readouterr()
-    assert swap.replacement.before != swap.replacement.after
-    assert status == 1, (
-        "the operator was told the pass succeeded over a directory it never "
-        "read")
-    assert retention.RetentionFailureReason.IDENTITY_UNAVAILABLE.value \
-        in printed.out
+    if swap.replacement is None:
+        # The CLI now holds the exact target across both the lock and scan.
+        # Windows therefore denies the injected rename, and the successful
+        # report is genuinely about the directory that was read.
+        assert swap.blocked is not None
+        assert status == 0
+        assert "refused=none" in printed.out
+    else:
+        # Descriptor-relative platforms may permit the pathname swap. The
+        # CLI still scans and reports on the held original object, never the
+        # unscanned replacement now occupying the caller's spelling.
+        assert swap.replacement.before != swap.replacement.after
+        assert status == 0
+        assert "refused=none" in printed.out
     assert str(tmp_path) not in printed.out
 
 

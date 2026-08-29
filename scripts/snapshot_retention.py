@@ -1434,6 +1434,484 @@ def directory_state(path):
     return identity[:2]
 
 
+def _windows_identity_from_handle(handle):
+    """Stable Windows directory identity and attributes for one live handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE,
+                                ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    information = _ByHandleFileInformation()
+    if not get_information(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    index = ((int(information.file_index_high) << 32)
+             | int(information.file_index_low))
+    serial = int(information.volume_serial_number)
+    if serial == 0 or index == 0:
+        raise OSError(errno.EINVAL, "directory_identity_unavailable")
+    return (serial, index), int(information.file_attributes)
+
+
+def _open_windows_directory_handle(path, *, follow_reparse, share_delete):
+    """Open one directory without traversal and return its stable identity."""
+    import ctypes
+    from ctypes import wintypes
+
+    text = os.fspath(path)
+    if not isinstance(text, str) or "\x00" in text:
+        raise ValueError("invalid_directory_path")
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                            wintypes.DWORD, wintypes.LPVOID,
+                            wintypes.DWORD, wintypes.DWORD,
+                            wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    file_list_directory = 0x00000001
+    file_read_attributes = 0x00000080
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    shares = file_share_read | file_share_write
+    if share_delete:
+        shares |= file_share_delete
+    flags = file_flag_backup_semantics
+    if not follow_reparse:
+        flags |= file_flag_open_reparse_point
+
+    # Identity-only probes need no data access and therefore work through
+    # ordinary traversable ancestors with restrictive ACLs. The long-lived
+    # quarantine binding requests directory access so omitting DELETE sharing
+    # actually prevents replacement for its whole lifetime.
+    desired_access = (0 if share_delete
+                      else file_list_directory | file_read_attributes)
+    handle = create_file(text, desired_access, shares, None, open_existing,
+                         flags, None)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        identity, attributes = _windows_identity_from_handle(handle)
+        file_attribute_directory = 0x00000010
+        file_attribute_reparse_point = 0x00000400
+        if not attributes & file_attribute_directory:
+            raise OSError(errno.ENOTDIR, "not_a_directory")
+        if (not follow_reparse
+                and attributes & file_attribute_reparse_point):
+            raise OSError(errno.ELOOP, "directory_is_reparse_point")
+    except BaseException:
+        _close_windows_handle(handle)
+        raise
+    return handle, identity
+
+
+def _close_windows_handle(handle) -> bool:
+    """Make exactly one close attempt on a Windows kernel handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    return bool(close_handle(handle))
+
+
+def _windows_final_directory_path(handle):
+    """The normalized path of the object named by one live directory handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                               wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_final_path(handle, buffer, len(buffer), 0)
+    if length == 0 or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    path = buffer.value
+    # Preserve an ordinary spelling where one exists. The handle has already
+    # resolved junctions, subst roots and mapped-drive aliases, so stripping
+    # only this syntactic prefix does not reintroduce their mutable namespace.
+    if path[:8].upper() == "\\\\?\\UNC\\":
+        return "\\\\" + path[8:]
+    if (path[:4] == "\\\\?\\" and len(path) >= 6
+            and path[5] == ":" and path[4].isalpha()):
+        return path[4:]
+    return path
+
+
+def _directory_object_identity(path, *, follow_reparse):
+    """Filesystem-object identity for a directory, across namespace aliases.
+
+    Windows uses the volume serial and file index from a directory handle, so
+    mapped drives, UNC shares, administrative shares and subst roots converge
+    on the object they name. POSIX uses the device and inode and can therefore
+    recognize a bind-mount alias. Absence, a non-directory, a reparse point
+    where following was forbidden, or an unprovable identity all answer None.
+    """
+    if os.name == "nt":
+        handle = None
+        try:
+            handle, identity = _open_windows_directory_handle(
+                path, follow_reparse=follow_reparse, share_delete=True)
+        except (OSError, ValueError, TypeError):
+            return None
+        if not _close_windows_handle(handle):
+            return None
+        return identity
+
+    try:
+        info = os.stat(path) if follow_reparse else os.lstat(path)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not stat_module.S_ISDIR(info.st_mode):
+        return None
+    if not follow_reparse and _is_reparse_point(info):
+        return None
+    identity = _stable_identity(info)
+    return None if identity is None else identity[:2]
+
+
+def _lock_object_ancestry_is_outside(lock_path, directory) -> bool:
+    """Prove no existing lock-path ancestor is the maintained object.
+
+    The lexical namespace guard runs first. This second proof is what catches
+    component-disjoint aliases: every existing parent of the prospective lock
+    is compared by filesystem identity with the non-followed target before the
+    lock sink is reached. Any relationship that cannot be proved refuses.
+    """
+    try:
+        os.lstat(directory)
+    except FileNotFoundError:
+        # There is no target object an alias could reach. Preserve the scan's
+        # established missing-target diagnosis; the outside lock still gates
+        # concurrency and the later scan refuses without touching the target.
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    target = _directory_object_identity(directory, follow_reparse=False)
+    if target is None:
+        return False
+
+    def _ordinary_namespace(path):
+        """Comparable spelling for the one common-ancestor calculation."""
+        if os.name != "nt":
+            return path
+        if path[:4] == "\\\\?\\":
+            rest = path[4:]
+            if len(rest) > 4 and rest[:4].upper() == "UNC\\":
+                return "\\\\" + rest[4:]
+            if (len(rest) >= 2 and rest[1] == ":"
+                    and rest[0].isalpha()):
+                return rest
+        return path
+
+    try:
+        text = os.fspath(lock_path)
+        if not isinstance(text, str) or "\x00" in text:
+            return False
+        lock_resolved = os.path.abspath(os.path.realpath(text))
+        target_resolved = os.path.abspath(os.path.realpath(directory))
+        current = os.path.dirname(lock_resolved)
+        try:
+            common = os.path.commonpath([
+                _ordinary_namespace(lock_resolved),
+                _ordinary_namespace(target_resolved),
+            ])
+            common = os.path.normcase(os.path.normpath(common))
+        except ValueError:
+            common = None
+    except (OSError, ValueError, TypeError):
+        return False
+    if not current:
+        return False
+
+    proved_existing_parent = False
+    seen = set()
+    while current not in seen:
+        seen.add(current)
+        comparable = os.path.normcase(os.path.normpath(
+            _ordinary_namespace(current)))
+        at_common_ancestor = common is not None and comparable == common
+        identity = _directory_object_identity(current, follow_reparse=True)
+        if identity is not None:
+            proved_existing_parent = True
+            if identity == target:
+                return False
+        else:
+            # A missing component makes the eventual open fail harmlessly.
+            # Any component that exists but cannot be identified is unsafe.
+            try:
+                os.lstat(current)
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, TypeError):
+                return False
+            else:
+                # A restrictive common ancestor can deny a metadata handle.
+                # Every component from the lock up to this shared lexical
+                # parent has already been proved, and an alias root capable of
+                # reaching the target would have appeared in that segment.
+                if at_common_ancestor and proved_existing_parent:
+                    return True
+                return False
+        if at_common_ancestor:
+            return proved_existing_parent
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return proved_existing_parent
+
+
+class _DirectoryBinding:
+    """One live binding to the exact directory object a scan established."""
+
+    def __init__(self, path, stable_path, logical_identity, object_identity,
+                 handle, *, windows):
+        self.original_path = Path(path)
+        self.path = Path(stable_path)
+        self.logical_identity = logical_identity
+        self._object_identity = object_identity
+        self._handle = handle
+        self._windows = windows
+        self._active = True
+
+    @classmethod
+    def acquire(cls, path):
+        if os.name == "nt":
+            handle = None
+            try:
+                # Omitting FILE_SHARE_DELETE keeps this exact directory from
+                # being renamed or replaced while pathname-based Windows
+                # operations beneath it run.
+                handle, object_identity = _open_windows_directory_handle(
+                    path, follow_reparse=False, share_delete=False)
+                stable_path = _windows_final_directory_path(handle)
+                if (_directory_object_identity(
+                        stable_path, follow_reparse=False)
+                        != object_identity):
+                    _close_windows_handle(handle)
+                    return None
+                logical_identity = directory_state(path)
+                if logical_identity is None:
+                    _close_windows_handle(handle)
+                    return None
+                return cls(path, stable_path, logical_identity,
+                           object_identity, handle, windows=True)
+            except (OSError, ValueError, TypeError):
+                if handle is not None:
+                    _close_windows_handle(handle)
+                return None
+
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = None
+        try:
+            fd = os.open(path, flags)
+            info = os.fstat(fd)
+            identity = _stable_identity(info)
+            if (not stat_module.S_ISDIR(info.st_mode)
+                    or identity is None
+                    or directory_state(path) != identity[:2]):
+                closing = fd
+                fd = None
+                try:
+                    os.close(closing)
+                except OSError:
+                    pass
+                return None
+            stable_path = None
+            for candidate in ("/proc/self/fd/%d" % fd,
+                              "/dev/fd/%d" % fd):
+                if os.path.isdir(candidate):
+                    stable_path = candidate
+                    break
+            if stable_path is None:
+                closing = fd
+                fd = None
+                try:
+                    os.close(closing)
+                except OSError:
+                    pass
+                return None
+            return cls(path, stable_path, identity[:2], identity[:2], fd,
+                       windows=False)
+        except (OSError, ValueError, TypeError):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            return None
+
+    def matches(self, expected) -> bool:
+        if not self._active or expected is None:
+            return False
+        try:
+            if self._windows:
+                current, _attributes = _windows_identity_from_handle(
+                    self._handle)
+            else:
+                info = os.fstat(self._handle)
+                identity = _stable_identity(info)
+                current = None if identity is None else identity[:2]
+        except OSError:
+            return False
+        return (self.logical_identity == expected
+                and current == self._object_identity
+                and (not self._windows
+                     or directory_state(self.path) == expected))
+
+    def release(self) -> bool:
+        if not self._active:
+            return False
+        self._active = False
+        if self._windows:
+            return _close_windows_handle(self._handle)
+        try:
+            os.close(self._handle)
+        except OSError:
+            return False
+        return True
+
+
+class _DirectoryAnchor:
+    """A held, stable route to an existing directory reached through aliases."""
+
+    def __init__(self, path, identity, handle, *, windows):
+        self.path = Path(path)
+        self.identity = identity
+        self._handle = handle
+        self._windows = windows
+        self._active = True
+
+    @classmethod
+    def acquire(cls, path):
+        if os.name == "nt":
+            handle = None
+            try:
+                handle, identity = _open_windows_directory_handle(
+                    path, follow_reparse=True, share_delete=False)
+                stable_path = _windows_final_directory_path(handle)
+                if (_directory_object_identity(
+                        stable_path, follow_reparse=False) != identity):
+                    _close_windows_handle(handle)
+                    return None
+                return cls(stable_path, identity, handle, windows=True)
+            except (OSError, ValueError, TypeError):
+                if handle is not None:
+                    _close_windows_handle(handle)
+                return None
+
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_DIRECTORY", 0)
+        fd = None
+        try:
+            fd = os.open(path, flags)
+            info = os.fstat(fd)
+            identity = _stable_identity(info)
+            if not stat_module.S_ISDIR(info.st_mode) or identity is None:
+                closing = fd
+                fd = None
+                try:
+                    os.close(closing)
+                except OSError:
+                    pass
+                return None
+            stable_path = None
+            for candidate in ("/proc/self/fd/%d" % fd,
+                              "/dev/fd/%d" % fd):
+                if os.path.isdir(candidate):
+                    stable_path = candidate
+                    break
+            if stable_path is None:
+                closing = fd
+                fd = None
+                try:
+                    os.close(closing)
+                except OSError:
+                    pass
+                return None
+            return cls(stable_path, identity[:2], fd, windows=False)
+        except (OSError, ValueError, TypeError):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            return None
+
+    def release(self) -> bool:
+        if not self._active:
+            return False
+        self._active = False
+        if self._windows:
+            return _close_windows_handle(self._handle)
+        try:
+            os.close(self._handle)
+        except OSError:
+            return False
+        return True
+
+
+class _LockPathBinding:
+    """A prospective lock path rooted at one held directory object."""
+
+    def __init__(self, path, anchor):
+        self.path = Path(path)
+        self._anchor = anchor
+
+    @classmethod
+    def acquire(cls, path):
+        try:
+            text = os.fspath(path)
+            if not isinstance(text, str) or "\x00" in text:
+                return None
+            absolute = os.path.abspath(text)
+            basename = os.path.basename(absolute)
+            parent = os.path.dirname(absolute)
+        except (OSError, ValueError, TypeError):
+            return None
+        if not basename or basename in (".", "..") or not parent:
+            return None
+        anchor = _DirectoryAnchor.acquire(parent)
+        if anchor is None:
+            return None
+        return cls(anchor.path / basename, anchor)
+
+    def release(self) -> bool:
+        return self._anchor.release()
+
+
 def _scanned_root_unchanged(path, scanned) -> bool:
     """Whether `path` is STILL the exact directory a live scan enumerated.
 
@@ -1701,16 +2179,54 @@ def _validated_quarantine_root(data_root, *, may_create):
 
 def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                 plan, reserve_ok, blocked, mover):
+    """Bind the scanned root once, then keep every quarantine sink on it."""
+    mode = RetentionMode.QUARANTINE
+    if not valid_pass_id(pass_id):
+        return _report(mode, refused=RetentionFailureReason.PASS_ID_INVALID,
+                       scan=scan, plan=plan, actions=plan_actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
+
+    scanned_root = getattr(scan, "root_identity", None)
+    binding = _DirectoryBinding.acquire(data_root)
+    if binding is None:
+        return _report(mode,
+                       refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                       scan=scan, plan=plan, actions=plan_actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
+    if not binding.matches(scanned_root):
+        binding.release()
+        return _report(mode,
+                       refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
+                       scan=scan, plan=plan, actions=plan_actions,
+                       reserve_ok=reserve_ok, blocked=blocked)
+
+    try:
+        report = _quarantine_bound(
+            binding.path, plan_actions, policy=policy, now_ns=now_ns,
+            pass_id=pass_id, scan=scan, plan=plan, reserve_ok=reserve_ok,
+            blocked=blocked, mover=mover, binding=binding)
+    finally:
+        released = binding.release()
+    if not released:
+        refusal = (report.refused
+                   if report.refused is not None
+                   else RetentionFailureReason.IDENTITY_UNAVAILABLE)
+        report = dataclasses.replace(report, refused=refusal, halted=True)
+    return report
+
+
+def _quarantine_bound(data_root, plan_actions, *, policy, now_ns, pass_id,
+                      scan, plan, reserve_ok, blocked, mover, binding):
     """Move at most one bounded batch into a fresh, exclusively created pass
     directory, journalling each completed move.
 
-    The rename is same-volume and therefore a directory-entry operation, but it
-    is NOT proof against a hostile path swap: nothing available here makes that
-    atomic on Windows. What this does provide is recoverability plus
-    detection -- the object's complete stable identity is verified immediately
-    before the move and again afterwards, and a mismatch stops the whole pass
-    and preserves the moved object for audit rather than attempting a second
-    blind move to put it back.
+    The rename is same-volume and therefore a directory-entry operation. Every
+    source and destination path is rooted at `binding.path`: a descriptor path
+    to the scanned object on POSIX, and a pathname protected from rename by a
+    non-delete-sharing directory handle on Windows. The object's complete
+    stable identity is still verified immediately before and after each move;
+    a mismatch stops the pass and preserves evidence rather than attempting a
+    second blind move to put it back.
     """
     mode = RetentionMode.QUARANTINE
 
@@ -1738,10 +2254,11 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
     # created inside a directory this pass never scanned.
     #
     # A single read serves both questions, so the check costs nothing extra.
-    data_state = directory_state(data_root)
+    data_state = binding.logical_identity
     scanned_root = getattr(scan, "root_identity", None)
     if (data_state is None or scanned_root is None
-            or data_state != scanned_root):
+            or data_state != scanned_root
+            or not binding.matches(scanned_root)):
         return _report(mode, refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
@@ -1850,7 +2367,7 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
             # Halts rather than skips: a data root that is no longer the
             # scanned one invalidates every remaining action at once, not
             # this one.
-            if not _scanned_root_unchanged(data_root, scanned_root):
+            if not binding.matches(scanned_root):
                 refused = RetentionFailureReason.IDENTITY_UNAVAILABLE
                 halted = True
                 break
@@ -2107,6 +2624,19 @@ def _default_pass_id() -> str:
     return time.strftime("p%Y%m%dT%H%M%S", time.gmtime())
 
 
+def _main_under_lock(directory, lock_path, mode) -> int:
+    """Run the path-free CLI body while one already-validated lock is held."""
+    with single_instance_lock(lock_path) as acquired:
+        if not acquired:
+            print("retention refused=%s"
+                  % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+            return 1
+        report = run_pass(directory,
+                          policy=PRODUCTION_RETENTION_POLICY, mode=mode)
+        print(format_report(report))
+        return 1 if (report.refused is not None or report.halted) else 0
+
+
 def main(argv=None) -> int:
     """Operator entry point. `PLAN` unless `--quarantine` is given explicitly.
 
@@ -2142,15 +2672,51 @@ def main(argv=None) -> int:
         print("retention refused=%s"
               % RetentionFailureReason.LOCK_UNAVAILABLE.value)
         return 1
-    with single_instance_lock(lock_path) as acquired:
-        if not acquired:
+
+    # Preserve the established diagnosis for a missing, non-directory or
+    # otherwise unusable target. There is no valid maintained object to bind;
+    # the ordinary outside lock still gates concurrency and `run_pass` owns
+    # the subsequent IDENTITY_UNAVAILABLE decision.
+    target_state = directory_state(args.directory)
+    if target_state is None:
+        return _main_under_lock(args.directory, lock_path, mode)
+
+    # First prove the current spellings before acquiring any long-lived
+    # handle. This keeps an already-unsafe placement entirely away from the
+    # lock sink. Then bind both objects and repeat the proof on their stable,
+    # handle-derived paths: a junction, bind mount, mapped drive or subst root
+    # retargeted between the first proof and `os.open(O_CREAT)` can no longer
+    # redirect either the target pass or the lock creation.
+    if not _lock_object_ancestry_is_outside(lock_path, args.directory):
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    target_binding = _DirectoryBinding.acquire(args.directory)
+    if (target_binding is None
+            or not target_binding.matches(target_state)):
+        if target_binding is not None:
+            target_binding.release()
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    lock_binding = _LockPathBinding.acquire(lock_path)
+    if lock_binding is None:
+        target_binding.release()
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    try:
+        if (not _lock_path_is_outside(
+                lock_binding.path, target_binding.path)
+                or not _lock_object_ancestry_is_outside(
+                    lock_binding.path, target_binding.path)):
             print("retention refused=%s"
                   % RetentionFailureReason.LOCK_UNAVAILABLE.value)
             return 1
-        report = run_pass(args.directory,
-                          policy=PRODUCTION_RETENTION_POLICY, mode=mode)
-        print(format_report(report))
-        return 1 if (report.refused is not None or report.halted) else 0
+        return _main_under_lock(target_binding.path, lock_binding.path, mode)
+    finally:
+        lock_binding.release()
+        target_binding.release()
 
 
 if __name__ == "__main__":  # pragma: no cover - operator entry point
