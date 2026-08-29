@@ -25,12 +25,22 @@ Windows-service totality.
 from __future__ import annotations
 
 import logging
+import os
+import pathlib
 import subprocess
 import sys
 import types
 from unittest import mock
 
 import pytest
+
+from scripts.snapshot_archive_guard import (
+    PRODUCTION_DISCOVERY_POLICY,
+    CandidateDiscoveryPolicy,
+    DiscoveryFailed,
+    DiscoveryFailureReason,
+    DiscoverySucceeded,
+)
 
 # `scripts/watchdog.py` builds `logging.FileHandler(log_path)` as an ARGUMENT to
 # `logging.basicConfig`, so importing it opens `data/watchdog.log` even when
@@ -111,11 +121,11 @@ class _Seams:
         self.started = []
         self.killed = []
 
-    def find_latest_snapshot(self):
+    def discover_snapshots(self):
         self.snapshot_lookups += 1
         if self.snapshot_name is None:
-            return None
-        return types.SimpleNamespace(name=self.snapshot_name)
+            return DiscoverySucceeded((), 0, 0, 0)
+        return DiscoverySucceeded((pathlib.Path(self.snapshot_name),), 0, 1, 1)
 
     def start_engine(self, snapshot_path):
         self.started.append(getattr(snapshot_path, "name", snapshot_path))
@@ -134,7 +144,7 @@ def _run_loop(monkeypatch, side_effects, cycles=1, snapshot_name="snap.npz"):
     """
     seams = _Seams(snapshot_name)
     monkeypatch.setattr(watchdog.subprocess, "run", mock.Mock(side_effect=side_effects))
-    monkeypatch.setattr(watchdog, "find_latest_snapshot", seams.find_latest_snapshot)
+    monkeypatch.setattr(watchdog, "discover_snapshots", seams.discover_snapshots)
     monkeypatch.setattr(watchdog, "start_engine", seams.start_engine)
     monkeypatch.setattr(watchdog, "kill_process", seams.kill_process)
     monkeypatch.setattr(watchdog, "time", _FakeTime(stop_after_sleeps=cycles))
@@ -307,7 +317,9 @@ def test_once_zero_processes_keeps_established_output(monkeypatch, capsys):
     monkeypatch.setattr(
         watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout="")])
     )
-    monkeypatch.setattr(watchdog, "find_latest_snapshot", lambda: None)
+    monkeypatch.setattr(
+        watchdog, "discover_snapshots", lambda: DiscoverySucceeded((), 0, 0, 0)
+    )
     status = watchdog.run_once()
     output = capsys.readouterr().out
     assert status == 0
@@ -326,3 +338,628 @@ def test_once_running_processes_keep_established_output(monkeypatch, capsys):
     assert "Engine running: 2 process(es)" in output
     assert "PID 1234" in output and "PID 5678" in output
     assert "Health: OK" in output
+
+
+# =============================================================================
+# Bounded snapshot discovery
+# =============================================================================
+#
+# `find_latest_snapshot()` used to be an unbounded
+# `sorted(DATA_DIR.glob("v070_gen*.npz"), key=lambda p: p.stat().st_mtime)`.
+# It ran from three call sites -- the per-cycle health check, the engine-down
+# restart branch and `--once` -- and collapsed every possible directory state
+# into `Path | None`. "The directory is empty", "names matched but every
+# metadata read failed" and "the listing could not be completed at all" were
+# indistinguishable, and the last of those could send the loop down the restart
+# path on a directory state it had never actually observed.
+#
+# `discover_snapshots()` now returns the shared primitive's result and each
+# caller keeps those states apart.
+#
+# This section is DISCOVERY ONLY and makes no archive-admission claim.
+# `admit_snapshot` and `first_admissible` are not used: a corrupt or partially
+# written newest snapshot is still selected and still handed to the restart
+# subprocess, and one can still burn the restart budget. A selected path can
+# also disappear after discovery succeeds but before the subprocess opens it.
+# Neither is closed here.
+#
+# Nothing below starts a process, reads the real data directory or writes a
+# watchdog log: `watchdog.DATA_DIR` is redirected to pytest's `tmp_path`,
+# `subprocess.Popen` is mocked at the module boundary, and the import-time
+# `logging.FileHandler` patch above is untouched.
+
+
+def _touch_snapshot(directory, name, mtime_ns=None):
+    """Create one candidate file, optionally at an exact modification time."""
+    path = pathlib.Path(directory) / name
+    path.write_bytes(b"")
+    if mtime_ns is not None:
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+    return path
+
+
+ENGINE_DOWN = [_Completed(stdout="", returncode=0)]
+
+
+def _discovering_loop(monkeypatch, side_effects, data_dir, *, policy=None, cycles=1):
+    """Drive the REAL loop with REAL discovery over `data_dir`.
+
+    Unlike `_run_loop`, neither `discover_snapshots` nor `start_engine` is
+    stubbed: the genuine functions run, and `subprocess.Popen` is mocked at the
+    module boundary so an attempted engine start is observable and inert.
+    """
+    popen = mock.Mock()
+    monkeypatch.setattr(watchdog.subprocess, "run", mock.Mock(side_effect=side_effects))
+    monkeypatch.setattr(watchdog.subprocess, "Popen", popen)
+    monkeypatch.setattr(watchdog, "DATA_DIR", pathlib.Path(data_dir))
+    if policy is not None:
+        monkeypatch.setattr(watchdog, "PRODUCTION_DISCOVERY_POLICY", policy)
+    monkeypatch.setattr(watchdog, "kill_process", lambda pid: True)
+    monkeypatch.setattr(watchdog, "time", _FakeTime(stop_after_sleeps=cycles))
+    try:
+        watchdog.run_watchdog()
+    except KeyboardInterrupt:
+        pass
+    return popen
+
+
+def _state_loop(monkeypatch, state, cycles=1):
+    """Drive the REAL loop with one fixed discovery result every cycle."""
+    seams = _Seams()
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        mock.Mock(side_effect=[_Completed(stdout="", returncode=0)] * cycles),
+    )
+    monkeypatch.setattr(watchdog, "discover_snapshots", lambda: state)
+    monkeypatch.setattr(watchdog, "start_engine", seams.start_engine)
+    monkeypatch.setattr(watchdog, "kill_process", seams.kill_process)
+    clock = _FakeTime(stop_after_sleeps=cycles)
+    monkeypatch.setattr(watchdog, "time", clock)
+    try:
+        watchdog.run_watchdog()
+    except KeyboardInterrupt:
+        pass
+    return seams, clock
+
+
+# -- the calibrated policy is imported, never redefined -----------------------
+
+
+def test_watchdog_uses_the_one_production_discovery_policy():
+    # Identity, not equality: a per-consumer instance would be a mixed-cap
+    # production state that no test could see.
+    assert watchdog.PRODUCTION_DISCOVERY_POLICY is PRODUCTION_DISCOVERY_POLICY
+
+
+def test_watchdog_defines_no_calibration_constant_of_its_own():
+    assert watchdog.PRODUCTION_DISCOVERY_POLICY.max_directory_entries == 196_608
+    assert watchdog.PRODUCTION_DISCOVERY_POLICY.max_candidates == 65_536
+
+
+def test_discovery_passes_the_policy_explicitly(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(directory, *, policy):
+        seen["directory"] = directory
+        seen["policy"] = policy
+        return DiscoverySucceeded((), 0, 0, 0)
+
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(watchdog, "discover_snapshot_candidates", fake)
+    watchdog.discover_snapshots()
+    assert seen["directory"] == tmp_path
+    assert seen["policy"] is PRODUCTION_DISCOVERY_POLICY
+
+
+def test_discovery_does_not_glob_the_data_directory(monkeypatch, tmp_path):
+    # `glob` materialises the whole listing before anything can bound it:
+    # `glob.glob` is `list(iglob(...))` and even `iglob` reaches `_listdir`,
+    # which is `return list(it)`.
+    _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+
+    def refuse(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("the unbounded glob is still in the discovery path")
+
+    monkeypatch.setattr(pathlib.Path, "glob", refuse)
+    result = watchdog.discover_snapshots()
+    assert isinstance(result, DiscoverySucceeded)
+    assert [p.name for p in result.ordered] == ["v070_gen1.npz"]
+
+
+# -- S1: clean empty ----------------------------------------------------------
+
+
+def test_s1_clean_empty_discovery(monkeypatch, tmp_path):
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    result = watchdog.discover_snapshots()
+    assert isinstance(result, DiscoverySucceeded)
+    assert result.ordered == () and result.matched == 0
+
+
+def test_s1_missing_data_directory_is_clean_empty_not_a_failure(monkeypatch, tmp_path):
+    # `Path.glob` over a missing directory also yielded nothing, so this is the
+    # established behaviour rather than a new refusal.
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path / "absent")
+    assert isinstance(watchdog.discover_snapshots(), DiscoverySucceeded)
+
+
+def test_s1_restart_branch_keeps_the_legacy_message_verbatim(
+    monkeypatch, tmp_path, caplog
+):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    popen = _discovering_loop(monkeypatch, ENGINE_DOWN, tmp_path)
+    assert popen.call_count == 0
+    assert "  No snapshot found to resume from!" in caplog.text
+
+
+def test_s1_health_keeps_the_legacy_message_verbatim(monkeypatch, tmp_path):
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    assert watchdog.check_engine_health([(1, "x")]) == (False, "No snapshots found")
+
+
+def test_s1_once_keeps_the_legacy_message_verbatim(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout="")])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    assert watchdog.run_once() == 0
+    output = capsys.readouterr().out
+    assert "Engine NOT running!" in output
+    assert "  No snapshots found!" in output
+
+
+# -- S2: every matching name's metadata read failed ---------------------------
+
+
+class _FakeEntry:
+    """A `DirEntry` stand-in whose metadata read fails."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def stat(self, *, follow_symlinks=True):
+        raise OSError("vanished mid-scan")
+
+
+class _FakeScandir:
+    """A context-manager iterator, exactly as `os.scandir` returns."""
+
+    def __init__(self, entries):
+        self._entries = list(entries)
+
+    def __enter__(self):
+        return iter(self._entries)
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self._entries)
+
+
+def _all_unreadable(monkeypatch, names):
+    import scripts.snapshot_archive_guard as sag
+
+    monkeypatch.setattr(
+        sag.os, "scandir", lambda directory: _FakeScandir(_FakeEntry(n) for n in names)
+    )
+
+
+def test_s2_mid_scan_disappearance_is_counted_not_raised(monkeypatch, tmp_path):
+    _all_unreadable(monkeypatch, ["v070_gen1.npz", "v070_gen2.npz"])
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    result = watchdog.discover_snapshots()
+    assert isinstance(result, DiscoverySucceeded)
+    assert result.unreadable == 2 and result.matched == 2
+    assert result.ordered == ()
+    assert result.all_matching_unreadable is True
+
+
+def test_s2_is_not_reported_as_clean_empty(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    _all_unreadable(monkeypatch, ["v070_gen1.npz"])
+    popen = _discovering_loop(monkeypatch, ENGINE_DOWN, tmp_path)
+    assert popen.call_count == 0
+    assert watchdog.SNAPSHOT_METADATA_UNREADABLE_MESSAGE in caplog.text
+    assert "No snapshot found to resume from!" not in caplog.text
+
+
+def test_s2_health_reports_its_own_state(monkeypatch, tmp_path):
+    _all_unreadable(monkeypatch, ["v070_gen1.npz"])
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    healthy, status = watchdog.check_engine_health([(1, "x")])
+    assert healthy is False
+    assert status == watchdog.SNAPSHOT_METADATA_UNREADABLE_MESSAGE
+
+
+def test_s2_once_reports_its_own_state_and_keeps_exit_zero(
+    monkeypatch, tmp_path, capsys
+):
+    _all_unreadable(monkeypatch, ["v070_gen1.npz"])
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout="")])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    assert watchdog.run_once() == 0
+    output = capsys.readouterr().out
+    assert watchdog.SNAPSHOT_METADATA_UNREADABLE_MESSAGE in output
+    assert "No snapshots found!" not in output
+
+
+# -- S3: the listing could not be completed -----------------------------------
+
+
+TINY_ENTRY_CAP = CandidateDiscoveryPolicy(max_directory_entries=2, max_candidates=64)
+TINY_CANDIDATE_CAP = CandidateDiscoveryPolicy(max_directory_entries=64, max_candidates=2)
+
+
+def test_s3_entry_limit_is_a_bounded_failure(monkeypatch, tmp_path):
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(watchdog, "PRODUCTION_DISCOVERY_POLICY", TINY_ENTRY_CAP)
+    result = watchdog.discover_snapshots()
+    assert isinstance(result, DiscoveryFailed)
+    assert result.reason is DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED
+
+
+def test_s3_candidate_limit_is_a_bounded_failure(monkeypatch, tmp_path):
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(watchdog, "PRODUCTION_DISCOVERY_POLICY", TINY_CANDIDATE_CAP)
+    result = watchdog.discover_snapshots()
+    assert isinstance(result, DiscoveryFailed)
+    assert result.reason is DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED
+
+
+def test_s3_failure_carries_no_candidate_prefix():
+    # A partially observed, attacker-ordered prefix must not be consumable.
+    assert not hasattr(
+        DiscoveryFailed(DiscoveryFailureReason.ITERATION_FAILED, 1, 1, 0), "ordered"
+    )
+
+
+def test_s3_never_starts_an_engine(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    popen = _discovering_loop(monkeypatch, ENGINE_DOWN, tmp_path, policy=TINY_ENTRY_CAP)
+    assert popen.call_count == 0
+    assert "entry_limit_exceeded" in caplog.text
+    assert "No snapshot found to resume from!" not in caplog.text
+
+
+def test_s3_message_is_path_free(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    _discovering_loop(monkeypatch, ENGINE_DOWN, tmp_path, policy=TINY_ENTRY_CAP)
+    assert str(tmp_path) not in caplog.text
+    assert ".npz" not in watchdog.SNAPSHOT_DISCOVERY_FAILED_TEMPLATE
+
+
+@pytest.mark.parametrize("reason", list(DiscoveryFailureReason))
+def test_s3_every_reason_has_a_fixed_path_free_message(reason):
+    rendered = watchdog.SNAPSHOT_DISCOVERY_FAILED_TEMPLATE.format(reason=reason.value)
+    assert reason.value in rendered
+    assert "/" not in rendered and "\\" not in rendered
+
+
+def test_s3_health_reports_its_own_state(monkeypatch, tmp_path):
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(watchdog, "PRODUCTION_DISCOVERY_POLICY", TINY_ENTRY_CAP)
+    healthy, status = watchdog.check_engine_health([(1, "x")])
+    assert healthy is False
+    assert "entry_limit_exceeded" in status
+
+
+def test_s3_once_reports_its_own_state_and_keeps_exit_zero(
+    monkeypatch, tmp_path, capsys
+):
+    for index in range(4):
+        _touch_snapshot(tmp_path, "v070_gen%d.npz" % index)
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout="")])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(watchdog, "PRODUCTION_DISCOVERY_POLICY", TINY_ENTRY_CAP)
+    assert watchdog.run_once() == 0
+    assert "entry_limit_exceeded" in capsys.readouterr().out
+
+
+# -- restart accounting is untouched by every indeterminate state -------------
+
+
+INDETERMINATE_STATES = [
+    DiscoverySucceeded((), 0, 0, 0),
+    DiscoverySucceeded((), 2, 2, 2),
+    DiscoveryFailed(DiscoveryFailureReason.ENTRY_LIMIT_EXCEEDED, 3, 1, 0),
+    DiscoveryFailed(DiscoveryFailureReason.CANDIDATE_LIMIT_EXCEEDED, 3, 2, 0),
+    DiscoveryFailed(DiscoveryFailureReason.DIRECTORY_OPEN_FAILED, 0, 0, 0),
+    DiscoveryFailed(DiscoveryFailureReason.ITERATION_FAILED, 3, 1, 0),
+]
+INDETERMINATE_IDS = [
+    "clean_empty",
+    "all_unreadable",
+    "entry_limit",
+    "candidate_limit",
+    "open_failed",
+    "iteration_failed",
+]
+
+
+@pytest.mark.parametrize("state", INDETERMINATE_STATES, ids=INDETERMINATE_IDS)
+def test_no_indeterminate_state_starts_an_engine(state, monkeypatch):
+    seams, _ = _state_loop(monkeypatch, state, cycles=3)
+    assert seams.started == []
+
+
+@pytest.mark.parametrize("state", INDETERMINATE_STATES, ids=INDETERMINATE_IDS)
+def test_no_indeterminate_state_consumes_restart_accounting(state, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    _state_loop(monkeypatch, state, cycles=3)
+    assert "Restart #" not in caplog.text
+    assert "MAX RESTARTS" not in caplog.text
+
+
+def test_repeated_discovery_failure_never_exhausts_the_budget(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="watchdog")
+    failure = DiscoveryFailed(DiscoveryFailureReason.ITERATION_FAILED, 3, 1, 0)
+    seams, _ = _state_loop(monkeypatch, failure, cycles=12)
+    assert seams.started == []
+    assert "MAX RESTARTS" not in caplog.text
+
+
+@pytest.mark.parametrize("state", INDETERMINATE_STATES, ids=INDETERMINATE_IDS)
+def test_indeterminate_states_sleep_exactly_once_per_cycle(state, monkeypatch):
+    # The established fail-closed branches sleep and `continue`; a second sleep
+    # would double the cadence exactly when the watchdog is least sure of the
+    # world.
+    _, clock = _state_loop(monkeypatch, state, cycles=3)
+    assert len(clock.sleeps) == 3
+    assert clock.sleeps == [watchdog.CHECK_INTERVAL] * 3
+
+
+# -- S4: a usable listing -----------------------------------------------------
+
+
+def test_s4_selects_the_primitive_ordering_head(monkeypatch, tmp_path):
+    _touch_snapshot(tmp_path, "v070_gen1.npz", mtime_ns=1_000_000_000_000_000_000)
+    newest = _touch_snapshot(
+        tmp_path, "v070_gen2.npz", mtime_ns=2_000_000_000_000_000_000
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    result = watchdog.discover_snapshots()
+    assert result.ordered[0] == newest
+
+
+def test_s4_mtime_ties_break_on_generation_not_filename(monkeypatch, tmp_path):
+    # `:06d` in the producer's format is a MINIMUM width production has already
+    # outgrown, so comparing names as text inverts across a digit-count
+    # boundary: "v070_gen999999" > "v070_gen1000000" as strings.
+    same = 1_700_000_000_000_000_000
+    for name in ("v070_gen9.npz", "v070_gen10.npz", "v070_gen100.npz"):
+        _touch_snapshot(tmp_path, name, mtime_ns=same)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    result = watchdog.discover_snapshots()
+    assert [p.name for p in result.ordered] == [
+        "v070_gen100.npz",
+        "v070_gen10.npz",
+        "v070_gen9.npz",
+    ]
+
+
+def test_s4_partial_unreadability_still_yields_a_usable_head(monkeypatch, tmp_path):
+    import scripts.snapshot_archive_guard as sag
+
+    good = _touch_snapshot(tmp_path, "v070_gen1.npz")
+    real_scandir = sag.os.scandir
+
+    def mixed(directory):
+        with real_scandir(directory) as entries:
+            real = list(entries)
+        return _FakeScandir([_FakeEntry("v070_gen9.npz"), *real])
+
+    monkeypatch.setattr(sag.os, "scandir", mixed)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    result = watchdog.discover_snapshots()
+    assert result.unreadable == 1
+    assert result.all_matching_unreadable is False
+    assert result.ordered[0].name == good.name
+
+
+def test_s4_starts_the_engine_with_the_selected_path(monkeypatch, tmp_path):
+    newest = _touch_snapshot(
+        tmp_path, "v070_gen2.npz", mtime_ns=2_000_000_000_000_000_000
+    )
+    _touch_snapshot(tmp_path, "v070_gen1.npz", mtime_ns=1_000_000_000_000_000_000)
+    popen = _discovering_loop(monkeypatch, ENGINE_DOWN, tmp_path)
+    assert popen.call_count == 1
+    argv = popen.call_args[0][0]
+    assert "--resume" in argv
+    assert argv[argv.index("--resume") + 1] == str(newest)
+
+
+def test_s4_health_keeps_its_established_strings(monkeypatch, tmp_path):
+    _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    healthy, status = watchdog.check_engine_health([(1, "x")])
+    assert healthy is True
+    assert status.startswith("Latest: v070_gen1.npz (")
+    assert status.endswith(" min ago)")
+
+
+def test_s4_health_stale_keeps_its_established_string(monkeypatch, tmp_path):
+    _touch_snapshot(tmp_path, "v070_gen1.npz", mtime_ns=1)
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    healthy, status = watchdog.check_engine_health([(1, "x")])
+    assert healthy is False
+    assert status.endswith(" min old (stale)")
+
+
+def test_s4_once_keeps_its_established_string(monkeypatch, tmp_path, capsys):
+    _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout="")])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    assert watchdog.run_once() == 0
+    assert "  Latest snapshot: v070_gen1.npz" in capsys.readouterr().out
+
+
+# -- S5: the later metadata read did not establish an age ---------------------
+#
+# `DiscoverySucceeded` carries `ordered`, `unreadable`, `processed` and
+# `matched` -- and NO modification time. The age comparison therefore needs a
+# SECOND metadata read, after selection, and `check_engine_health` catches the
+# whole of `OSError` there.
+#
+# That read can fail for ANY `OSError` cause -- the entry having been removed,
+# a permission or sharing denial, or a general I/O or mount failure are only
+# examples. The watchdog cannot distinguish them and does not try: one fixed,
+# path-free, cause-neutral outcome covers all of them, because a message that
+# names a cause it did not establish is worse than one that names none. On a
+# network-mounted data directory the permission and I/O cases are not exotic.
+#
+# This tranche does not close the underlying race, lock or fault. It gives the
+# failure a fixed outcome instead of an `OSError` escaping into the loop's
+# blanket handler (or, from `--once`, into a traceback).
+
+
+# Factories, not stored instances. Each invocation raises a FRESH exception, so
+# no test can pass by re-raising an object another call already unwound, and
+# the `__traceback__` one raise attaches cannot accumulate into the next.
+STAT_FAILURES = [
+    ("missing", lambda: FileNotFoundError(2, "No such file or directory")),
+    ("permission", lambda: PermissionError(13, "Permission denied")),
+    ("generic_io", lambda: OSError(5, "Input/output error")),
+]
+STAT_FAILURE_IDS = [name for name, _ in STAT_FAILURES]
+
+# Vocabulary that would assert a cause the second metadata read never
+# established. `OSError` is caught whole, so none of these may appear.
+CAUSE_WORDS = (
+    "went away", "disappear", "deleted", "removed", "missing", "gone",
+    "vanish", "permission", "denied", "locked", "unreadable",
+)
+
+
+def _failing_stat(target, make_error):
+    real_stat = pathlib.Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == target:
+            raise make_error()
+        return real_stat(self, *args, **kwargs)
+
+    return stat
+
+
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_health_reports_the_fixed_unknown_for_every_cause(
+    name, make, monkeypatch, tmp_path
+):
+    target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+    healthy, status = watchdog.check_engine_health([(1, "x")])
+    assert healthy is False
+    assert status == watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+
+
+def test_s5_every_cause_produces_the_identical_status(monkeypatch, tmp_path):
+    # Independent of what the message happens to say: the three causes must be
+    # indistinguishable from the outside.
+    seen = set()
+    for _, make in STAT_FAILURES:
+        with monkeypatch.context() as patch:
+            target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+            patch.setattr(watchdog, "DATA_DIR", tmp_path)
+            patch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+            seen.add(watchdog.check_engine_health([(1, "x")]))
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_once_does_not_traceback_and_keeps_exit_zero(
+    name, make, monkeypatch, tmp_path, capsys
+):
+    single = "ProcessId   : 1234\nCommandLine : python.exe -u run_v070_engine.py\n"
+    target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout=single)])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+    assert watchdog.run_once() == 0
+    output = capsys.readouterr().out
+    assert watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize("name,make", STAT_FAILURES, ids=STAT_FAILURE_IDS)
+def test_s5_discloses_no_path_for_any_cause(name, make, monkeypatch, tmp_path, capsys):
+    single = "ProcessId   : 1234\nCommandLine : python.exe -u run_v070_engine.py\n"
+    target = _touch_snapshot(tmp_path, "v070_gen1.npz")
+    monkeypatch.setattr(
+        watchdog.subprocess, "run", mock.Mock(side_effect=[_Completed(stdout=single)])
+    )
+    monkeypatch.setattr(watchdog, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pathlib.Path, "stat", _failing_stat(target, make))
+    watchdog.run_once()
+    output = capsys.readouterr().out
+    assert str(tmp_path) not in output
+    assert "v070_gen1.npz" not in output
+
+
+def test_s5_message_is_path_free():
+    assert ".npz" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+    assert "/" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+    assert "\\" not in watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+
+
+def test_s5_message_names_no_cause():
+    lowered = watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE.lower()
+    offenders = [word for word in CAUSE_WORDS if word in lowered]
+    assert offenders == []
+
+
+def test_s5_message_states_only_what_was_observed():
+    message = watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE
+    assert "metadata could not be read" in message
+    assert "age not established" in message
+
+
+# -- the fixed messages stay distinct from one another ------------------------
+
+
+def test_the_fixed_snapshot_messages_are_all_distinct():
+    rendered = watchdog.SNAPSHOT_DISCOVERY_FAILED_TEMPLATE.format(reason="x")
+    messages = {
+        watchdog.SNAPSHOT_METADATA_UNREADABLE_MESSAGE,
+        watchdog.SNAPSHOT_HEALTH_UNKNOWN_MESSAGE,
+        rendered,
+        "No snapshots found",
+    }
+    assert len(messages) == 4
+
+
+# -- the #425 rule survives: a failed process query discovers nothing ---------
+
+
+@pytest.mark.parametrize("name,make", QUERY_FAILURES, ids=QUERY_FAILURE_IDS)
+def test_query_failure_performs_no_discovery_at_all(name, make, monkeypatch):
+    seams = _run_loop(monkeypatch, [make()], cycles=1)
+    assert seams.snapshot_lookups == 0
+    assert seams.started == []
+
+
+def test_query_failure_creates_no_subprocess_beyond_the_query(monkeypatch, tmp_path):
+    _touch_snapshot(tmp_path, "v070_gen1.npz")
+    popen = _discovering_loop(monkeypatch, [_timeout()], tmp_path)
+    assert popen.call_count == 0
