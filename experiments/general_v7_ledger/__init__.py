@@ -940,10 +940,11 @@ def _check_reciprocity(payload):
 def validate_ledger(payload):
     """Validate one in-memory ledger document; return it unchanged."""
     if type(payload) is not dict:
-        # Decided from the real class's MRO, never from isinstance: a
-        # hostile non-dict carrying a __class__ property would have that
-        # descriptor invoked by isinstance before its own refusal.
-        if dict in type(payload).__mro__:
+        # The builtin subtype decision: issubclass over the exact runtime
+        # type and the builtin dict class uses interpreter-level type
+        # information only -- it reads no attribute of the candidate class
+        # and compares no candidate class object through Python equality.
+        if issubclass(type(payload), dict):
             _refuse("type-not-exact")
         _refuse("root-not-object")
     _screen_tree(payload)
