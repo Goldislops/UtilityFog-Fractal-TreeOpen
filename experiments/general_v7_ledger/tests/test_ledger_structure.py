@@ -132,6 +132,30 @@ class RaisingEqMeta(type):
         return NotImplemented
 
 
+class BasesInterceptingMeta(type):
+    """Intercepts ``__bases__`` and raises.
+
+    ``MroInterceptingMeta`` fires only on ``__mro__``, so an implementation
+    reading ``__bases__`` slipped past every earlier fixture.
+    """
+
+    def __getattribute__(cls, name):
+        if name == "__bases__":
+            MetaclassHookLog.hits.append(("bases-raising", name))
+            raise RuntimeError("synthetic __bases__ hook")
+        return type.__getattribute__(cls, name)
+
+
+class BasesForgingMeta(type):
+    """Intercepts ``__bases__`` and lies, without raising."""
+
+    def __getattribute__(cls, name):
+        if name == "__bases__":
+            MetaclassHookLog.hits.append(("bases-forging", name))
+            return (dict,)
+        return type.__getattribute__(cls, name)
+
+
 class HostileRaisingRoot(metaclass=MroInterceptingMeta):
     pass
 
@@ -160,6 +184,128 @@ class EqHostileDictSubclass(dict, metaclass=RaisingEqMeta):
     """A GENUINE ``dict`` subclass. The equality route escapes here too, so
     even the correct ``type-not-exact`` branch is reachable only by running
     supplied code."""
+
+
+class BasesPropertyRaisingMeta(type):
+    """A ``__bases__`` PROPERTY, which ``type.__getattribute__`` still calls."""
+
+    @property
+    def __bases__(cls):
+        MetaclassHookLog.hits.append(("bases-property-raising", "__bases__"))
+        raise RuntimeError("synthetic __bases__ property")
+
+
+class BasesPropertyForgingMeta(type):
+    """The same descriptor route, lying instead of raising."""
+
+    @property
+    def __bases__(cls):
+        MetaclassHookLog.hits.append(("bases-property-forging", "__bases__"))
+        return (dict,)
+
+
+class BasesShadowMeta(type):
+    """A PLAIN ``__bases__`` attribute shadowing the real one. No hook at all."""
+
+    __bases__ = (dict,)
+
+
+class MroMethodRaisingMeta(type):
+    """Overrides ``mro()``. Armed after class creation, so the class builds."""
+
+    armed = False
+
+    def mro(cls):
+        if MroMethodRaisingMeta.armed:
+            MetaclassHookLog.hits.append(("mro-method-raising", "mro"))
+            raise RuntimeError("synthetic mro() override")
+        return type.mro(cls)
+
+
+class MroMethodForgingMeta(type):
+    """Overrides ``mro()`` and returns a forged sequence containing ``dict``."""
+
+    armed = False
+
+    def mro(cls):
+        if MroMethodForgingMeta.armed:
+            MetaclassHookLog.hits.append(("mro-method-forging", "mro"))
+            return [cls, dict, object]
+        return type.mro(cls)
+
+
+class DuckTypedDecoy:
+    """Not a mapping at all, but it answers to ``keys`` and ``__getitem__``.
+
+    A validator that duck-types instead of deciding a type accepts this.
+    """
+
+    def keys(self):
+        MetaclassHookLog.hits.append(("duck-keys", "keys"))
+        return ()
+
+    def __getitem__(self, key):
+        MetaclassHookLog.hits.append(("duck-getitem", "__getitem__"))
+        raise KeyError(key)
+
+
+class _IntermediateDictSubclass(dict):
+    pass
+
+
+class GrandchildDictSubclass(_IntermediateDictSubclass):
+    """An INDIRECT ``dict`` subclass: ``dict`` is not among its own bases."""
+
+
+class BasesRaisingRoot(metaclass=BasesInterceptingMeta):
+    pass
+
+
+class BasesPropertyRaisingRoot(metaclass=BasesPropertyRaisingMeta):
+    pass
+
+
+class BasesPropertyForgingRoot(metaclass=BasesPropertyForgingMeta):
+    pass
+
+
+class BasesShadowRoot(metaclass=BasesShadowMeta):
+    pass
+
+
+class MroMethodRaisingRoot(metaclass=MroMethodRaisingMeta):
+    pass
+
+
+class MroMethodForgingRoot(metaclass=MroMethodForgingMeta):
+    pass
+
+
+class BasesForgingRoot(metaclass=BasesForgingMeta):
+    pass
+
+
+class ClassPropertyRaisingRoot:
+    """An OBJECT-level ``__class__`` property that raises.
+
+    Not a metaclass at all: the hook lives on the instance's own class, and it
+    is what ``isinstance`` would have run. ``type(payload)`` reads the type
+    slot and never performs this lookup.
+    """
+
+    @property
+    def __class__(self):
+        MetaclassHookLog.hits.append(("class-property-raising", "__class__"))
+        raise RuntimeError("synthetic __class__ property")
+
+
+class ClassPropertyForgingRoot:
+    """An object-level ``__class__`` property that forges ``dict``."""
+
+    @property
+    def __class__(self):
+        MetaclassHookLog.hits.append(("class-property-forging", "__class__"))
+        return dict
 
 
 class HookedDict(dict):
@@ -264,9 +410,56 @@ def test_gv7_s_004_every_nested_block_key_set_is_closed_and_exact():
     refuse(schema, hostile, "undeclared-key")
 
 
+def frozen_root_decision(source: str):
+    """The two decision expressions of ``validate_ledger``, or ``None``.
+
+    A whitelist of one shape. A fixture set is a deny-list over the routes
+    somebody thought of, and this project has already ruled that a deny-list is
+    not a detector: ``type.__getattribute__(type(p), "__bases__")``, an identity
+    scan over ``type(p).mro()``, ``type(p) in dict.__subclasses__()`` and
+    duck-typing on ``keys`` all evade any fixture set that does not name them.
+    Reading the shape out of the source refuses every one of them at once.
+    """
+    import ast
+
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.FunctionDef) or node.name != "validate_ledger":
+            continue
+        if not node.args.args:
+            return None
+        parameter = node.args.args[0].arg
+        for statement in node.body:
+            if not isinstance(statement, ast.If):
+                continue
+            if ast.unparse(statement.test) != f"type({parameter}) is not dict":
+                continue
+            nested = [s for s in statement.body if isinstance(s, ast.If)]
+            if len(nested) != 1:
+                return None
+            return (
+                ast.unparse(statement.test),
+                ast.unparse(nested[0].test),
+                parameter,
+            )
+    return None
+
+
 def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
     schema = sup.require_schema()
     ledger = sup.require_ledger()
+
+    # The mechanism itself, pinned by source shape. Exactly one production
+    # module may define `validate_ledger`, and its root decision must be the
+    # frozen two expressions -- nothing else, however it behaves.
+    decisions = [
+        found
+        for name in sup.PRODUCTION_MODULES
+        if (found := frozen_root_decision(sup.require_file(sup.LAB_DIR / name, name)))
+    ]
+    assert len(decisions) == 1, decisions
+    outer, inner, parameter = decisions[0]
+    assert outer == f"type({parameter}) is not dict", outer
+    assert inner == f"issubclass(type({parameter}), dict)", inner
     hostile = HookedDict(ledger)
     hostile.hooks.clear()
     refuse(schema, hostile, "type-not-exact")
@@ -313,7 +506,29 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
         ("plain __mro__ shadow", ShadowMroRoot(), "root-not-object"),
         ("metaclass __eq__, non-dict", EqHostileRoot(), "root-not-object"),
         ("metaclass __eq__, dict subclass", EqHostileDictSubclass(), "type-not-exact"),
+        # Correction 4. None of these was covered before, and an
+        # implementation reading __bases__ or __class__ passed the whole
+        # control without them.
+        ("metaclass __bases__ raising", BasesRaisingRoot(), "root-not-object"),
+        ("metaclass __bases__ forging", BasesForgingRoot(), "root-not-object"),
+        ("object __class__ property raising", ClassPropertyRaisingRoot(),
+         "root-not-object"),
+        ("object __class__ property forging", ClassPropertyForgingRoot(),
+         "root-not-object"),
+        # Correction 4, second round. Each of these satisfied every fixture
+        # above, so each is a route the earlier set did not name.
+        ("metaclass __bases__ property raising", BasesPropertyRaisingRoot(),
+         "root-not-object"),
+        ("metaclass __bases__ property forging", BasesPropertyForgingRoot(),
+         "root-not-object"),
+        ("plain metaclass __bases__ shadow", BasesShadowRoot(), "root-not-object"),
+        ("metaclass mro() raising", MroMethodRaisingRoot(), "root-not-object"),
+        ("metaclass mro() forging", MroMethodForgingRoot(), "root-not-object"),
+        ("duck-typed decoy with keys", DuckTypedDecoy(), "root-not-object"),
+        ("indirect dict subclass", GrandchildDictSubclass(), "type-not-exact"),
     )
+    MroMethodRaisingMeta.armed = True
+    MroMethodForgingMeta.armed = True
     for label, hostile_root, expected in metaclass_roots:
         # (a) nothing raw escapes the closed vocabulary.
         MetaclassHookLog.hits.clear()
@@ -329,8 +544,12 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
 
         # (b) the exact refusal for this root, with the usual hygiene. A
         #     genuine dict subclass is `type-not-exact`; nothing else is.
-        MetaclassHookLog.hits.clear()
+        #     The log is NOT cleared here: clearing between the probes would
+        #     discard any hook that fired during (a), so an implementation
+        #     reading a supplied attribute once per type would pass unseen.
+        first_pass_hits = list(MetaclassHookLog.hits)
         refuse(schema, hostile_root, expected)
+        MetaclassHookLog.hits.extend(first_pass_hits)
 
         # (c) no supplied hook ran on either attempt. The plain shadow has no
         #     hook to run at all -- its fault is the forged answer, not an
@@ -371,7 +590,29 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
             dict in real_mro  # noqa: B015 - the comparison is the probe
         assert MetaclassHookLog.hits == [("metaclass-eq", "__eq__")]
 
+    # The four Correction 4 fixtures are live too, each by its own route.
+    MetaclassHookLog.hits.clear()
+    with pytest.raises(RuntimeError):
+        type(BasesRaisingRoot()).__bases__  # noqa: B018 - the read is the probe
+    assert MetaclassHookLog.hits == [("bases-raising", "__bases__")]
+
+    MetaclassHookLog.hits.clear()
+    assert type(BasesForgingRoot()).__bases__ == (dict,), "the forged bases must lie"
+    assert MetaclassHookLog.hits == [("bases-forging", "__bases__")]
+
+    MetaclassHookLog.hits.clear()
+    with pytest.raises(RuntimeError):
+        ClassPropertyRaisingRoot().__class__  # noqa: B018 - the read is the probe
+    assert MetaclassHookLog.hits == [("class-property-raising", "__class__")]
+
+    MetaclassHookLog.hits.clear()
+    assert ClassPropertyForgingRoot().__class__ is dict, "the forged class must lie"
+    assert MetaclassHookLog.hits == [("class-property-forging", "__class__")]
+
     # And the frozen mechanism decides every one of them, invoking nothing.
+    # This is what pins the mechanism: a `__bases__`-reading implementation
+    # satisfies every fixture ABOVE, and only this table plus the two
+    # `__bases__` fixtures make the difference visible.
     MetaclassHookLog.hits.clear()
     for _label, hostile_root, expected in metaclass_roots:
         subtype = issubclass(type(hostile_root), dict)
@@ -747,16 +988,185 @@ def test_gv7_s_027_no_timestamp_or_environment_value_appears_in_the_output(capsy
         assert fragment not in out
 
 
-def test_gv7_s_028_no_production_module_imports_outside_its_allowance():
-    """An allowlist, not a blocklist -- and it is the authoritative rule.
+def sys_modules_findings(source: str):
+    """``(conforming, violations)`` for one production module's source.
 
-    A blocklist admits every network-capable package published tomorrow. An
-    allowlist over imported roots, together with the ban on dynamic-import
-    mechanisms, is what actually establishes that no code path could retrieve
-    anything. ``__init__.py`` is included: it is a production module, it runs
-    on every import of ``schema``, and it was previously unscanned.
+    The frozen form is: receiver the syntactically unaliased name ``sys``,
+    attribute exactly ``modules``, key a constant string equal to the package's
+    own dotted name. Anything else -- an aliased ``sys``, a
+    ``from sys import modules``, a computed key, another literal key, a bare
+    ``sys.modules`` reference, a ``getattr`` indirection -- is a violation.
     """
     import ast
+
+    tree = ast.parse(source)
+    violations = []
+    conforming = 0
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "sys" and alias.asname is not None:
+                    violations.append(("sys-imported-under-an-alias", alias.asname))
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "") == "sys":
+                for alias in node.names:
+                    # Only `modules` -- and a star import, which brings it in
+                    # unnamed. `from sys import stdout` is required elsewhere by
+                    # the byte-level emission rule and must stay legal.
+                    if alias.name in ("modules", "*"):
+                        violations.append(("from-sys-import-modules", alias.name))
+
+    examined = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Subscript):
+            continue
+        target = node.value
+        if not (isinstance(target, ast.Attribute) and target.attr == "modules"):
+            continue
+        examined.add(id(target))
+        if not (isinstance(target.value, ast.Name) and target.value.id == "sys"):
+            violations.append(
+                ("modules-on-a-non-sys-receiver", ast.unparse(target.value))
+            )
+            continue
+        key = node.slice
+        if not (isinstance(key, ast.Constant) and type(key.value) is str):
+            violations.append(("non-constant-subscript-key", ast.unparse(key)))
+            continue
+        if key.value != sup.SYS_MODULES_SELF_BINDING_KEY:
+            violations.append(("wrong-subscript-key", key.value))
+            continue
+        if not isinstance(node.ctx, ast.Load):
+            # Layer 3 permits OBTAINING the core. Writing or deleting the entry
+            # is the opposite of obtaining it, and must never be scored as the
+            # one permitted self-binding.
+            violations.append(
+                ("modules-entry-written-or-deleted", type(node.ctx).__name__)
+            )
+            continue
+        conforming += 1
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and node.attr == "modules"):
+            continue
+        if id(node) in examined:
+            continue
+        violations.append(
+            ("modules-reference-outside-the-frozen-form", ast.unparse(node.value))
+        )
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        label = getattr(node.func, "id", None)
+        if label == "getattr" and len(node.args) >= 2:
+            second = node.args[1]
+            if isinstance(second, ast.Constant) and second.value == "modules":
+                violations.append(("getattr-indirection-to-modules", "getattr"))
+        # `vars(sys)` hands back the same mapping without ever naming it.
+        if label == "vars" and node.args:
+            first = node.args[0]
+            if isinstance(first, ast.Name) and first.id == "sys":
+                violations.append(("vars-indirection-to-the-module-table", "vars"))
+
+    # `sys.__dict__` is that same table by another attribute.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__dict__"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "sys"
+        ):
+            violations.append(("dunder-dict-indirection", "sys.__dict__"))
+
+    return conforming, violations
+
+
+#: Self-contained fixtures. Each must be rejected; none touches the filesystem.
+SYS_MODULES_NEGATIVE_FIXTURES = (
+    ("another literal key",
+     "import sys\n_c = sys.modules['experiments.other']\n"),
+    ("a computed key",
+     "import sys\n_n = 'experiments.' + 'general_v7_ledger'\n_c = sys.modules[_n]\n"),
+    ("an f-string key",
+     "import sys\n_c = sys.modules[f'experiments.general_v7_ledger']\n"),
+    ("a name key",
+     "import sys\nKEY = 'experiments.general_v7_ledger'\n_c = sys.modules[KEY]\n"),
+    ("an aliased sys import",
+     "import sys as _s\n_c = _s.modules['experiments.general_v7_ledger']\n"),
+    ("from sys import modules",
+     "from sys import modules\n_c = modules['experiments.general_v7_ledger']\n"),
+    ("a bare sys.modules reference",
+     "import sys\n_c = sys.modules\n"),
+    ("a getattr indirection",
+     "import sys\n_c = getattr(sys, 'modules')['experiments.general_v7_ledger']\n"),
+    ("a vars() indirection",
+     "import sys\n_c = vars(sys)['modules']['socket']\n"),
+    ("a __dict__ indirection",
+     "import sys\n_c = sys.__dict__['modules']['socket']\n"),
+    ("a write to the frozen key",
+     "import sys\nsys.modules['experiments.general_v7_ledger'] = None\n"),
+    ("a delete of the frozen key",
+     "import sys\ndel sys.modules['experiments.general_v7_ledger']\n"),
+    ("a star import from sys",
+     "from sys import *\n_c = modules['experiments.general_v7_ledger']\n"),
+)
+
+#: DISCLOSED RESIDUAL. A scan over names cannot close rebinding in
+#: general: a builtin bound to another name first reaches the table
+#: without ever naming it. Recorded here rather than left to be
+#: discovered, and named in CONTRACT.md alongside the other gaps.
+SYS_MODULES_UNCLOSED_ROUTES = (
+    "a builtin rebound before use, as in `_g = getattr` then "
+    "`_g(sys, 'modules')`",
+)
+
+#: Legal, and must NOT be refused: the contract requires byte-level
+#: emission through `sys.stdout`, so importing a non-`modules` name
+#: from `sys` has to stay available. A scanner that refused these
+#: would be broken, not correct.
+SYS_MODULES_PERMITTED_FIXTURES = (
+    ("from sys import stdout", "from sys import stdout\n"),
+    ("from sys import stderr", "from sys import stderr\n"),
+)
+
+SYS_MODULES_POSITIVE_FIXTURE = (
+    "import sys\n_core = sys.modules['experiments.general_v7_ledger']\n"
+)
+
+
+def test_gv7_s_028_no_production_module_imports_outside_its_allowance():
+    """An allowlist over imports, PLUS the one route an allowlist cannot see.
+
+    A blocklist admits every network-capable package published tomorrow, so an
+    allowlist over import roots is the better shape. But the earlier claim that
+    it "establishes that no code path could retrieve anything" is **withdrawn**:
+    it walks ``import`` statements only, and both public surfaces bind the
+    shared core through a ``sys.modules`` subscript no import walker sees. That
+    route is constrained here too, to a single exact form. What the layers
+    jointly establish is what a production module can STATICALLY REACH -- never
+    an absolute behavioural impossibility, and a human audit remains required.
+
+    ``__init__.py`` is included: it is a production module and it runs on every
+    import of ``schema``.
+    """
+    import ast
+
+    # The scanner discriminates, proved on self-contained fixtures before it is
+    # pointed at anything. A scanner that accepted these would be worthless.
+    conforming, violations = sys_modules_findings(SYS_MODULES_POSITIVE_FIXTURE)
+    assert conforming == 1, conforming
+    assert violations == [], violations
+    for label, fixture in SYS_MODULES_NEGATIVE_FIXTURES:
+        found_conforming, found_violations = sys_modules_findings(fixture)
+        assert found_violations, f"{label}: not rejected"
+        assert found_conforming == 0, (label, found_conforming)
+    for label, fixture in SYS_MODULES_PERMITTED_FIXTURES:
+        found_conforming, found_violations = sys_modules_findings(fixture)
+        assert not found_violations, (label, found_violations)
+        assert found_conforming == 0, (label, found_conforming)
+    assert SYS_MODULES_UNCLOSED_ROUTES, "the residual must stay disclosed"
 
     for name in sup.PRODUCTION_MODULES:
         path = sup.LAB_DIR / name
@@ -775,6 +1185,15 @@ def test_gv7_s_028_no_production_module_imports_outside_its_allowance():
             assert forbidden not in roots, (name, forbidden)
             for root in roots:
                 assert not root.startswith(forbidden + "."), (name, root)
+
+        # The constrained self-binding: exact form, exact count, per module.
+        conforming, violations = sys_modules_findings(text)
+        assert not violations, (name, violations)
+        assert conforming == sup.SYS_MODULES_ALLOWED_USES[name], (
+            name,
+            conforming,
+            sup.SYS_MODULES_ALLOWED_USES[name],
+        )
 
 
 def test_gv7_s_029_no_production_module_contains_a_bare_assert_or_broad_catch():

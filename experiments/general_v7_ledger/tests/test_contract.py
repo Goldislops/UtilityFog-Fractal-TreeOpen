@@ -314,10 +314,34 @@ def test_gv7_d_020_the_contract_declares_the_structured_bibliography_rules():
         "A negative control alters the parsed field itself",
         "static `BIBLIOGRAPHY.md` **is required in the future implementation**",
         "generation* feature is **deferred**",
+        # Each shipped document carries its own acceptance boundary.
+        "Each shipped document carries its own acceptance boundary",
+        "must **each independently** state",
+        "before any substantive record or report content",
+        "synthetic calibration material",
+        "not merge-authorized",
+        "Each of the three is separately liftable",
+        "no document may rely on a sibling to disclaim on its behalf",
+        "the most liftable artifact of all",
+        "A statement that appears only after the records is not a boundary",
+        "The rule is mechanical, so an implementer can satisfy it without guessing",
+        "The declaration must appear **in prose**",
+        "URL-like spans are removed from the preamble before it is looked for",
+        "a check that a URL can satisfy is not a check",
+        "as whole words; a negated form",
+        "does not count",
+        "first substantive line",
+        "at any position including the very first",
+        "A `# Title` line is not substantive",
+        "A disclosed limit",
+        "reported as a defect** rather than passed silently",
     ):
         assert_phrase(text, statement)
     for label in sup.BIBLIOGRAPHY_FIELD_LABELS:
         assert f"- {label}:" in text, label
+    for name in sup.ACCEPTANCE_BOUNDARY_DOCUMENTS:
+        assert name in text, name
+    assert len(sup.ACCEPTANCE_BOUNDARY_DOCUMENTS) == 3
 
 
 def test_gv7_d_028_the_contract_requires_reciprocal_introduction_both_ways():
@@ -631,6 +655,14 @@ def test_gv7_d_035_the_contract_freezes_windows_path_safety_precisely():
     assert sup.is_device_namespace(chr(92) * 2 + "?" + chr(92) + "C:")
     assert sup.is_device_namespace(chr(92) * 2 + "." + chr(92) + "CON")
     assert not sup.is_device_namespace("C:" + chr(92) + "x")
+    for statement in (
+        "The mechanism is pinned by source shape, not by hostile fixtures alone",
+        "deny-list over the routes somebody thought of",
+        "a deny-list is not a detector",
+        "whitelist of one shape",
+        "defence in depth",
+    ):
+        assert_phrase(contract_text(), statement)
     for literal in ("0xA000000C", "0xA0000003", "0x20000000"):
         assert literal in text, literal
     assert sup.REPARSE_TAG_SYMLINK == 0xA000000C
@@ -702,15 +734,79 @@ def test_gv7_d_038_the_contract_forbids_a_correction_targeting_a_correction():
 
 
 def test_gv7_d_039_the_contract_demotes_the_call_name_scan_to_a_tripwire():
+    """And demotes every other single layer with it.
+
+    The contract used to call the import allowlist "the authoritative rule" and
+    to assert "there is no code path that could" retrieve. Both are withdrawn:
+    an allowlist over import statements never covered the ``sys.modules``
+    subscript both public surfaces actually use. The replacement claims less
+    and is true -- and this control refuses to let the stronger claim return.
+    """
     text = contract_text()
     for statement in (
-        "The import allowlist is the authoritative rule",
-        "heuristic tripwire",
+        "The assurance is layered and static, and no layer of it is "
+        "authoritative on its own",
+        "Permitted direct imports",
+        "No dynamic-import mechanism",
+        "Constrained direct `sys.modules` self-binding",
+        "A deliberately limited call-name tripwire",
+        "A separate human audit",
+        "constrain **what a production module can statically reach by a "
+        "direct, named route**",
+        "They do not establish an absolute behavioural impossibility",
+        # The gap is disclosed, and `compile` is not claimed as enforced.
+        "A disclosed gap, recorded rather than quietly closed",
+        "a scan over names cannot close rebinding in general",
+        "no static layer here catches that",
+        "an undisclosed gap in an assurance is worse than a disclosed one",
+        "**`compile` is deliberately not named**",
+        "would fire on every `re.compile(...)`",
+        "constrained by review, not by a static scan",
+        "The call-name tripwire is a heuristic and nothing more",
         "one level of indirection defeats it",
         "teaches its readers to ignore it",
         "No control claims that a call-name scan proves the absence of networking",
+        "none claims that any other single layer does either",
+        # The required behaviour survives the withdrawal, distinguished from
+        # what the static controls prove.
+        "No validator retrieves, opens, resolves, or contacts a locator",
+        "required behaviour of the implementation",
+        "not the same thing as a property these static controls prove",
     ):
         assert_phrase(text, statement)
+
+    # The withdrawn absolutes must not return, in any position other than the
+    # sentence that names them as withdrawn.
+    flattened = flat(text)
+    for withdrawn in (
+        "The import allowlist is the authoritative rule",
+        "is what actually establishes that no code path could retrieve anything",
+    ):
+        assert withdrawn not in flattened, withdrawn
+    assert "there is no code path that could" in flattened
+    assert flattened.count("there is no code path that could") == 1
+    head = flattened[: flattened.find("there is no code path that could")]
+    assert head.rstrip().endswith("or that"), "it may appear only as a withdrawal"
+
+    # The frozen sys.modules form.
+    for statement in (
+        "the receiver is the syntactically unaliased name",
+        "the attribute is exactly `modules`",
+        "constant string exactly equal to `experiments.general_v7_ledger`",
+        "exactly once in `schema.py`",
+        "exactly once in `validate.py`",
+        "never in `__init__.py`",
+        "are all refused",
+    ):
+        assert_phrase(text, statement)
+    assert sup.SYS_MODULES_SELF_BINDING_KEY == "experiments.general_v7_ledger"
+    assert sup.SYS_MODULES_ALLOWED_USES == {
+        "__init__.py": 0,
+        "schema.py": 1,
+        "validate.py": 1,
+    }
+    assert set(sup.SYS_MODULES_ALLOWED_USES) == set(sup.PRODUCTION_MODULES)
+
     for generic in ("get", "run", "post", "request"):
         assert generic not in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, generic
     for specific in ("urlopen", "create_connection", "Popen"):

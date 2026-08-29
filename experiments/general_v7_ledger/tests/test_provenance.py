@@ -391,8 +391,15 @@ def test_gv7_p_021_a_retrieval_call_name_tripwire_over_the_production_modules():
 
     A call-name scan cannot establish the absence of networking: an alias, a
     bound attribute, a dispatch table, or one level of helper indirection
-    defeats it. **What establishes the rule is GV7-S-028's import allowlist.**
-    This scan only makes the obvious form loud.
+    defeats it. This scan only makes the obvious form loud.
+
+    **No single layer establishes the rule**, and the earlier claim that
+    ``GV7-S-028``'s import allowlist did is **withdrawn**: the allowlist walks
+    import statements, and both public surfaces bind the core through a
+    ``sys.modules`` subscript no import walker sees. ``GV7-S-028`` now
+    constrains that route too, and what the layers jointly establish is what a
+    production module can STATICALLY REACH -- never an absolute behavioural
+    impossibility. A human audit remains required.
 
     The generic names ``get``, ``run``, ``post`` and ``request`` are excluded:
     they match ``dict.get`` and unrelated methods, and a screen that fires on

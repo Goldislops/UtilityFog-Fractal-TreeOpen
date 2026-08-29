@@ -689,6 +689,18 @@ subclass and is refused `type-not-exact`; every other root is refused
 `root-not-object`. **No hook supplied on the object, on its class, or on its
 metaclass runs at any point in that decision.**
 
+**The mechanism is pinned by source shape, not by hostile fixtures alone.** A
+fixture set is a **deny-list over the routes somebody thought of**, and a
+deny-list is not a detector: `type.__getattribute__(type(payload), "__bases__")`,
+an identity scan over `type(payload).mro()`, `type(payload) in
+dict.__subclasses__()` and duck-typing on `keys` each evade any fixture set that
+does not happen to name them. The acceptance surface therefore reads the two
+decision expressions out of the production source and requires them to be
+**exactly** `type(<parameter>) is not dict` and
+`issubclass(type(<parameter>), dict)`. That is a **whitelist of one shape**, and
+every non-conformant form fails it by construction. The hostile fixtures remain
+as defence in depth and as evidence that the shape behaves as claimed.
+
 `bool` is refused wherever `int` is required, and `int` wherever `bool` is
 required. No float appears anywhere. Every integer carries an explicit bounded
 range.
@@ -774,18 +786,68 @@ separate processes, differing hash seeds, and **normal, `-O` and `-OO`**
 execution. No bare `assert` appears in any production module, so `-O` strips
 nothing load-bearing.
 
-**Imports.** Neither `schema` nor `validate` imports a network-capable module:
-no `socket`, `http`, `urllib`, `requests`, `ftplib`, `smtplib`, `asyncio`,
-`ssl`, `subprocess`, or dynamic-import mechanism. **No validator retrieves,
-opens, resolves, or contacts a locator**, and there is no code path that could.
+**Imports.** No production module imports a network-capable module: no
+`socket`, `http`, `urllib`, `requests`, `ftplib`, `smtplib`, `asyncio`, `ssl`,
+`subprocess`, or dynamic-import mechanism. **No validator retrieves, opens,
+resolves, or contacts a locator.** That is a **required behaviour of the
+implementation**, and it remains required in full. It is not the same thing as
+a property these static controls prove, and the two must not be conflated.
 
-**The import allowlist is the authoritative rule.** A scan for call *names* is
-at most a **heuristic tripwire** and establishes nothing: an alias, an attribute
-lookup, or one level of indirection defeats it. Generic names such as `get`,
-`run`, `post` and `request` also match `dict.get` and unrelated methods, and a
-screen that fires on `dict.get` teaches its readers to ignore it, so they are
-excluded. **No control claims that a call-name scan proves the absence of
-networking.**
+**The assurance is layered and static, and no layer of it is authoritative on
+its own.** Any statement that the import allowlist alone is "the authoritative
+rule", that it proves no code path could retrieve anything, or that there is no
+code path that could — is **withdrawn**. The allowlist walks `import` and
+`from … import` statements only, and both public surfaces obtain the shared
+core through a `sys.modules` subscript that no import walker sees; an allowlist
+over import statements therefore never covered the mechanism the implementation
+actually uses. The layers are:
+
+1. **Permitted direct imports** — every import root in every production module
+   lies inside a declared allowlist, and no relative import is permitted;
+2. **No dynamic-import mechanism** — `importlib` is outside the allowlist,
+   and `__import__`, `import_module`, `eval` and `exec` are named by the
+   tripwire. **`compile` is deliberately not named**: the tripwire matches an
+   attribute as well as a bare name, so listing it would fire on every
+   `re.compile(...)` in a schema built on frozen patterns — the exact
+   fires-on-`dict.get` failure this section warns against below;
+3. **Constrained direct `sys.modules` self-binding** — the one route by which a
+   surface may obtain a module object it did not import, narrowed to a single
+   exact form (below);
+4. **A deliberately limited call-name tripwire** — a heuristic that makes the
+   obvious form loud and establishes nothing by itself;
+5. **A separate human audit**, which remains required and is not optional.
+
+Together these constrain **what a production module can statically reach by a
+direct, named route**. They do not establish an absolute behavioural
+impossibility, and nothing in this contract should be read as claiming they do:
+an author with edit access to the production modules is constrained by review,
+not by a static scan.
+
+**A disclosed gap, recorded rather than quietly closed.** Indirect access to the
+module table is refused where it is named — `vars(sys)`, `sys.__dict__` and a
+literal `getattr(sys, "modules")` are all rejected — but a scan over names
+cannot close rebinding in general. A builtin bound to another name first, as in
+`_g = getattr` then `_g(sys, "modules")`, reaches the table without naming it,
+and no static layer here catches that. It is disclosed for the same reason the
+reserved-name and file-symlink gaps are: an undisclosed gap in an assurance is
+worse than a disclosed one, and the human audit is where it is caught.
+
+**The constrained `sys.modules` form.** A production module may reference
+`sys.modules` only where the receiver is the syntactically unaliased name
+`sys`, the attribute is exactly `modules`, and the subscript key is a constant
+string exactly equal to `experiments.general_v7_ledger`. It may appear **exactly
+once in `schema.py`**, **exactly once in `validate.py`**, and **never in
+`__init__.py`**. An aliased `sys` import, a `from sys import modules`, a
+computed or non-constant key, any other literal key, a bare `sys.modules`
+reference that is not such a subscript, and any other direct `sys.modules` form
+are all refused.
+
+**The call-name tripwire is a heuristic and nothing more.** An alias, an
+attribute lookup, or one level of indirection defeats it. Generic names such as
+`get`, `run`, `post` and `request` also match `dict.get` and unrelated methods,
+and a screen that fires on `dict.get` teaches its readers to ignore it, so they
+are excluded. **No control claims that a call-name scan proves the absence of
+networking**, and none claims that any other single layer does either.
 
 **Emitted counts.** Every count in the output equals the actual validated
 collection length. No count is read from a constant, and the acceptance surface
@@ -877,6 +939,39 @@ mapping, the bibliography renderings and the conflict coverage of section 10 are
 reciprocity, locator, date and path rules are **refused**. **An audit control is
 never described as a rejection control**, and no rule whose only control is an
 audit is claimed to be enforced by the validator.
+
+**Each shipped document carries its own acceptance boundary.**
+`BIBLIOGRAPHY.md`, `INTAKE_REPORT.md` and `README.md` must **each
+independently** state, **before any substantive record or report content**,
+that the material is **synthetic calibration material** and that it is **not
+merge-authorized**. Each of the three is separately liftable — pasted into a
+ticket, an appendix, a slide — and a reader who receives one of them does not
+receive the other two, so no document may rely on a sibling to disclaim on its
+behalf. A bibliography of sixty-one entries with live-looking `https://` URLs
+is the most liftable artifact of all, and the least self-describing unless it
+says so itself. A statement that appears only after the records is not a
+boundary: a reader who stops at the first entry never reaches it.
+
+**The rule is mechanical, so an implementer can satisfy it without guessing.**
+The declaration must appear **in prose**: URL-like spans are removed from the
+preamble before it is looked for, because a locator such as
+`https://example.invalid/synthetic/item-0001` would otherwise satisfy the rule
+with no prose anywhere, and **a check that a URL can satisfy is not a check**.
+The words that count are `synthetic` or `fabricated`, as whole words; a negated
+form — `non-` or `not ` immediately before the word — does not count. The
+boundary statement is
+**`not merge-authorized`**, in any ordinary spelling including the British
+`-ised`. Both must appear before the document's **first substantive line**: a
+`##`-or-deeper sub-heading, a `- label:` data line, or any URL-like line, **at
+any position including the very first**. A `# Title` line is not substantive
+and does not end the preamble, so a document whose first line is a record
+heading has an empty preamble and cannot satisfy the rule from inside its own
+records.
+
+**A disclosed limit.** A document containing no substantive line at all has
+nothing for the statements to precede. That case is **reported as a defect**
+rather than passed silently, because a silent pass would vacate the rule for
+exactly the shape it cannot police.
 
 **Line-ending provenance is read from Git, not from the checkout.** This
 repository is developed on a platform where `core.autocrlf` rewrites LF to CRLF

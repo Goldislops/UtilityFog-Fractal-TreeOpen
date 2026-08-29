@@ -164,9 +164,29 @@ VALIDATE_MODULE = "experiments.general_v7_ledger.validate"
 #: and was previously unscanned by the import, assert and call-name controls.
 PRODUCTION_MODULES = ("__init__.py", "schema.py", "validate.py")
 
-#: An ALLOWLIST. A blocklist admits every network-capable package published
-#: tomorrow; an allowlist over imported roots, plus the ban on dynamic import,
-#: is what actually establishes that no code path could retrieve anything.
+#: The ONE key a production module may bind from ``sys.modules``: the package's
+#: own core. A surface may re-export what the package already imported; it may
+#: not reach anything else this way.
+SYS_MODULES_SELF_BINDING_KEY = "experiments.general_v7_ledger"
+
+#: Exactly how many conforming self-bindings each production module may carry.
+#: ``__init__.py`` is the core itself and needs none.
+SYS_MODULES_ALLOWED_USES = {
+    "__init__.py": 0,
+    "schema.py": 1,
+    "validate.py": 1,
+}
+
+#: An ALLOWLIST over `import` roots. A blocklist admits every network-capable
+#: package published tomorrow, so the allowlist is the better shape -- but it is
+#: **one layer of a static assurance, not the authoritative rule**, and the
+#: claim that it "establishes that no code path could retrieve anything" is
+#: **withdrawn**. It walks `import` and `from ... import` statements only; both
+#: public surfaces obtain the shared core through a `sys.modules` subscript,
+#: which no import walker sees. That route is constrained separately, by
+#: ``SYS_MODULES_ALLOWED_USES`` below, and what the layers together establish is
+#: what a production module can STATICALLY REACH -- never an absolute
+#: behavioural impossibility. A human audit remains required.
 PRODUCTION_ALLOWED_IMPORTS = frozenset(
     {
         "__future__",
@@ -916,8 +936,10 @@ NETWORK_CAPABLE_MODULES = (
 
 #: A HEURISTIC TRIPWIRE, never a proof. A call-name scan cannot establish that
 #: a module does not perform networking: an alias, an attribute lookup, or one
-#: level of indirection defeats it. The authoritative rule is the import
-#: allowlist. Generic names that also match harmless standard-library calls --
+#: level of indirection defeats it. It is ONE LAYER of a static assurance --
+#: alongside the import allowlist, the ban on dynamic import, the constrained
+#: `sys.modules` self-binding and a required human audit -- and no layer of
+#: that assurance is authoritative alone. Generic names that also match harmless standard-library calls --
 #: ``get`` on a dict, ``run`` on an unrelated object, ``post``, ``request`` --
 #: are deliberately excluded: a screen that fires on ``dict.get`` teaches
 #: readers to ignore it.
@@ -950,6 +972,92 @@ FORBIDDEN_PROMOTION_FRAGMENTS = (
 MARKER_VALUE = "canary-value-1d7c4b93-do-not-echo"
 MARKER_KEY = "canary-key-6a2f8e05-do-not-echo"
 MARKERS = (MARKER_VALUE, MARKER_KEY)
+
+
+# --------------------------------------------------------------------------
+# The documentation acceptance boundary. CONTRACT.md section 12.
+#
+# Each of these three documents may be lifted out of the laboratory on its own
+# -- pasted into a ticket, an appendix, a slide -- and read without the other
+# two. So each must carry BOTH statements itself, before its substantive
+# content, rather than relying on a sibling document to disclaim on its behalf.
+# --------------------------------------------------------------------------
+
+ACCEPTANCE_BOUNDARY_DOCUMENTS = (
+    "BIBLIOGRAPHY.md",
+    "INTAKE_REPORT.md",
+    "README.md",
+)
+
+#: The PHRASE the contract names, not a bare token. A bare ``synthetic`` is
+#: satisfied by a locator such as ``https://example.invalid/synthetic/item-0001``
+#: or by an identifier, with no prose disclaimer anywhere -- so the token form
+#: is **withdrawn**. The lookbehinds refuse a negated declaration: ``non-`` and
+#: ``not `` are both four characters, so both are fixed-width and legal here.
+SYNTHETIC_DECLARATION_RE = re.compile(
+    r"(?i)(?<!non-)(?<!not )\b(synthetic|fabricated)\b"
+)
+
+#: URL-like spans are stripped BEFORE the declaration is looked for. Without
+#: this a locator such as ``https://example.invalid/synthetic/item-0001``
+#: satisfies the declaration with no prose anywhere, and a check that a URL
+#: can satisfy is not a check.
+URL_SPAN_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.)\S*")
+
+#: "not merge-authorized" -- the acceptance boundary, in any ordinary spelling,
+#: including the British ``-ised``/``-isation`` forms this repository also uses.
+NOT_MERGE_AUTHORIZED_RE = re.compile(
+    r"(?i)\bnot\s+merge[- ]authoris?(ed|ation|zed|zation)\b"
+)
+
+#: A line that begins substantive content: a sub-heading at ANY index, a
+#: labelled data line, or anything URL-like. The preamble ends at the first of
+#: these, so a document whose very first line is a record heading has an EMPTY
+#: preamble and cannot satisfy the rule from inside its own records.
+SUBSTANTIVE_LINE_RE = re.compile(
+    r"\A(?:#{2,}\s|-\s*[A-Za-z_][A-Za-z0-9_]*\s*:|>?\s*(?:[a-z][a-z0-9+.-]*://|www\.))"
+)
+URL_ANYWHERE_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.)")
+
+
+def acceptance_boundary_preamble(text: str) -> str:
+    """Everything before the document's first substantive line.
+
+    A statement that appears only after the records is not a boundary: a reader
+    who stops at the first entry never reaches it. The preamble therefore ends
+    at the first line that begins substantive content -- a ``##``-or-deeper
+    sub-heading, a ``- label:`` data line, or any URL-like line -- **at any
+    index, including the very first**. A ``# Title`` line is not substantive and
+    does not end it.
+
+    If a document contains no substantive line at all, the whole text is
+    returned, and ``acceptance_boundary_violations`` reports that separately
+    rather than letting the placement rule pass vacuously.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if SUBSTANTIVE_LINE_RE.match(line) or URL_ANYWHERE_RE.search(line):
+            return "\n".join(lines[:index])
+    return text
+
+
+def acceptance_boundary_violations(name: str, text: str):
+    """``(name, defect)`` for each missing statement. Empty means compliant."""
+    preamble = acceptance_boundary_preamble(text)
+    found = []
+    if preamble == text:
+        # No substantive line was found, so "before the content" has nothing to
+        # be before. Reported rather than passed: a silent pass here would make
+        # the placement rule vacuous for exactly the shape it cannot police.
+        found.append(
+            (name, "no substantive content boundary: the placement rule cannot bind")
+        )
+    prose = URL_SPAN_RE.sub(" ", preamble)
+    if not SYNTHETIC_DECLARATION_RE.search(prose):
+        found.append((name, "no synthetic-calibration statement before the content"))
+    if not NOT_MERGE_AUTHORIZED_RE.search(preamble):
+        found.append((name, "no not-merge-authorized statement before the content"))
+    return found
 
 
 #: Tokens the acceptance surface names by exact string. The production
