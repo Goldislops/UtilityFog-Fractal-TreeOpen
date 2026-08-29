@@ -82,12 +82,84 @@ class MroForgingMeta(type):
         return type.__getattribute__(cls, name)
 
 
+class RaisingMroPropertyMeta(type):
+    """A ``__mro__`` PROPERTY on the metaclass, which raises.
+
+    ``type.__getattribute__`` bypasses an overridden ``__getattribute__`` and
+    nothing else: it finds this descriptor and calls it.
+    """
+
+    @property
+    def __mro__(cls):
+        MetaclassHookLog.hits.append(("mro-property-raising", "__mro__"))
+        raise RuntimeError("synthetic __mro__ property")
+
+
+class ForgingMroPropertyMeta(type):
+    """The same descriptor route, lying instead of raising."""
+
+    @property
+    def __mro__(cls):
+        MetaclassHookLog.hits.append(("mro-property-forging", "__mro__"))
+        return (dict,)
+
+
+class ShadowMroMeta(type):
+    """A PLAIN ``__mro__`` attribute shadowing the real one.
+
+    No descriptor, no hook, nothing to invoke -- an attribute lookup simply
+    finds this tuple first and returns it. There is no ``__getattribute__`` to
+    bypass, so no attribute-read primitive can help.
+    """
+
+    __mro__ = (dict,)
+
+
+class RaisingEqMeta(type):
+    """Escapes during ``dict in <mro>``, after any read has succeeded.
+
+    The comparison is narrowed to ``dict`` so these classes stay ordinarily
+    comparable and hashable, and cannot perturb the harness. ``__hash__`` is
+    inherited explicitly because defining ``__eq__`` would otherwise clear it.
+    """
+
+    __hash__ = type.__hash__
+
+    def __eq__(cls, other):
+        if other is dict:
+            MetaclassHookLog.hits.append(("metaclass-eq", "__eq__"))
+            raise RuntimeError("synthetic metaclass __eq__")
+        return NotImplemented
+
+
 class HostileRaisingRoot(metaclass=MroInterceptingMeta):
     pass
 
 
 class HostileForgingRoot(metaclass=MroForgingMeta):
     pass
+
+
+class RaisingMroPropertyRoot(metaclass=RaisingMroPropertyMeta):
+    pass
+
+
+class ForgingMroPropertyRoot(metaclass=ForgingMroPropertyMeta):
+    pass
+
+
+class ShadowMroRoot(metaclass=ShadowMroMeta):
+    pass
+
+
+class EqHostileRoot(metaclass=RaisingEqMeta):
+    pass
+
+
+class EqHostileDictSubclass(dict, metaclass=RaisingEqMeta):
+    """A GENUINE ``dict`` subclass. The equality route escapes here too, so
+    even the correct ``type-not-exact`` branch is reachable only by running
+    supplied code."""
 
 
 class HookedDict(dict):
@@ -230,16 +302,86 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
         # (c) the metaclass hook was never invoked, on either attempt.
         assert not MetaclassHookLog.hits, MetaclassHookLog.hits
 
-    # The hooks are real: unguarded, each one fires exactly as the defect
-    # predicts, so a passing control cannot be an inert fixture.
+    # Three further routes that a bare ``type.__getattribute__`` does not
+    # close. It bypasses an overridden ``__getattribute__`` and nothing else:
+    # it still finds and calls a ``__mro__`` property, it still returns a
+    # plain shadowing ``__mro__`` attribute, and it does nothing about the
+    # ``==`` comparison that ``dict in <mro>`` performs afterwards.
+    metaclass_roots = (
+        ("raising __mro__ property", RaisingMroPropertyRoot(), "root-not-object"),
+        ("forging __mro__ property", ForgingMroPropertyRoot(), "root-not-object"),
+        ("plain __mro__ shadow", ShadowMroRoot(), "root-not-object"),
+        ("metaclass __eq__, non-dict", EqHostileRoot(), "root-not-object"),
+        ("metaclass __eq__, dict subclass", EqHostileDictSubclass(), "type-not-exact"),
+    )
+    for label, hostile_root, expected in metaclass_roots:
+        # (a) nothing raw escapes the closed vocabulary.
+        MetaclassHookLog.hits.clear()
+        try:
+            schema.validate_ledger(hostile_root)
+        except schema.LedgerError:
+            escaped = None
+        except BaseException as error:  # noqa: BLE001 - the probe records a class
+            escaped = type(error).__name__
+        else:
+            escaped = "no refusal at all"
+        assert escaped is None, f"{label}: a raw {escaped} escaped"
+
+        # (b) the exact refusal for this root, with the usual hygiene. A
+        #     genuine dict subclass is `type-not-exact`; nothing else is.
+        MetaclassHookLog.hits.clear()
+        refuse(schema, hostile_root, expected)
+
+        # (c) no supplied hook ran on either attempt. The plain shadow has no
+        #     hook to run at all -- its fault is the forged answer, not an
+        #     invocation -- and this still holds for it.
+        assert not MetaclassHookLog.hits, (label, MetaclassHookLog.hits)
+
+    # Every hook fixture is live when invoked directly, so none is inert.
     MetaclassHookLog.hits.clear()
     with pytest.raises(RuntimeError):
         dict in type(HostileRaisingRoot()).__mro__  # noqa: B015 - the read is the probe
     assert MetaclassHookLog.hits == [("raising", "__mro__")]
+
     MetaclassHookLog.hits.clear()
     assert dict in type(HostileForgingRoot()).__mro__, "the forged MRO must lie"
     assert MetaclassHookLog.hits == [("forging", "__mro__")]
+
     MetaclassHookLog.hits.clear()
+    with pytest.raises(RuntimeError):
+        type.__getattribute__(type(RaisingMroPropertyRoot()), "__mro__")
+    assert MetaclassHookLog.hits == [("mro-property-raising", "__mro__")]
+
+    MetaclassHookLog.hits.clear()
+    forged = type.__getattribute__(type(ForgingMroPropertyRoot()), "__mro__")
+    assert forged == (dict,), "the property must forge an MRO containing dict"
+    assert MetaclassHookLog.hits == [("mro-property-forging", "__mro__")]
+
+    # The plain shadow is live without any hook: no entry is recorded, and the
+    # forged tuple is returned by the very primitive that was said to be safe.
+    MetaclassHookLog.hits.clear()
+    shadowed = type.__getattribute__(type(ShadowMroRoot()), "__mro__")
+    assert shadowed == (dict,), "the plain shadow must return a forged MRO"
+    assert MetaclassHookLog.hits == []
+
+    for live_root in (EqHostileRoot(), EqHostileDictSubclass()):
+        MetaclassHookLog.hits.clear()
+        real_mro = type.__getattribute__(type(live_root), "__mro__")
+        with pytest.raises(RuntimeError):
+            dict in real_mro  # noqa: B015 - the comparison is the probe
+        assert MetaclassHookLog.hits == [("metaclass-eq", "__eq__")]
+
+    # And the frozen mechanism decides every one of them, invoking nothing.
+    MetaclassHookLog.hits.clear()
+    for _label, hostile_root, expected in metaclass_roots:
+        subtype = issubclass(type(hostile_root), dict)
+        exact = type(hostile_root) is dict
+        decided = (
+            "type-not-exact" if (subtype and not exact) else "root-not-object"
+        )
+        assert decided == expected, (_label, decided, expected)
+    assert issubclass(type({}), dict) and type({}) is dict, "exact dict accepted"
+    assert not MetaclassHookLog.hits, MetaclassHookLog.hits
 
 
 def test_gv7_s_006_hostile_subclasses_are_refused_before_any_hook_runs():

@@ -654,15 +654,40 @@ refused before any hook on the rejected object can run — and before any hook o
 **its class or its metaclass** can run either.
 
 **A type decision is never made by reading an attribute of the class.**
-`__mro__`, `__bases__` and `__class__` are all reachable by a custom
-metaclass's `__getattribute__`, so reading one hands control to attacker code
-at the exact moment the validator is deciding whether to trust the object. Such
-a metaclass can **raise**, and a raw exception then escapes the closed refusal
-vocabulary; or it can **return a forged answer**, and a value that is not a
-mapping at all is then refused as a mapping subclass, with the wrong token. The
-decision is made from the exact type identity alone, and wherever a class
-attribute genuinely must be consulted it is read through a primitive the
-metaclass cannot intercept.
+`__mro__`, `__bases__` and `__class__` are all reachable from a supplied
+metaclass, so reading one hands control to attacker code at the exact moment
+the validator is deciding whether to trust the object. Such a metaclass can
+**raise**, and a raw exception then escapes the closed refusal vocabulary; or
+it can **return a forged answer**, and a value that is not a mapping at all is
+then refused as a mapping subclass, with the wrong token.
+
+**Invoking `type.__getattribute__` directly does not make that read safe, and
+any claim that it does is withdrawn.** It bypasses a metaclass's overridden
+`__getattribute__` and nothing else. It does not bypass a `__mro__` **property**
+defined on the metaclass, which it will find and call; it does not bypass a
+**plain `__mro__` attribute** shadowing the real one on the metaclass, which
+needs no hook at all and simply returns a forged tuple; and it does nothing
+whatever about what happens *after* the read, because testing `dict in <mro>`
+compares class objects with `==` and therefore invokes the metaclass's
+`__eq__`. That equality route escapes on a value that is not a mapping **and on
+a genuine `dict` subclass alike**, so even the correct branch is reachable only
+by running supplied code.
+
+**The root subtype decision is therefore frozen as `issubclass(type(payload),
+dict)`, and this is the required mechanism.** It:
+
+- reads **no** attribute of the candidate class — not `__mro__`, not
+  `__bases__`, not `__class__`, and not any other;
+- walks **no** method resolution order by hand;
+- compares **no** candidate class object through Python equality;
+- reaches its answer through the builtin subtype decision, from the exact
+  runtime type and builtin class information alone.
+
+`type(payload) is dict` accepts the exact builtin mapping; a value for which
+`issubclass(type(payload), dict)` holds but the identity does not is a `dict`
+subclass and is refused `type-not-exact`; every other root is refused
+`root-not-object`. **No hook supplied on the object, on its class, or on its
+metaclass runs at any point in that decision.**
 
 `bool` is refused wherever `int` is required, and `int` wherever `bool` is
 required. No float appears anywhere. Every integer carries an explicit bounded
