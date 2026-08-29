@@ -1,8 +1,13 @@
 """Contract-document consistency controls.
 
-These read `CONTRACT.md` only. They are implementation-independent and must
-pass in this phase: if the frozen contract stops saying what it froze, the rest
-of the acceptance surface is measuring nothing.
+These read the contract document and the committed Git blobs of the Phase-A
+files, and nothing else. They are implementation-independent and must pass in
+both admissible states: if the frozen contract stops saying what it froze, the
+rest of the acceptance surface is measuring nothing.
+
+**No control here asserts that an implementation file is absent.** That
+assertion was withdrawn in Correction 3: it could only ever be made green by
+deleting it, and Git history carries the evidence instead.
 
 Control ids GV7-D-NNN are declared in ``test_controls_manifest.py``.
 """
@@ -168,27 +173,19 @@ def test_gv7_d_012_the_contract_refuses_to_freeze_uncounted_totals():
     assert_phrase(text, "at least one** attributed, limited claim")
 
 
-def test_gv7_d_013_the_contract_names_every_future_file_without_creating_it():
+def test_gv7_d_013_the_contract_names_every_implementation_file():
+    """It names them. It does not require them to stay absent.
+
+    The runtime absence assertion this control used to carry is **withdrawn**:
+    it could only ever be made green by deleting it, so it would have had to be
+    destroyed by the very work it guarded. Git history carries that evidence
+    instead, and ``GV7-M-005``/``GV7-M-007`` admit both lawful states.
+    """
     text = contract_text()
-    for name in (
-        "schema.py",
-        "validate.py",
-        "ledger.json",
-        "BIBLIOGRAPHY.md",
-        "INTAKE_REPORT.md",
-        "README.md",
-    ):
+    for name in sup.IMPLEMENTATION_PATHS:
         assert name in text, name
-    for path in (
-        sup.LEDGER_PATH,
-        sup.BIBLIOGRAPHY_PATH,
-        sup.INTAKE_REPORT_PATH,
-        sup.README_PATH,
-        sup.LAB_DIR / "schema.py",
-        sup.LAB_DIR / "validate.py",
-        sup.LAB_DIR / "__init__.py",
-    ):
-        assert not path.exists(), f"this phase must not create {path.name}"
+    for name in sup.PHASE_A_PATHS:
+        assert name.rsplit("/", 1)[-1] in text, name
 
 
 def test_gv7_d_014_no_vocabulary_token_can_promote_a_record_by_assertion():
@@ -245,15 +242,29 @@ def test_gv7_d_016_the_contract_forbids_network_capable_validator_imports():
     assert len(set(sup.NETWORK_CAPABLE_MODULES)) == len(sup.NETWORK_CAPABLE_MODULES)
 
 
-def test_gv7_d_017_the_contract_is_lf_only_with_a_final_newline():
-    raw = sup.CONTRACT_PATH.read_bytes()
-    assert b"\r\n" not in raw
-    assert b"\r" not in raw
-    assert b"\t" not in raw
-    assert raw.endswith(b"\n")
-    text = raw.decode("utf-8")
-    trailing = [i + 1 for i, line in enumerate(text.split("\n")) if line != line.rstrip()]
-    assert not trailing, trailing
+def test_gv7_d_017_every_committed_phase_a_blob_is_lf_only():
+    """Provenance is read from Git, never from the checkout.
+
+    ``core.autocrlf`` rewrites LF to CRLF in the working tree on this platform,
+    so a byte check over the checked-out file reports a defect that does not
+    exist in the repository and fails on a fresh clone. The committed blob is
+    what every consumer actually receives, so it is what is checked. No
+    ``.gitattributes`` file is added to make this true.
+    """
+    for name in sup.PHASE_A_PATHS:
+        raw = sup.committed_blob(f"experiments/general_v7_ledger/{name}")
+        assert raw, name
+        assert b"\r" not in raw, name
+        assert b"\t" not in raw, name
+        assert raw.endswith(b"\n"), name
+        assert not raw.endswith(b"\n\n"), name
+        text = raw.decode("utf-8")
+        trailing = [
+            index + 1
+            for index, line in enumerate(text.split("\n"))
+            if line != line.rstrip()
+        ]
+        assert not trailing, (name, trailing)
 
 
 def test_gv7_d_018_every_vocabulary_is_duplicate_free_and_lowercase_kebab():
@@ -284,22 +295,29 @@ def test_gv7_d_019_the_eight_quarantine_dispositions_cover_the_named_families():
     assert len(sup.SAFETY_DISPOSITIONS) == 9
 
 
-def test_gv7_d_020_the_contract_declares_the_bibliography_rules():
+def test_gv7_d_020_the_contract_declares_the_structured_bibliography_rules():
     text = contract_text()
     for statement in (
+        "Accounting is structural, and never by substring",
+        "cannot tell a locator from its own prefix",
+        "are **withdrawn** for the same reason",
         "every one of the 61 source identities appears exactly once",
-        "every non-null original `supplied_locator` is preserved literally",
-        "every non-null `normalized_locator` is rendered exactly once",
-        "when the two forms are **identical**, a single occurrence satisfies both",
-        "each form is rendered in **exactly one entry**",
+        "each of the three labelled fields appears exactly once inside its entry",
+        "parsed with `json.loads` and compared for **exact equality**",
+        "two different sources may share a locator value",
+        "sharing is never conflated with duplication",
         "exact recorded",
-        "no URL of any kind",
+        "no URL-like material may appear anywhere in an entry outside the "
+        "labelled locator values",
         "nothing is fabricated",
         "Testing only `normalized_locator` would let the original supplied string be",
+        "A negative control alters the parsed field itself",
         "static `BIBLIOGRAPHY.md` **is required in the future implementation**",
         "generation* feature is **deferred**",
     ):
         assert_phrase(text, statement)
+    for label in sup.BIBLIOGRAPHY_FIELD_LABELS:
+        assert f"- {label}:" in text, label
 
 
 def test_gv7_d_028_the_contract_requires_reciprocal_introduction_both_ways():
@@ -383,12 +401,15 @@ def test_gv7_d_025_the_contract_keeps_relationships_visibly_unverified():
     assert sup.RELATIONSHIP_VERIFICATION_STATES == ("unverified",)
 
 
-def test_gv7_d_026_the_contract_defines_the_canonical_supersession_digest():
+def test_gv7_d_026_the_canonical_digest_survives_as_reserved_future_design():
+    """Retained as specification for a later schema, binding on nothing in v1."""
     text = contract_text()
     assert_phrase(text, "SHA-256, lowercase hex, of the predecessor record's")
     assert_phrase(text, "canonical form")
     assert_phrase(text, "same collection")
     assert_phrase(text, "cross-collection supersession is refused")
+    assert_phrase(text, "retained as reserved documentation")
+    assert_phrase(text, "Nothing in v1 may rely on it")
     probe = {"b": 1, "a": [2, 3]}
     assert sup.canonical_bytes(probe) == b'{"a":[2,3],"b":1}'
     assert sup.DIGEST_RE.match(sup.canonical_digest(probe))
@@ -411,3 +432,247 @@ def test_gv7_d_027_the_contract_requires_precise_absence_detection():
     assert_phrase(text, "it is not about paths beneath it")
     assert_phrase(text, "a divergence is a harness fault, never absence")
     assert_phrase(text, "tripwire, not a detector")
+
+
+# --------------------------------------------------------------------------
+# Correction 3. Each of these asserts a clause the contract did not previously
+# carry, and each has a behavioural counterpart elsewhere in the suite.
+# --------------------------------------------------------------------------
+
+
+def test_gv7_d_029_the_contract_declares_two_admissible_laboratory_states():
+    """A control that must be deleted to permit the work is not evidence."""
+    text = contract_text()
+    for statement in (
+        "exactly two admissible states",
+        "Implementation surface — all seven, or none",
+        "A partial implementation surface is refused",
+        "An unrelated extra path is refused",
+        "Git history, not a permanently red future test, is the evidence",
+        "No control asserts that the implementation is absent",
+        "an assertion that must be destroyed to permit the work it guards",
+    ):
+        assert_phrase(text, statement)
+    assert sup.PRE_IMPLEMENTATION_STATE in text
+    assert sup.IMPLEMENTED_STATE in text
+    assert len(sup.PHASE_A_PATHS) == 8
+    assert len(sup.IMPLEMENTATION_PATHS) == 7
+    assert not set(sup.PHASE_A_PATHS) & set(sup.IMPLEMENTATION_PATHS)
+
+
+def test_gv7_d_030_the_contract_scopes_list_max_and_declares_a_root_ceiling():
+    text = contract_text()
+    for statement in (
+        "`LIST_MAX` bounds nested lists, never a root collection",
+        "not impossible by arithmetic",
+        "precisely what makes it dangerous",
+        "one record away from a frozen total is not a resource ceiling",
+        "Bounds are not totals",
+        "a resource ceiling and not a frozen factual total",
+        "Every **nested** list is duplicate-free and within `LIST_MAX`",
+    ):
+        assert_phrase(text, statement)
+    assert "ROOT_COLLECTION_MAX" in text
+    assert str(sup.ROOT_COLLECTION_MAX) in text
+    # The danger is headroom, not impossibility: the frozen totals fit under 64
+    # with almost nothing to spare, which is exactly why 64 must not apply here.
+    assert sup.EXPECTED_BATCHES < sup.LIST_MAX
+    assert sup.LIST_MAX - sup.EXPECTED_BATCHES == 1
+    assert sup.EXPECTED_SOURCES < sup.ROOT_COLLECTION_MAX
+    assert sup.ROOT_COLLECTION_MAX > sup.LIST_MAX
+    assert set(sup.ROOT_COLLECTION_BOUNDS) == set(sup.COLLECTION_KEYS)
+    for key, (low, high) in sorted(sup.ROOT_COLLECTION_BOUNDS.items()):
+        assert type(low) is int and type(high) is int, key
+        assert 0 <= low <= high <= sup.ROOT_COLLECTION_MAX, key
+    assert sup.ROOT_COLLECTION_BOUNDS["corrections"][0] == 0
+    assert sup.ROOT_COLLECTION_BOUNDS["claims"][0] == sup.EXPECTED_SOURCES
+    for key in ("relationships", "unresolved"):
+        assert sup.ROOT_COLLECTION_BOUNDS[key][0] == 1, key
+
+
+def test_gv7_d_031_the_contract_closes_supersession_and_defers_it():
+    text = contract_text()
+    for statement in (
+        "closed to `null` in v1",
+        "A non-null supersession is refused",
+        "supersedes-not-permitted",
+        "deferred to a future",
+        "in v1 it is dead, not merely unused",
+        "successor source would have to be a 62nd record",
+        "Any statement that source successors are operational in v1 is",
+        "additive history channel of v1",
+    ):
+        assert_phrase(text, statement)
+
+
+def test_gv7_d_032_the_contract_reserves_verified_implementation_evidence():
+    text = contract_text()
+    for statement in (
+        "A v1 claim can never be verified implementation evidence",
+        "would contradict its own verification state",
+        "remains reserved",
+        "no v1 claim and no v1 relationship may use it",
+    ):
+        assert_phrase(text, statement)
+    assert "CLAIM_ATTRIBUTION_CLASSES" in text
+    reserved = "verified-implementation-evidence"
+    assert reserved in sup.ATTRIBUTION_CLASSES
+    assert reserved not in sup.CLAIM_ATTRIBUTION_CLASSES
+    assert reserved not in sup.RELATIONSHIP_ATTRIBUTION_CLASSES
+    assert sup.RESERVED_UNUSED_ATTRIBUTION_CLASSES == (reserved,)
+    assert len(sup.CLAIM_ATTRIBUTION_CLASSES) == len(sup.ATTRIBUTION_CLASSES) - 1
+
+
+def test_gv7_d_033_the_contract_separates_duplicate_keys_from_parse_faults():
+    text = contract_text()
+    for statement in (
+        "A duplicate object key carries its own exact token",
+        "is not a parse `ValueError`",
+        "json-duplicate-key",
+        "json-malformed",
+        "The general parse-`ValueError` rule therefore excludes the "
+        "duplicate-key refusal",
+        "Neither path echoes input and neither chains the original exception",
+        "decoded as strict UTF-8, and never handed to the parser as bytes",
+        "ledger-encoding-invalid",
+        'decodes with `errors="surrogatepass"`',
+    ):
+        assert_phrase(text, statement)
+
+
+def test_gv7_d_034_the_contract_freezes_refusal_order_classes_and_exit_codes():
+    text = contract_text()
+    for statement in (
+        "the earliest applicable stage wins",
+        "lexical and path-entry checks",
+        "the byte ceiling, over captured bytes",
+        "JSON parsing, including the duplicate-key refusal",
+        "exact builtin types",
+        "closed key sets and closed shapes",
+        "scalar bounds, and string encodability",
+        "references, reciprocity, and domain rules",
+        "canonical inventory rules",
+        "`schema.LedgerError` is the single refusal base",
+        "is a `schema.LedgerError` that is none of them",
+        "`0` on success, `1` on any refusal, `2` on a usage error",
+        "None of the three is a subclass of another",
+        "A refusal writes nothing to standard output",
+        "exactly one line** to standard error",
+        "`ensure_ascii=True` is load-bearing",
+        "string-not-encodable",
+        "any claim that it does is withdrawn",
+        "written through `sys.stdout.buffer`, never through `print`",
+    ):
+        assert_phrase(text, statement)
+
+
+def test_gv7_d_035_the_contract_freezes_windows_path_safety_precisely():
+    text = contract_text()
+    for statement in (
+        "Reparse points: redirection, not storage",
+        "name-surrogate bit",
+        "It is **not** refused merely for carrying",
+        "cloud placeholder",
+        "must already be locally hydrated",
+        "residual gap is disclosed rather than skipped",
+        "frozen, not delegated",
+        "are **not** reserved and must not be refused",
+        "scheduled for removal in Python 3.15",
+        "The device namespace is refused on the anchor",
+        "path-device-namespace",
+        "A disclosed gap, recorded rather than quietly closed",
+        "freezes the twenty-two names listed above and no more",
+        "this contract does not pretend otherwise",
+    ):
+        assert_phrase(text, statement)
+    # The disclosed gap is carried in the suite as data, not only as prose.
+    assert len(sup.WINDOWS_RESERVED_NAMES_KNOWN_UNCOVERED) == 8
+    for name in sup.WINDOWS_RESERVED_NAMES_KNOWN_UNCOVERED:
+        assert name.upper() not in sup.WINDOWS_RESERVED_NAMES, name
+    assert sup.is_device_namespace(chr(92) * 2 + "?" + chr(92) + "C:")
+    assert sup.is_device_namespace(chr(92) * 2 + "." + chr(92) + "CON")
+    assert not sup.is_device_namespace("C:" + chr(92) + "x")
+    for literal in ("0xA000000C", "0xA0000003", "0x20000000"):
+        assert literal in text, literal
+    assert sup.REPARSE_TAG_SYMLINK == 0xA000000C
+    assert sup.REPARSE_TAG_MOUNT_POINT == 0xA0000003
+    assert sup.REPARSE_NAME_SURROGATE_BIT == 0x20000000
+    for tag in sup.REDIRECTING_REPARSE_TAGS:
+        assert tag & sup.REPARSE_NAME_SURROGATE_BIT, hex(tag)
+    for name in ("CON", "PRN", "AUX", "NUL"):
+        assert name in sup.WINDOWS_RESERVED_NAMES
+    assert len(sup.WINDOWS_RESERVED_NAMES) == 22
+    for absent_name in ("COM0", "LPT0", "LPT10", "CONSOLE", "COMPANY"):
+        assert absent_name not in sup.WINDOWS_RESERVED_NAMES
+
+
+def test_gv7_d_036_the_contract_separates_audit_controls_from_refusal_controls():
+    text = contract_text()
+    for statement in (
+        "that governs input",
+        "Two kinds of control, and they are not interchangeable",
+        "canonical-ledger audit control",
+        "hostile-input validator control",
+        "An audit control is never described as a rejection control",
+        "no rule whose only control is an audit is claimed to be enforced",
+        "Line-ending provenance is read from Git, not from the checkout",
+        "would fail on a fresh clone",
+        "No `.gitattributes` file is added by this contract",
+        "A path that merely overflows `MAX_PATH` is not absent",
+        "Retired controls are recorded, never deleted",
+        "never reused and never renumbered",
+    ):
+        assert_phrase(text, statement)
+    assert sup.PATH_TOO_LONG_WINERROR == 206
+    assert sup.RETIRED_CONTROLS, "the retired register must not be empty"
+
+
+def test_gv7_d_037_the_contract_keeps_supplied_values_verbatim():
+    text = contract_text()
+    for statement in (
+        "A supplied field is verbatim and is never trimmed or rewritten",
+        "every whitespace-canonicality requirement applies to a `normalized_*` "
+        "field only",
+        "Dates keep both forms",
+        "retained verbatim with `normalized_date` `null`",
+        "The converse does not hold",
+        "Creator and channel are separate provenance",
+        "may honestly remain `not-supplied`",
+        "inventing one would be fabrication",
+        "`supplied_locator` is subject to neither, being verbatim",
+    ):
+        assert_phrase(text, statement)
+    for field in ("supplied_channel", "normalized_date"):
+        assert field in sup.SOURCE_KEYS, field
+        assert field in text, field
+
+
+def test_gv7_d_038_the_contract_forbids_a_correction_targeting_a_correction():
+    text = contract_text()
+    for statement in (
+        "A correction may not target a correction",
+        "a self-targeting correction, a two-record cycle",
+        "correction-target-not-permitted",
+        "distinct from `reference-not-found`",
+    ):
+        assert_phrase(text, statement)
+    assert "corrections" not in sup.CORRECTION_TARGET_COLLECTIONS
+    assert set(sup.CORRECTION_TARGET_COLLECTIONS) == set(sup.COLLECTION_KEYS) - {
+        "corrections"
+    }
+
+
+def test_gv7_d_039_the_contract_demotes_the_call_name_scan_to_a_tripwire():
+    text = contract_text()
+    for statement in (
+        "The import allowlist is the authoritative rule",
+        "heuristic tripwire",
+        "one level of indirection defeats it",
+        "teaches its readers to ignore it",
+        "No control claims that a call-name scan proves the absence of networking",
+    ):
+        assert_phrase(text, statement)
+    for generic in ("get", "run", "post", "request"):
+        assert generic not in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, generic
+    for specific in ("urlopen", "create_connection", "Popen"):
+        assert specific in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, specific

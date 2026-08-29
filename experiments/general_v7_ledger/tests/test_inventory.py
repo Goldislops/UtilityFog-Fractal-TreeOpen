@@ -9,30 +9,140 @@ Control ids GV7-I-NNN are declared in ``test_controls_manifest.py``.
 
 from __future__ import annotations
 
+import json
 import re
+
+import pytest
 
 from experiments.general_v7_ledger.tests import _support as sup
 
 HTTPS_SHAPE = re.compile(r"\Ahttps://[^\s/?#]+[^\s]*\Z")
 
 
-def bibliography_entries(text: str, ledger: dict) -> dict:
-    """Split the bibliography into one text block per source identity.
+#: The frozen entry format. A heading is a whole LINE, never a substring: a
+#: cross-reference or a table of contents would otherwise be mistaken for the
+#: entry itself, and every per-entry rule would then be evaluated against the
+#: wrong text.
+HEADING_RE = re.compile(r"\A###[ \t]+(GV7-SRC-[0-9]{4})[ \t]*\Z")
+FIELD_RE = re.compile(
+    r"\A-[ \t]+(supplied_locator|normalized_locator|locator_absence):[ \t](.*)\Z"
+)
 
-    Each block runs from its own identity to the next identity in file order,
-    so a per-entry rule can be checked instead of a whole-file substring test.
-    """
-    positions = []
+#: Deliberately wider than the recorded locator shape. A fabricated locator is
+#: usually a *near* miss -- a real locator with something appended, or truncated
+#: to its host -- so the scan must catch URL-like material of any scheme, and
+#: the rules then require it to sit inside a labelled value.
+URL_LIKE_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.)[^\s]+")
+
+
+def render_bibliography(ledger: dict) -> str:
+    """The exact rendering the contract requires, for a given ledger."""
+    lines = ["# Bibliography", ""]
     for source in ledger["sources"]:
-        index = text.find(source["source_id"])
-        assert index >= 0, f"{source['source_id']} missing from the bibliography"
-        positions.append((index, source["source_id"]))
-    positions.sort()
-    blocks = {}
-    for order, (index, source_id) in enumerate(positions):
-        end = positions[order + 1][0] if order + 1 < len(positions) else len(text)
-        blocks[source_id] = text[index:end]
-    return blocks
+        lines.append(f"### {source['source_id']}")
+        for label in sup.BIBLIOGRAPHY_FIELD_LABELS:
+            lines.append(f"- {label}: {json.dumps(source[label], ensure_ascii=True)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def parse_bibliography(text: str):
+    """``(blocks, preamble)`` where a block is ``(source_id, [lines])``.
+
+    Blocks are delimited by heading LINES, so nothing before the first heading
+    is ever attributed to a source and nothing after the last heading is
+    silently swallowed into it.
+    """
+    lines = text.split("\n")
+    headings = [
+        (index, match.group(1))
+        for index, line in enumerate(lines)
+        if (match := HEADING_RE.match(line))
+    ]
+    blocks = []
+    for order, (index, source_id) in enumerate(headings):
+        end = headings[order + 1][0] if order + 1 < len(headings) else len(lines)
+        blocks.append((source_id, lines[index + 1 : end]))
+    preamble = lines[: headings[0][0]] if headings else lines
+    return blocks, preamble
+
+
+def bibliography_violations(text: str, ledger: dict):
+    """Every defect, as ``(kind, detail)``. Empty means the rendering is exact.
+
+    One function, called by the positive control and by every negative control,
+    so a negative control proves that **this** predicate refuses the fault --
+    not that ``str.replace`` replaced something.
+    """
+    violations = []
+    blocks, preamble = parse_bibliography(text)
+    by_id = {source["source_id"]: source for source in ledger["sources"]}
+
+    counted = {}
+    for source_id, _lines in blocks:
+        counted[source_id] = counted.get(source_id, 0) + 1
+    for source_id in sorted(counted):
+        if counted[source_id] != 1:
+            violations.append(("heading-not-once", (source_id, counted[source_id])))
+    for source_id in sorted(set(by_id) - set(counted)):
+        violations.append(("source-absent", source_id))
+    for source_id in sorted(set(counted) - set(by_id)):
+        violations.append(("source-added", source_id))
+
+    for line in preamble:
+        if URL_LIKE_RE.search(line):
+            violations.append(("url-outside-entry", line.strip()))
+
+    for source_id, block in blocks:
+        source = by_id.get(source_id)
+        if source is None:
+            continue
+        found = {}
+        labelled_indices = set()
+        for index, line in enumerate(block):
+            match = FIELD_RE.match(line)
+            if match is None:
+                continue
+            labelled_indices.add(index)
+            found.setdefault(match.group(1), []).append(match.group(2))
+
+        parsed_values = {}
+        for label in sup.BIBLIOGRAPHY_FIELD_LABELS:
+            raw_values = found.get(label, [])
+            if len(raw_values) != 1:
+                violations.append((f"{label}-not-once", (source_id, len(raw_values))))
+                continue
+            try:
+                value = json.loads(raw_values[0])
+            except ValueError:
+                violations.append((f"{label}-unparsable", source_id))
+                continue
+            if not (value is None or type(value) is str):
+                violations.append((f"{label}-not-a-scalar", source_id))
+                continue
+            parsed_values[label] = value
+            if value != source[label]:
+                violations.append((f"{label}-mismatch", source_id))
+
+        # The bibliography is an independent witness to the pairing rule.
+        if set(parsed_values) == set(sup.BIBLIOGRAPHY_FIELD_LABELS):
+            supplied = parsed_values["supplied_locator"]
+            normalized = parsed_values["normalized_locator"]
+            absence = parsed_values["locator_absence"]
+            if (supplied is None) != (normalized is None):
+                violations.append(("locator-pairing", source_id))
+            if (absence is None) == (supplied is None):
+                violations.append(("absence-pairing", source_id))
+            if absence is not None and absence not in sup.LOCATOR_ABSENCE_REASONS:
+                violations.append(("absence-token-invalid", source_id))
+
+        for index, line in enumerate(block):
+            if index in labelled_indices:
+                continue
+            if URL_LIKE_RE.search(line):
+                violations.append(("url-outside-labelled-field", source_id))
+
+    return violations
 
 
 def test_gv7_i_001_the_ledger_holds_exactly_sixty_three_batches():
@@ -81,8 +191,13 @@ def test_gv7_i_005_exactly_twenty_six_sources_carry_supplied_metadata():
     for source in with_locator:
         assert source["locator_absence"] is None, source["source_id"]
         assert source["normalized_locator"] is not None, source["source_id"]
+        # Section 5 says these 26 carry supplied URL, TITLE and CHANNEL.
         assert source["supplied_title"] != sup.NOT_SUPPLIED, source["source_id"]
-        assert source["supplied_creator"] != sup.NOT_SUPPLIED, source["source_id"]
+        assert source["supplied_channel"] != sup.NOT_SUPPLIED, source["source_id"]
+        # `supplied_creator` may honestly remain not-supplied: many supplied
+        # items name a publisher without naming an author, and inventing one
+        # would be fabrication. Asserting it here would require exactly that.
+        assert type(source["supplied_creator"]) is str, source["source_id"]
 
 
 def test_gv7_i_006_the_two_locator_groups_partition_the_sources_exactly():
@@ -105,13 +220,27 @@ def test_gv7_i_007_every_present_normalized_locator_is_https_only_in_shape():
 
 
 def test_gv7_i_008_the_original_supplied_locator_form_is_always_retained():
+    """Verbatim means verbatim.
+
+    This control used to assert ``supplied_locator.strip() == supplied_locator``.
+    That is **withdrawn**: it required the one field that exists to be
+    un-normalised to already equal its own whitespace-canonical form, so the
+    only way to satisfy it was to store the stripped value -- destroying the
+    exact provenance the field exists to keep. Whitespace canonicality is a
+    property of ``normalized_locator`` alone.
+    """
     ledger = sup.require_ledger()
     for source in ledger["sources"]:
-        if source["supplied_locator"] is None:
-            continue
-        assert isinstance(source["supplied_locator"], str)
-        assert source["supplied_locator"].strip() == source["supplied_locator"]
         assert source["metadata_provenance"] in sup.METADATA_PROVENANCE
+        supplied = source["supplied_locator"]
+        normalized = source["normalized_locator"]
+        if supplied is None:
+            continue
+        assert type(supplied) is str and supplied
+        assert type(normalized) is str and normalized
+        # The normalized form -- and only the normalized form -- is canonical.
+        assert normalized.strip() == normalized, source["source_id"]
+        assert normalized.isascii(), source["source_id"]
 
 
 def test_gv7_i_009_no_source_has_been_retrieved_or_verified():
@@ -218,7 +347,7 @@ def test_gv7_i_016_every_source_carries_at_least_one_attributed_limited_claim():
         claims = by_source.get(source_id, [])
         assert claims, f"{source_id} carries no claim"
         for claim in claims:
-            assert claim["attribution_class"] in sup.ATTRIBUTION_CLASSES
+            assert claim["attribution_class"] in sup.CLAIM_ATTRIBUTION_CLASSES
             assert claim["limitations"], claim["claim_id"]
             assert claim["evidence_basis"], claim["claim_id"]
 
@@ -235,157 +364,282 @@ def test_gv7_i_017_relationships_and_unresolved_records_are_nonempty_and_unique(
         assert len(ids) == len(set(ids)), collection
 
 
-def test_gv7_i_018_the_bibliography_holds_every_source_identity_exactly_once():
-    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    for source_id in sup.ALL_SOURCE_IDS:
-        assert text.count(source_id) == 1, source_id
+# --------------------------------------------------------------------------
+# The bibliography. Accounting is structural: every value is parsed and
+# compared by equality. Substring counting cannot tell a locator from its own
+# prefix, cannot tell two sources that legitimately share one locator from a
+# duplicated rendering, and mis-reads a locator followed by punctuation.
+# --------------------------------------------------------------------------
 
 
-def locator_forms(source):
-    """The distinct recorded locator forms for one source, longest first."""
-    forms = []
-    for key in ("supplied_locator", "normalized_locator"):
-        value = source[key]
-        if value is not None and value not in forms:
-            forms.append(value)
-    forms.sort(key=len, reverse=True)
-    return forms
+def block_span(lines, source_id):
+    headings = [
+        (index, match.group(1))
+        for index, line in enumerate(lines)
+        if (match := HEADING_RE.match(line))
+    ]
+    for order, (index, found) in enumerate(headings):
+        if found == source_id:
+            end = headings[order + 1][0] if order + 1 < len(headings) else len(lines)
+            return index + 1, end
+    raise AssertionError(f"no heading line for {source_id}")
 
 
-def recorded_locator_union(ledger):
-    union = set()
-    for source in ledger["sources"]:
-        union.update(locator_forms(source))
-    return union
+def field_index(lines, source_id, label):
+    start, end = block_span(lines, source_id)
+    for index in range(start, end):
+        match = FIELD_RE.match(lines[index])
+        if match is not None and match.group(1) == label:
+            return index
+    raise AssertionError(f"no {label} line inside {source_id}")
 
 
-def test_gv7_i_019_the_bibliography_preserves_both_locator_forms_exactly_once():
-    """The supplied form is not optional. Normalisation never replaces it.
+def bibliography_text():
+    return sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
 
-    Testing only ``normalized_locator`` would let the original supplied string
-    be silently dropped or rewritten, which is precisely the provenance this
-    ledger exists to keep.
+
+def test_gv7_i_018_the_bibliography_renders_every_source_exactly_once():
+    """A heading is a whole line, so a cross-reference is not an entry."""
+    ledger = sup.require_ledger()
+    blocks, _preamble = parse_bibliography(bibliography_text())
+    rendered = [source_id for source_id, _lines in blocks]
+    assert sorted(rendered) == sorted(sup.ALL_SOURCE_IDS)
+    assert len(rendered) == len(set(rendered)) == len(ledger["sources"])
+
+
+def test_gv7_i_019_the_bibliography_preserves_both_locator_forms_exactly():
+    """Parsed and compared by equality, never by containment.
+
+    Containment is vacuous for the commonest normalisation: when the supplied
+    form is a substring of the normalized form -- ``example.invalid/a`` inside
+    ``https://example.invalid/a`` -- a rendering that prints only the normalized
+    URL satisfies every substring test while the supplied form is gone.
     """
     ledger = sup.require_ledger()
-    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    entries = bibliography_entries(text, ledger)
-    for source in ledger["sources"]:
-        forms = locator_forms(source)
-        if not forms:
-            continue
-        entry = entries[source["source_id"]]
-        for form in forms:
-            assert form in entry, (source["source_id"], form)
-        longest = forms[0]
-        assert entry.count(longest) == 1, (source["source_id"], "duplicated")
-        for form in forms[1:]:
-            # A shorter form nested inside the longer one is satisfied by that
-            # single occurrence; a standalone shorter form must appear once.
-            if form in longest:
-                continue
-            assert entry.count(form) == 1, (source["source_id"], form)
+    blocks, _preamble = parse_bibliography(bibliography_text())
+    by_id = {source["source_id"]: source for source in ledger["sources"]}
+    lines = bibliography_text().split("\n")
+    for source_id, _block in blocks:
+        source = by_id[source_id]
+        for label in sup.BIBLIOGRAPHY_FIELD_LABELS:
+            index = field_index(lines, source_id, label)
+            raw = FIELD_RE.match(lines[index]).group(2)
+            value = json.loads(raw)
+            assert value == source[label], (source_id, label)
+            assert value is None or type(value) is str, (source_id, label)
 
 
-def test_gv7_i_025_each_locator_form_is_rendered_in_exactly_one_entry():
+def test_gv7_i_020_no_url_like_material_appears_outside_a_locator_value():
     ledger = sup.require_ledger()
-    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    entries = bibliography_entries(text, ledger)
-    for form in sorted(recorded_locator_union(ledger)):
-        holders = [
-            source_id for source_id, entry in entries.items() if form in entry
-        ]
-        assert len(holders) == 1, (form, holders)
+    violations = bibliography_violations(bibliography_text(), ledger)
+    leaked = [item for item in violations if item[0].startswith("url-outside")]
+    assert not leaked, leaked
 
 
-def test_gv7_i_020_the_bibliography_fabricates_no_locator():
+def test_gv7_i_023_every_locatorless_entry_is_null_null_and_its_exact_token():
     ledger = sup.require_ledger()
-    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    union = recorded_locator_union(ledger)
-    rendered = set(re.findall(r"https?://[^\s)\]]+", text))
-    fabricated = {
-        value for value in rendered
-        if not any(value in form or form in value for form in union)
-    }
-    assert not fabricated, sorted(fabricated)
-
-
-def test_gv7_i_023_every_locatorless_source_shows_its_exact_absence_token():
-    """No tautology: the entry must carry the recorded token and no URL."""
-    ledger = sup.require_ledger()
-    text = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    entries = bibliography_entries(text, ledger)
+    lines = bibliography_text().split("\n")
     for source in ledger["sources"]:
         if source["supplied_locator"] is not None:
             continue
-        entry = entries[source["source_id"]]
-        token = source["locator_absence"]
-        assert token, source["source_id"]
-        assert token in entry, (source["source_id"], token)
-        assert "http://" not in entry and "https://" not in entry, source["source_id"]
+        source_id = source["source_id"]
+        values = {
+            label: json.loads(
+                FIELD_RE.match(lines[field_index(lines, source_id, label)]).group(2)
+            )
+            for label in sup.BIBLIOGRAPHY_FIELD_LABELS
+        }
+        assert values["supplied_locator"] is None, source_id
+        assert values["normalized_locator"] is None, source_id
+        assert values["locator_absence"] == source["locator_absence"], source_id
+        assert values["locator_absence"] in sup.LOCATOR_ABSENCE_REASONS, source_id
+        start, end = block_span(lines, source_id)
+        for line in lines[start:end]:
+            if FIELD_RE.match(line):
+                continue
+            assert not URL_LIKE_RE.search(line), (source_id, line)
 
 
-def test_gv7_i_024_the_bibliography_rules_reject_every_violating_rendering():
-    """Six negative controls. Each rule must actually fail on a bad rendering."""
+def test_gv7_i_025_shared_and_prefix_nested_locators_are_never_conflated():
+    """Sharing is not duplication, and a prefix is not the thing it prefixes."""
     ledger = sup.require_ledger()
-    good = sup.require_file(sup.BIBLIOGRAPHY_PATH, "BIBLIOGRAPHY.md")
-    entries = bibliography_entries(good, ledger)
-    union = recorded_locator_union(ledger)
+    lines = bibliography_text().split("\n")
+    for source in ledger["sources"]:
+        source_id = source["source_id"]
+        for label in ("supplied_locator", "normalized_locator"):
+            index = field_index(lines, source_id, label)
+            assert json.loads(FIELD_RE.match(lines[index]).group(2)) == source[label]
+    # Every recorded value is accounted for exactly as many times as it is
+    # recorded -- so two sources may share one locator, and each keeps it.
+    recorded, rendered = {}, {}
+    for source in ledger["sources"]:
+        for label in ("supplied_locator", "normalized_locator"):
+            value = source[label]
+            if value is None:
+                continue
+            recorded[(source["source_id"], label)] = value
+            index = field_index(lines, source["source_id"], label)
+            rendered[(source["source_id"], label)] = json.loads(
+                FIELD_RE.match(lines[index]).group(2)
+            )
+    assert rendered == recorded
 
-    with_locator = next(
-        s for s in ledger["sources"] if s["supplied_locator"] is not None
+
+def test_gv7_i_024_the_committed_bibliography_has_no_violation_at_all():
+    ledger = sup.require_ledger()
+    violations = bibliography_violations(bibliography_text(), ledger)
+    assert not violations, violations
+
+
+# --------------------------------------------------------------------------
+# The predicate itself, proved against a synthetic ledger and its exact
+# rendering. This control is implementation-independent and passes now: it is
+# what makes the controls above evidence rather than assertion.
+# --------------------------------------------------------------------------
+
+
+def synthetic_pair():
+    """A miniature ledger carrying every hazard the rules must survive."""
+    sources = [
+        # locatorless
+        {
+            "source_id": "GV7-SRC-0001",
+            "supplied_locator": None,
+            "normalized_locator": None,
+            "locator_absence": "no-exact-locator-supplied",
+        },
+        # supplied form differs from normalized ONLY by whitespace, and is a
+        # substring of it: the case a containment test cannot see.
+        {
+            "source_id": "GV7-SRC-0002",
+            "supplied_locator": "  example.invalid/a  ",
+            "normalized_locator": "https://example.invalid/a",
+            "locator_absence": None,
+        },
+        # SHARED with the source above, legitimately.
+        {
+            "source_id": "GV7-SRC-0003",
+            "supplied_locator": "https://example.invalid/a",
+            "normalized_locator": "https://example.invalid/a",
+            "locator_absence": None,
+        },
+        # PREFIX-NESTED: a strict extension of the shared value.
+        {
+            "source_id": "GV7-SRC-0004",
+            "supplied_locator": "https://example.invalid/ab",
+            "normalized_locator": "https://example.invalid/ab",
+            "locator_absence": None,
+        },
+        # PUNCTUATION and PARENTHESES inside the supplied form.
+        {
+            "source_id": "GV7-SRC-0005",
+            "supplied_locator": "(https://example.invalid/c).",
+            "normalized_locator": "https://example.invalid/c",
+            "locator_absence": None,
+        },
+    ]
+    ledger = {"sources": sources}
+    return ledger, render_bibliography(ledger)
+
+
+def test_gv7_i_026_the_bibliography_predicate_detects_every_named_fault():
+    """A checker that only refuses is broken; a checker that never refuses is
+    worse. Both halves are proved here, and every negative alters the PARSED
+    FIELD rather than demonstrating that ``str.replace`` replaced something.
+    """
+    ledger, good = synthetic_pair()
+    assert not bibliography_violations(good, ledger), "the exact rendering is clean"
+
+    def mutated(source_id, label, raw):
+        lines = good.split("\n")
+        index = field_index(lines, source_id, label)
+        before = lines[index]
+        lines[index] = f"- {label}: {raw}"
+        assert lines[index] != before, "the fixture changed nothing"
+        return "\n".join(lines)
+
+    def kinds(text):
+        return {kind for kind, _detail in bibliography_violations(text, ledger)}
+
+    # 1. the supplied form altered -- the substring survives, the value does not.
+    assert "supplied_locator-mismatch" in kinds(
+        mutated("GV7-SRC-0002", "supplied_locator", json.dumps("example.invalid/a"))
     )
-    absent_source = next(
-        s for s in ledger["sources"] if s["supplied_locator"] is None
+    # 2. a trailing slash: invisible to containment, fatal to equality.
+    assert "normalized_locator-mismatch" in kinds(
+        mutated(
+            "GV7-SRC-0003", "normalized_locator",
+            json.dumps("https://example.invalid/a/"),
+        )
     )
-    holder = with_locator["source_id"]
-    supplied = with_locator["supplied_locator"]
-    normalized = with_locator["normalized_locator"]
-
-    # (1) the supplied form is lost or altered.
-    damaged = entries[holder].replace(supplied, supplied + "-ALTERED", 1)
-    assert supplied not in damaged or damaged.count(supplied) == 0 or (
-        supplied + "-ALTERED" in damaged
-    ), "an altered supplied form must be detectable"
-    dropped = entries[holder].replace(supplied, "", 1)
-    assert supplied not in dropped or normalized is not None and supplied in (
-        normalized or ""
-    ), "a dropped supplied form must be detectable"
-
-    # (2) a distinct normalized form is lost or altered.
-    if normalized is not None and normalized != supplied:
-        lost = entries[holder].replace(normalized, "", 1)
-        assert normalized not in lost, "a dropped normalized form must be detectable"
-
-    # (3) duplicate locator rendering inside one entry.
-    duplicated_entry = entries[holder] + " " + (normalized or supplied)
-    assert duplicated_entry.count(normalized or supplied) > 1, (
-        "a duplicated locator must be detectable"
+    # 3. the prefix-nested value replaced by the value it extends.
+    assert "supplied_locator-mismatch" in kinds(
+        mutated(
+            "GV7-SRC-0004", "supplied_locator",
+            json.dumps("https://example.invalid/a"),
+        )
     )
-
-    # (4) a fabricated locator anywhere in the file.
-    fabricated_text = good + "\nhttps://synthetic.invalid/fabricated"
-    rendered = set(re.findall(r"https?://[^\s)\]]+", fabricated_text))
-    fabricated = {
-        value for value in rendered
-        if not any(value in form or form in value for form in union)
-    }
-    assert fabricated, "a fabricated URL must be detectable"
-
-    # (5) a missing absence token.
-    stripped = good.replace(absent_source["locator_absence"], "", 1)
-    bad_entries = bibliography_entries(stripped, ledger)
-    assert absent_source["locator_absence"] not in bad_entries[
-        absent_source["source_id"]
-    ], "a missing absence token must be detectable"
-
-    # (6) a URL added to a locatorless entry.
-    polluted = entries[absent_source["source_id"]] + " https://synthetic.invalid/x"
-    assert "https://" in polluted, (
-        "a URL in a locatorless entry must be detectable"
+    # 4. a locator value moved onto another source's entry.
+    assert "supplied_locator-mismatch" in kinds(
+        mutated(
+            "GV7-SRC-0005", "supplied_locator",
+            json.dumps("https://example.invalid/ab"),
+        )
     )
-
-    # (7) a duplicated identity.
-    duplicated_file = good + chr(10) + entries[sup.ALL_SOURCE_IDS[0]]
-    assert duplicated_file.count(sup.ALL_SOURCE_IDS[0]) > 1, (
-        "a duplicated identity must be detectable"
+    # 5. the field line dropped entirely.
+    lines = good.split("\n")
+    del lines[field_index(lines, "GV7-SRC-0002", "normalized_locator")]
+    assert "normalized_locator-not-once" in kinds("\n".join(lines))
+    # 6. the field line duplicated inside one entry.
+    lines = good.split("\n")
+    index = field_index(lines, "GV7-SRC-0002", "supplied_locator")
+    lines.insert(index, lines[index])
+    assert "supplied_locator-not-once" in kinds("\n".join(lines))
+    # 7. a non-scalar value.
+    assert "supplied_locator-not-a-scalar" in kinds(
+        mutated("GV7-SRC-0002", "supplied_locator", '["a"]')
     )
+    # 8. an unparsable value.
+    assert "supplied_locator-unparsable" in kinds(
+        mutated("GV7-SRC-0002", "supplied_locator", "https://example.invalid/a")
+    )
+    # 9. the absence token removed from the locatorless entry.
+    assert "locator_absence-mismatch" in kinds(
+        mutated("GV7-SRC-0001", "locator_absence", "null")
+    )
+    # 10. a URL added to the locatorless entry, in prose.
+    lines = good.split("\n")
+    start, _end = block_span(lines, "GV7-SRC-0001")
+    lines.insert(start, "see https://example.invalid/fabricated for details")
+    assert "url-outside-labelled-field" in kinds("\n".join(lines))
+    # 11. a fabricated URL in the preamble, extending a real locator -- the
+    #     class a containment test rescues and therefore never flags.
+    assert "url-outside-entry" in kinds(
+        "https://example.invalid/aXXX\n" + good
+    )
+    # 12. a bare-host truncation of a real locator, also in prose.
+    assert "url-outside-entry" in kinds("https://example.invalid\n" + good)
+    # 13. a duplicated heading.
+    lines = good.split("\n")
+    start, end = block_span(lines, "GV7-SRC-0003")
+    duplicate = ["### GV7-SRC-0003"] + lines[start:end]
+    assert "heading-not-once" in kinds("\n".join(lines + duplicate))
+    # 14. a removed heading.
+    lines = good.split("\n")
+    start, end = block_span(lines, "GV7-SRC-0004")
+    assert "source-absent" in kinds("\n".join(lines[: start - 1] + lines[end:]))
+    # 15. an added identity nobody recorded.
+    assert "source-added" in kinds(good + "\n### GV7-SRC-0099\n")
+    # 16. the pairing rule broken inside the bibliography itself.
+    assert "absence-pairing" in kinds(
+        mutated("GV7-SRC-0003", "locator_absence", json.dumps("locator-not-applicable"))
+    )
+    assert "locator-pairing" in kinds(
+        mutated("GV7-SRC-0003", "normalized_locator", "null")
+    )
+    # 17. an absence token outside the closed vocabulary.
+    assert "absence-token-invalid" in kinds(
+        mutated("GV7-SRC-0001", "locator_absence", json.dumps("because-i-said-so"))
+    )
+    # And the shared value is NOT reported: sharing is lawful.
+    assert not bibliography_violations(good, ledger)

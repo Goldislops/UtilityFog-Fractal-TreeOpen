@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import re
 import sys
@@ -24,37 +25,27 @@ import pytest
 
 from experiments.general_v7_ledger.tests import _support as sup
 
+def _ids(letter, *spans):
+    numbers = []
+    for low, high in spans:
+        numbers.extend(range(low, high + 1))
+    return tuple(f"GV7-{letter}-{number:03d}" for number in numbers)
+
+
+#: Gaps are deliberate and are explained in ``sup.RETIRED_CONTROLS``. A retired
+#: id is never reused and never renumbered: an auditor reading an earlier
+#: handback must be able to look up what ``GV7-S-040`` was and find that it was
+#: withdrawn, not find a different control wearing its name.
 AUTHORED_CONTROLS = {
-    "test_contract.py": tuple(f"GV7-D-{n:03d}" for n in range(1, 29)),
-    "test_ledger_structure.py": tuple(f"GV7-S-{n:03d}" for n in range(1, 47)),
-    "test_inventory.py": tuple(f"GV7-I-{n:03d}" for n in range(1, 26)),
-    "test_provenance.py": tuple(f"GV7-P-{n:03d}" for n in range(1, 27)),
-    "test_controls_manifest.py": tuple(f"GV7-M-{n:03d}" for n in range(1, 23)),
+    "test_contract.py": _ids("D", (1, 39)),
+    "test_ledger_structure.py": _ids("S", (1, 37), (43, 44), (46, 69)),
+    "test_inventory.py": _ids("I", (1, 26)),
+    "test_provenance.py": _ids("P", (1, 26)),
+    "test_controls_manifest.py": _ids("M", (1, 25)),
 }
 
-#: This phase authors contract and tests only. None of these may be created here.
-FORBIDDEN_IMPLEMENTATION_PATHS = (
-    "__init__.py",
-    "schema.py",
-    "validate.py",
-    "ledger.json",
-    "BIBLIOGRAPHY.md",
-    "INTAKE_REPORT.md",
-    "README.md",
-)
-
-APPROVED_LABORATORY_PATHS = frozenset(
-    {
-        "CONTRACT.md",
-        "tests/__init__.py",
-        "tests/_support.py",
-        "tests/test_contract.py",
-        "tests/test_ledger_structure.py",
-        "tests/test_inventory.py",
-        "tests/test_provenance.py",
-        "tests/test_controls_manifest.py",
-    }
-)
+#: Paths that belong to no admissible state, in either phase.
+NEVER_AUTHORIZED_PATHS = ("records", ".gitattributes")
 
 #: Roots the acceptance suite itself may import.
 SUITE_ALLOWED_IMPORTS = frozenset(
@@ -71,6 +62,7 @@ SUITE_ALLOWED_IMPORTS = frozenset(
         "subprocess",
         "sys",
         "pytest",
+        "ntpath",
     }
 )
 
@@ -84,14 +76,50 @@ def control_id_of(function_name: str) -> str | None:
     return f"GV7-{match.group(1).upper()}-{match.group(2)}"
 
 
+def top_level_functions(module: ast.Module):
+    return [
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
 def control_ids_in_source(source: str) -> set[str]:
-    found: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            control_id = control_id_of(node.name)
-            if control_id is not None:
-                found.add(control_id)
-    return found
+    """Only TOP-LEVEL definitions count, because only those are collected.
+
+    ``ast.walk`` recurses into function and class bodies, so a control id on a
+    nested ``def`` used to satisfy the manifest while pytest never collected
+    it. A duplicate id in one module is likewise a fault: the second definition
+    shadows the first at runtime, the first never runs, and a set-based census
+    cannot see the difference.
+    """
+    module = ast.parse(source)
+    seen: list[str] = []
+    for node in top_level_functions(module):
+        control_id = control_id_of(node.name)
+        if control_id is not None:
+            seen.append(control_id)
+    assert len(seen) == len(set(seen)), f"duplicate control id in one module: {seen}"
+
+    top_level = set(top_level_functions(module))
+    for node in ast.walk(module):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node in top_level:
+            continue
+        assert control_id_of(node.name) is None, (
+            f"control id on a definition pytest will never collect: {node.name}"
+        )
+    return set(seen)
+
+
+def undeclared_test_functions(source: str) -> list[str]:
+    """Collected ``test_*`` functions carrying no control id at all."""
+    return sorted(
+        node.name
+        for node in top_level_functions(ast.parse(source))
+        if node.name.startswith("test_") and control_id_of(node.name) is None
+    )
 
 
 def suite_modules() -> dict[str, pathlib.Path]:
@@ -105,6 +133,11 @@ def suite_modules() -> dict[str, pathlib.Path]:
 def test_gv7_m_001_every_declared_control_exists_in_its_declared_module():
     modules = suite_modules()
     assert modules, "the manifest scan examined nothing"
+    # The module set is closed too: an entire unlisted module full of tests
+    # would otherwise be invisible to a manifest that iterates the manifest.
+    assert set(AUTHORED_CONTROLS) == set(modules), sorted(
+        set(AUTHORED_CONTROLS) ^ set(modules)
+    )
     for filename, declared in sorted(AUTHORED_CONTROLS.items()):
         path = modules.get(filename)
         assert path is not None, f"declared module missing: {filename}"
@@ -117,10 +150,15 @@ def test_gv7_m_002_every_control_in_the_suite_is_declared_in_the_manifest():
     modules = suite_modules()
     assert modules, "the manifest scan examined nothing"
     for filename, path in sorted(modules.items()):
+        source = path.read_text(encoding="utf-8")
         declared = set(AUTHORED_CONTROLS.get(filename, ()))
-        present = control_ids_in_source(path.read_text(encoding="utf-8"))
+        present = control_ids_in_source(source)
         undeclared = sorted(present - declared)
         assert not undeclared, f"{filename}: present but undeclared {undeclared}"
+        # A collected test with no control id contributes no id to either side
+        # and would slip through the set arithmetic entirely.
+        anonymous = undeclared_test_functions(source)
+        assert not anonymous, f"{filename}: collected test with no id {anonymous}"
 
 
 def test_gv7_m_003_no_declared_control_id_is_duplicated():
@@ -130,28 +168,82 @@ def test_gv7_m_003_no_declared_control_id_is_duplicated():
     assert len(seen) == len(set(seen))
 
 
-def test_gv7_m_004_no_control_is_skipped_or_marked_expected_failure():
-    modules = suite_modules()
+BANNED_MARKS = frozenset({"skip", "skipif", "xfail"})
+BANNED_CALLS = frozenset({"skip", "xfail", "importorskip", "exit"})
+
+
+def test_gv7_m_004_nothing_in_the_suite_can_skip_or_expect_failure():
+    """Decorators were the only shape the old scan could see.
+
+    A runtime ``pytest.skip(...)`` call and a module-level ``pytestmark`` are
+    the two shapes reached for under pressure, and both were invisible. So was
+    a bare ``@skip`` imported by name. The scan now covers every ``.py`` file
+    in the suite, not only ``test_*`` -- ``_support.py`` could have called
+    ``pytest.skip(allow_module_level=True)`` and silenced everything.
+    """
+    modules = {path.name: path for path in sorted(sup.TESTS_DIR.glob("*.py"))}
     assert modules, "the marker scan examined nothing"
-    banned = {"skip", "skipif", "xfail"}
     for filename, path in sorted(modules.items()):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            for target in targets:
+                assert getattr(target, "id", None) != "pytestmark", filename
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                for sub in ast.walk(decorator):
-                    if isinstance(sub, ast.Attribute):
-                        assert sub.attr not in banned, (filename, node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for decorator in node.decorator_list:
+                    for element in ast.walk(decorator):
+                        label = getattr(element, "attr", None) or getattr(
+                            element, "id", None
+                        )
+                        assert label not in BANNED_MARKS, (filename, node.name, label)
+            if isinstance(node, ast.Call):
+                label = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None)
+                )
+                assert label not in BANNED_CALLS, (filename, label)
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "pytest"
+            ):
+                for alias in node.names:
+                    assert alias.name not in BANNED_MARKS | BANNED_CALLS, (
+                        filename,
+                        alias.name,
+                    )
 
 
-def test_gv7_m_005_this_phase_created_no_implementation_file():
-    for name in FORBIDDEN_IMPLEMENTATION_PATHS:
-        assert not (sup.LAB_DIR / name).exists(), (
-            f"this phase must not create {name}"
-        )
-    assert not (sup.LAB_DIR / "records").exists()
-    assert not (sup.LAB_DIR / ".gitattributes").exists()
+def test_gv7_m_005_the_implementation_surface_is_absent_or_complete():
+    """Never a partial surface -- and never an assertion that it stays absent.
+
+    The old control asserted every implementation file was missing, so it could
+    only be made green by deleting it. It also used ``Path.exists()``, which
+    swallows ``PermissionError`` into a bare ``False``: a present-but-unreadable
+    ``schema.py`` read as "this phase created nothing", the exact false green
+    that CONTRACT.md section 12 and ``GV7-M-013``..``GV7-M-022`` exist to
+    eliminate. Both defects are gone. Git history carries the evidence that the
+    controls preceded the implementation.
+    """
+    present = [
+        name
+        for name in sup.IMPLEMENTATION_PATHS
+        if not sup.entry_is_absent(sup.LAB_DIR / name)
+    ]
+    missing = [
+        name
+        for name in sup.IMPLEMENTATION_PATHS
+        if sup.entry_is_absent(sup.LAB_DIR / name)
+    ]
+    assert not present or not missing, (
+        f"partial implementation surface: present={present} absent={missing}"
+    )
+    for name in NEVER_AUTHORIZED_PATHS:
+        assert sup.entry_is_absent(sup.LAB_DIR / name), name
 
 
 def test_gv7_m_006_the_tests_directory_holds_only_test_code_and_helpers():
@@ -167,16 +259,13 @@ def test_gv7_m_006_the_tests_directory_holds_only_test_code_and_helpers():
         ), entry.name
 
 
-def test_gv7_m_007_the_laboratory_contains_exactly_the_approved_paths():
-    present = {
-        path.relative_to(sup.LAB_DIR).as_posix()
-        for path in sup.LAB_DIR.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    }
+def test_gv7_m_007_the_laboratory_is_in_one_of_the_two_admissible_states():
+    """Exactly two states, and nothing else -- including no extra path."""
+    assert sup.entry_is_absent(sup.LAB_DIR) is False, "a loud failure on a bad root"
+    present = sup.laboratory_file_names()
     assert present, "the path scan examined nothing"
-    assert present == APPROVED_LABORATORY_PATHS, sorted(
-        present ^ APPROVED_LABORATORY_PATHS
-    )
+    state = sup.laboratory_state(present)
+    assert state in sup.ADMISSIBLE_STATES, state
 
 
 def test_gv7_m_008_the_suite_imports_only_its_declared_allowance():
@@ -309,13 +398,22 @@ def test_gv7_m_015_a_malformed_ledger_propagates_a_parse_error(tmp_path):
     # A different mechanism, not a second syntax fault: the integer-conversion
     # digit limit raises a plain ``ValueError``. ``JSONDecodeError`` subclasses
     # ``ValueError``, so the base class alone would collapse the two together.
-    oversized = tmp_path / "oversized.json"
-    oversized.write_text('{"n": ' + "9" * 6000 + "}", encoding="utf-8")
-    with pytest.raises(ValueError) as excinfo:
-        sup.load_json_file(oversized, "oversized.json")
-    assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
-    assert not isinstance(excinfo.value, json.JSONDecodeError)
-    assert "digits" in str(excinfo.value)
+    # The digit limit is an interpreter setting, and `0` disables it. Pin it
+    # for the probe and restore it, exactly as GV7-S-017 does, so this control
+    # cannot pass or fail for a reason outside the suite.
+    original = sys.get_int_max_str_digits()
+    try:
+        if original == 0:
+            sys.set_int_max_str_digits(4300)
+        digits = sys.get_int_max_str_digits() + 64
+        oversized = tmp_path / "oversized.json"
+        oversized.write_text('{"n": ' + "9" * digits + "}", encoding="utf-8")
+        with pytest.raises(ValueError) as excinfo:
+            sup.load_json_file(oversized, "oversized.json")
+        assert sup.IMPLEMENTATION_ABSENT not in str(excinfo.value)
+        assert not isinstance(excinfo.value, json.JSONDecodeError)
+    finally:
+        sys.set_int_max_str_digits(original)
 
 
 def test_gv7_m_016_missing_import_broken_and_malformed_stay_distinguishable(
@@ -589,3 +687,105 @@ def test_gv7_m_022_an_imported_module_must_be_the_entry_that_was_inspected(
         assert "identity divergence" in str(excinfo.value)
     finally:
         sys.modules.pop(name, None)
+
+
+def test_gv7_m_023_the_two_state_classifier_refuses_every_other_shape():
+    """Proved on synthetic path sets, so the real directory need not be wrong.
+
+    Fourteen partial surfaces, an unrelated extra path in both states, and a
+    missing Phase-A file. Without this, ``GV7-M-005`` and ``GV7-M-007`` would
+    be single observations of a directory that happens to be correct.
+    """
+    phase_a = frozenset(sup.PHASE_A_PATHS)
+    implementation = frozenset(sup.IMPLEMENTATION_PATHS)
+
+    assert sup.laboratory_state(phase_a) == sup.PRE_IMPLEMENTATION_STATE
+    assert (
+        sup.laboratory_state(phase_a | implementation) == sup.IMPLEMENTED_STATE
+    )
+
+    for name in sorted(implementation):
+        partial_up = sup.laboratory_state(phase_a | {name})
+        assert partial_up.startswith("invalid: partial"), (name, partial_up)
+        partial_down = sup.laboratory_state((phase_a | implementation) - {name})
+        assert partial_down.startswith("invalid: partial"), (name, partial_down)
+
+    for base in (phase_a, phase_a | implementation):
+        stray = sup.laboratory_state(base | {"scratch_notes.md"})
+        assert stray.startswith("invalid: unrelated"), stray
+        nested = sup.laboratory_state(base | {"records/keep.json"})
+        assert nested.startswith("invalid: unrelated"), nested
+
+    for name in sorted(phase_a):
+        hole = sup.laboratory_state(phase_a - {name})
+        assert hole.startswith("invalid: phase-A"), (name, hole)
+
+    assert not set(sup.PHASE_A_PATHS) & set(sup.IMPLEMENTATION_PATHS)
+    assert len(sup.ADMISSIBLE_STATES) == 2
+
+
+def test_gv7_m_024_the_collection_environment_is_disclosed_not_assumed(request):
+    """A disclosure, not an exclusion.
+
+    This suite cannot see a ``conftest.py`` in a parent directory, and a
+    control asserting one does not exist would claim a fact it cannot
+    establish. What it *can* establish is what actually loaded and what is
+    actually in effect, and that every collected item reached the run
+    unmarked. Configuration above the laboratory stays a human-audit item, and
+    CONTRACT.md section 12 says so.
+    """
+    config = request.config
+    assert config.getini("addopts") == [], config.getini("addopts")
+    assert not os.environ.get("PYTEST_ADDOPTS"), os.environ.get("PYTEST_ADDOPTS")
+
+    loaded = sorted(
+        name
+        for name, module in list(sys.modules.items())
+        if module is not None
+        and getattr(module, "__file__", None)
+        and pathlib.Path(module.__file__).name == "conftest.py"
+    )
+    assert not loaded, f"conftest modules loaded: {loaded}"
+
+    # Marks injected after a static scan are only visible on the items.
+    for item in request.session.items:
+        offending = sorted(
+            mark.name
+            for mark in item.iter_markers()
+            if mark.name in BANNED_MARKS
+        )
+        assert not offending, (item.nodeid, offending)
+
+
+def test_gv7_m_025_the_manifest_equals_what_pytest_actually_collected(request):
+    """The census is reconciled against the run, not only against the source.
+
+    A nested definition is not collected and an id-less test carries no id, so
+    this single control closes both gaps behaviourally, whatever the AST scan
+    may have missed.
+    """
+    collected: dict[str, set[str]] = {}
+    for item in request.session.items:
+        control_id = control_id_of(item.name.split("[")[0])
+        if control_id is None:
+            continue
+        collected.setdefault(pathlib.Path(str(item.path)).name, set()).add(control_id)
+
+    # Compared per module, so selecting a subset of files does not turn this
+    # into a false failure about the files that were never asked for.
+    assert collected, "no control was collected"
+    for filename, ids in sorted(collected.items()):
+        declared = set(AUTHORED_CONTROLS.get(filename, ()))
+        assert ids == declared, (filename, sorted(ids ^ declared))
+    if set(collected) == set(AUTHORED_CONTROLS):
+        every = {cid for values in AUTHORED_CONTROLS.values() for cid in values}
+        assert set().union(*collected.values()) == every
+
+    # A retired id is never reused and never reappears in a module.
+    retired = set(sup.RETIRED_CONTROLS)
+    assert not retired & declared, sorted(retired & declared)
+    for path in sorted(sup.TESTS_DIR.glob("test_*.py")):
+        present = control_ids_in_source(path.read_text(encoding="utf-8"))
+        assert not retired & present, (path.name, sorted(retired & present))
+    for reason in sup.RETIRED_CONTROLS.values():
+        assert reason and len(reason) > 20

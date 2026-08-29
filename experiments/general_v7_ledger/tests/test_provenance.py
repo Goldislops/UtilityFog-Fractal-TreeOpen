@@ -66,10 +66,40 @@ PAST_TENSE = re.compile(
 )
 
 
+def refuse(schema, payload, token):
+    """The same hygiene the structural controls apply.
+
+    A bare ``pytest.raises`` skips the chaining, marker-absence and
+    closed-vocabulary checks, so a refusal that leaked a rejected value or
+    chained its cause would pass unnoticed.
+    """
+    with pytest.raises(schema.LedgerError) as excinfo:
+        schema.validate_ledger(payload)
+    error = excinfo.value
+    assert error.token == token, (token, error.token)
+    assert error.token in schema.REFUSAL_TOKENS
+    rendered = str(error)
+    for marker in sup.MARKERS:
+        assert marker not in rendered
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+    return error
+
+
+def altered(ledger, collection, field, value, index=0):
+    payload = json.loads(json.dumps(ledger))
+    payload[collection][index][field] = value
+    return payload
+
+
 def operational_hits(obj):
-    """(path, shape-name) for every offending string leaf. Never the value."""
+    """(path, shape-name) for every offending string node. Never the value.
+
+    Walks ``string_nodes``, which yields mapping KEYS as well as values: a
+    payload hidden in a key was previously invisible to this screen.
+    """
     found = []
-    for path, value in sup.string_leaves(obj):
+    for path, value in sup.string_nodes(obj):
         for name, shape in OPERATIONAL_SHAPES:
             if shape.search(value):
                 found.append((path, name))
@@ -113,7 +143,7 @@ def test_gv7_p_003_every_claim_remains_unverified():
 def test_gv7_p_004_every_claim_carries_class_basis_limitation_and_dispositions():
     ledger = sup.require_ledger()
     for claim in ledger["claims"]:
-        assert claim["attribution_class"] in sup.ATTRIBUTION_CLASSES
+        assert claim["attribution_class"] in sup.CLAIM_ATTRIBUTION_CLASSES
         assert isinstance(claim["evidence_basis"], str) and claim["evidence_basis"]
         assert isinstance(claim["limitations"], list) and claim["limitations"]
         for limitation in claim["limitations"]:
@@ -121,16 +151,22 @@ def test_gv7_p_004_every_claim_carries_class_basis_limitation_and_dispositions()
         assert_dispositions(claim["safety_dispositions"], claim["claim_id"])
 
 
-def test_gv7_p_005_the_eleven_attribution_classes_remain_distinct_and_closed():
+def test_gv7_p_005_the_attribution_vocabularies_are_closed_and_layered():
+    """Eleven reserved, ten usable, and the difference is enforced."""
     schema = sup.require_schema()
     assert tuple(schema.ATTRIBUTION_CLASSES) == sup.ATTRIBUTION_CLASSES
+    assert tuple(schema.CLAIM_ATTRIBUTION_CLASSES) == sup.CLAIM_ATTRIBUTION_CLASSES
+    assert tuple(schema.RELATIONSHIP_ATTRIBUTION_CLASSES) == (
+        sup.RELATIONSHIP_ATTRIBUTION_CLASSES
+    )
     assert len(set(sup.ATTRIBUTION_CLASSES)) == 11
+    assert len(set(sup.CLAIM_ATTRIBUTION_CLASSES)) == 10
     ledger = sup.require_ledger()
-    payload = json.loads(json.dumps(ledger))
-    payload["claims"][0]["attribution_class"] = "aura-summary-verified"
-    with pytest.raises(schema.LedgerError) as excinfo:
-        schema.validate_ledger(payload)
-    assert excinfo.value.token == "enum-value-invalid"
+    refuse(
+        schema,
+        altered(ledger, "claims", "attribution_class", "aura-summary-verified"),
+        "enum-value-invalid",
+    )
 
 
 def test_gv7_p_006_a_past_tense_aura_implementation_claim_is_not_evidence():
@@ -145,12 +181,30 @@ def test_gv7_p_006_a_past_tense_aura_implementation_claim_is_not_evidence():
         assert claim["limitations"], claim["claim_id"]
 
 
-def test_gv7_p_007_no_claim_is_recorded_as_verified_implementation_evidence():
+def test_gv7_p_007_the_validator_refuses_verified_implementation_evidence():
+    """An audit of the committed data is not enforcement.
+
+    This control used to scan ``ledger.json`` only, so a ledger produced by any
+    other process could carry the token on every claim and still validate. The
+    exclusion is now refused by the validator, in both positions that exist.
+    """
+    schema = sup.require_schema()
     ledger = sup.require_ledger()
+    reserved = "verified-implementation-evidence"
     for claim in ledger["claims"]:
-        assert claim["attribution_class"] != "verified-implementation-evidence", (
+        assert claim["attribution_class"] != reserved, (
             "nothing in this corpus has been independently reproduced"
         )
+    refuse(
+        schema,
+        altered(ledger, "claims", "attribution_class", reserved),
+        "enum-value-invalid",
+    )
+    refuse(
+        schema,
+        altered(ledger, "relationships", "attribution_class", reserved),
+        "enum-value-invalid",
+    )
 
 
 def test_gv7_p_008_duplicate_and_conflicting_material_is_cross_referenced():
@@ -186,34 +240,32 @@ def test_gv7_p_009_corrections_are_additive_and_never_remove_their_target():
 def test_gv7_p_010_no_record_can_be_promoted_by_schema_mutation():
     schema = sup.require_schema()
     ledger = sup.require_ledger()
+    # One exact token, not a choice of two: a loose assertion cannot tell a
+    # closed vocabulary from a special-cased state check.
     for field, value in (
         ("verification_state", "identity-verified"),
         ("verification_state", "independently-reproduced"),
         ("retrieval_state", "retrieved"),
     ):
-        payload = json.loads(json.dumps(ledger))
-        payload["sources"][0][field] = value
-        with pytest.raises(schema.LedgerError) as excinfo:
-            schema.validate_ledger(payload)
-        assert excinfo.value.token in ("enum-value-invalid", "state-not-permitted")
-    payload = json.loads(json.dumps(ledger))
-    payload["claims"][0]["verification_state"] = "claim-source-matched"
-    with pytest.raises(schema.LedgerError) as excinfo:
-        schema.validate_ledger(payload)
-    assert excinfo.value.token in ("enum-value-invalid", "state-not-permitted")
+        refuse(schema, altered(ledger, "sources", field, value), "enum-value-invalid")
+    refuse(
+        schema,
+        altered(ledger, "claims", "verification_state", "claim-source-matched"),
+        "enum-value-invalid",
+    )
 
 
 def test_gv7_p_011_no_v6_verification_state_can_be_inherited():
     schema = sup.require_schema()
     ledger = sup.require_ledger()
     blob = json.dumps(ledger)
+    folded = blob.casefold()
     for token in ("SR-A-", "SR-B-", "SR-X-", "uap-v6", "UAP V6", "source-record-v1"):
-        assert token not in blob, token
+        assert token.casefold() not in folded, token
     payload = json.loads(blob)
     payload["sources"][0]["batch_ref"] = "SR-A-MSG-0001"
-    with pytest.raises(schema.LedgerError) as excinfo:
-        schema.validate_ledger(payload)
-    assert excinfo.value.token in ("identifier-malformed", "reference-not-found")
+    error = refuse(schema, payload, "identifier-malformed")
+    assert "SR-A-MSG-0001" not in str(error)
 
 
 def test_gv7_p_012_every_artifact_records_its_full_preservation_metadata():
@@ -242,11 +294,9 @@ def test_gv7_p_013_no_artifact_can_be_marked_executable_or_authorizing():
         ("preservation_status", "adopted"),
         ("artifact_class", "authorization"),
     ):
-        payload = json.loads(json.dumps(ledger))
-        payload["artifacts"][0][field] = value
-        with pytest.raises(schema.LedgerError) as excinfo:
-            schema.validate_ledger(payload)
-        assert excinfo.value.token == "enum-value-invalid"
+        refuse(
+            schema, altered(ledger, "artifacts", field, value), "enum-value-invalid"
+        )
 
 
 def test_gv7_p_014_quarantined_material_carries_a_quarantine_disposition():
@@ -290,10 +340,13 @@ def test_gv7_p_017_every_unresolved_record_states_positions_without_adjudicating
         for ref in record["refs"]:
             assert ref in known, ref
         assert set(record) == sup.UNRESOLVED_KEYS
-        for key in record:
-            assert "correct" not in key
-            assert "winner" not in key
-            assert "resolved_position" not in key
+    # Run the neutrality screen over the PRODUCTION key set. Over the record's
+    # own keys it was dead code: the line above already pins them to a constant
+    # that contains none of these fragments, so the loop could never fail.
+    schema = sup.require_schema()
+    for key in schema.KEYS_BY_COLLECTION["unresolved"]:
+        for fragment in ("correct", "winner", "resolved_position", "verdict"):
+            assert fragment not in key, (key, fragment)
 
 
 def test_gv7_p_018_no_unresolved_vocabulary_token_can_adjudicate():
@@ -301,11 +354,11 @@ def test_gv7_p_018_no_unresolved_vocabulary_token_can_adjudicate():
     assert tuple(schema.UNRESOLVED_STATES) == sup.UNRESOLVED_STATES
     assert sup.UNRESOLVED_STATES == ("unresolved",)
     ledger = sup.require_ledger()
-    payload = json.loads(json.dumps(ledger))
-    payload["unresolved"][0]["resolution_state"] = "resolved"
-    with pytest.raises(schema.LedgerError) as excinfo:
-        schema.validate_ledger(payload)
-    assert excinfo.value.token == "enum-value-invalid"
+    refuse(
+        schema,
+        altered(ledger, "unresolved", "resolution_state", "resolved"),
+        "enum-value-invalid",
+    )
 
 
 def test_gv7_p_019_the_ox_alpha_versus_qwen_identity_conflict_is_recorded_unresolved():
@@ -333,13 +386,24 @@ def test_gv7_p_020_scientific_analogy_overreach_is_recorded_not_endorsed():
         assert claim["attribution_class"] != "verified-implementation-evidence"
 
 
-def test_gv7_p_021_no_validator_can_retrieve_open_or_contact_a_locator():
+def test_gv7_p_021_a_retrieval_call_name_tripwire_over_the_production_modules():
+    """A tripwire, not a detector, and it does not claim otherwise.
+
+    A call-name scan cannot establish the absence of networking: an alias, a
+    bound attribute, a dispatch table, or one level of helper indirection
+    defeats it. **What establishes the rule is GV7-S-028's import allowlist.**
+    This scan only makes the obvious form loud.
+
+    The generic names ``get``, ``run``, ``post`` and ``request`` are excluded:
+    they match ``dict.get`` and unrelated methods, and a screen that fires on
+    ``record.get("supplied_locator")`` in a schema full of nullable fields is a
+    screen every reader learns to ignore.
+    """
     import ast
 
-    for name in ("schema.py", "validate.py"):
+    for name in sup.PRODUCTION_MODULES:
         text = sup.require_file(sup.LAB_DIR / name, name)
-        tree = ast.parse(text)
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(text)):
             if not isinstance(node, ast.Call):
                 continue
             target = node.func
@@ -348,11 +412,7 @@ def test_gv7_p_021_no_validator_can_retrieve_open_or_contact_a_locator():
                 if isinstance(target, ast.Attribute)
                 else getattr(target, "id", None)
             )
-            assert label not in (
-                "urlopen", "urlretrieve", "request", "get", "post",
-                "connect", "create_connection", "getaddrinfo", "Popen", "run",
-                "system", "__import__", "import_module", "eval", "exec",
-            ), (name, label)
+            assert label not in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, (name, label)
 
 
 def test_gv7_p_022_every_source_records_limitations_and_dispositions():
@@ -402,6 +462,12 @@ def test_gv7_p_024_the_screen_rejects_synthetic_operational_payloads():
     hits = operational_hits(nested)
     assert hits
     assert hits[0][0] == ("claims", 0, "claim_text")
+    # A payload hidden in a mapping KEY. ``string_leaves`` walks values only and
+    # would not have seen this at all.
+    keyed = {'api_key = "SYNTHETIC-NOT-A-REAL-KEY-000000"': "harmless"}
+    key_hits = operational_hits(keyed)
+    assert key_hits, "a payload in a key must be screened too"
+    assert any("<key>" in path for path, _name in key_hits)
 
 
 def test_gv7_p_025_a_relationship_is_visibly_unverified_and_never_promotes():
@@ -436,11 +502,11 @@ def test_gv7_p_026_a_historical_kev_authorization_is_not_runtime_authority():
     assert "kev-authorization" in sup.ATTRIBUTION_CLASSES
     for retired in sup.RETIRED_ATTRIBUTION_CLASSES:
         assert retired not in tuple(schema.ATTRIBUTION_CLASSES), retired
-        payload = json.loads(json.dumps(ledger))
-        payload["claims"][0]["attribution_class"] = retired
-        with pytest.raises(schema.LedgerError) as excinfo:
-            schema.validate_ledger(payload)
-        assert excinfo.value.token == "enum-value-invalid"
+        refuse(
+            schema,
+            altered(ledger, "claims", "attribution_class", retired),
+            "enum-value-invalid",
+        )
     # A recorded authorization is still an unverified, limited claim, and it
     # confers no capability on this or any later run.
     for claim in ledger["claims"]:
