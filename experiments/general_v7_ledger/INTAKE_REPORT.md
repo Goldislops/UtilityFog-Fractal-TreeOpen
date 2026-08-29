@@ -7,6 +7,8 @@ attachment, video, transcript or external material was consulted, copied,
 paraphrased or inferred from. Nothing below is evidence about any real
 person, product, organization, research or event.
 
+**This synthetic calibration material is not merge-authorized.**
+
 ## Identity
 
     schema        source-record-v3

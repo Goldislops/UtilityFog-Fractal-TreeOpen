@@ -1,5 +1,7 @@
 # Bibliography
 
+**Synthetic calibration material. This bibliography is not merge-authorized.**
+
 ### GV7-SRC-0001
 - supplied_locator: null
 - normalized_locator: null
