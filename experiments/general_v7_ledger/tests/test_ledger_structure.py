@@ -47,6 +47,49 @@ class HookedStr(str):
         return str.__len__(self)
 
 
+#: A module-level log, so a hostile class needs no attribute of its own and
+#: the probe cannot be defeated by the very interception it is testing.
+class MetaclassHookLog:
+    hits = []
+
+
+class MroInterceptingMeta(type):
+    """Intercepts ``__mro__`` and raises.
+
+    A validator that decides the root's type by reading ``type(payload).__mro__``
+    calls this, and the ``RuntimeError`` escapes the closed refusal vocabulary.
+    """
+
+    def __getattribute__(cls, name):
+        if name == "__mro__":
+            MetaclassHookLog.hits.append(("raising", name))
+            raise RuntimeError("synthetic metaclass hook")
+        return type.__getattribute__(cls, name)
+
+
+class MroForgingMeta(type):
+    """Intercepts ``__mro__`` and lies, without raising.
+
+    The quieter half of the same defect: a value that is not a mapping at all
+    reports an MRO containing ``dict``, and is then refused as a mapping
+    subclass with the wrong token.
+    """
+
+    def __getattribute__(cls, name):
+        if name == "__mro__":
+            MetaclassHookLog.hits.append(("forging", name))
+            return (dict,)
+        return type.__getattribute__(cls, name)
+
+
+class HostileRaisingRoot(metaclass=MroInterceptingMeta):
+    pass
+
+
+class HostileForgingRoot(metaclass=MroForgingMeta):
+    pass
+
+
 class HookedDict(dict):
     def __init__(self, *args, **kwargs):
         dict.__init__(self, *args, **kwargs)
@@ -158,6 +201,45 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
     assert not hostile.hooks, hostile.hooks
     for wrong in ([], (), "", 0, None):
         refuse(schema, wrong, "root-not-object")
+
+    # A hostile METACLASS. Deciding the root's type by reading an attribute of
+    # its class -- ``__mro__``, ``__bases__``, ``__class__`` -- hands control
+    # to the metaclass at the exact moment the validator is deciding whether
+    # to trust the object. The metaclass may raise, and the raw exception then
+    # escapes the closed refusal vocabulary; or it may return a forged answer,
+    # and a value that is not a mapping is refused as a mapping subclass with
+    # the wrong token. Neither is admissible. The exact type identity alone
+    # decides, so the hook must never be reached at all.
+    for hostile_root in (HostileRaisingRoot(), HostileForgingRoot()):
+        # (a) nothing raw escapes the closed vocabulary.
+        MetaclassHookLog.hits.clear()
+        try:
+            schema.validate_ledger(hostile_root)
+        except schema.LedgerError:
+            escaped = None
+        except BaseException as error:  # noqa: BLE001 - the probe records a class
+            escaped = type(error).__name__
+        else:
+            escaped = "no refusal at all"
+        assert escaped is None, f"a raw {escaped} escaped the refusal vocabulary"
+
+        # (b) the refusal is exactly root-not-object, with the usual hygiene.
+        MetaclassHookLog.hits.clear()
+        refuse(schema, hostile_root, "root-not-object")
+
+        # (c) the metaclass hook was never invoked, on either attempt.
+        assert not MetaclassHookLog.hits, MetaclassHookLog.hits
+
+    # The hooks are real: unguarded, each one fires exactly as the defect
+    # predicts, so a passing control cannot be an inert fixture.
+    MetaclassHookLog.hits.clear()
+    with pytest.raises(RuntimeError):
+        dict in type(HostileRaisingRoot()).__mro__  # noqa: B015 - the read is the probe
+    assert MetaclassHookLog.hits == [("raising", "__mro__")]
+    MetaclassHookLog.hits.clear()
+    assert dict in type(HostileForgingRoot()).__mro__, "the forged MRO must lie"
+    assert MetaclassHookLog.hits == [("forging", "__mro__")]
+    MetaclassHookLog.hits.clear()
 
 
 def test_gv7_s_006_hostile_subclasses_are_refused_before_any_hook_runs():

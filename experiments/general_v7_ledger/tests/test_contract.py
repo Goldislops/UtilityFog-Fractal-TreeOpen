@@ -547,9 +547,9 @@ def test_gv7_d_034_the_contract_freezes_refusal_order_classes_and_exit_codes():
         "lexical and path-entry checks",
         "the byte ceiling, over captured bytes",
         "JSON parsing, including the duplicate-key refusal",
-        "exact builtin types",
+        "exact builtin types, and document-wide string encodability",
         "closed key sets and closed shapes",
-        "scalar bounds, and string encodability",
+        "identifiers, closed enum vocabularies, and scalar bounds",
         "references, reciprocity, and domain rules",
         "canonical inventory rules",
         "`schema.LedgerError` is the single refusal base",
@@ -558,12 +558,27 @@ def test_gv7_d_034_the_contract_freezes_refusal_order_classes_and_exit_codes():
         "None of the three is a subclass of another",
         "A refusal writes nothing to standard output",
         "exactly one line** to standard error",
+        "Encodability is a stage-4 rule",
         "`ensure_ascii=True` is load-bearing",
         "string-not-encodable",
         "any claim that it does is withdrawn",
+        "The stage is fixed by a document that carries two faults at once",
+        "runs with the exact types, at **stage 4**",
+        "only the stage decides which one the operator is told about",
         "written through `sys.stdout.buffer`, never through `print`",
+        # The exact-type rule is a stage-4 rule too, and it must survive a
+        # hostile metaclass. GV7-S-005 is its behavioural counterpart.
+        "before any hook on **its class or its metaclass** can run",
+        "A type decision is never made by reading an attribute of the class",
+        "hands control to attacker code",
+        "a raw exception then escapes the closed refusal vocabulary",
+        "return a forged answer",
+        "read through a primitive the metaclass cannot intercept",
     ):
         assert_phrase(text, statement)
+    # The withdrawn stage-6 placement must not survive anywhere in the text.
+    assert "stage-6 rule" not in flat(text)
+    assert "surrogate code point at stage 6" not in flat(text)
 
 
 def test_gv7_d_035_the_contract_freezes_windows_path_safety_precisely():
