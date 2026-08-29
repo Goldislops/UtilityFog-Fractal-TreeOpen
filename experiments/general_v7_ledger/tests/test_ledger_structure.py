@@ -1105,6 +1105,18 @@ VOCABULARY_NAMES = (
 
 SCALAR_NAMES = ("LABEL_MAX", "TEXT_MAX", "LIST_MAX", "ROOT_COLLECTION_MAX")
 
+#: Exempt from the SUBSTRING promotion sweep only. The frozen-equality check
+#: above still covers every vocabulary, this one included.
+#:
+#: A conflict-family label names an unresolved topic, not a verdict on it.
+#: ``immutable-raw-provenance-versus-raw-deletion`` contains ``provenance``,
+#: whose first six characters are the forbidden fragment ``proven`` -- so a
+#: substring sweep reads a dispute *about* provenance as a claim that
+#: something has been proven. It is neither: the label records that the
+#: question is open. ``GV7-D-014`` already excludes this vocabulary for the
+#: same reason, and this restores the two to agreement.
+PROMOTION_SWEEP_EXEMPT = ("CONFLICT_FAMILIES",)
+
 
 def test_gv7_s_052_the_production_vocabularies_are_the_frozen_vocabularies():
     """Otherwise a validator whose ROLES quietly gained a value passes."""
@@ -1120,8 +1132,11 @@ def test_gv7_s_052_the_production_vocabularies_are_the_frozen_vocabularies():
     assert frozenset(schema.ROOT_KEYS) == sup.ROOT_KEYS
     assert schema.ID_PATTERN == sup.ID_PATTERN
     assert schema.NOT_SUPPLIED == sup.NOT_SUPPLIED
-    # The production vocabularies carry no promoting token either.
+    # The production vocabularies carry no promoting token either, except
+    # where a substring sweep cannot tell a topic label from an assertion.
     for name in VOCABULARY_NAMES:
+        if name in PROMOTION_SWEEP_EXEMPT:
+            continue
         for token in getattr(schema, name):
             for fragment in sup.FORBIDDEN_PROMOTION_FRAGMENTS:
                 assert fragment not in token, (name, token, fragment)
