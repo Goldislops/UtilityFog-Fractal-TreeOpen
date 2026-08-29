@@ -410,56 +410,447 @@ def test_gv7_s_004_every_nested_block_key_set_is_closed_and_exact():
     refuse(schema, hostile, "undeclared-key")
 
 
-def frozen_root_decision(source: str):
-    """The two decision expressions of ``validate_ledger``, or ``None``.
+#: The frozen root decision, as an executable BLOCK. Correction 4 compared only
+#: the two test EXPRESSIONS, which a dead compliant-looking nested ``if``
+#: followed by a real classifier satisfied while the module actually decided by
+#: an identity scan over ``type.mro(...)``. Matching the block structurally
+#: closes that: the comparison is ``ast.dump`` against this template, so an
+#: empty ``else``, an exact statement count, the absence of ``pass`` or a
+#: conditional expression, and the two exact refusal calls are all enforced at
+#: once, by one equality.
+FROZEN_ROOT_BLOCK = (
+    "if type({parameter}) is not dict:\n"
+    "    if issubclass(type({parameter}), dict):\n"
+    "        _refuse('type-not-exact')\n"
+    "    _refuse('root-not-object')\n"
+)
 
-    A whitelist of one shape. A fixture set is a deny-list over the routes
-    somebody thought of, and this project has already ruled that a deny-list is
-    not a detector: ``type.__getattribute__(type(p), "__bases__")``, an identity
-    scan over ``type(p).mro()``, ``type(p) in dict.__subclasses__()`` and
-    duck-typing on ``keys`` all evade any fixture set that does not name them.
-    Reading the shape out of the source refuses every one of them at once.
+
+def _is_core_reexport(statement):
+    """True for exactly ``validate_ledger = _core.validate_ledger``."""
+    import ast
+
+    target = statement.targets[0]
+    value = statement.value
+    return (
+        isinstance(target, ast.Name)
+        and target.id == "validate_ledger"
+        and isinstance(value, ast.Attribute)
+        and value.attr == "validate_ledger"
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "_core"
+    )
+
+
+def frozen_root_decision(sources):
+    """``(parameter, defect)`` for the sole production ``validate_ledger``.
+
+    ``sources`` maps a production module name to its source text. Exactly one
+    definition may exist across all of them, and the frozen block must be the
+    **first executable statement** after an optional docstring -- so a
+    classifier running before it, or an extra decision statement inside it, is
+    refused rather than tolerated alongside a compliant-looking shape.
     """
     import ast
 
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.FunctionDef) or node.name != "validate_ledger":
+    found = []
+    module_scope = []
+    rebindings = []
+    raising_refuse = []
+    for name, source in sorted(sources.items()):
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "validate_ledger"
+            ):
+                found.append((name, node))
+            # `_refuse` must actually raise. A `_refuse` that returns leaves
+            # both calls falling through, and whatever follows the block does
+            # the deciding -- a conforming block that is simply dead.
+            if isinstance(node, ast.FunctionDef) and node.name == "_refuse":
+                raising_refuse.append(
+                    any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
+                )
+        for statement in tree.body:
+            if (
+                isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and statement.name == "validate_ledger"
+            ):
+                module_scope.append(statement)
+        # Any module-scope REBINDING of the name replaces whatever the def
+        # produced, so the block below it is no longer what the module exports.
+        #
+        # ONE shape is permitted, and only in a module that does not define it:
+        # `validate_ledger = _core.validate_ledger`, the surfaces' re-export of
+        # the core's own attribute. It can substitute nothing -- it names the
+        # attribute of the module the frozen block lives in.
+        for statement in tree.body:
+            targets = []
+            if isinstance(statement, ast.Assign):
+                if len(statement.targets) == 1 and _is_core_reexport(statement):
+                    continue
+                targets = statement.targets
+            elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+                targets = [statement.target]
+            elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+                for alias in statement.names:
+                    if (alias.asname or alias.name) == "validate_ledger":
+                        rebindings.append("import")
+            for target in targets:
+                for inner in ast.walk(target):
+                    if isinstance(inner, ast.Name) and inner.id == "validate_ledger":
+                        rebindings.append(type(statement).__name__)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.NamedExpr) and getattr(
+                node.target, "id", None
+            ) == "validate_ledger":
+                rebindings.append("NamedExpr")
+
+    if len(found) != 1:
+        return None, f"expected exactly one validate_ledger, found {len(found)}"
+    if len(module_scope) != 1:
+        return None, (
+            "validate_ledger is not a single module-scope definition "
+            f"(found {len(module_scope)} at module scope)"
+        )
+    defining = {name for name, node in found}
+    for name, source in sorted(sources.items()):
+        if name not in defining:
             continue
-        if not node.args.args:
-            return None
-        parameter = node.args.args[0].arg
-        for statement in node.body:
-            if not isinstance(statement, ast.If):
-                continue
-            if ast.unparse(statement.test) != f"type({parameter}) is not dict":
-                continue
-            nested = [s for s in statement.body if isinstance(s, ast.If)]
-            if len(nested) != 1:
-                return None
-            return (
-                ast.unparse(statement.test),
-                ast.unparse(nested[0].test),
-                parameter,
-            )
-    return None
+        for statement in ast.parse(source).body:
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                if _is_core_reexport(statement):
+                    rebindings.append("re-export-in-the-defining-module")
+    if rebindings:
+        return None, f"validate_ledger is rebound after definition: {rebindings}"
+    if not raising_refuse or not all(raising_refuse):
+        return None, "the refusal helper `_refuse` does not raise"
+
+    _module, function = found[0]
+    # A decorator can wrap the function, or replace it outright, leaving the
+    # frozen block below it dead -- the same defect shape as a dead nested
+    # `if`. None is permitted.
+    if function.decorator_list:
+        return None, "validate_ledger carries a decorator"
+    if isinstance(function, ast.AsyncFunctionDef):
+        return None, "validate_ledger is async"
+    arguments = function.args
+    if (
+        len(arguments.args) != 1
+        or arguments.posonlyargs
+        or arguments.kwonlyargs
+        or arguments.vararg
+        or arguments.kwarg
+        or arguments.defaults
+        or arguments.kw_defaults
+    ):
+        return None, "validate_ledger does not take exactly one plain parameter"
+    parameter = arguments.args[0].arg
+
+    body = list(function.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if not body:
+        return None, "validate_ledger has no executable statement"
+
+    expected = ast.parse(FROZEN_ROOT_BLOCK.format(parameter=parameter)).body[0]
+    if ast.dump(body[0]) != ast.dump(expected):
+        return None, "the first executable statement is not the frozen block"
+    return parameter, None
+
+
+#: Jack's reproduced counterexample heads this list. The first several were
+#: ACCEPTED by the Correction 4 expression matcher; the later ones close routes
+#: found while correcting it, and some of those the older matcher would itself
+#: have refused. The claim is deliberately not "every one of these".
+FROZEN_BLOCK_NEGATIVE_FIXTURES = (
+    (
+        "a dead compliant nested if, with a real classifier after it",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            pass\n"
+        "        lineage = type.mro(type(payload))\n"
+        "        return (\n"
+        "            'type-not-exact'\n"
+        "            if any(base is dict for base in lineage)\n"
+        "            else 'root-not-object'\n"
+        "        )\n"
+        "    return 'accepted'\n",
+    ),
+    (
+        "an extra decision statement inside the outer body",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a pass in the nested body",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            pass\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "an else on the outer if",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "    else:\n"
+        "        return 'accepted'\n",
+    ),
+    (
+        "an else on the nested if",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        else:\n"
+        "            _refuse('root-not-object')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a classifier running before the block",
+        "def validate_ledger(payload):\n"
+        "    verdict = any(b is dict for b in type.mro(type(payload)))\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "two validate_ledger definitions",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "def validate_ledger(payload):\n"
+        "    return 'accepted'\n",
+    ),
+    (
+        "the wrong refusal token in the nested body",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('root-not-object')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "isinstance in place of the frozen subtype decision",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if isinstance(payload, dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a __bases__ read in place of the frozen subtype decision",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if dict in type(payload).__bases__:\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a conforming def nested in a factory, with the name bound elsewhere",
+        "def _factory():\n"
+        "    def validate_ledger(payload):\n"
+        "        if type(payload) is not dict:\n"
+        "            if issubclass(type(payload), dict):\n"
+        "                _refuse('type-not-exact')\n"
+        "            _refuse('root-not-object')\n"
+        "    return validate_ledger\n"
+        "\n"
+        "\n"
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n"
+        "\n"
+        "\n"
+        "validate_ledger = _hostile\n",
+    ),
+    (
+        "a re-export in the module that defines it",
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n"
+        "\n"
+        "\n"
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "validate_ledger = _core.validate_ledger\n",
+    ),
+    (
+        "a re-export from something other than _core",
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n"
+        "\n"
+        "\n"
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "validate_ledger = _elsewhere.validate_ledger\n",
+    ),
+    (
+        "a conforming def immediately rebound at module scope",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n"
+        "\n"
+        "\n"
+        "validate_ledger = _real\n",
+    ),
+    (
+        "a conforming def rebound to a lambda",
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n"
+        "\n"
+        "\n"
+        "validate_ledger = lambda payload: payload\n",
+    ),
+    (
+        "a conforming def behind a module-scope condition",
+        "if _FLAG:\n"
+        "    def validate_ledger(payload):\n"
+        "        if type(payload) is not dict:\n"
+        "            if issubclass(type(payload), dict):\n"
+        "                _refuse('type-not-exact')\n"
+        "            _refuse('root-not-object')\n"
+        "\n"
+        "\n"
+        "def _refuse(token):\n"
+        "    raise LedgerError(token)\n",
+    ),
+    (
+        "a `_refuse` that returns instead of raising",
+        "def _refuse(token):\n"
+        "    return token\n"
+        "\n"
+        "\n"
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n"
+        "    return any(b is dict for b in type.mro(type(payload)))\n",
+    ),
+    (
+        "a decorator that could wrap or replace the function",
+        "@wrapper\n"
+        "def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "an async definition",
+        "async def validate_ledger(payload):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a second parameter with a default",
+        "def validate_ledger(payload, mode=1):\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+    (
+        "a nested definition shadowing the real one",
+        "def validate_ledger(payload):\n"
+        "    def validate_ledger(other):\n"
+        "        return 'accepted'\n"
+        "    if type(payload) is not dict:\n"
+        "        if issubclass(type(payload), dict):\n"
+        "            _refuse('type-not-exact')\n"
+        "        _refuse('root-not-object')\n",
+    ),
+)
+
+FROZEN_BLOCK_POSITIVE_FIXTURE = (
+    "def _refuse(token):\n"
+    "    raise LedgerError(token)\n"
+    "\n"
+    "\n"
+    "def validate_ledger(payload):\n"
+    '    """A docstring is permitted before the block."""\n'
+    "    if type(payload) is not dict:\n"
+    "        if issubclass(type(payload), dict):\n"
+    "            _refuse('type-not-exact')\n"
+    "        _refuse('root-not-object')\n"
+    "    return payload\n"
+)
 
 
 def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
     schema = sup.require_schema()
     ledger = sup.require_ledger()
 
-    # The mechanism itself, pinned by source shape. Exactly one production
-    # module may define `validate_ledger`, and its root decision must be the
-    # frozen two expressions -- nothing else, however it behaves.
-    decisions = [
-        found
-        for name in sup.PRODUCTION_MODULES
-        if (found := frozen_root_decision(sup.require_file(sup.LAB_DIR / name, name)))
-    ]
-    assert len(decisions) == 1, decisions
-    outer, inner, parameter = decisions[0]
-    assert outer == f"type({parameter}) is not dict", outer
-    assert inner == f"issubclass(type({parameter}), dict)", inner
+    # The mechanism itself, pinned by source shape: one module-scope,
+    # undecorated `validate_ledger`, never rebound, whose first executable
+    # statement is the frozen block, with a `_refuse` that really raises.
+    # The matcher discriminates, proved on self-contained fixtures before it is
+    # pointed at anything. The first fixture is the shape that defeated the
+    # Correction 4 expression matcher: a dead compliant-looking nested `if`
+    # with the real classifier after it.
+    parameter, defect = frozen_root_decision(
+        {"schema.py": FROZEN_BLOCK_POSITIVE_FIXTURE}
+    )
+    assert defect is None, defect
+    assert parameter == "payload", parameter
+    for label, fixture in FROZEN_BLOCK_NEGATIVE_FIXTURES:
+        found, found_defect = frozen_root_decision({"schema.py": fixture})
+        assert found is None, f"{label}: accepted"
+        assert found_defect, label
+
+    # The executable block itself, in the production source.
+    parameter, defect = frozen_root_decision(
+        {
+            name: sup.require_file(sup.LAB_DIR / name, name)
+            for name in sup.PRODUCTION_MODULES
+        }
+    )
+    assert defect is None, defect
+    assert parameter, parameter
     hostile = HookedDict(ledger)
     hostile.hooks.clear()
     refuse(schema, hostile, "type-not-exact")
@@ -988,35 +1379,102 @@ def test_gv7_s_027_no_timestamp_or_environment_value_appears_in_the_output(capsy
         assert fragment not in out
 
 
+def sys_bindings(tree):
+    """Every AST node that BINDS the name ``sys``, with a label.
+
+    Correction 4 verified the *spelling* ``sys`` and never that the name still
+    referred to the imported module, so ``sys = Decoy()`` followed by
+    ``sys.modules[...]`` passed as a conforming self-binding.
+
+    This enumerates the binding forms **named below** -- it is not a proof that
+    no other form exists. ``match`` capture patterns were missing from an
+    earlier version of this list and rebound ``sys`` undetected, which is
+    exactly why the claim here is an enumeration and not an absolute.
+    """
+    import ast
+
+    bindings = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "sys":
+            if isinstance(node.ctx, ast.Store):
+                bindings.append(("assigned", node))
+            elif isinstance(node.ctx, ast.Del):
+                bindings.append(("deleted", node))
+        elif isinstance(node, ast.arg) and node.arg == "sys":
+            bindings.append(("parameter", node))
+        elif isinstance(node, ast.ExceptHandler) and node.name == "sys":
+            bindings.append(("exception-target", node))
+        elif isinstance(node, ast.MatchAs) and node.name == "sys":
+            bindings.append(("match-capture", node))
+        elif isinstance(node, ast.MatchStar) and node.name == "sys":
+            bindings.append(("match-star", node))
+        elif isinstance(node, ast.MatchMapping) and node.rest == "sys":
+            bindings.append(("match-mapping-rest", node))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and "sys" in node.names:
+            bindings.append(("global-or-nonlocal", node))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == "sys":
+                bindings.append(("shadowing-definition", node))
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname == "sys":
+                    bindings.append(("aliased-import", node))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                # `from os import sys` binds the name with no alias at all.
+                if (alias.asname or alias.name) == "sys":
+                    bindings.append(("from-import-of-the-name", node))
+    return bindings
+
+
 def sys_modules_findings(source: str):
     """``(conforming, violations)`` for one production module's source.
 
-    The frozen form is: receiver the syntactically unaliased name ``sys``,
-    attribute exactly ``modules``, key a constant string equal to the package's
-    own dotted name. Anything else -- an aliased ``sys``, a
-    ``from sys import modules``, a computed key, another literal key, a bare
-    ``sys.modules`` reference, a ``getattr`` indirection -- is a violation.
+    The frozen shape pins the **binding** as well as the spelling: one
+    module-scope ``import sys`` with no alias, no later rebinding of that name
+    by any of the **enumerated** forms, and -- in the two surfaces -- exactly one
+    module-scope ``_core = sys.modules[...]`` assignment. The enumeration is a
+    list of named forms, not a proof that no other exists; ``match`` captures
+    and a plain ``from x import sys`` were each missing from an earlier version
+    of it, and the residual is disclosed rather than asserted away. A conforming-looking subscript
+    nested in a function or sitting in dead code does not count toward it.
+
+    **This pins the direct static production shape and nothing more.** It does
+    not prove that no runtime mutation could occur, it is not an absolute
+    behavioural impossibility, and the separate human audit remains required.
     """
     import ast
 
     tree = ast.parse(source)
     violations = []
-    conforming = 0
+
+    # -- the name `sys` must be the imported module, and must stay it ---------
+    module_scope_imports = [
+        alias
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "sys"
+    ]
+    unaliased = [alias for alias in module_scope_imports if alias.asname is None]
+    uses_sys = any(
+        isinstance(node, ast.Name) and node.id == "sys" for node in ast.walk(tree)
+    )
+    if uses_sys and (len(module_scope_imports) != 1 or len(unaliased) != 1):
+        violations.append(
+            ("sys-not-one-module-scope-unaliased-import", len(module_scope_imports))
+        )
+    for label, _node in sys_bindings(tree):
+        violations.append((f"sys-rebound-{label}", "sys"))
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
+        if isinstance(node, ast.ImportFrom) and (node.module or "") == "sys":
             for alias in node.names:
-                if alias.name == "sys" and alias.asname is not None:
-                    violations.append(("sys-imported-under-an-alias", alias.asname))
-        elif isinstance(node, ast.ImportFrom):
-            if (node.module or "") == "sys":
-                for alias in node.names:
-                    # Only `modules` -- and a star import, which brings it in
-                    # unnamed. `from sys import stdout` is required elsewhere by
-                    # the byte-level emission rule and must stay legal.
-                    if alias.name in ("modules", "*"):
-                        violations.append(("from-sys-import-modules", alias.name))
+                if alias.name in ("modules", "*"):
+                    violations.append(("from-sys-import-modules", alias.name))
 
+    # -- every `sys.modules[...]` subscript, classified -----------------------
+    conforming_nodes = []
     examined = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Subscript):
@@ -1038,14 +1496,11 @@ def sys_modules_findings(source: str):
             violations.append(("wrong-subscript-key", key.value))
             continue
         if not isinstance(node.ctx, ast.Load):
-            # Layer 3 permits OBTAINING the core. Writing or deleting the entry
-            # is the opposite of obtaining it, and must never be scored as the
-            # one permitted self-binding.
             violations.append(
                 ("modules-entry-written-or-deleted", type(node.ctx).__name__)
             )
             continue
-        conforming += 1
+        conforming_nodes.append(node)
 
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Attribute) and node.attr == "modules"):
@@ -1064,13 +1519,11 @@ def sys_modules_findings(source: str):
             second = node.args[1]
             if isinstance(second, ast.Constant) and second.value == "modules":
                 violations.append(("getattr-indirection-to-modules", "getattr"))
-        # `vars(sys)` hands back the same mapping without ever naming it.
         if label == "vars" and node.args:
             first = node.args[0]
             if isinstance(first, ast.Name) and first.id == "sys":
                 violations.append(("vars-indirection-to-the-module-table", "vars"))
 
-    # `sys.__dict__` is that same table by another attribute.
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -1079,8 +1532,61 @@ def sys_modules_findings(source: str):
             and node.value.id == "sys"
         ):
             violations.append(("dunder-dict-indirection", "sys.__dict__"))
+        # `sys.__getattribute__("modules")` names the route in source.
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__getattribute__"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "sys"
+        ):
+            violations.append(
+                ("dunder-getattribute-indirection", "sys.__getattribute__")
+            )
+        # `globals()["sys"] = ...` and `vars()["sys"] = ...` rebind the name
+        # without ever writing a Name node for it.
+        if (
+            isinstance(node, ast.Subscript)
+            and not isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) in ("globals", "vars")
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value == "sys"
+        ):
+            violations.append(
+                ("sys-rebound-through-the-namespace-mapping",
+                 getattr(node.value.func, "id", "?"))
+            )
 
-    return conforming, violations
+    # -- only a MODULE-SCOPE `_core = <conforming subscript>` counts ----------
+    permitted = set()
+    core_targets = 0
+    for statement in tree.body:
+        for node in ast.walk(statement) if isinstance(
+            statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)
+        ) else ():
+            if isinstance(node, ast.Name) and node.id == "_core" and isinstance(
+                node.ctx, ast.Store
+            ):
+                core_targets += 1
+    if core_targets > 1:
+        violations.append(("core-rebound-at-module-scope", core_targets))
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+            continue
+        target = statement.targets[0]
+        if not (isinstance(target, ast.Name) and target.id == "_core"):
+            continue
+        if any(statement.value is node for node in conforming_nodes):
+            permitted.add(id(statement.value))
+    for node in conforming_nodes:
+        if id(node) not in permitted:
+            violations.append(
+                (
+                    "self-binding-outside-the-permitted-module-scope-assignment",
+                    "not `_core = sys.modules[...]` at module scope",
+                )
+            )
+    return len(permitted), violations
 
 
 #: Self-contained fixtures. Each must be rejected; none touches the filesystem.
@@ -1111,6 +1617,40 @@ SYS_MODULES_NEGATIVE_FIXTURES = (
      "import sys\ndel sys.modules['experiments.general_v7_ledger']\n"),
     ("a star import from sys",
      "from sys import *\n_c = modules['experiments.general_v7_ledger']\n"),
+    # Correction 5. Every one of these was ACCEPTED before: the scanner
+    # verified the SPELLING `sys`, never that it was still the module.
+    ("sys rebound to a decoy object",
+     "import sys\n\n\nclass Decoy:\n    modules = {'experiments.general_v7_ledger': object()}\n\n\nsys = Decoy()\n_core = sys.modules['experiments.general_v7_ledger']\n"),
+    ("sys deleted and rebound",
+     "import sys\n\ndel sys\nsys = 1\n_core = sys.modules['experiments.general_v7_ledger']\n"),
+    ("a conforming subscript inside a function",
+     "import sys\n\n\ndef bind():\n    return sys.modules['experiments.general_v7_ledger']\n"),
+    ("a conforming subscript in dead code",
+     "import sys\n\nif False:\n    _core = sys.modules['experiments.general_v7_ledger']\n"),
+    ("a conforming subscript assigned to another target",
+     "import sys\n\n_elsewhere = sys.modules['experiments.general_v7_ledger']\n"),
+    ("two sys imports",
+     "import sys\nimport sys\n\n_core = sys.modules['experiments.general_v7_ledger']\n"),
+    ("sys bound by a plain from-import",
+     "import sys\n\nfrom os import sys\n"),
+    ("sys bound by a match capture pattern",
+     "import sys\n\nmatch object():\n    case sys:\n        pass\n"),
+    ("sys bound by a match star pattern",
+     "import sys\n\nmatch [1]:\n    case [*sys]:\n        pass\n"),
+    ("sys bound by a match mapping rest",
+     "import sys\n\nmatch {}:\n    case {**sys}:\n        pass\n"),
+    ("sys rebound through globals()",
+     "import sys\n\nglobals()['sys'] = 1\n"),
+    ("sys rebound through vars()",
+     "import sys\n\nvars()['sys'] = 1\n"),
+    ("a sys.__getattribute__ indirection",
+     "import sys\n\n_c = sys.__getattribute__('modules')['experiments.general_v7_ledger']\n"),
+    ("_core reassigned after the permitted binding",
+     "import sys\n\n_core = sys.modules['experiments.general_v7_ledger']\n_core = object()\n"),
+    ("sys bound as a with-target",
+     "import sys\n\nwith open('x') as sys:\n    pass\n"),
+    ("sys bound by a walrus",
+     "import sys\n\n_v = (sys := 1)\n"),
 )
 
 #: DISCLOSED RESIDUAL. A scan over names cannot close rebinding in
@@ -1132,7 +1672,7 @@ SYS_MODULES_PERMITTED_FIXTURES = (
 )
 
 SYS_MODULES_POSITIVE_FIXTURE = (
-    "import sys\n_core = sys.modules['experiments.general_v7_ledger']\n"
+    "import sys\n\n_core = sys.modules['experiments.general_v7_ledger']\n"
 )
 
 
@@ -1159,9 +1699,12 @@ def test_gv7_s_028_no_production_module_imports_outside_its_allowance():
     assert conforming == 1, conforming
     assert violations == [], violations
     for label, fixture in SYS_MODULES_NEGATIVE_FIXTURES:
-        found_conforming, found_violations = sys_modules_findings(fixture)
+        _found_conforming, found_violations = sys_modules_findings(fixture)
+        # A violation is what refuses the module. Some shapes carry a
+        # conforming-LOOKING subscript together with a fatal binding fault --
+        # `sys = Decoy()` is exactly that -- so the count alone is not the
+        # rejection signal and asserting it here would be wrong.
         assert found_violations, f"{label}: not rejected"
-        assert found_conforming == 0, (label, found_conforming)
     for label, fixture in SYS_MODULES_PERMITTED_FIXTURES:
         found_conforming, found_violations = sys_modules_findings(fixture)
         assert not found_violations, (label, found_violations)

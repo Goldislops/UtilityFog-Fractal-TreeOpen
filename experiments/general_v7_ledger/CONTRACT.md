@@ -689,17 +689,53 @@ subclass and is refused `type-not-exact`; every other root is refused
 `root-not-object`. **No hook supplied on the object, on its class, or on its
 metaclass runs at any point in that decision.**
 
-**The mechanism is pinned by source shape, not by hostile fixtures alone.** A
-fixture set is a **deny-list over the routes somebody thought of**, and a
-deny-list is not a detector: `type.__getattribute__(type(payload), "__bases__")`,
-an identity scan over `type(payload).mro()`, `type(payload) in
-dict.__subclasses__()` and duck-typing on `keys` each evade any fixture set that
-does not happen to name them. The acceptance surface therefore reads the two
-decision expressions out of the production source and requires them to be
-**exactly** `type(<parameter>) is not dict` and
-`issubclass(type(<parameter>), dict)`. That is a **whitelist of one shape**, and
-every non-conformant form fails it by construction. The hostile fixtures remain
-as defence in depth and as evidence that the shape behaves as claimed.
+**The mechanism is pinned by the executable decision BLOCK, not by hostile
+fixtures and not by its expressions alone.** A fixture set is a **deny-list over
+the routes somebody thought of**, and a deny-list is not a detector:
+`type.__getattribute__(type(payload), "__bases__")`, an identity scan over
+`type(payload).mro()`, `type(payload) in dict.__subclasses__()` and duck-typing
+on `keys` each evade any fixture set that does not happen to name them.
+
+**Matching only the two decision expressions was also insufficient, and that
+claim is withdrawn.** It accepted a source whose nested `if` was compliant but
+**dead** — its body a bare `pass` — with the real classification performed by an
+identity scan over `type.mro(...)` immediately afterwards. Two correct
+expressions in a block that decides nothing are not the mechanism.
+
+The acceptance surface therefore requires that the **sole** production
+`validate_ledger` definition carries, as the **first executable statement after
+an optional docstring**, a block structurally identical to:
+
+    if type(<parameter>) is not dict:
+        if issubclass(type(<parameter>), dict):
+            _refuse("type-not-exact")
+        _refuse("root-not-object")
+
+exactly — the outer test, an **empty** outer `else`, an outer body of **exactly
+those two statements**, the nested test, a nested body of **exactly**
+`_refuse("type-not-exact")`, an **empty** nested `else`, and the second call.
+No `pass`, no decoy condition, no conditional expression, no additional decision
+statement and no alternate classifier may appear inside it, and no classifier
+may run before it. The definition itself carries **no decorator** — a decorator
+can wrap the function or replace it outright, leaving the block below it dead in
+the same way a dead nested `if` does — is a plain `def` rather than `async`, and
+takes **exactly one plain positional parameter**.
+
+**What is pinned is the exported binding, not merely a `def` statement.** A
+conforming block is worth nothing if the module does not run it, so the
+definition must be a **single module-scope** one — not nested in a factory, not
+a class method, not behind a module-scope condition — and the name must **not be rebound afterwards** by assignment, annotated or
+augmented assignment, a named expression, or an import. **One shape is
+permitted, and only in a module that does not define it**:
+`validate_ledger = _core.validate_ledger`, by which a surface re-exports the
+core's own attribute. It can substitute nothing, because it names the attribute
+of the very module the frozen block lives in; the defining module may not carry
+it. A conforming block followed by
+`validate_ledger = _real` is the Correction 4 defeat pattern moved one scope
+outward, and is refused. **`_refuse` must itself raise**: a `_refuse` that
+returns leaves both calls falling through and hands the decision to whatever
+follows the block, which is again a conforming block that decides nothing. The hostile fixtures remain as defence in depth and as
+evidence that the shape behaves as claimed.
 
 `bool` is refused wherever `int` is required, and `int` wherever `bool` is
 required. No float appears anywhere. Every integer carries an explicit bounded
@@ -832,15 +868,34 @@ and no static layer here catches that. It is disclosed for the same reason the
 reserved-name and file-symlink gaps are: an undisclosed gap in an assurance is
 worse than a disclosed one, and the human audit is where it is caught.
 
-**The constrained `sys.modules` form.** A production module may reference
-`sys.modules` only where the receiver is the syntactically unaliased name
-`sys`, the attribute is exactly `modules`, and the subscript key is a constant
-string exactly equal to `experiments.general_v7_ledger`. It may appear **exactly
-once in `schema.py`**, **exactly once in `validate.py`**, and **never in
-`__init__.py`**. An aliased `sys` import, a `from sys import modules`, a
-computed or non-constant key, any other literal key, a bare `sys.modules`
-reference that is not such a subscript, and any other direct `sys.modules` form
-are all refused.
+**The constrained `sys.modules` form pins the binding, not merely the
+spelling.** Checking that the receiver is spelled `sys` was **insufficient, and
+that claim is withdrawn**: a module could `import sys`, then rebind `sys` to a
+decoy object carrying its own `modules` mapping, and the subscript still read as
+conforming. The frozen shape is therefore:
+
+- the permitted `sys` name comes from **one module-scope `import sys` with no
+  alias**, and from nothing else;
+- **the enumerated binding forms may not shadow or replace it** — assignment,
+  deletion, parameter, loop or comprehension target, `with` target, `except`
+  target, `match` capture, star or mapping-rest pattern, named expression,
+  aliased import, shadowing definition, or a `globals()`/`vars()` subscript
+  store. **This is an enumeration, not an absolute**: `match` patterns were
+  missing from an earlier version of it and rebound `sys` undetected, which is
+  the reason it is stated as a list of named forms and the residual is
+  disclosed below;
+- in `schema.py` and `validate.py` the single permitted self-binding is **one
+  module-scope assignment** whose target is exactly `_core` and whose value is
+  exactly `sys.modules["experiments.general_v7_ledger"]`;
+- `__init__.py` carries **no** self-binding at all;
+- a conforming-looking subscript **nested in a function or sitting in dead
+  code** does not count toward that allowance;
+- a computed or non-constant key, any other literal key, a bare `sys.modules`
+  reference, and every other direct `sys.modules` form remain refused.
+
+**This pins the direct static production shape and nothing further.** It does
+not prove that no runtime mutation could occur, it establishes no absolute
+behavioural impossibility, and the separate human audit remains required.
 
 **The call-name tripwire is a heuristic and nothing more.** An alias, an
 attribute lookup, or one level of indirection defeats it. Generic names such as

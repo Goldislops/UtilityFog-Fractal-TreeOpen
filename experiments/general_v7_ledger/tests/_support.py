@@ -169,8 +169,13 @@ PRODUCTION_MODULES = ("__init__.py", "schema.py", "validate.py")
 #: not reach anything else this way.
 SYS_MODULES_SELF_BINDING_KEY = "experiments.general_v7_ledger"
 
-#: Exactly how many conforming self-bindings each production module may carry.
-#: ``__init__.py`` is the core itself and needs none.
+#: Exactly how many conforming self-bindings each production module may carry,
+#: where "conforming" means one MODULE-SCOPE ``_core = sys.modules[...]``
+#: assignment whose ``sys`` is not rebound by any of the ENUMERATED binding
+#: forms. "Enumerated", not "provably": an earlier version of that list omitted
+#: ``match`` capture patterns and a decoy rebind went undetected. ``__init__.py`` is the core itself and needs none. This pins the
+#: direct static shape only; it proves no runtime property, and the separate
+#: human audit remains required.
 SYS_MODULES_ALLOWED_USES = {
     "__init__.py": 0,
     "schema.py": 1,

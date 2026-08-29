@@ -656,13 +656,50 @@ def test_gv7_d_035_the_contract_freezes_windows_path_safety_precisely():
     assert sup.is_device_namespace(chr(92) * 2 + "." + chr(92) + "CON")
     assert not sup.is_device_namespace("C:" + chr(92) + "x")
     for statement in (
-        "The mechanism is pinned by source shape, not by hostile fixtures alone",
+        "The mechanism is pinned by the executable decision BLOCK",
+        "not by hostile fixtures and not by its expressions alone",
         "deny-list over the routes somebody thought of",
         "a deny-list is not a detector",
-        "whitelist of one shape",
+        # The Correction 4 claim, named as withdrawn.
+        "Matching only the two decision expressions was also insufficient, "
+        "and that claim is withdrawn",
+        "its body a bare `pass`",
+        "Two correct expressions in a block that decides nothing are not the "
+        "mechanism",
+        # The block, and every part of it the matcher enforces.
+        "first executable statement after an optional docstring",
+        "an **empty** outer `else`",
+        "an outer body of **exactly those two statements**",
+        "an **empty** nested `else`",
+        "no additional decision statement and no alternate classifier may "
+        "appear inside it",
+        "no classifier may run before it",
+        # The normative block itself, line by line, so the document and the
+        # matcher template cannot drift apart silently.
+        "if type(<parameter>) is not dict:",
+        "if issubclass(type(<parameter>), dict):",
+        '_refuse("type-not-exact")',
+        '_refuse("root-not-object")',
+        "carries **no decorator**",
+        "leaving the block below it dead",
+        "exactly one plain positional parameter",
+        "What is pinned is the exported binding, not merely a `def` statement",
+        "single module-scope** one",
+        "not be rebound afterwards",
+        "One shape is permitted, and only in a module that does not define it",
+        "the defining module may not carry it",
+        "the Correction 4 defeat pattern moved one scope outward",
+        "**`_refuse` must itself raise**",
+        "hands the decision to whatever follows the block",
         "defence in depth",
     ):
         assert_phrase(contract_text(), statement)
+    # The withdrawn wording must not return as a positive claim. The suite's
+    # precedent for a withdrawal is a negative pin, not merely a replacement.
+    flattened = flat(contract_text())
+    assert "fails it by construction" not in flattened
+    assert "whitelist of one shape" not in flattened
+    assert flattened.count("Matching only the two decision expressions") == 1
     for literal in ("0xA000000C", "0xA0000003", "0x20000000"):
         assert literal in text, literal
     assert sup.REPARSE_TAG_SYMLINK == 0xA000000C
@@ -790,15 +827,31 @@ def test_gv7_d_039_the_contract_demotes_the_call_name_scan_to_a_tripwire():
 
     # The frozen sys.modules form.
     for statement in (
-        "the receiver is the syntactically unaliased name",
-        "the attribute is exactly `modules`",
-        "constant string exactly equal to `experiments.general_v7_ledger`",
-        "exactly once in `schema.py`",
-        "exactly once in `validate.py`",
-        "never in `__init__.py`",
-        "are all refused",
+        "pins the binding, not merely the spelling",
+        "Checking that the receiver is spelled `sys` was **insufficient, and "
+        "that claim is withdrawn**",
+        "rebind `sys` to a decoy object carrying its own `modules` mapping",
+        "one module-scope `import sys` with no alias",
+        "the enumerated binding forms may not shadow or replace it",
+        "`match` capture, star or mapping-rest pattern",
+        "This is an enumeration, not an absolute",
+        "were missing from an earlier version of it and rebound `sys` undetected",
+        "one module-scope assignment** whose target is exactly `_core`",
+        'exactly `sys.modules["experiments.general_v7_ledger"]`',
+        "carries **no** self-binding at all",
+        "nested in a function or sitting in dead code",
+        "does not count toward that allowance",
+        "remain refused",
+        # The assurance stays modest.
+        "This pins the direct static production shape and nothing further",
+        "does not prove that no runtime mutation could occur",
+        "establishes no absolute behavioural impossibility",
+        "the separate human audit remains required",
     ):
         assert_phrase(text, statement)
+    # The withdrawn spelling claim must not return either.
+    assert "pins the binding, not merely the spelling" in flat(text)
+    assert flat(text).count("was **insufficient, and that claim is withdrawn**") == 1
     assert sup.SYS_MODULES_SELF_BINDING_KEY == "experiments.general_v7_ledger"
     assert sup.SYS_MODULES_ALLOWED_USES == {
         "__init__.py": 0,
