@@ -782,8 +782,16 @@ def test_gv7_m_025_the_manifest_equals_what_pytest_actually_collected(request):
         assert set().union(*collected.values()) == every
 
     # A retired id is never reused and never reappears in a module.
+    #
+    # The union of EVERY declared set, not the `declared` left behind by the
+    # loop above. That leak checked whichever module happened to sort last and
+    # nothing else, so a retired id declared in any other module passed
+    # unnoticed while the assertion still read as though it covered them all.
     retired = set(sup.RETIRED_CONTROLS)
-    assert not retired & declared, sorted(retired & declared)
+    every_declared = {
+        control for values in AUTHORED_CONTROLS.values() for control in values
+    }
+    assert not retired & every_declared, sorted(retired & every_declared)
     for path in sorted(sup.TESTS_DIR.glob("test_*.py")):
         present = control_ids_in_source(path.read_text(encoding="utf-8"))
         assert not retired & present, (path.name, sorted(retired & present))

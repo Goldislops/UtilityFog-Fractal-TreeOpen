@@ -724,18 +724,102 @@ takes **exactly one plain positional parameter**.
 **What is pinned is the exported binding, not merely a `def` statement.** A
 conforming block is worth nothing if the module does not run it, so the
 definition must be a **single module-scope** one — not nested in a factory, not
-a class method, not behind a module-scope condition — and the name must **not be rebound afterwards** by assignment, annotated or
-augmented assignment, a named expression, or an import. **One shape is
-permitted, and only in a module that does not define it**:
+a class method, not behind a module-scope condition — and the name must **not
+be bound anywhere else in the package**. The census is **order-insensitive**: a
+binding that precedes the definition is refused exactly as firmly as one that
+follows it, and the forms are enumerated in full below rather than sampled here.
+**One shape is permitted, and only in a module that does not define it**:
 `validate_ledger = _core.validate_ledger`, by which a surface re-exports the
 core's own attribute. It can substitute nothing, because it names the attribute
-of the very module the frozen block lives in; the defining module may not carry
-it. A conforming block followed by
+of the very module the frozen block lives in — **and that is now verified rather
+than assumed**: the re-exporting module's `_core` must itself be bound exactly
+once, by the frozen `_core = sys.modules[...]` self-binding. Pinning the
+spelling `_core` while never asking what it named was the very defect
+Correction 5 closed for `sys`, re-committed one control over. As before,
+the defining module may not carry it, and the package now carries **at most one**
+of it: permitting one per module made the count below false the moment a second
+surface existed. A conforming block followed by
 `validate_ledger = _real` is the Correction 4 defeat pattern moved one scope
 outward, and is refused. **`_refuse` must itself raise**: a `_refuse` that
 returns leaves both calls falling through and hands the decision to whatever
 follows the block, which is again a conforming block that decides nothing. The hostile fixtures remain as defence in depth and as
 evidence that the shape behaves as claimed.
+
+**`_refuse` is pinned as an executable helper, not as a name with a `raise`
+somewhere inside it.** Requiring only that a `raise` appear *somewhere* accepted
+a helper whose `raise` sat under `if False:` and which then returned `token`:
+both calls in the frozen block fell through, and the statement after the block
+did the deciding. So exactly **one** production `_refuse` may be defined, at
+module scope, **in the same module as the sole `validate_ledger` definition** —
+a helper that module does not itself define is not demonstrably the helper its
+block calls. Its signature is exactly `_refuse(token, path=())` and its body is
+**exactly one executable statement**, `raise LedgerError(token, path) from
+None`, both compared structurally. A dead or conditional `raise`, a `return`
+before or instead of raising, an extra executable statement, and a nested,
+conditional, `async`, decorated, duplicated, imported, assigned or class-based
+`_refuse` are each refused, as is any later rebinding of the name.
+
+**The exported binding is decided by a census, not by a top-level scan.** A scan
+reading only the module's top level accepts an assignment one indent inside
+`if True:`; a scan looking only for assignments accepts a class definition of
+the same name. Both were reproduced against the previous matcher, and neither is
+exotic — they are the two most ordinary ways to rebind a name that a narrow scan
+does not happen to look at. Every enumerated binding of the name is therefore
+collected wherever it occurs, and **exactly two nodes are permitted across the
+whole package**: the sole module-scope definition carrying the frozen block, and
+the exact public re-export `validate_ledger = _core.validate_ledger`, once in
+the package, in a production module that does not define the function and whose
+`_core` is demonstrably this package's own module. Every other enumerated binding is
+refused — an assignment nested beneath a module-level `if`, loop, `try`, `with`
+or `match`; a class definition; a PEP 695 `type` alias, which binds the module
+attribute as surely as a class statement does; a nested function definition; a
+deletion,
+annotated or augmented assignment; a loop, comprehension, context-manager,
+`except`, `match` or named-expression target; an import or alias; a parameter; a
+`global` or `nonlocal` declaration; a write through a literal `globals()`,
+`vars()` or `locals()` key; a second definition or re-export; a re-export inside
+the defining module; and a re-export of anything but `_core.validate_ledger`.
+
+**Three independent reviews defeated the first version of this census, and what
+they found is refused rather than described.** `_refuse.__code__ =
+_tame.__code__` replaces the helper's executable code while leaving its name,
+its signature and its source body untouched — an object mutation rather than a
+name binding, and invisible to any scan looking for a name in store position; so
+**no attribute of either pinned name may be read or written at all**.
+`from _hostile import *` keys as the literal `*`, which can never equal a name,
+so a **wildcard import is refused as itself**. And a namespace write spelled one
+token differently — `_g = globals()` first, a computed key,
+`globals().update(...)`, `globals().__setitem__(...)` — walked straight through
+a check aimed at a single literal subscript. That check was aimed at a spelling
+and not at the capability, so **the capability is refused instead: a production
+module may not call `globals`, `vars`, `locals`, `setattr`, `delattr`, `exec` or
+`eval`, and may not touch a `__dict__`.**
+
+**The residual is a builtin rebound before use.** `_g = globals` and then `_g()`
+defeats any check that works by name, exactly as it does for `getattr` in the
+`sys.modules` control. What is refused here is the **named vocabulary**, which is
+narrower than the capability itself, and the difference is stated rather than
+smoothed over.
+
+**This pins the enumerated direct static binding shapes and nothing further.**
+It is not a claim of exhaustiveness, and it has already been wrong more than
+once. The PEP 695 `type` alias above was missing from the first version of the
+list and was accepted, exactly as `class validate_ledger: pass` had been; the
+`__code__` swap, the wildcard import and four spellings of the namespace write
+were each accepted until a review reproduced them. Every one of those is
+recorded here rather than quietly repaired, because together they are the reason
+this section says *enumerated* wherever it could have said *every*.
+
+An earlier version of this paragraph claimed the disclosed routes "bind a module
+attribute without producing any node the census can see". **That was false and is
+withdrawn.** `sys.modules[__name__].__dict__["validate_ledger"] = …` and
+`_core.validate_ledger = _hostile` both produce nodes the walk visits: the census
+saw them and simply did not classify them as bindings, which is a different and
+less flattering fault than not seeing them. Both are now refused. What genuinely
+remains outside a static scan is a **builtin rebound before use**, and source
+constructed at runtime and executed by a call this vocabulary does not name.
+Those routes are disclosed rather than asserted away, and **the separate human
+audit remains required**.
 
 `bool` is refused wherever `int` is required, and `int` wherever `bool` is
 required. No float appears anywhere. Every integer carries an explicit bounded

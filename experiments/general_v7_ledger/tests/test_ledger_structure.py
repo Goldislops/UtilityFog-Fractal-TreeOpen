@@ -442,92 +442,422 @@ def _is_core_reexport(statement):
     )
 
 
-def frozen_root_decision(sources):
-    """``(parameter, defect)`` for the sole production ``validate_ledger``.
+#: The refusal helper is the executable half of the frozen block: both calls in
+#: that block are calls to ``_refuse``. A ``_refuse`` that RETURNS leaves both
+#: falling through and hands the decision to whatever follows -- a conforming
+#: block that decides nothing, which is the Correction 5 defeat shape moved one
+#: level into the helper. Jack reproduced exactly that, with a dead ``raise``
+#: under ``if False:`` and then ``return token``; it scored ``('payload', None)``
+#: because the Correction 5 check asked only whether a ``raise`` appeared
+#: SOMEWHERE inside the helper, which a dead one does.
+#:
+#: The helper is therefore pinned the way the block is: one signature and one
+#: body, by ``ast.dump`` equality against these templates.
+FROZEN_REFUSE_SIGNATURE = "def _refuse(token, path=()):\n    pass\n"
+FROZEN_REFUSE_BODY = "raise LedgerError(token, path) from None\n"
 
-    ``sources`` maps a production module name to its source text. Exactly one
-    definition may exist across all of them, and the frozen block must be the
-    **first executable statement** after an optional docstring -- so a
-    classifier running before it, or an extra decision statement inside it, is
-    refused rather than tolerated alongside a compliant-looking shape.
+
+def _binds(target, name):
+    """True when ``target`` stores or deletes ``name``."""
+    import ast
+
+    return any(
+        isinstance(inner, ast.Name)
+        and inner.id == name
+        and isinstance(inner.ctx, (ast.Store, ast.Del))
+        for inner in ast.walk(target)
+    )
+
+
+def binding_census(tree, name):
+    """Every ENUMERATED binding of ``name`` in ``tree``, as ``(kind, node)``.
+
+    A scan that reads only the module's top level accepts
+    ``if True: validate_ledger = _hostile``; one that looks only for assignments
+    accepts ``class validate_ledger: pass``. Jack reproduced both against the
+    Correction 5 matcher, each scoring ``('payload', None)``. Neither is an
+    exotic route -- they are the two most ordinary ways to rebind a name that
+    the previous scan happened not to look at, which is precisely the failure
+    mode of asking a narrow question.
+
+    So this asks the question that decides the matter -- *what else binds this
+    name, anywhere in the module* -- and leaves the caller to permit an
+    explicit, small set of nodes and refuse the remainder.
+
+    It enumerates the forms named below. It is NOT a proof that no other form
+    exists: ``setattr`` on the module object, a write through
+    ``sys.modules[__name__].__dict__``, and ``exec`` of generated source each
+    bind a module attribute without producing any node this can see. Those are
+    disclosed as residuals rather than asserted away.
+
+    The enumeration has already been wrong once since it was written: a PEP 695
+    ``type validate_ledger = int`` binds the module attribute -- after it runs
+    the name is a ``TypeAliasType`` -- and was accepted until ``ast.TypeAlias``
+    was added below. That is the same defect as Jack's ``class validate_ledger:
+    pass``, one spelling further out, and it is recorded here rather than
+    quietly fixed, because it is the evidence for why this says "enumerated"
+    everywhere it could have said "every".
+
+    A PEP 695 *type parameter* -- ``def _f[validate_ledger]() -> None`` -- is
+    deliberately NOT collected: it binds inside the function's annotation
+    scope and never touches the module namespace, so refusing it would be a
+    false positive rather than a closed route.
     """
     import ast
 
-    found = []
-    module_scope = []
-    rebindings = []
-    raising_refuse = []
+    census = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == name:
+                census.append(("definition", node))
+        elif isinstance(node, ast.ClassDef):
+            if node.name == name:
+                census.append(("class-definition", node))
+        elif isinstance(node, getattr(ast, "TypeAlias", ())):
+            # PEP 695. `type validate_ledger = int` binds the MODULE attribute:
+            # after it runs, the name is a `TypeAliasType`, not the function.
+            # The empty-tuple fallback makes `isinstance` simply False where
+            # the node type does not exist.
+            if isinstance(node.name, ast.Name) and node.name.id == name:
+                census.append(("type-alias", node))
+        elif isinstance(node, ast.Assign):
+            if any(_binds(target, name) for target in node.targets):
+                census.append(("assignment", node))
+        elif isinstance(node, ast.AnnAssign):
+            if _binds(node.target, name):
+                census.append(("annotated-assignment", node))
+        elif isinstance(node, ast.AugAssign):
+            if _binds(node.target, name):
+                census.append(("augmented-assignment", node))
+        elif isinstance(node, ast.Delete):
+            if any(_binds(target, name) for target in node.targets):
+                census.append(("deletion", node))
+        elif isinstance(node, ast.NamedExpr):
+            if _binds(node.target, name):
+                census.append(("named-expression", node))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            if _binds(node.target, name):
+                census.append(("loop-target", node))
+        elif isinstance(node, ast.comprehension):
+            if _binds(node.target, name):
+                census.append(("comprehension-target", node))
+        elif isinstance(node, ast.withitem):
+            if node.optional_vars is not None and _binds(node.optional_vars, name):
+                census.append(("context-manager-target", node))
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                census.append(("exception-target", node))
+        elif isinstance(node, ast.MatchAs):
+            if node.name == name:
+                census.append(("match-capture", node))
+        elif isinstance(node, ast.MatchStar):
+            if node.name == name:
+                census.append(("match-star", node))
+        elif isinstance(node, ast.MatchMapping):
+            if node.rest == name:
+                census.append(("match-mapping-rest", node))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                # `from x import *` keys as the literal "*" and can never match
+                # a name, so a wildcard is censused as itself: it may bind
+                # anything, including this.
+                if alias.name == "*":
+                    census.append(("star-import", node))
+                elif (alias.asname or alias.name.split(".")[0]) == name:
+                    census.append(("import", node))
+        elif isinstance(node, ast.arg):
+            if node.arg == name:
+                census.append(("parameter", node))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            if name in node.names:
+                census.append(("global-or-nonlocal", node))
+        elif isinstance(node, ast.Attribute):
+            # `_refuse.__code__ = _tame.__code__` replaces the helper's
+            # executable code and leaves its name, signature and source body
+            # untouched -- an object mutation rather than a name binding, and
+            # invisible to any scan looking for a Name in Store context. The
+            # shipped package never reads or writes an attribute of either
+            # pinned name, so all of it is refused.
+            if isinstance(node.value, ast.Name) and node.value.id == name:
+                census.append(("attribute-access", node))
+            # `_core.validate_ledger = _hostile` writes the attribute on the
+            # module object instead.
+            elif node.attr == name and not isinstance(node.ctx, ast.Load):
+                census.append(("module-attribute-write", node))
+        elif isinstance(node, ast.Subscript):
+            if (
+                not isinstance(node.ctx, ast.Load)
+                and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", None)
+                in ("globals", "vars", "locals")
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value == name
+            ):
+                census.append(("namespace-mapping-write", node))
+    return census
+
+
+def frozen_refusal_helper(sources, defining_module):
+    """``None``, or the defect in the sole production ``_refuse``.
+
+    Exactly one ``_refuse`` may be DEFINED, at module scope, and it must live in
+    ``defining_module`` -- the module carrying the sole ``validate_ledger``
+    definition -- because a helper the defining module does not itself define is
+    not demonstrably the helper the frozen block calls.
+
+    The signature and the body are both compared structurally, so a dead or
+    conditional ``raise``, a ``return`` before or instead of raising, and an
+    extra executable statement are each refused by the same equality rather
+    than by a list of shapes somebody thought of.
+    """
+    import ast
+
+    definitions = []
+    census = []
     for name, source in sorted(sources.items()):
         tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and node.name == "validate_ledger"
-            ):
-                found.append((name, node))
-            # `_refuse` must actually raise. A `_refuse` that returns leaves
-            # both calls falling through, and whatever follows the block does
-            # the deciding -- a conforming block that is simply dead.
-            if isinstance(node, ast.FunctionDef) and node.name == "_refuse":
-                raising_refuse.append(
-                    any(isinstance(inner, ast.Raise) for inner in ast.walk(node))
-                )
+        for kind, node in binding_census(tree, "_refuse"):
+            census.append((name, kind, node))
         for statement in tree.body:
-            if (
-                isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and statement.name == "validate_ledger"
-            ):
-                module_scope.append(statement)
-        # Any module-scope REBINDING of the name replaces whatever the def
-        # produced, so the block below it is no longer what the module exports.
-        #
-        # ONE shape is permitted, and only in a module that does not define it:
-        # `validate_ledger = _core.validate_ledger`, the surfaces' re-export of
-        # the core's own attribute. It can substitute nothing -- it names the
-        # attribute of the module the frozen block lives in.
-        for statement in tree.body:
-            targets = []
-            if isinstance(statement, ast.Assign):
-                if len(statement.targets) == 1 and _is_core_reexport(statement):
-                    continue
-                targets = statement.targets
-            elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
-                targets = [statement.target]
-            elif isinstance(statement, (ast.Import, ast.ImportFrom)):
-                for alias in statement.names:
-                    if (alias.asname or alias.name) == "validate_ledger":
-                        rebindings.append("import")
-            for target in targets:
-                for inner in ast.walk(target):
-                    if isinstance(inner, ast.Name) and inner.id == "validate_ledger":
-                        rebindings.append(type(statement).__name__)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.NamedExpr) and getattr(
-                node.target, "id", None
-            ) == "validate_ledger":
-                rebindings.append("NamedExpr")
+            if isinstance(statement, ast.FunctionDef) and statement.name == "_refuse":
+                definitions.append((name, statement))
 
-    if len(found) != 1:
-        return None, f"expected exactly one validate_ledger, found {len(found)}"
-    if len(module_scope) != 1:
-        return None, (
-            "validate_ledger is not a single module-scope definition "
-            f"(found {len(module_scope)} at module scope)"
+    if len(definitions) != 1:
+        return (
+            "expected exactly one module-scope `_refuse` definition, found "
+            f"{len(definitions)}"
         )
-    defining = {name for name, node in found}
-    for name, source in sorted(sources.items()):
-        if name not in defining:
-            continue
-        for statement in ast.parse(source).body:
-            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-                if _is_core_reexport(statement):
-                    rebindings.append("re-export-in-the-defining-module")
-    if rebindings:
-        return None, f"validate_ledger is rebound after definition: {rebindings}"
-    if not raising_refuse or not all(raising_refuse):
-        return None, "the refusal helper `_refuse` does not raise"
+    module, function = definitions[0]
+    if module != defining_module:
+        return (
+            f"`_refuse` is defined in {module}, not in {defining_module} where "
+            "validate_ledger is defined"
+        )
 
-    _module, function = found[0]
+    stray = sorted(
+        {
+            f"{name}:{kind}"
+            for name, kind, node in census
+            if node is not function
+        }
+    )
+    if stray:
+        return f"`_refuse` carries other bindings: {stray}"
+
+    if function.decorator_list:
+        return "`_refuse` carries a decorator"
+    expected = ast.parse(FROZEN_REFUSE_SIGNATURE).body[0]
+    if ast.dump(function.args) != ast.dump(expected.args):
+        return "`_refuse` does not take exactly (token, path=())"
+
+    body = list(function.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if len(body) != 1:
+        return f"`_refuse` has {len(body)} executable statements, not one"
+    if ast.dump(body[0]) != ast.dump(ast.parse(FROZEN_REFUSE_BODY).body[0]):
+        return "`_refuse` does not raise exactly LedgerError(token, path) from None"
+    return None
+
+
+#: The names by which a module reaches its own namespace AS DATA, and so
+#: rebinds anything in it without ever writing that name down.
+#:
+#: The first version of this correction refused only a literal
+#: ``globals()["validate_ledger"] = ...`` subscript. Three independent reviews
+#: each defeated it in a single token -- ``_g = globals()`` first, a computed
+#: key, ``globals().update(...)``, ``globals().__setitem__(...)`` -- because it
+#: was aimed at a SPELLING and not at the capability. A production module has no
+#: use for any of these, and the shipped package calls none of them, so the
+#: capability is refused rather than one of its shapes.
+NAMESPACE_REACH_NAMES = (
+    "globals",
+    "vars",
+    "locals",
+    "setattr",
+    "delattr",
+    "exec",
+    "eval",
+)
+
+
+def namespace_reach_violations(tree):
+    """``(kind, detail)`` for each way this module reaches its namespace as data.
+
+    The residual is stated plainly and is NOT closed: a builtin rebound before
+    use -- ``_g = globals`` and then ``_g()`` -- defeats any scan that works by
+    name, exactly as it does for ``getattr`` in GV7-S-028. This refuses the
+    named vocabulary, which is narrower than refusing the capability, and the
+    difference is disclosed rather than described away.
+    """
+    import ast
+
+    violations = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in NAMESPACE_REACH_NAMES
+        ):
+            violations.append(("namespace-builtin-call", node.func.id))
+        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            # `sys.modules[__name__].__dict__["validate_ledger"] = ...` is a
+            # namespace write that no name scan over the target would see.
+            violations.append(("dunder-dict-reach", "__dict__"))
+    return violations
+
+
+def _core_is_the_package(tree):
+    """True when ``_core`` is bound once, by the frozen package self-binding.
+
+    ``_is_core_reexport`` pins the SPELLING ``_core`` and nothing else -- the
+    very defect Correction 5 closed for ``sys``, re-committed one control over.
+    A surface that writes ``import _hostile as _core`` and then performs the
+    blessed re-export exports a different function entirely. So the permitted
+    re-export is only permitted where ``_core`` demonstrably names this package.
+    """
+    import ast
+
+    # Reading an attribute OF `_core` is what the permitted re-export does --
+    # and what `LedgerError = _core.LedgerError` does beside it -- so those
+    # reads are not rebindings of `_core`. Counting them as such was my own
+    # false positive, and it failed the conforming two-module fixture.
+    bindings = [
+        (kind, node)
+        for kind, node in binding_census(tree, "_core")
+        if kind != "attribute-access"
+    ]
+    if len(bindings) != 1 or bindings[0][0] != "assignment":
+        return False
+    statement = bindings[0][1]
+    if statement not in tree.body or len(statement.targets) != 1:
+        return False
+    value = statement.value
+    return (
+        isinstance(value, ast.Subscript)
+        and isinstance(value.value, ast.Attribute)
+        and value.value.attr == "modules"
+        and isinstance(value.value.value, ast.Name)
+        and value.value.value.id == "sys"
+        and isinstance(value.slice, ast.Constant)
+        and value.slice.value == sup.SYS_MODULES_SELF_BINDING_KEY
+    )
+
+
+def frozen_root_decision(sources):
+    """``(parameter, defect)`` for the sole production ``validate_ledger``.
+
+    ``sources`` maps a production module name to its source text.
+
+    What is pinned is the **exported binding**, not a ``def`` statement the
+    module may never run and may immediately replace. Jack reproduced three
+    shapes against the Correction 5 matcher, each scoring ``('payload', None)``:
+    a ``_refuse`` holding a dead ``raise`` and returning normally; a conforming
+    definition followed by ``if True: validate_ledger = _hostile``; and one
+    followed by ``class validate_ledger: pass``.
+
+    A binding census over every enumerated form therefore decides, and exactly
+    two nodes are permitted **across the whole package**:
+
+    * the sole module-scope definition carrying the frozen block; and
+    * the exact public re-export ``validate_ledger = _core.validate_ledger``,
+      once in the package, in a module that does not define the function and
+      whose ``_core`` is demonstrably this package's own module.
+
+    Every other enumerated binding is refused, wherever it sits; no production
+    module may reach its namespace as data; and no attribute of either pinned
+    name may be read or written, because ``_refuse.__code__ = _tame.__code__``
+    replaces the helper's executable code while leaving every name, signature
+    and source body untouched.
+
+    This pins the enumerated DIRECT STATIC shapes and nothing further. It proves
+    no runtime property, it is not exhaustive -- see
+    ``namespace_reach_violations`` for the residual it cannot close -- and the
+    separate human audit remains required.
+    """
+    import ast
+
+    trees = {}
+    definitions = []
+    reexports = []
+    census = []
+    for name, source in sorted(sources.items()):
+        tree = ast.parse(source)
+        trees[name] = tree
+        module_definitions = [
+            statement
+            for statement in tree.body
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name == "validate_ledger"
+        ]
+        definitions.extend((name, node) for node in module_definitions)
+        if not module_definitions:
+            reexports.extend(
+                (name, statement)
+                for statement in tree.body
+                if isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and _is_core_reexport(statement)
+            )
+        for kind, node in binding_census(tree, "validate_ledger"):
+            census.append((name, kind, node))
+
+    if len(definitions) != 1:
+        return None, (
+            "expected exactly one module-scope validate_ledger definition, "
+            f"found {len(definitions)}"
+        )
+    defining_module, function = definitions[0]
+
+    # ONE re-export in the package, not one per module. Permitting it per module
+    # made "exactly two nodes are permitted" false the moment a second surface
+    # existed, and no fixture covered the cross-module case.
+    if len(reexports) > 1:
+        return None, (
+            f"validate_ledger is re-exported {len(reexports)} times; "
+            "exactly one re-export is permitted"
+        )
+    permitted = [function]
+    if reexports:
+        reexport_module, reexport = reexports[0]
+        if not _core_is_the_package(trees[reexport_module]):
+            return None, (
+                f"the re-exporting module {reexport_module} binds `_core` to "
+                "something that is not the package's own module"
+            )
+        permitted.append(reexport)
+
+    # Identity, not `id()`: the trees stay alive in `trees`, but comparing the
+    # nodes themselves removes the question entirely.
+    stray = sorted(
+        {
+            f"{name}:{kind}"
+            for name, kind, node in census
+            if not any(node is allowed for allowed in permitted)
+        }
+    )
+    if stray:
+        return None, f"validate_ledger carries other bindings: {stray}"
+
+    reach = sorted(
+        {
+            f"{name}:{kind}:{detail}"
+            for name, tree in sorted(trees.items())
+            for kind, detail in namespace_reach_violations(tree)
+        }
+    )
+    if reach:
+        return None, f"a production module reaches its namespace as data: {reach}"
+
+    defect = frozen_refusal_helper(sources, defining_module)
+    if defect:
+        return None, defect
+
     # A decorator can wrap the function, or replace it outright, leaving the
     # frozen block below it dead -- the same defect shape as a dead nested
     # `if`. None is permitted.
@@ -565,6 +895,47 @@ def frozen_root_decision(sources):
     return parameter, None
 
 
+#: The one conforming refusal helper, reused by every fixture that is not
+#: itself about ``_refuse``, so each negative below is refused for its OWN
+#: reason rather than for a helper defect it never meant to carry.
+CONFORMING_REFUSE = (
+    "def _refuse(token, path=()):\n"
+    "    raise LedgerError(token, path) from None\n"
+)
+
+#: The one conforming definition, likewise.
+CONFORMING_DEFINITION = (
+    "def validate_ledger(payload):\n"
+    "    if type(payload) is not dict:\n"
+    "        if issubclass(type(payload), dict):\n"
+    "            _refuse('type-not-exact')\n"
+    "        _refuse('root-not-object')\n"
+)
+
+#: A whole conforming core module: the helper and the definition together.
+CONFORMING_CORE = CONFORMING_REFUSE + "\n\n" + CONFORMING_DEFINITION
+
+
+def _with_refuse(body):
+    """A fixture module carrying the conforming helper, then ``body``."""
+    return CONFORMING_REFUSE + "\n\n" + body
+
+
+def _module(body):
+    """A single-module fixture, named as the core."""
+    return {"__init__.py": body}
+
+
+#: The frozen self-binding a surface must carry before its re-export means
+#: anything, and the re-export itself.
+CORE_SELF_BINDING = (
+    "import sys\n"
+    "\n"
+    "_core = sys.modules['" + sup.SYS_MODULES_SELF_BINDING_KEY + "']\n"
+)
+CORE_REEXPORT = "validate_ledger = _core.validate_ledger\n"
+
+
 #: Jack's reproduced counterexample heads this list. The first several were
 #: ACCEPTED by the Correction 4 expression matcher; the later ones close routes
 #: found while correcting it, and some of those the older matcher would itself
@@ -572,193 +943,201 @@ def frozen_root_decision(sources):
 FROZEN_BLOCK_NEGATIVE_FIXTURES = (
     (
         "a dead compliant nested if, with a real classifier after it",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            pass\n"
-        "        lineage = type.mro(type(payload))\n"
-        "        return (\n"
-        "            'type-not-exact'\n"
-        "            if any(base is dict for base in lineage)\n"
-        "            else 'root-not-object'\n"
-        "        )\n"
-        "    return 'accepted'\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            pass\n"
+            "        lineage = type.mro(type(payload))\n"
+            "        return (\n"
+            "            'type-not-exact'\n"
+            "            if any(base is dict for base in lineage)\n"
+            "            else 'root-not-object'\n"
+            "        )\n"
+            "    return 'accepted'\n"
+        ),
     ),
     (
         "an extra decision statement inside the outer body",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a pass in the nested body",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            pass\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            pass\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "an else on the outer if",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "    else:\n"
-        "        return 'accepted'\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "    else:\n"
+            "        return 'accepted'\n"
+        ),
     ),
     (
         "an else on the nested if",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        else:\n"
-        "            _refuse('root-not-object')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        else:\n"
+            "            _refuse('root-not-object')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a classifier running before the block",
-        "def validate_ledger(payload):\n"
-        "    verdict = any(b is dict for b in type.mro(type(payload)))\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    verdict = any(b is dict for b in type.mro(type(payload)))\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "two validate_ledger definitions",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "def validate_ledger(payload):\n"
-        "    return 'accepted'\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "\n"
+            "\n"
+            "def validate_ledger(payload):\n"
+            "    return 'accepted'\n"
+        ),
     ),
     (
         "the wrong refusal token in the nested body",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('root-not-object')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('root-not-object')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "isinstance in place of the frozen subtype decision",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if isinstance(payload, dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if isinstance(payload, dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a __bases__ read in place of the frozen subtype decision",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if dict in type(payload).__bases__:\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if dict in type(payload).__bases__:\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a conforming def nested in a factory, with the name bound elsewhere",
-        "def _factory():\n"
-        "    def validate_ledger(payload):\n"
-        "        if type(payload) is not dict:\n"
-        "            if issubclass(type(payload), dict):\n"
-        "                _refuse('type-not-exact')\n"
-        "            _refuse('root-not-object')\n"
-        "    return validate_ledger\n"
-        "\n"
-        "\n"
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n"
-        "\n"
-        "\n"
-        "validate_ledger = _hostile\n",
+        _with_refuse(
+            "def _factory():\n"
+            "    def validate_ledger(payload):\n"
+            "        if type(payload) is not dict:\n"
+            "            if issubclass(type(payload), dict):\n"
+            "                _refuse('type-not-exact')\n"
+            "            _refuse('root-not-object')\n"
+            "    return validate_ledger\n"
+            "\n"
+            "\n"
+            "validate_ledger = _hostile\n"
+        ),
     ),
     (
         "a re-export in the module that defines it",
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n"
-        "\n"
-        "\n"
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "validate_ledger = _core.validate_ledger\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "\n"
+            "\n"
+            "validate_ledger = _core.validate_ledger\n"
+        ),
     ),
     (
         "a re-export from something other than _core",
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n"
-        "\n"
-        "\n"
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "validate_ledger = _elsewhere.validate_ledger\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "\n"
+            "\n"
+            "validate_ledger = _elsewhere.validate_ledger\n"
+        ),
     ),
     (
         "a conforming def immediately rebound at module scope",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n"
-        "\n"
-        "\n"
-        "validate_ledger = _real\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "\n"
+            "\n"
+            "validate_ledger = _real\n"
+        ),
     ),
     (
         "a conforming def rebound to a lambda",
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n"
-        "\n"
-        "\n"
-        "validate_ledger = lambda payload: payload\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+            "\n"
+            "\n"
+            "validate_ledger = lambda payload: payload\n"
+        ),
     ),
     (
         "a conforming def behind a module-scope condition",
-        "if _FLAG:\n"
-        "    def validate_ledger(payload):\n"
-        "        if type(payload) is not dict:\n"
-        "            if issubclass(type(payload), dict):\n"
-        "                _refuse('type-not-exact')\n"
-        "            _refuse('root-not-object')\n"
-        "\n"
-        "\n"
-        "def _refuse(token):\n"
-        "    raise LedgerError(token)\n",
+        _with_refuse(
+            "if _FLAG:\n"
+            "    def validate_ledger(payload):\n"
+            "        if type(payload) is not dict:\n"
+            "            if issubclass(type(payload), dict):\n"
+            "                _refuse('type-not-exact')\n"
+            "            _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a `_refuse` that returns instead of raising",
-        "def _refuse(token):\n"
+        "def _refuse(token, path=()):\n"
         "    return token\n"
         "\n"
         "\n"
@@ -771,44 +1150,560 @@ FROZEN_BLOCK_NEGATIVE_FIXTURES = (
     ),
     (
         "a decorator that could wrap or replace the function",
-        "@wrapper\n"
-        "def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "@wrapper\n"
+            "def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "an async definition",
-        "async def validate_ledger(payload):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "async def validate_ledger(payload):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a second parameter with a default",
-        "def validate_ledger(payload, mode=1):\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload, mode=1):\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
     (
         "a nested definition shadowing the real one",
-        "def validate_ledger(payload):\n"
-        "    def validate_ledger(other):\n"
-        "        return 'accepted'\n"
-        "    if type(payload) is not dict:\n"
-        "        if issubclass(type(payload), dict):\n"
-        "            _refuse('type-not-exact')\n"
-        "        _refuse('root-not-object')\n",
+        _with_refuse(
+            "def validate_ledger(payload):\n"
+            "    def validate_ledger(other):\n"
+            "        return 'accepted'\n"
+            "    if type(payload) is not dict:\n"
+            "        if issubclass(type(payload), dict):\n"
+            "            _refuse('type-not-exact')\n"
+            "        _refuse('root-not-object')\n"
+        ),
     ),
 )
 
+#: Correction 6. Each entry carries the fragment of the defect it must be
+#: refused FOR, so a fixture cannot quietly begin passing for the wrong reason
+#: -- the failure mode that let the Correction 5 negatives look conclusive
+#: while three ordinary shapes walked through.
+REFUSAL_AND_BINDING_FIXTURES = (
+    # -- Jack's three reproduced bypasses of the Correction 5 matcher --------
+    (
+        "JACK 1: a dead `raise` in _refuse, which then returns",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    if False:\n"
+            "        raise LedgerError(token, path) from None\n"
+            "    return token\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "executable statements",
+    ),
+    (
+        "JACK 2: a conforming def, then `if True: validate_ledger = _hostile`",
+        _module(CONFORMING_CORE + "\n\nif True:\n    validate_ledger = _hostile\n"),
+        "assignment",
+    ),
+    (
+        "JACK 3: a conforming def, then `class validate_ledger: pass`",
+        _module(CONFORMING_CORE + "\n\nclass validate_ledger:\n    pass\n"),
+        "class-definition",
+    ),
+    # -- the refusal helper, pinned as an executable statement ---------------
+    (
+        "a _refuse whose only statement is a conditional raise",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    if token:\n"
+            "        raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not raise exactly",
+    ),
+    (
+        "a _refuse that returns instead of raising",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    return token\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not raise exactly",
+    ),
+    (
+        "a _refuse that returns before raising",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    return token\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "executable statements",
+    ),
+    (
+        "a _refuse carrying an extra executable statement",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    _log(token)\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "executable statements",
+    ),
+    (
+        "a _refuse raising something other than the frozen exception",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    raise ValueError(token) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not raise exactly",
+    ),
+    (
+        "a _refuse that drops `from None`",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    raise LedgerError(token, path)\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not raise exactly",
+    ),
+    (
+        "a _refuse that drops the path from the raised error",
+        _module(
+            "def _refuse(token, path=()):\n"
+            "    raise LedgerError(token) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not raise exactly",
+    ),
+    (
+        "a decorated _refuse",
+        _module(
+            "@wrapper\n"
+            "def _refuse(token, path=()):\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "carries a decorator",
+    ),
+    (
+        "a conditional _refuse",
+        _module(
+            "if _FLAG:\n"
+            "    def _refuse(token, path=()):\n"
+            "        raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "found 0",
+    ),
+    (
+        "an async _refuse",
+        _module(
+            "async def _refuse(token, path=()):\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "found 0",
+    ),
+    (
+        "a class-based _refuse",
+        _module("class _refuse:\n    pass\n\n\n" + CONFORMING_DEFINITION),
+        "found 0",
+    ),
+    (
+        "a nested _refuse beside the module-scope one",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _factory():\n"
+            "    def _refuse(token, path=()):\n"
+            "        return token\n"
+            "    return _refuse\n"
+        ),
+        "carries other bindings",
+    ),
+    (
+        "a duplicated _refuse",
+        _module(CONFORMING_CORE + "\n\n" + CONFORMING_REFUSE),
+        "found 2",
+    ),
+    (
+        "an imported _refuse",
+        _module(CONFORMING_CORE + "\n\nfrom _elsewhere import _refuse\n"),
+        "carries other bindings",
+    ),
+    (
+        "an aliased import bound to _refuse",
+        _module(CONFORMING_CORE + "\n\nimport _elsewhere as _refuse\n"),
+        "carries other bindings",
+    ),
+    (
+        "a rebound _refuse",
+        _module(CONFORMING_CORE + "\n\n_refuse = _noop\n"),
+        "carries other bindings",
+    ),
+    (
+        "a _refuse rebound beneath a module-scope condition",
+        _module(CONFORMING_CORE + "\n\nif True:\n    _refuse = _noop\n"),
+        "carries other bindings",
+    ),
+    (
+        "a _refuse with the wrong signature",
+        _module(
+            "def _refuse(token):\n"
+            "    raise LedgerError(token) from None\n"
+            "\n"
+            "\n" + CONFORMING_DEFINITION
+        ),
+        "does not take exactly",
+    ),
+    (
+        "a _refuse defined in a module other than the defining one",
+        {"__init__.py": CONFORMING_DEFINITION, "schema.py": CONFORMING_REFUSE},
+        "not in __init__.py",
+    ),
+    # -- the exported binding, decided by census -----------------------------
+    (
+        "an assignment beneath a module-scope loop",
+        _module(CONFORMING_CORE + "\n\nfor _ in (1,):\n    validate_ledger = _h\n"),
+        "assignment",
+    ),
+    (
+        "an assignment beneath a module-scope try",
+        _module(
+            CONFORMING_CORE
+            + "\n\ntry:\n    validate_ledger = _h\nexcept Exception:\n    pass\n"
+        ),
+        "assignment",
+    ),
+    (
+        "an assignment beneath a module-scope with",
+        _module(CONFORMING_CORE + "\n\nwith _ctx():\n    validate_ledger = _h\n"),
+        "assignment",
+    ),
+    (
+        "an assignment beneath a module-scope match",
+        _module(
+            CONFORMING_CORE
+            + "\n\nmatch _mode:\n    case 1:\n        validate_ledger = _h\n"
+        ),
+        "assignment",
+    ),
+    (
+        "a nested definition of the name",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _factory():\n"
+            "    def validate_ledger(other):\n"
+            "        return other\n"
+            "    return validate_ledger\n"
+        ),
+        "definition",
+    ),
+    (
+        "a __code__ swap on the refusal helper (reviewer A6)",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _tame(token, path=()):\n    return None\n"
+            "\n\n_refuse.__code__ = _tame.__code__\n"
+        ),
+        "attribute-access",
+    ),
+    (
+        "a __code__ swap on validate_ledger itself (reviewer B6)",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _p(payload):\n    return payload\n"
+            "\n\nvalidate_ledger.__code__ = _p.__code__\n"
+        ),
+        "attribute-access",
+    ),
+    (
+        "a write through the helper's __globals__ (reviewer A6)",
+        _module(CONFORMING_CORE + "\n\n_refuse.__globals__['_refuse'] = _tame\n"),
+        "attribute-access",
+    ),
+    (
+        "a star import that may bind anything (reviewer B6)",
+        _module(CONFORMING_CORE + "\n\nfrom _hostile import *\n"),
+        "star-import",
+    ),
+    (
+        "a module-attribute write on the core (reviewer C6)",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": CORE_SELF_BINDING
+            + CORE_REEXPORT
+            + "_core.validate_ledger = _h\n",
+        },
+        "module-attribute-write",
+    ),
+    (
+        "globals() bound to a name first (reviewer A6)",
+        _module(CONFORMING_CORE + "\n\n_g = globals()\n_g['_refuse'] = _tame\n"),
+        "namespace-builtin-call",
+    ),
+    (
+        "a computed key into globals() (reviewer A6)",
+        _module(CONFORMING_CORE + "\n\nglobals()['_ref' + 'use'] = _tame\n"),
+        "namespace-builtin-call",
+    ),
+    (
+        "globals().__setitem__ (reviewer A6)",
+        _module(
+            CONFORMING_CORE + "\n\nglobals().__setitem__('_refuse', _tame)\n"
+        ),
+        "namespace-builtin-call",
+    ),
+    (
+        "globals().update (reviewers A6 and C6)",
+        _module(CONFORMING_CORE + "\n\nglobals().update(_refuse=_tame)\n"),
+        "namespace-builtin-call",
+    ),
+    (
+        "setattr on the core module (reviewer C6)",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": CORE_SELF_BINDING
+            + CORE_REEXPORT
+            + "setattr(_core, 'validate_ledger', _h)\n",
+        },
+        "namespace-builtin-call",
+    ),
+    (
+        "exec of generated source",
+        _module(CONFORMING_CORE + "\n\nexec(_source)\n"),
+        "namespace-builtin-call",
+    ),
+    (
+        "a write through sys.modules[__name__].__dict__ (reviewer C6)",
+        _module(
+            CONFORMING_CORE
+            + "\n\nimport sys\n"
+            "sys.modules[__name__].__dict__['validate_ledger'] = _h\n"
+        ),
+        "dunder-dict-reach",
+    ),
+    (
+        "a re-export whose _core is an aliased import (reviewer B6)",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": "import _hostile as _core\n" + CORE_REEXPORT,
+        },
+        "not the package's own module",
+    ),
+    (
+        "a re-export whose _core is a plain assignment (reviewer C6)",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": "_core = _hostile\n" + CORE_REEXPORT,
+        },
+        "not the package's own module",
+    ),
+    (
+        "a re-export whose _core is rebound after the self-binding",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": CORE_SELF_BINDING + "_core = _hostile\n" + CORE_REEXPORT,
+        },
+        "not the package's own module",
+    ),
+    (
+        "two surfaces each re-exporting once (reviewer C6)",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": CORE_SELF_BINDING + CORE_REEXPORT,
+            "validate.py": CORE_SELF_BINDING + CORE_REEXPORT,
+        },
+        "exactly one re-export is permitted",
+    ),
+    (
+        "a PEP 695 type alias of the name",
+        _module(CONFORMING_CORE + "\n\ntype validate_ledger = int\n"),
+        "type-alias",
+    ),
+    (
+        "a deletion of the name",
+        _module(CONFORMING_CORE + "\n\ndel validate_ledger\n"),
+        "deletion",
+    ),
+    (
+        "an annotated assignment",
+        _module(CONFORMING_CORE + "\n\nvalidate_ledger: object = _h\n"),
+        "annotated-assignment",
+    ),
+    (
+        "an augmented assignment",
+        _module(CONFORMING_CORE + "\n\nvalidate_ledger += _h\n"),
+        "augmented-assignment",
+    ),
+    (
+        "a loop target",
+        _module(CONFORMING_CORE + "\n\nfor validate_ledger in (_h,):\n    pass\n"),
+        "loop-target",
+    ),
+    (
+        "a comprehension target",
+        _module(
+            CONFORMING_CORE + "\n\n_all = [validate_ledger for validate_ledger in ()]\n"
+        ),
+        "comprehension-target",
+    ),
+    (
+        "a context-manager target",
+        _module(CONFORMING_CORE + "\n\nwith _ctx() as validate_ledger:\n    pass\n"),
+        "context-manager-target",
+    ),
+    (
+        "an exception target",
+        _module(
+            CONFORMING_CORE
+            + "\n\ntry:\n    pass\nexcept Exception as validate_ledger:\n    pass\n"
+        ),
+        "exception-target",
+    ),
+    (
+        "a match capture pattern",
+        _module(
+            CONFORMING_CORE
+            + "\n\nmatch _mode:\n    case validate_ledger:\n        pass\n"
+        ),
+        "match-capture",
+    ),
+    (
+        "a match star pattern",
+        _module(
+            CONFORMING_CORE
+            + "\n\nmatch [1]:\n    case [*validate_ledger]:\n        pass\n"
+        ),
+        "match-star",
+    ),
+    (
+        "a match mapping rest pattern",
+        _module(
+            CONFORMING_CORE + "\n\nmatch {}:\n    case {**validate_ledger}:\n        pass\n"
+        ),
+        "match-mapping-rest",
+    ),
+    (
+        "a named-expression target",
+        _module(CONFORMING_CORE + "\n\n_seen = (validate_ledger := _h)\n"),
+        "named-expression",
+    ),
+    (
+        "a plain import of the name",
+        _module(CONFORMING_CORE + "\n\nfrom _elsewhere import validate_ledger\n"),
+        "import",
+    ),
+    (
+        "an aliased import bound to the name",
+        _module(CONFORMING_CORE + "\n\nimport _elsewhere as validate_ledger\n"),
+        "import",
+    ),
+    (
+        "a parameter shadowing the name",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _helper(validate_ledger):\n    return validate_ledger\n"
+        ),
+        "parameter",
+    ),
+    (
+        "a globals() write",
+        _module(CONFORMING_CORE + "\n\nglobals()['validate_ledger'] = _h\n"),
+        "namespace-mapping-write",
+    ),
+    (
+        "a vars() write",
+        _module(CONFORMING_CORE + "\n\nvars()['validate_ledger'] = _h\n"),
+        "namespace-mapping-write",
+    ),
+    (
+        "a locals() write",
+        _module(CONFORMING_CORE + "\n\nlocals()['validate_ledger'] = _h\n"),
+        "namespace-mapping-write",
+    ),
+    (
+        "a global declaration in a function that rebinds the name",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _swap():\n    global validate_ledger\n"
+            "    validate_ledger = _h\n"
+        ),
+        "global-or-nonlocal",
+    ),
+    # -- the one permitted re-export, and everything shaped like it ----------
+    (
+        "two re-exports in one surface",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": CORE_SELF_BINDING + CORE_REEXPORT + CORE_REEXPORT,
+        },
+        "exactly one re-export is permitted",
+    ),
+    (
+        "a surface re-exporting from something other than _core",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": "validate_ledger = _elsewhere.validate_ledger\n",
+        },
+        "assignment",
+    ),
+    (
+        "a surface re-exporting a different attribute of _core",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": "validate_ledger = _core.something_else\n",
+        },
+        "assignment",
+    ),
+    (
+        "a re-export in the defining module",
+        _module(CONFORMING_CORE + "\n\nvalidate_ledger = _core.validate_ledger\n"),
+        "assignment",
+    ),
+    (
+        "a re-export nested beneath a condition in a surface",
+        {
+            "__init__.py": CONFORMING_CORE,
+            "schema.py": "if True:\n    validate_ledger = _core.validate_ledger\n",
+        },
+        "assignment",
+    ),
+)
+
+#: The two-module shape the production package actually has: the core defines
+#: the function, one surface binds `_core` to this package and re-exports it.
+#: Proved on a fixture before the matcher is pointed at anything real.
+FROZEN_BINDING_POSITIVE_FIXTURE = {
+    "__init__.py": CONFORMING_CORE,
+    "schema.py": CORE_SELF_BINDING + CORE_REEXPORT,
+}
+
 FROZEN_BLOCK_POSITIVE_FIXTURE = (
-    "def _refuse(token):\n"
-    "    raise LedgerError(token)\n"
+    "def _refuse(token, path=()):\n"
+    "    raise LedgerError(token, path) from None\n"
     "\n"
     "\n"
     "def validate_ledger(payload):\n"
@@ -841,6 +1736,23 @@ def test_gv7_s_005_the_root_must_be_an_exact_builtin_dict():
         found, found_defect = frozen_root_decision({"schema.py": fixture})
         assert found is None, f"{label}: accepted"
         assert found_defect, label
+
+    # The two-module production shape -- a core that defines the function and a
+    # surface that re-exports it -- is ACCEPTED, proved on a fixture before the
+    # matcher is pointed at anything real.
+    parameter, defect = frozen_root_decision(FROZEN_BINDING_POSITIVE_FIXTURE)
+    assert defect is None, defect
+    assert parameter == "payload", parameter
+
+    # Jack's three reproduced bypasses, and every route found while closing
+    # them. Each names the defect it must be refused FOR, so a fixture cannot
+    # quietly begin passing for some other reason -- which is how the
+    # Correction 5 negatives went on looking conclusive while three ordinary
+    # shapes walked through.
+    for label, fixture_sources, fragment in REFUSAL_AND_BINDING_FIXTURES:
+        found, found_defect = frozen_root_decision(fixture_sources)
+        assert found is None, f"{label}: accepted"
+        assert fragment in found_defect, (label, found_defect)
 
     # The executable block itself, in the production source.
     parameter, defect = frozen_root_decision(
