@@ -650,9 +650,23 @@ literal is disclosed, `__cause__` is `None`, and `__suppress_context__` is set
 on both.
 
 **Types.** Exact builtin scalar and container types throughout. Subclasses are
-refused before any hook on the rejected object can run. `bool` is refused
-wherever `int` is required, and `int` wherever `bool` is required. No float
-appears anywhere. Every integer carries an explicit bounded range.
+refused before any hook on the rejected object can run — and before any hook on
+**its class or its metaclass** can run either.
+
+**A type decision is never made by reading an attribute of the class.**
+`__mro__`, `__bases__` and `__class__` are all reachable by a custom
+metaclass's `__getattribute__`, so reading one hands control to attacker code
+at the exact moment the validator is deciding whether to trust the object. Such
+a metaclass can **raise**, and a raw exception then escapes the closed refusal
+vocabulary; or it can **return a forged answer**, and a value that is not a
+mapping at all is then refused as a mapping subclass, with the wrong token. The
+decision is made from the exact type identity alone, and wherever a class
+attribute genuinely must be consulted it is read through a primitive the
+metaclass cannot intercept.
+
+`bool` is refused wherever `int` is required, and `int` wherever `bool` is
+required. No float appears anywhere. Every integer carries an explicit bounded
+range.
 
 **Shape.** Root and every nested block have exact, closed key sets. Every
 **nested** list is duplicate-free and within `LIST_MAX`; every **root**
@@ -674,23 +688,32 @@ race between checks:
    redirecting reparse points;
 2. the byte ceiling, over captured bytes;
 3. JSON parsing, including the duplicate-key refusal;
-4. exact builtin types;
+4. exact builtin types, and document-wide string encodability;
 5. closed key sets and closed shapes;
-6. identifiers, closed enum vocabularies, scalar bounds, and string
-   encodability;
+6. identifiers, closed enum vocabularies, and scalar bounds;
 7. references, reciprocity, and domain rules;
 8. canonical inventory rules.
 
-**Encodability is a stage-6 rule, and `ensure_ascii=True` is load-bearing.** A
+**Encodability is a stage-4 rule, and `ensure_ascii=True` is load-bearing.** A
 JSON `\uD800` escape decodes to a lone surrogate, which `str.encode("utf-8")`
 cannot represent. The frozen canonical form sets `ensure_ascii=True`, which
 re-escapes the surrogate back to ASCII — so canonical encoding **does not** in
 fact crash on this input today, and any claim that it does is withdrawn.
 Relaxing that flag to `ensure_ascii=False` **would** raise `UnicodeEncodeError`
 on the same value. The validator therefore refuses any string carrying a
-surrogate code point at stage 6, as `string-not-encodable`, **before** a digest
-or a canonical rendering is computed: defence in depth for a flag that must
-never be relaxed, not a repair for a crash the frozen form already avoids.
+surrogate code point as `string-not-encodable`, **before** a digest or a
+canonical rendering is computed: defence in depth for a flag that must never be
+relaxed, not a repair for a crash the frozen form already avoids.
+
+**The stage is fixed by a document that carries two faults at once.** A payload
+whose only key is `schema` and whose value is a lone surrogate is *also* missing
+ten required root keys. If encodability ran after the closed key sets, that
+document would be refused as `missing-key`, the shape fault would be reported
+and the unencodable string would go unmentioned. So the screen is document wide
+and runs with the exact types, at **stage 4**, before any closed key set is
+examined. That is why the ordering is stated rather than left to be inferred:
+the two refusals are both correct in isolation, and only the stage decides
+which one the operator is told about.
 
 **Refusal classes and exit codes.** `schema.LedgerError` is the single refusal
 base. `validate.LedgerPathError`, `validate.LedgerCeilingError` and
