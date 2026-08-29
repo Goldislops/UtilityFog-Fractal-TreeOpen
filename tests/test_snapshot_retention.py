@@ -8884,3 +8884,119 @@ def test_the_direct_library_nul_defect_is_still_present_and_unrepaired():
     end = source.index("    def release(self)")
     assert "except OSError:" in source[start:end]
     assert "ValueError" not in source[start:end]
+
+
+# ===========================================================================
+# Final readiness corrections -- object-bound quarantine and lock containment
+# ===========================================================================
+
+
+def test_quarantine_mutations_stay_on_the_exact_scanned_directory_object(
+        tmp_path, monkeypatch):
+    """Swap the pathname after the last scan-identity comparison.
+
+    The replacement has the same eligible basenames, so per-file checks alone
+    skip every action after creating quarantine state in the wrong object.  A
+    corrected pass instead keeps one binding to the scanned directory: Windows
+    may deny the rename while that binding is held, and descriptor-relative
+    platforms may let the rename happen, but no mutation may reach the
+    unscanned replacement in either case.
+    """
+    root = _scanned_root(tmp_path, snapshots=4)
+    names = _listing(root)
+    genuine = retention._validated_quarantine_root
+    attempted = {"replacement": None, "blocked": None}
+
+    def _swap_after_the_binding(data_root, *, may_create):
+        try:
+            attempted["replacement"] = _replace_root_pathname(
+                root, contents=names)
+        except OSError as error:
+            attempted["blocked"] = error
+        return genuine(data_root, may_create=may_create)
+
+    monkeypatch.setattr(retention, "_validated_quarantine_root",
+                        _swap_after_the_binding)
+    report = _run(root)
+
+    assert report.refused is None
+    assert report.halted is False
+    assert report.moved == report.planned_actions_count == 3
+    replacement = attempted["replacement"]
+    if replacement is None:
+        assert attempted["blocked"] is not None, (
+            "the replacement neither happened nor met an active binding")
+        assert _quarantine_root(root).is_dir()
+    else:
+        assert replacement.before != replacement.after
+        assert not _quarantine_root(root).exists(), (
+            "quarantine state reached the unscanned replacement")
+        assert _quarantine_root(replacement.displaced).is_dir(), (
+            "the exact scanned object did not receive its own quarantine")
+        assert _listing(root) == names, (
+            "the unscanned replacement's contents were changed")
+
+
+def _object_alias_identity_seam(monkeypatch, target, alias, *, same_object):
+    """Give component-disjoint paths deterministic filesystem identities.
+
+    The four alias families below require machine-global configuration to make
+    literally.  This seam supplies only the object identity result that those
+    real aliases produce; all path parsing, ancestry walking and CLI ordering
+    remain production code.
+    """
+    genuine = getattr(retention, "_directory_object_identity", None)
+    target_key = os.path.normcase(os.path.abspath(os.fspath(target)))
+    alias_key = os.path.normcase(os.path.abspath(os.fspath(alias)))
+
+    def _identity(path, *, follow_reparse):
+        key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        if key == target_key:
+            return (7001, 9001)
+        if key == alias_key:
+            return (7001, 9001 if same_object else 9002)
+        if genuine is None:
+            return None
+        return genuine(path, follow_reparse=follow_reparse)
+
+    monkeypatch.setattr(retention, "_directory_object_identity", _identity,
+                        raising=False)
+
+
+@pytest.mark.parametrize("alias_family", [
+    "windows_mapped_drive",
+    "windows_administrative_share",
+    "windows_subst_root",
+    "posix_bind_mount",
+])
+def test_a_component_disjoint_alias_of_the_target_is_rejected_before_open(
+        tmp_path, monkeypatch, capsys, alias_family):
+    """Different namespace roots do not make one directory two objects."""
+    root = _scanned_root(tmp_path, name="maintained", snapshots=2)
+    alias = tmp_path / alias_family
+    alias.mkdir()
+    lock = alias / "retention.lock"
+    _object_alias_identity_seam(monkeypatch, root, alias, same_object=True)
+    opened = _open_recorder(monkeypatch)
+    before = _listing(root)
+
+    status = retention.main([str(root), "--lock", str(lock)])
+    printed = capsys.readouterr()
+
+    assert status == 1
+    assert printed.out.strip() == "retention refused=lock_unavailable"
+    assert printed.err == ""
+    assert opened == [], "the lock sink was reached before object containment"
+    assert not lock.exists()
+    assert _listing(root) == before
+
+
+def test_a_component_disjoint_distinct_directory_remains_outside(
+        tmp_path, monkeypatch):
+    """Object comparison must not reject an ordinary outside sibling."""
+    root = _scanned_root(tmp_path, name="maintained", snapshots=1)
+    outside = tmp_path / "different-object"
+    outside.mkdir()
+    lock = outside / "retention.lock"
+    _object_alias_identity_seam(monkeypatch, root, outside, same_object=False)
+    assert retention._lock_path_is_outside(lock, root) is True
