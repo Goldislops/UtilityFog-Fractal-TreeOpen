@@ -21,7 +21,9 @@ concurrency:
 jobs:
   acceptance:
     name: general-v7-ledger (${{ matrix.label }}, informational, path-scoped)
-    runs-on: ubuntu-latest
+    # The admitted controls exercise Windows device-name, junction and reparse
+    # semantics, and use ast.parse(optimize=...), which requires Python 3.13+.
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +38,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
+      # Contacts the configured Python package index. Pinned exactly.
       - name: Install pinned test dependency
         run: pip install pytest==9.0.2
       - name: Collect the General V7 acceptance surface
