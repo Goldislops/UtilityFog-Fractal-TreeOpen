@@ -462,7 +462,15 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     if not isinstance(policy, RetentionPolicy):
         raise TypeError("explicit RetentionPolicy required")
 
+    # A live pass may lend the scanner its private directory binding.  That
+    # object is the only trusted descriptor route in this module: arbitrary
+    # caller strings, including `/proc/self/fd` and `/dev/fd`, stay on the
+    # ordinary non-following pathname proof below.
+    binding = (directory
+               if isinstance(directory, _DirectoryBinding)
+               else None)
     root = Path(os.fspath(directory))
+    root_proof = binding if binding is not None else root
 
     # The identity of the directory this pass intends to enumerate, from one
     # bounded, non-following read taken BEFORE the iterator is acquired.
@@ -482,7 +490,10 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     # device or inode the platform reports as zero. Either way the scan fails
     # closed rather than handing back a success nothing downstream can bind
     # to an object.
-    root_identity = directory_state(root)
+    root_identity = (binding.logical_identity
+                     if binding is not None
+                     and binding.matches(binding.logical_identity)
+                     else directory_state(root))
 
     try:
         iterator = os.scandir(root)
@@ -510,7 +521,7 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     # never had a usable identity at all -- a reparse point, a zero device or
     # inode, one `os.lstat` could not read -- fails closed here rather than
     # becoming a success nothing downstream can bind to an object.
-    if not _scanned_root_unchanged(root, root_identity):
+    if not _scanned_root_unchanged(root_proof, root_identity):
         # `os.scandir` already opened a handle; release it before refusing.
         with iterator:
             pass
@@ -600,7 +611,7 @@ def scan_retention_candidates(directory, *, policy: RetentionPolicy) -> ScanResu
     # original object, while every per-entry `os.lstat(root / name)` above
     # resolves by PATH into the replacement. Equality here is what discards
     # that whole pass instead of planning against the mixture.
-    if not _scanned_root_unchanged(root, root_identity):
+    if not _scanned_root_unchanged(root_proof, root_identity):
         return ScanFailed(RetentionFailureReason.IDENTITY_UNAVAILABLE,
                           processed, inspected)
 
@@ -1689,6 +1700,43 @@ def _lock_object_ancestry_is_outside(lock_path, directory) -> bool:
     return proved_existing_parent
 
 
+def _trusted_posix_descriptor_route(fd, expected):
+    """One kernel descriptor symlink that still names `expected`, or None.
+
+    Merely finding a directory at `/proc/self/fd/N` is not enough: a chroot or
+    unusual namespace can put an ordinary, attacker-controlled directory at
+    that spelling.  The private route is trusted only when it is a symlink and
+    its followed identity is exactly the identity read from the held fd.
+    """
+    for candidate in ("/proc/self/fd/%d" % fd, "/dev/fd/%d" % fd):
+        try:
+            link_info = os.lstat(candidate)
+            target_info = os.stat(candidate)
+        except (OSError, ValueError, TypeError):
+            continue
+        identity = _stable_identity(target_info)
+        if (stat_module.S_ISLNK(link_info.st_mode)
+                and stat_module.S_ISDIR(target_info.st_mode)
+                and identity is not None
+                and identity[:2] == expected):
+            return candidate
+    return None
+
+
+def _trusted_posix_route_matches(path, expected) -> bool:
+    """Whether a private descriptor route is still the expected kernel link."""
+    try:
+        link_info = os.lstat(path)
+        target_info = os.stat(path)
+    except (OSError, ValueError, TypeError):
+        return False
+    identity = _stable_identity(target_info)
+    return (stat_module.S_ISLNK(link_info.st_mode)
+            and stat_module.S_ISDIR(target_info.st_mode)
+            and identity is not None
+            and identity[:2] == expected)
+
+
 class _DirectoryBinding:
     """One live binding to the exact directory object a scan established."""
 
@@ -1701,6 +1749,10 @@ class _DirectoryBinding:
         self._handle = handle
         self._windows = windows
         self._active = True
+
+    def __fspath__(self):
+        """The private stable route, usable only while this binding is live."""
+        return os.fspath(self.path)
 
     @classmethod
     def acquire(cls, path):
@@ -1748,12 +1800,7 @@ class _DirectoryBinding:
                 except OSError:
                     pass
                 return None
-            stable_path = None
-            for candidate in ("/proc/self/fd/%d" % fd,
-                              "/dev/fd/%d" % fd):
-                if os.path.isdir(candidate):
-                    stable_path = candidate
-                    break
+            stable_path = _trusted_posix_descriptor_route(fd, identity[:2])
             if stable_path is None:
                 closing = fd
                 fd = None
@@ -1785,10 +1832,13 @@ class _DirectoryBinding:
                 current = None if identity is None else identity[:2]
         except OSError:
             return False
+        route_matches = (directory_state(self.path) == expected
+                         if self._windows
+                         else _trusted_posix_route_matches(
+                             self.path, self._object_identity))
         return (self.logical_identity == expected
                 and current == self._object_identity
-                and (not self._windows
-                     or directory_state(self.path) == expected))
+                and route_matches)
 
     def release(self) -> bool:
         if not self._active:
@@ -1847,12 +1897,7 @@ class _DirectoryAnchor:
                 except OSError:
                     pass
                 return None
-            stable_path = None
-            for candidate in ("/proc/self/fd/%d" % fd,
-                              "/dev/fd/%d" % fd):
-                if os.path.isdir(candidate):
-                    stable_path = candidate
-                    break
+            stable_path = _trusted_posix_descriptor_route(fd, identity[:2])
             if stable_path is None:
                 closing = fd
                 fd = None
@@ -1912,6 +1957,117 @@ class _LockPathBinding:
         return self._anchor.release()
 
 
+# A hostile or simply pathological namespace must not turn an ancestry proof
+# into unbounded work.  Ordinary supported paths are far shallower than this;
+# reaching the cap is an unprovable relationship and therefore a refusal.
+_MAX_HELD_ANCESTRY_DEPTH = 256
+
+
+def _held_directory_identity(fd):
+    """`(dev, ino)` for one live POSIX directory descriptor, or None."""
+    try:
+        info = os.fstat(fd)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not stat_module.S_ISDIR(info.st_mode):
+        return None
+    identity = _stable_identity(info)
+    return None if identity is None else identity[:2]
+
+
+def _held_lock_parent_is_outside(target_binding, lock_binding) -> bool:
+    """Prove the held lock parent is outside the held maintained object.
+
+    User-controlled spellings have already passed the lexical and object
+    guards before this function is reached.  This is the post-acquisition race
+    closure: on POSIX it walks `..` with `openat` from the live lock-parent
+    descriptor and compares every held ancestor with the live target identity.
+    No mutable user pathname, `realpath`, `lstat`, `/proc` prefix or `/dev/fd`
+    prefix participates.  Windows keeps its existing handle-derived-path proof;
+    both directory handles deny replacement for the duration of that proof.
+
+    Every dimension is bounded, every owned descriptor receives at most one
+    close attempt, and any open, identity or close ambiguity fails closed.
+    """
+    if (not isinstance(target_binding, _DirectoryBinding)
+            or not isinstance(lock_binding, _LockPathBinding)
+            or not target_binding._active
+            or not lock_binding._anchor._active):
+        return False
+
+    anchor = lock_binding._anchor
+    if target_binding._windows or anchor._windows:
+        if not target_binding._windows or not anchor._windows:
+            return False
+        if not target_binding.matches(target_binding.logical_identity):
+            return False
+        return _lock_object_ancestry_is_outside(
+            lock_binding.path, target_binding.path)
+
+    target_identity = _held_directory_identity(target_binding._handle)
+    anchor_identity = _held_directory_identity(anchor._handle)
+    if (target_identity is None or anchor_identity is None
+            or target_identity != target_binding._object_identity
+            or anchor_identity != anchor.identity):
+        return False
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd = anchor._handle       # borrowed; the binding owns this one
+    current_owned = False
+    pending_fd = None
+    answer = False
+    seen = set()
+    try:
+        for _depth in range(_MAX_HELD_ANCESTRY_DEPTH):
+            current_identity = _held_directory_identity(current_fd)
+            if current_identity is None or current_identity in seen:
+                break
+            seen.add(current_identity)
+            if current_identity == target_identity:
+                break
+
+            pending_fd = os.open("..", flags, dir_fd=current_fd)
+            parent_identity = _held_directory_identity(pending_fd)
+            if parent_identity is None:
+                break
+            if parent_identity == current_identity:
+                answer = True
+                break
+
+            if current_owned:
+                closing = current_fd
+                current_fd = None
+                current_owned = False
+                try:
+                    os.close(closing)
+                except OSError:
+                    break
+            current_fd = pending_fd
+            current_owned = True
+            pending_fd = None
+    except (OSError, ValueError, TypeError):
+        answer = False
+
+    cleanup_ok = True
+    if pending_fd is not None:
+        closing = pending_fd
+        pending_fd = None
+        try:
+            os.close(closing)
+        except OSError:
+            cleanup_ok = False
+    if current_owned and current_fd is not None:
+        closing = current_fd
+        current_fd = None
+        current_owned = False
+        try:
+            os.close(closing)
+        except OSError:
+            cleanup_ok = False
+    return answer and cleanup_ok
+
+
 def _scanned_root_unchanged(path, scanned) -> bool:
     """Whether `path` is STILL the exact directory a live scan enumerated.
 
@@ -1936,6 +2092,8 @@ def _scanned_root_unchanged(path, scanned) -> bool:
     """
     if scanned is None:
         return False
+    if isinstance(path, _DirectoryBinding):
+        return path.matches(scanned)
     return directory_state(path) == scanned
 
 
@@ -2187,14 +2345,16 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
                        reserve_ok=reserve_ok, blocked=blocked)
 
     scanned_root = getattr(scan, "root_identity", None)
-    binding = _DirectoryBinding.acquire(data_root)
+    borrowed = isinstance(data_root, _DirectoryBinding)
+    binding = data_root if borrowed else _DirectoryBinding.acquire(data_root)
     if binding is None:
         return _report(mode,
                        refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                        scan=scan, plan=plan, actions=plan_actions,
                        reserve_ok=reserve_ok, blocked=blocked)
     if not binding.matches(scanned_root):
-        binding.release()
+        if not borrowed:
+            binding.release()
         return _report(mode,
                        refused=RetentionFailureReason.IDENTITY_UNAVAILABLE,
                        scan=scan, plan=plan, actions=plan_actions,
@@ -2206,8 +2366,8 @@ def _quarantine(data_root, plan_actions, *, policy, now_ns, pass_id, scan,
             pass_id=pass_id, scan=scan, plan=plan, reserve_ok=reserve_ok,
             blocked=blocked, mover=mover, binding=binding)
     finally:
-        released = binding.release()
-    if not released:
+        released = True if borrowed else binding.release()
+    if not borrowed and not released:
         refusal = (report.refused
                    if report.refused is not None
                    else RetentionFailureReason.IDENTITY_UNAVAILABLE)
@@ -2457,6 +2617,58 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
     `now_ns` is captured once and used throughout, so every age comparison in
     one pass is against a single instant.
     """
+    # Preserve the public validation and the two zero-work QUARANTINE gates
+    # before acquiring a directory descriptor.  The implementation repeats
+    # these checks so its private borrowed-binding route remains self-contained.
+    if not isinstance(policy, RetentionPolicy):
+        raise TypeError("explicit RetentionPolicy required")
+    if not isinstance(mode, RetentionMode):
+        raise TypeError("explicit RetentionMode required")
+    if scan is not None and mode is not RetentionMode.PLAN:
+        raise ValueError("retention_scan_injection_plan_only")
+    if mode is RetentionMode.QUARANTINE:
+        if not valid_pass_id(pass_id if pass_id is not None
+                             else _default_pass_id()):
+            return _run_pass(
+                directory, policy=policy, mode=mode, now_ns=now_ns,
+                pass_id=pass_id, admit=admit, scan=scan, mover=mover)
+        if mover is None and os.name != "nt":
+            return _run_pass(
+                directory, policy=policy, mode=mode, now_ns=now_ns,
+                pass_id=pass_id, admit=admit, scan=scan, mover=mover)
+
+    # A synthetic PLAN scan deliberately has no live filesystem object to bind.
+    # Every live pass instead owns one binding from before the scan until after
+    # reporting, unless `main` lends the binding it already holds.
+    borrowed = isinstance(directory, _DirectoryBinding)
+    binding = directory if borrowed else None
+    if scan is None and binding is None:
+        binding = _DirectoryBinding.acquire(directory)
+    if scan is not None or binding is None:
+        return _run_pass(
+            directory, policy=policy, mode=mode, now_ns=now_ns,
+            pass_id=pass_id, admit=admit, scan=scan, mover=mover)
+
+    released = True
+    try:
+        report = _run_pass(
+            binding, policy=policy, mode=mode, now_ns=now_ns,
+            pass_id=pass_id, admit=admit, scan=scan, mover=mover)
+    finally:
+        if not borrowed:
+            released = binding.release()
+    if not borrowed and not released:
+        refusal = (report.refused
+                   if report.refused is not None
+                   else RetentionFailureReason.IDENTITY_UNAVAILABLE)
+        report = dataclasses.replace(report, refused=refusal, halted=True)
+    return report
+
+
+def _run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
+              now_ns=None, pass_id=None, admit=None, scan=None,
+              mover=None) -> PassReport:
+    """Implementation for an ordinary path or a private held binding."""
     if not isinstance(policy, RetentionPolicy):
         raise TypeError("explicit RetentionPolicy required")
     if not isinstance(mode, RetentionMode):
@@ -2585,7 +2797,10 @@ def run_pass(directory, *, policy: RetentionPolicy, mode: RetentionMode,
         # reported a clean no-op over a root it never scanned would tell an
         # operator the directory is healthy on the strength of a reading taken
         # somewhere else.
-        data_state = directory_state(directory)
+        data_state = (directory.logical_identity
+                      if isinstance(directory, _DirectoryBinding)
+                      and directory.matches(directory.logical_identity)
+                      else directory_state(directory))
         if (data_state is None or observed.root_identity is None
                 or data_state != observed.root_identity):
             return _report(mode,
@@ -2624,17 +2839,29 @@ def _default_pass_id() -> str:
     return time.strftime("p%Y%m%dT%H%M%S", time.gmtime())
 
 
-def _main_under_lock(directory, lock_path, mode) -> int:
-    """Run the path-free CLI body while one already-validated lock is held."""
+def _run_under_lock(directory, lock_path, mode):
+    """Return `(acquired, report)` after the lock context has been released."""
     with single_instance_lock(lock_path) as acquired:
         if not acquired:
-            print("retention refused=%s"
-                  % RetentionFailureReason.LOCK_UNAVAILABLE.value)
-            return 1
+            return False, None
         report = run_pass(directory,
                           policy=PRODUCTION_RETENTION_POLICY, mode=mode)
-        print(format_report(report))
-        return 1 if (report.refused is not None or report.halted) else 0
+    return True, report
+
+
+def _main_under_lock(directory, lock_path, mode) -> int:
+    """Run and print the path-free CLI body with an ordinary lock path."""
+    acquired, report = _run_under_lock(directory, lock_path, mode)
+    if not acquired:
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    if report is None:  # pragma: no cover - defensive shape check
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    print(format_report(report))
+    return 1 if (report.refused is not None or report.halted) else 0
 
 
 def main(argv=None) -> int:
@@ -2705,18 +2932,42 @@ def main(argv=None) -> int:
         print("retention refused=%s"
               % RetentionFailureReason.LOCK_UNAVAILABLE.value)
         return 1
+    acquired = False
+    report = None
+    lock_released = False
+    target_released = False
     try:
-        if (not _lock_path_is_outside(
-                lock_binding.path, target_binding.path)
-                or not _lock_object_ancestry_is_outside(
-                    lock_binding.path, target_binding.path)):
+        # The spellings were proved before acquisition.  This final race
+        # closure is deliberately OBJECT-ONLY: feeding our own POSIX
+        # `/proc/self/fd` route back through the arbitrary-path proof makes a
+        # trusted held descriptor look like an unsafe user symlink.
+        if not _held_lock_parent_is_outside(target_binding, lock_binding):
             print("retention refused=%s"
                   % RetentionFailureReason.LOCK_UNAVAILABLE.value)
             return 1
-        return _main_under_lock(target_binding.path, lock_binding.path, mode)
+        acquired, report = _run_under_lock(
+            target_binding, lock_binding.path, mode)
     finally:
-        lock_binding.release()
-        target_binding.release()
+        lock_released = lock_binding.release()
+        target_released = target_binding.release()
+
+    if not acquired:
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    if report is None:  # pragma: no cover - defensive shape check
+        print("retention refused=%s"
+              % RetentionFailureReason.LOCK_UNAVAILABLE.value)
+        return 1
+    if not lock_released or not target_released:
+        reason = report.refused
+        if reason is None:
+            reason = (RetentionFailureReason.LOCK_UNAVAILABLE
+                      if not lock_released
+                      else RetentionFailureReason.IDENTITY_UNAVAILABLE)
+        report = dataclasses.replace(report, refused=reason, halted=True)
+    print(format_report(report))
+    return 1 if (report.refused is not None or report.halted) else 0
 
 
 if __name__ == "__main__":  # pragma: no cover - operator entry point
