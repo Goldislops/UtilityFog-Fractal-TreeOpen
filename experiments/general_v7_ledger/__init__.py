@@ -409,6 +409,45 @@ def _refuse(token, path=()):
     raise LedgerError(token, path) from None
 
 
+#: The content stages, in the order section 9 freezes them, and the value the
+#: selector rests at outside a staged pass.
+_CONTENT_STAGES = (4, 5, 6)
+_FINAL_STAGE = 6
+
+#: A field that is not present at all. Its absence is a stage-5 fault, decided
+#: by the record's own closed key set; every rule about its VALUE simply has
+#: nothing to decide and steps over it, so one missing key can no longer mask
+#: an exact-type fault elsewhere in the same record or document.
+_ABSENT = object()
+
+
+def _refuse_at(rule_stage, pass_stage, token, path=()):
+    """Refuse only once the pass being decided has reached ``stage``.
+
+    "The earliest applicable stage wins" ranges over the whole document, not
+    over one record. A validator that runs every stage inside each record
+    before moving on lets a stage-6 vocabulary fault in the first record outrun
+    a stage-4 exact-type fault in the last, so the token reports the traversal
+    rather than the fault. Running the one traversal once per stage, with the
+    later stages deferred, makes the stage a property of the document.
+
+    Deferring leaves the value's TYPE known good -- stage 4 has decided every
+    exactness question before stage 5 or 6 is consulted -- but it does not make
+    the value well formed. A rule that depends on a later-stage rule must guard
+    on it explicitly; `ordinal-id-mismatch` is the one such rule here, and it
+    checks the identifier is well formed before parsing its digits.
+
+    ``pass_stage`` is an ARGUMENT, never module state. It was a module global
+    once, and two concurrent validations then overwrote each other's selector:
+    a document that had to be refused was accepted, because the fault was
+    deferred on every pass its own validation ever ran. Nothing about which
+    stage is being decided is shared between calls.
+    """
+    if pass_stage < rule_stage:
+        return
+    _refuse(token, path)
+
+
 def _refuse_path(token):
     raise LedgerPathError(token) from None
 
@@ -469,89 +508,110 @@ def _screen_tree(root):
 
 
 def _exact_str(value, path):
+    if value is _ABSENT:
+        return
     if type(value) is not str:
         _refuse("type-not-exact", path)
 
 
-def _text(value, path, high):
+def _text(value, path, high, *, stage):
+    if value is _ABSENT:
+        return
     _exact_str(value, path)
     if not 1 <= len(value) <= high:
-        _refuse("text-length-invalid", path)
+        _refuse_at(6, stage, "text-length-invalid", path)
 
 
-def _enum(value, vocabulary, path):
+def _enum(value, vocabulary, path, *, stage):
+    if value is _ABSENT:
+        return
     _exact_str(value, path)
     if value not in vocabulary:
-        _refuse("enum-value-invalid", path)
+        _refuse_at(6, stage, "enum-value-invalid", path)
 
 
-def _identifier(value, segment, path):
+def _identifier(value, segment, path, *, stage):
+    if value is _ABSENT:
+        return
     _exact_str(value, path)
     if _ID_RE.match(value) is None:
-        _refuse("identifier-malformed", path)
+        _refuse_at(6, stage, "identifier-malformed", path)
     if value[4:7] != segment:
-        _refuse("identifier-wrong-collection", path)
+        _refuse_at(6, stage, "identifier-wrong-collection", path)
 
 
-def _reference_shape(value, path):
+def _reference_shape(value, path, *, stage):
+    if value is _ABSENT:
+        return
     _exact_str(value, path)
     if _ID_RE.match(value) is None:
-        _refuse("identifier-malformed", path)
+        _refuse_at(6, stage, "identifier-malformed", path)
 
 
-def _string_list(value, path, low, high, item_max):
+def _string_list(value, path, low, high, item_max, *, stage):
     # Shape before content: length and duplicate-freeness are section-9
     # "Shape" rules, so they precede the per-item scalar bounds. Item
     # exactness must still precede the set-based duplicate check, because a
     # non-string item is unhashable in general and exactness is stage 4.
+    if value is _ABSENT:
+        return
     if type(value) is not list:
         _refuse("type-not-exact", path)
     if not low <= len(value) <= high:
-        _refuse("list-length-invalid", path)
+        _refuse_at(5, stage, "list-length-invalid", path)
     for index, item in enumerate(value):
         _exact_str(item, path + (index,))
     if len(value) != len(set(value)):
-        _refuse("list-duplicate-item", path)
+        _refuse_at(5, stage, "list-duplicate-item", path)
     for index, item in enumerate(value):
         if not 1 <= len(item) <= item_max:
-            _refuse("text-length-invalid", path + (index,))
+            _refuse_at(6, stage, "text-length-invalid", path + (index,))
 
 
-def _id_list(value, path, low=0):
+def _id_list(value, path, low=0, *, stage):
+    if value is _ABSENT:
+        return
     if type(value) is not list:
         _refuse("type-not-exact", path)
     if not low <= len(value) <= LIST_MAX:
-        _refuse("list-length-invalid", path)
+        _refuse_at(5, stage, "list-length-invalid", path)
     for index, item in enumerate(value):
         _exact_str(item, path + (index,))
     if len(value) != len(set(value)):
-        _refuse("list-duplicate-item", path)
+        _refuse_at(5, stage, "list-duplicate-item", path)
     for index, item in enumerate(value):
         if _ID_RE.match(item) is None:
-            _refuse("identifier-malformed", path + (index,))
+            _refuse_at(6, stage, "identifier-malformed", path + (index,))
 
 
-def _dispositions(value, path):
+def _dispositions(value, path, *, stage):
+    if value is _ABSENT:
+        return
     if type(value) is not list:
         _refuse("type-not-exact", path)
     if not 1 <= len(value) <= LIST_MAX:
-        _refuse("list-length-invalid", path)
+        _refuse_at(5, stage, "list-length-invalid", path)
     for index, item in enumerate(value):
         _exact_str(item, path + (index,))
     if len(value) != len(set(value)):
-        _refuse("list-duplicate-item", path)
+        _refuse_at(5, stage, "list-duplicate-item", path)
     for index, item in enumerate(value):
         if item not in SAFETY_DISPOSITIONS:
-            _refuse("enum-value-invalid", path + (index,))
+            _refuse_at(6, stage, "enum-value-invalid", path + (index,))
     if ORDINARY_DISPOSITION in value and len(value) != 1:
-        _refuse("disposition-ordinary-not-exclusive", path)
+        _refuse_at(6, stage, "disposition-ordinary-not-exclusive", path)
 
 
-def _supersedes_closed(value, path):
-    if value is None:
+def _supersedes_closed(value, path, *, stage):
+    if value is _ABSENT or value is None:
         return
     if type(value) is dict:
-        _refuse("supersedes-not-permitted", path)
+        # A dict IS an exact builtin type, so this is not a stage-4 exactness
+        # fault: v1 admits no supersession block, which is a closed-VALUE rule
+        # at stage 5. Falling through to the type refusal after deferring would
+        # have reported `type-not-exact` for it on the stage-4 pass.
+        _refuse_at(5, stage, "supersedes-not-permitted", path)
+        return
     _refuse("type-not-exact", path)
 
 
@@ -583,189 +643,212 @@ _HTTPS_RE = re.compile(r"\Ahttps://[^\s/?#]+[^\s]*\Z")
 # --------------------------------------------------------------------------
 
 
-def _check_record_shape(record, collection, index):
+def _check_record_shape(record, collection, index, *, stage):
+    """The record's closed key set, for the stage being decided.
+
+    This no longer reports completeness, and the caller no longer skips a
+    record because a declared key is absent: every value rule steps over
+    ``_ABSENT``, so the fields that ARE present are still type checked on the
+    stage-4 pass and a missing key can mask nothing.
+    """
     if type(record) is not dict:
         _refuse("type-not-exact", (collection, index))
     declared = KEYS_BY_COLLECTION[collection]
     declared_set = frozenset(declared)
     for field in record:
         if field not in declared_set:
-            _refuse("undeclared-key", (collection, index))
+            _refuse_at(5, stage, "undeclared-key", (collection, index))
     for field in declared:
         if field not in record:
-            _refuse("missing-key", (collection, index, field))
+            _refuse_at(5, stage, "missing-key", (collection, index, field))
 
 
-def _check_batch(record, path):
-    _identifier(record["batch_id"], "BAT", path + ("batch_id",))
-    ordinal = record["batch_ordinal"]
-    if type(ordinal) is not int:
-        _refuse("type-not-exact", path + ("batch_ordinal",))
-    if not 1 <= ordinal <= _BATCH_ORDINAL_MAX:
-        _refuse("int-out-of-range", path + ("batch_ordinal",))
-    if int(record["batch_id"][8:12]) != ordinal:
-        _refuse("ordinal-id-mismatch", path + ("batch_ordinal",))
-    _enum(record["batch_kind"], BATCH_KINDS, path + ("batch_kind",))
-    _id_list(record["introduces_sources"], path + ("introduces_sources",))
-    _id_list(record["introduces_artifacts"], path + ("introduces_artifacts",))
-    _id_list(record["updates_sources"], path + ("updates_sources",))
-    _enum(record["supplied_by_role"], ROLES, path + ("supplied_by_role",))
-    _text(record["supplied_by_label"], path + ("supplied_by_label",), LABEL_MAX)
-    _text(record["notes"], path + ("notes",), TEXT_MAX)
+def _check_batch(record, path, *, stage):
+    _identifier(record.get("batch_id", _ABSENT), "BAT", path + ("batch_id",), stage=stage)
+    ordinal = record.get("batch_ordinal", _ABSENT)
+    if ordinal is not _ABSENT:
+        if type(ordinal) is not int:
+            _refuse("type-not-exact", path + ("batch_ordinal",))
+        if not 1 <= ordinal <= _BATCH_ORDINAL_MAX:
+            _refuse_at(6, stage, "int-out-of-range", path + ("batch_ordinal",))
+    # The ordinal must agree with the identifier's digits -- a rule that only
+    # means anything once the identifier is well formed. `identifier-malformed`
+    # is itself stage 6, so on the stage-4 pass it has deferred and those digits
+    # need not be there; parsing them regardless raised a raw `ValueError` for
+    # `batch_id = ""`. A malformed identifier is refused by its own rule.
+    identifier = record.get("batch_id", _ABSENT)
+    if identifier is not _ABSENT and ordinal is not _ABSENT:
+        if _ID_RE.match(identifier) is not None:
+            if int(identifier[8:12]) != ordinal:
+                _refuse_at(6, stage, "ordinal-id-mismatch", path + ("batch_ordinal",))
+    _enum(record.get("batch_kind", _ABSENT), BATCH_KINDS, path + ("batch_kind",), stage=stage)
+    _id_list(record.get("introduces_sources", _ABSENT), path + ("introduces_sources",), stage=stage)
+    _id_list(record.get("introduces_artifacts", _ABSENT), path + ("introduces_artifacts",), stage=stage)
+    _id_list(record.get("updates_sources", _ABSENT), path + ("updates_sources",), stage=stage)
+    _enum(record.get("supplied_by_role", _ABSENT), ROLES, path + ("supplied_by_role",), stage=stage)
+    _text(record.get("supplied_by_label", _ABSENT), path + ("supplied_by_label",), LABEL_MAX, stage=stage)
+    _text(record.get("notes", _ABSENT), path + ("notes",), TEXT_MAX, stage=stage)
 
 
-def _check_source(record, path):
-    _identifier(record["source_id"], "SRC", path + ("source_id",))
-    _reference_shape(record["batch_ref"], path + ("batch_ref",))
-    _text(record["supplied_title"], path + ("supplied_title",), TEXT_MAX)
-    _text(record["supplied_creator"], path + ("supplied_creator",), LABEL_MAX)
-    _text(record["supplied_channel"], path + ("supplied_channel",), LABEL_MAX)
+def _check_source(record, path, *, stage):
+    _identifier(record.get("source_id", _ABSENT), "SRC", path + ("source_id",), stage=stage)
+    _reference_shape(record.get("batch_ref", _ABSENT), path + ("batch_ref",), stage=stage)
+    _text(record.get("supplied_title", _ABSENT), path + ("supplied_title",), TEXT_MAX, stage=stage)
+    _text(record.get("supplied_creator", _ABSENT), path + ("supplied_creator",), LABEL_MAX, stage=stage)
+    _text(record.get("supplied_channel", _ABSENT), path + ("supplied_channel",), LABEL_MAX, stage=stage)
 
-    supplied = record["supplied_locator"]
-    if supplied is not None:
-        _text(supplied, path + ("supplied_locator",), TEXT_MAX)
-    normalized = record["normalized_locator"]
-    if normalized is not None:
+    supplied = record.get("supplied_locator", _ABSENT)
+    if supplied is not None and supplied is not _ABSENT:
+        _text(supplied, path + ("supplied_locator",), TEXT_MAX, stage=stage)
+    normalized = record.get("normalized_locator", _ABSENT)
+    if normalized is not None and normalized is not _ABSENT:
         _exact_str(normalized, path + ("normalized_locator",))
-    absence = record["locator_absence"]
-    if absence is not None:
+    absence = record.get("locator_absence", _ABSENT)
+    if absence is not None and absence is not _ABSENT:
         _exact_str(absence, path + ("locator_absence",))
-    if (supplied is None) != (normalized is None):
-        _refuse("locator-pairing-invalid", path)
-    if (absence is None) is (supplied is None):
-        _refuse("locator-pairing-invalid", path)
-    if normalized is not None:
+    if (
+        supplied is not _ABSENT
+        and normalized is not _ABSENT
+        and absence is not _ABSENT
+    ):
+        if (supplied is None) != (normalized is None):
+            _refuse_at(6, stage, "locator-pairing-invalid", path)
+        if (absence is None) is (supplied is None):
+            _refuse_at(6, stage, "locator-pairing-invalid", path)
+    if normalized is not None and normalized is not _ABSENT:
         if _HTTPS_RE.match(normalized) is None or not normalized.isascii():
-            _refuse("locator-not-https", path + ("normalized_locator",))
+            _refuse_at(6, stage, "locator-not-https", path + ("normalized_locator",))
         if len(normalized) > TEXT_MAX:
-            _refuse("text-length-invalid", path + ("normalized_locator",))
-    if absence is not None and absence not in LOCATOR_ABSENCE_REASONS:
-        _refuse("enum-value-invalid", path + ("locator_absence",))
+            _refuse_at(6, stage, "text-length-invalid", path + ("normalized_locator",))
+    if absence is not _ABSENT and absence is not None and absence not in LOCATOR_ABSENCE_REASONS:
+        _refuse_at(6, stage, "enum-value-invalid", path + ("locator_absence",))
 
-    _text(record["supplied_date"], path + ("supplied_date",), LABEL_MAX)
-    normalized_date = record["normalized_date"]
-    if normalized_date is not None:
+    _text(record.get("supplied_date", _ABSENT), path + ("supplied_date",), LABEL_MAX, stage=stage)
+    normalized_date = record.get("normalized_date", _ABSENT)
+    if normalized_date is not None and normalized_date is not _ABSENT:
         _exact_str(normalized_date, path + ("normalized_date",))
         if not _is_calendar_date(normalized_date):
-            _refuse("date-pairing-invalid", path + ("normalized_date",))
-    if record["supplied_date"] == NOT_SUPPLIED and normalized_date is not None:
-        _refuse("date-pairing-invalid", path + ("normalized_date",))
+            _refuse_at(6, stage, "date-pairing-invalid", path + ("normalized_date",))
+    supplied_date = record.get("supplied_date", _ABSENT)
+    if supplied_date is not _ABSENT and normalized_date is not _ABSENT:
+        if supplied_date == NOT_SUPPLIED and normalized_date is not None:
+            _refuse_at(6, stage, "date-pairing-invalid", path + ("normalized_date",))
 
-    _enum(record["carrier_role"], ROLES, path + ("carrier_role",))
-    _text(record["carrier_label"], path + ("carrier_label",), LABEL_MAX)
+    _enum(record.get("carrier_role", _ABSENT), ROLES, path + ("carrier_role",), stage=stage)
+    _text(record.get("carrier_label", _ABSENT), path + ("carrier_label",), LABEL_MAX, stage=stage)
     _text(
-        record["upstream_attribution"], path + ("upstream_attribution",), TEXT_MAX
+        record.get("upstream_attribution", _ABSENT), path + ("upstream_attribution",), TEXT_MAX, stage=stage
     )
     _enum(
-        record["metadata_provenance"],
+        record.get("metadata_provenance", _ABSENT),
         METADATA_PROVENANCE,
-        path + ("metadata_provenance",),
+        path + ("metadata_provenance",), stage=stage,
     )
     _enum(
-        record["retrieval_state"], RETRIEVAL_STATES, path + ("retrieval_state",)
+        record.get("retrieval_state", _ABSENT), RETRIEVAL_STATES, path + ("retrieval_state",), stage=stage
     )
     _enum(
-        record["verification_state"],
+        record.get("verification_state", _ABSENT),
         SOURCE_VERIFICATION_STATES,
-        path + ("verification_state",),
+        path + ("verification_state",), stage=stage,
     )
-    _string_list(record["limitations"], path + ("limitations",), 1, LIST_MAX, TEXT_MAX)
-    _dispositions(record["safety_dispositions"], path + ("safety_dispositions",))
-    _supersedes_closed(record["supersedes"], path + ("supersedes",))
+    _string_list(record.get("limitations", _ABSENT), path + ("limitations",), 1, LIST_MAX, TEXT_MAX, stage=stage)
+    _dispositions(record.get("safety_dispositions", _ABSENT), path + ("safety_dispositions",), stage=stage)
+    _supersedes_closed(record.get("supersedes", _ABSENT), path + ("supersedes",), stage=stage)
 
 
-def _check_claim(record, path):
-    _identifier(record["claim_id"], "CLM", path + ("claim_id",))
-    _reference_shape(record["source_ref"], path + ("source_ref",))
-    _reference_shape(record["batch_ref"], path + ("batch_ref",))
-    _text(record["claim_text"], path + ("claim_text",), TEXT_MAX)
+def _check_claim(record, path, *, stage):
+    _identifier(record.get("claim_id", _ABSENT), "CLM", path + ("claim_id",), stage=stage)
+    _reference_shape(record.get("source_ref", _ABSENT), path + ("source_ref",), stage=stage)
+    _reference_shape(record.get("batch_ref", _ABSENT), path + ("batch_ref",), stage=stage)
+    _text(record.get("claim_text", _ABSENT), path + ("claim_text",), TEXT_MAX, stage=stage)
     _enum(
-        record["attribution_class"],
+        record.get("attribution_class", _ABSENT),
         CLAIM_ATTRIBUTION_CLASSES,
-        path + ("attribution_class",),
+        path + ("attribution_class",), stage=stage,
     )
-    _text(record["evidence_basis"], path + ("evidence_basis",), TEXT_MAX)
-    _string_list(record["limitations"], path + ("limitations",), 1, LIST_MAX, TEXT_MAX)
-    _dispositions(record["safety_dispositions"], path + ("safety_dispositions",))
+    _text(record.get("evidence_basis", _ABSENT), path + ("evidence_basis",), TEXT_MAX, stage=stage)
+    _string_list(record.get("limitations", _ABSENT), path + ("limitations",), 1, LIST_MAX, TEXT_MAX, stage=stage)
+    _dispositions(record.get("safety_dispositions", _ABSENT), path + ("safety_dispositions",), stage=stage)
     _enum(
-        record["verification_state"],
+        record.get("verification_state", _ABSENT),
         CLAIM_VERIFICATION_STATES,
-        path + ("verification_state",),
+        path + ("verification_state",), stage=stage,
     )
-    _supersedes_closed(record["supersedes"], path + ("supersedes",))
+    _supersedes_closed(record.get("supersedes", _ABSENT), path + ("supersedes",), stage=stage)
 
 
-def _check_relationship(record, path):
-    _identifier(record["relationship_id"], "REL", path + ("relationship_id",))
-    _reference_shape(record["left_ref"], path + ("left_ref",))
-    _reference_shape(record["right_ref"], path + ("right_ref",))
+def _check_relationship(record, path, *, stage):
+    _identifier(record.get("relationship_id", _ABSENT), "REL", path + ("relationship_id",), stage=stage)
+    _reference_shape(record.get("left_ref", _ABSENT), path + ("left_ref",), stage=stage)
+    _reference_shape(record.get("right_ref", _ABSENT), path + ("right_ref",), stage=stage)
     _enum(
-        record["relationship_type"],
+        record.get("relationship_type", _ABSENT),
         RELATIONSHIP_TYPES,
-        path + ("relationship_type",),
+        path + ("relationship_type",), stage=stage,
     )
-    _enum(record["basis"], RELATIONSHIP_BASES, path + ("basis",))
+    _enum(record.get("basis", _ABSENT), RELATIONSHIP_BASES, path + ("basis",), stage=stage)
     _enum(
-        record["attribution_class"],
+        record.get("attribution_class", _ABSENT),
         RELATIONSHIP_ATTRIBUTION_CLASSES,
-        path + ("attribution_class",),
+        path + ("attribution_class",), stage=stage,
     )
     _enum(
-        record["verification_state"],
+        record.get("verification_state", _ABSENT),
         RELATIONSHIP_VERIFICATION_STATES,
-        path + ("verification_state",),
+        path + ("verification_state",), stage=stage,
     )
-    _string_list(record["limitations"], path + ("limitations",), 1, LIST_MAX, TEXT_MAX)
-    _enum(record["recorded_by_role"], ROLES, path + ("recorded_by_role",))
-    _text(record["recorded_by_label"], path + ("recorded_by_label",), LABEL_MAX)
+    _string_list(record.get("limitations", _ABSENT), path + ("limitations",), 1, LIST_MAX, TEXT_MAX, stage=stage)
+    _enum(record.get("recorded_by_role", _ABSENT), ROLES, path + ("recorded_by_role",), stage=stage)
+    _text(record.get("recorded_by_label", _ABSENT), path + ("recorded_by_label",), LABEL_MAX, stage=stage)
 
 
-def _check_unresolved(record, path):
-    _identifier(record["unresolved_id"], "UNR", path + ("unresolved_id",))
+def _check_unresolved(record, path, *, stage):
+    _identifier(record.get("unresolved_id", _ABSENT), "UNR", path + ("unresolved_id",), stage=stage)
     _enum(
-        record["conflict_family"], CONFLICT_FAMILIES, path + ("conflict_family",)
+        record.get("conflict_family", _ABSENT), CONFLICT_FAMILIES, path + ("conflict_family",), stage=stage
     )
-    _text(record["statement"], path + ("statement",), TEXT_MAX)
-    _string_list(record["positions"], path + ("positions",), 2, 8, TEXT_MAX)
-    _id_list(record["refs"], path + ("refs",), low=1)
+    _text(record.get("statement", _ABSENT), path + ("statement",), TEXT_MAX, stage=stage)
+    _string_list(record.get("positions", _ABSENT), path + ("positions",), 2, 8, TEXT_MAX, stage=stage)
+    _id_list(record.get("refs", _ABSENT), path + ("refs",), stage=stage, low=1)
     _enum(
-        record["resolution_state"],
+        record.get("resolution_state", _ABSENT),
         UNRESOLVED_STATES,
-        path + ("resolution_state",),
+        path + ("resolution_state",), stage=stage,
     )
-    _enum(record["recorded_by_role"], ROLES, path + ("recorded_by_role",))
-    _text(record["recorded_by_label"], path + ("recorded_by_label",), LABEL_MAX)
+    _enum(record.get("recorded_by_role", _ABSENT), ROLES, path + ("recorded_by_role",), stage=stage)
+    _text(record.get("recorded_by_label", _ABSENT), path + ("recorded_by_label",), LABEL_MAX, stage=stage)
 
 
-def _check_artifact(record, path):
-    _identifier(record["artifact_id"], "ART", path + ("artifact_id",))
-    _reference_shape(record["introducing_batch"], path + ("introducing_batch",))
-    _enum(record["artifact_class"], ARTIFACT_CLASSES, path + ("artifact_class",))
+def _check_artifact(record, path, *, stage):
+    _identifier(record.get("artifact_id", _ABSENT), "ART", path + ("artifact_id",), stage=stage)
+    _reference_shape(record.get("introducing_batch", _ABSENT), path + ("introducing_batch",), stage=stage)
+    _enum(record.get("artifact_class", _ABSENT), ARTIFACT_CLASSES, path + ("artifact_class",), stage=stage)
     _enum(
-        record["identity_origin"], IDENTITY_ORIGINS, path + ("identity_origin",)
+        record.get("identity_origin", _ABSENT), IDENTITY_ORIGINS, path + ("identity_origin",), stage=stage
     )
     _enum(
-        record["preservation_status"],
+        record.get("preservation_status", _ABSENT),
         PRESERVATION_STATES,
-        path + ("preservation_status",),
+        path + ("preservation_status",), stage=stage,
     )
-    _text(record["rejection_basis"], path + ("rejection_basis",), TEXT_MAX)
+    _text(record.get("rejection_basis", _ABSENT), path + ("rejection_basis",), TEXT_MAX, stage=stage)
     _enum(
-        record["executable_status"],
+        record.get("executable_status", _ABSENT),
         EXECUTABLE_STATES,
-        path + ("executable_status",),
+        path + ("executable_status",), stage=stage,
     )
-    _dispositions(record["safety_dispositions"], path + ("safety_dispositions",))
-    _text(record["summary"], path + ("summary",), TEXT_MAX)
+    _dispositions(record.get("safety_dispositions", _ABSENT), path + ("safety_dispositions",), stage=stage)
+    _text(record.get("summary", _ABSENT), path + ("summary",), TEXT_MAX, stage=stage)
 
 
-def _check_correction(record, path):
-    _identifier(record["correction_id"], "COR", path + ("correction_id",))
-    _reference_shape(record["target_ref"], path + ("target_ref",))
-    _enum(record["correction_kind"], CORRECTION_KINDS, path + ("correction_kind",))
-    _text(record["statement"], path + ("statement",), TEXT_MAX)
-    _enum(record["recorded_by_role"], ROLES, path + ("recorded_by_role",))
-    _text(record["recorded_by_label"], path + ("recorded_by_label",), LABEL_MAX)
+def _check_correction(record, path, *, stage):
+    _identifier(record.get("correction_id", _ABSENT), "COR", path + ("correction_id",), stage=stage)
+    _reference_shape(record.get("target_ref", _ABSENT), path + ("target_ref",), stage=stage)
+    _enum(record.get("correction_kind", _ABSENT), CORRECTION_KINDS, path + ("correction_kind",), stage=stage)
+    _text(record.get("statement", _ABSENT), path + ("statement",), TEXT_MAX, stage=stage)
+    _enum(record.get("recorded_by_role", _ABSENT), ROLES, path + ("recorded_by_role",), stage=stage)
+    _text(record.get("recorded_by_label", _ABSENT), path + ("recorded_by_label",), LABEL_MAX, stage=stage)
 
 
 _RECORD_CHECKS = {
@@ -822,59 +905,59 @@ def _check_references(payload):
     for index, record in enumerate(payload["batches"]):
         path = ("batches", index)
         _check_reference_list(
-            record["introduces_sources"],
+            record.get("introduces_sources", _ABSENT),
             ("SRC",),
             path + ("introduces_sources",),
             ids_by_collection,
         )
         _check_reference_list(
-            record["introduces_artifacts"],
+            record.get("introduces_artifacts", _ABSENT),
             ("ART",),
             path + ("introduces_artifacts",),
             ids_by_collection,
         )
         _check_reference_list(
-            record["updates_sources"],
+            record.get("updates_sources", _ABSENT),
             ("SRC",),
             path + ("updates_sources",),
             ids_by_collection,
         )
     for index, record in enumerate(payload["sources"]):
         _check_reference(
-            record["batch_ref"],
+            record.get("batch_ref", _ABSENT),
             ("BAT",),
             ("sources", index, "batch_ref"),
             ids_by_collection,
         )
     for index, record in enumerate(payload["claims"]):
         _check_reference(
-            record["source_ref"],
+            record.get("source_ref", _ABSENT),
             ("SRC",),
             ("claims", index, "source_ref"),
             ids_by_collection,
         )
         _check_reference(
-            record["batch_ref"],
+            record.get("batch_ref", _ABSENT),
             ("BAT",),
             ("claims", index, "batch_ref"),
             ids_by_collection,
         )
     for index, record in enumerate(payload["unresolved"]):
         _check_reference_list(
-            record["refs"],
+            record.get("refs", _ABSENT),
             ("SRC", "CLM"),
             ("unresolved", index, "refs"),
             ids_by_collection,
         )
     for index, record in enumerate(payload["artifacts"]):
         _check_reference(
-            record["introducing_batch"],
+            record.get("introducing_batch", _ABSENT),
             ("BAT",),
             ("artifacts", index, "introducing_batch"),
             ids_by_collection,
         )
     for index, record in enumerate(payload["corrections"]):
-        target = record["target_ref"]
+        target = record.get("target_ref", _ABSENT)
         path = ("corrections", index, "target_ref")
         if target[4:7] == "COR":
             _refuse("correction-target-not-permitted", path)
@@ -888,8 +971,8 @@ def _check_references(payload):
     triples = set()
     for index, record in enumerate(payload["relationships"]):
         path = ("relationships", index)
-        left = record["left_ref"]
-        right = record["right_ref"]
+        left = record.get("left_ref", _ABSENT)
+        right = record.get("right_ref", _ABSENT)
         _check_reference(
             left, ("SRC", "CLM"), path + ("left_ref",), ids_by_collection
         )
@@ -900,17 +983,17 @@ def _check_references(payload):
             _refuse("relationship-endpoint-kind-mismatch", path)
         if left == right:
             _refuse("relationship-self", path)
-        triple = (left, right, record["relationship_type"])
+        triple = (left, right, record.get("relationship_type", _ABSENT))
         if triple in triples:
             _refuse("relationship-duplicate", path)
         triples.add(triple)
 
 
 def _check_reciprocity(payload):
-    batches_by_id = {record["batch_id"]: record for record in payload["batches"]}
-    sources_by_id = {record["source_id"]: record for record in payload["sources"]}
+    batches_by_id = {record.get("batch_id", _ABSENT): record for record in payload["batches"]}
+    sources_by_id = {record.get("source_id", _ABSENT): record for record in payload["sources"]}
     artifacts_by_id = {
-        record["artifact_id"]: record for record in payload["artifacts"]
+        record.get("artifact_id", _ABSENT): record for record in payload["artifacts"]
     }
 
     for index, source in enumerate(payload["sources"]):
@@ -937,6 +1020,64 @@ def _check_reciprocity(payload):
 # --------------------------------------------------------------------------
 
 
+def _check_document(payload, stage):
+    """One traversal of the whole document, for the stage being decided.
+
+    There is exactly one implementation of each rule here; the stage a rule
+    belongs to is carried by its refusal, not by a second pass that could
+    drift away from this one.
+    """
+    declared = frozenset(ROOT_KEYS)
+    for key in payload:
+        if key not in declared:
+            _refuse_at(5, stage, "undeclared-key")
+    for key in ROOT_KEYS:
+        if key not in payload:
+            _refuse_at(5, stage, "missing-key", (key,))
+
+    # An absent root key is a stage-5 fault about THAT key. Returning here
+    # skipped every remaining check, so one missing key masked every stage-4
+    # exact-type fault in the whole document. Absent keys are stepped over
+    # instead, and each rule decides what it can still decide.
+    for key in COLLECTION_KEYS:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if type(value) is not list:
+            _refuse("type-not-exact", (key,))
+        low, high = ROOT_COLLECTION_BOUNDS[key]
+        if not low <= len(value) <= high:
+            _refuse_at(5, stage, "collection-length-invalid", (key,))
+
+    for key, expected in (
+        ("schema", SCHEMA_ID),
+        ("ledger_id", LEDGER_ID),
+        ("corpus", CORPUS),
+        ("intake_state", INTAKE_STATE),
+    ):
+        if key not in payload:
+            continue
+        value = payload[key]
+        if type(value) is not str:
+            _refuse("type-not-exact", (key,))
+        if value != expected:
+            _refuse_at(6, stage, "enum-value-invalid", (key,))
+
+    for collection in COLLECTION_KEYS:
+        if collection not in payload or type(payload[collection]) is not list:
+            continue
+        check = _RECORD_CHECKS[collection]
+        for index, record in enumerate(payload[collection]):
+            # The shape result no longer gates the field checks: a record with
+            # a missing declared key still has its PRESENT fields type checked,
+            # because every value rule steps over `_ABSENT`. A missing key used
+            # to skip the record entirely, so a stage-5 fault masked a stage-4
+            # fault in the very same record.
+            _check_record_shape(record, collection, index, stage=stage)
+            if type(record) is dict:
+                check(record, (collection, index), stage=stage)
+
+
 def validate_ledger(payload):
     """Validate one in-memory ledger document; return it unchanged."""
     if type(payload) is not dict:
@@ -948,49 +1089,8 @@ def validate_ledger(payload):
             _refuse("type-not-exact")
         _refuse("root-not-object")
     _screen_tree(payload)
-
-    # Stage 5 runs document-wide before stage 6: root key set, collection
-    # bounds (a section-9 "Shape" rule) and every record's closed key set
-    # all precede any vocabulary, scalar-bound or domain check, so a shape
-    # fault in a later collection is never outrun by a value fault in an
-    # earlier one.
-    declared = frozenset(ROOT_KEYS)
-    for key in payload:
-        if key not in declared:
-            _refuse("undeclared-key")
-    for key in ROOT_KEYS:
-        if key not in payload:
-            _refuse("missing-key", (key,))
-
-    for key in COLLECTION_KEYS:
-        value = payload[key]
-        if type(value) is not list:
-            _refuse("type-not-exact", (key,))
-        low, high = ROOT_COLLECTION_BOUNDS[key]
-        if not low <= len(value) <= high:
-            _refuse("collection-length-invalid", (key,))
-
-    for collection in COLLECTION_KEYS:
-        for index, record in enumerate(payload[collection]):
-            _check_record_shape(record, collection, index)
-
-    for key, expected in (
-        ("schema", SCHEMA_ID),
-        ("ledger_id", LEDGER_ID),
-        ("corpus", CORPUS),
-        ("intake_state", INTAKE_STATE),
-    ):
-        value = payload[key]
-        if type(value) is not str:
-            _refuse("type-not-exact", (key,))
-        if value != expected:
-            _refuse("enum-value-invalid", (key,))
-
-    for collection in COLLECTION_KEYS:
-        check = _RECORD_CHECKS[collection]
-        for index, record in enumerate(payload[collection]):
-            check(record, (collection, index))
-
+    for stage in _CONTENT_STAGES:
+        _check_document(payload, stage)
     _check_identifier_uniqueness(payload)
     _check_references(payload)
     _check_reciprocity(payload)
@@ -1058,8 +1158,30 @@ def validate_ledger_file(path):
         if component and _component_is_reserved(component):
             _refuse_path("path-reserved-name")
 
+    # The walk must cover the path the process will actually OPEN. For a
+    # relative supplied path that is `<current directory>\<value>`, so the
+    # current directory entry and its own ancestors are screened as well:
+    # `ntpath.dirname` of a bare filename is empty, so a walk starting at the
+    # supplied string inspected exactly one entry and never reached the
+    # directory the redirection was sitting in, while `open` resolved straight
+    # through it. Bare, dot-relative, nested-relative, component-relative and
+    # absolute spellings of one file therefore now agree.
+    #
+    # The anchor is a TEXTUAL join. Neither `realpath` nor `abspath` is used:
+    # resolving the path would follow the very reparse point being screened
+    # for, and `os.getcwd()` reports the directory as it was entered, junction
+    # and all.
+    if ntpath.isabs(value):
+        walked = value
+    else:
+        # `normpath` is the same purely LEXICAL collapse Windows itself applies
+        # to `.` and `..` before touching the filesystem: it follows nothing and
+        # reads nothing. Without it the chain kept a `J\..` pair, and a file
+        # sitting behind no redirection at all was refused because the walk
+        # lstat'd a junction the process never traverses.
+        walked = ntpath.normpath(ntpath.join(os.getcwd(), value))
     chain = []
-    current = value
+    current = walked
     while True:
         chain.append(current)
         parent = ntpath.dirname(current)
