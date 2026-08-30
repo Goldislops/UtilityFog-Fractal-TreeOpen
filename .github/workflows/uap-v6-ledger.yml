@@ -1,0 +1,37 @@
+name: uap-v6-ledger
+
+on:
+  pull_request:
+    paths:
+      - "experiments/uap_v6_ledger/**"
+      - ".github/workflows/uap-v6-ledger.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/uap_v6_ledger/**"
+      - ".github/workflows/uap-v6-ledger.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uap-v6-ledger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: uap-v6-ledger (informational, path-scoped)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Run the attributed-ledger acceptance controls
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B -m unittest -v experiments.uap_v6_ledger.tests.test_ledger
+      - name: Validate the committed intake ledger
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -B -m experiments.uap_v6_ledger.validate experiments/uap_v6_ledger/ledger.json
