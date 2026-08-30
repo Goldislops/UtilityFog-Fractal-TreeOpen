@@ -65,11 +65,11 @@ request side.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Optional, Union, get_args
 
-from scripts.agent_backends.base import Message, ToolSpec
+from scripts.agent_backends.base import AgentResponse, Message, ToolSpec
 from scripts.agent_backends.openai_compat_backend import StructuredCompletion
 from scripts.agent_backends.structured_request import (
     REFUSAL_TOKENS,
@@ -92,8 +92,17 @@ ExchangeRefusal = Union[
 
 Composed from :data:`StructuredRefusal` rather than restated, so the backend's
 closed vocabulary cannot drift out of step with this one. The single extra
-token covers a backend that does not implement the OMI-V2 method at all, or
-returns something other than a ``StructuredCompletion`` from it.
+token covers a backend that does not implement the OMI-V2 method at all,
+returns something other than a ``StructuredCompletion`` from it, **or returns
+one whose fields are no longer those of a coherent completion** - see
+:func:`_completion_state_ok`.
+
+That last case is not hypothetical. ``StructuredCompletion`` is frozen, and
+freezing is not sealing: ``object.__setattr__`` replaces any field after
+construction, and a backend is caller-supplied code. One token covers all three
+because they are one fact from the caller's side - the backend did not hand back
+a usable structured completion - and inventing a second would widen a closed
+vocabulary to describe how a defect was produced rather than what it was.
 """
 
 
@@ -405,6 +414,143 @@ def _build_structured_exchange_class():
 StructuredExchange = _restore_identity(_build_structured_exchange_class(), "StructuredExchange", __name__)
 
 
+def _closed_completion_check():
+    """Build :func:`_completion_state_ok`, every authority bound in a cell.
+
+    Mirrors ``StructuredCompletion.__post_init__`` rule for rule, using the same
+    imported vocabulary and the same two predicates, so the boundary this draws
+    is the boundary that carrier draws. It is a *re-check*, not a second
+    authority: every value it consults is the backend package's own.
+
+    Re-running the carrier's ``__post_init__`` would be the obvious alternative
+    and is not available - it is a method on a class in another package, reached
+    through an attribute an instance can shadow, and it raises rather than
+    reporting. This returns a verdict, which is what a total function needs.
+    """
+    _completion_type = StructuredCompletion
+    _agent_response = AgentResponse
+    _tokens = REFUSAL_TOKENS
+    _dialect_ok = is_supported_dialect
+    _pre_dialect = is_pre_dialect_refusal
+    #: The carrier's five declared field names, taken from the dataclass
+    #: itself at import time so a field added later is covered without
+    #: anyone remembering to extend a hand-written list.
+    _declared = tuple(field.name for field in fields(StructuredCompletion))
+    _instance_dict_of = object.__getattribute__
+    _type = type
+    _str = str
+    _bool = bool
+    _dict = dict
+
+    def _fields_set_on(completion: Any) -> bool:
+        """True only if all five declared fields are set on **this instance**.
+
+        ``getattr`` and ``hasattr`` cannot answer this, and that is the whole
+        reason this exists. ``StructuredCompletion`` declares four of its five
+        fields with a class-level default, so ``object.__delattr__`` on an
+        instance leaves the attribute lookup quietly returning that default:
+        ``None`` for ``response``, ``refusal`` and ``dialect``, ``False`` for
+        ``response_format_sent``. Where the default happens to equal the value
+        the carrier was built with, the deletion is invisible - a successful
+        completion whose ``refusal`` was removed read as a coherent success,
+        and was consumed as one. The fifth field, ``ok``, has no default at
+        all, so reading it raised a raw ``AttributeError`` out of a function
+        that promises a verdict.
+
+        Only the instance dictionary distinguishes a value that was *set* from
+        a fallback to the class, so that is what is read - through
+        ``object.__getattribute__`` so that no ``__getattr__``,
+        ``__getattribute__``, property or descriptor on the carrier's type can
+        answer in its place.
+
+        The one ``except`` is a single expression wide and means exactly one
+        thing: *this object has no instance dictionary*. Anything else that
+        lookup raises - a transport failure, a ``HermeticViolation`` - is not
+        caught here and propagates, which is the difference between a narrow
+        clause and a broad one.
+        """
+        try:
+            instance = _instance_dict_of(completion, "__dict__")
+        except AttributeError:
+            return False
+        if _type(instance) is not _dict:
+            return False
+        for name in _declared:
+            if name not in instance:
+                return False
+        return True
+
+    def _completion_state_ok(completion: Any) -> bool:
+        """True only for a completion in one of the carrier's coherent states.
+
+        The exact-type test comes first, and every later test is a
+        ``type(x) is T`` identity check taken **before** any truth test,
+        comparison, membership test or attribute traversal. That ordering is the
+        whole point: an earlier revision checked the outer type and then read
+        ``completion.ok`` in a boolean context and ``completion.response.text``
+        as a property. A backend that built a valid completion and then replaced
+        one field with ``object.__setattr__`` could therefore run its own
+        ``__bool__`` or its own property from inside this module, and could make
+        ``StructuredExchange`` construction raise ``ValueError`` - both escaping
+        as raw incidental exceptions from a function that promises a result.
+
+        The only exception caught anywhere in this check is the single
+        ``AttributeError`` in :func:`_fields_set_on`, one expression wide,
+        meaning *this object has no instance dictionary* and nothing else.
+        Transport failures raised by the backend itself, and
+        ``HermeticViolation`` from anywhere, still propagate untouched: this
+        function is only ever reached once the backend has already returned.
+        """
+        if _type(completion) is not _completion_type:
+            return False
+        # Presence before any field is read at all. Exact outer type says
+        # nothing about whether the fields are still there: freezing a
+        # dataclass blocks `del completion.ok`, and `object.__delattr__`
+        # walks straight past that, as it does past `object.__setattr__`'s
+        # counterpart. A missing field is not a state this carrier can
+        # coherently be in, so it lands on the same closed refusal every
+        # other incoherence does - no new token, and no second opinion about
+        # what a completion means.
+        if not _fields_set_on(completion):
+            return False
+        if _type(completion.ok) is not _bool:
+            return False
+        if _type(completion.response_format_sent) is not _bool:
+            return False
+        refusal = completion.refusal
+        if refusal is not None and (
+            _type(refusal) is not _str or refusal not in _tokens
+        ):
+            return False
+        dialect = completion.dialect
+        if dialect is not None and not _dialect_ok(dialect):
+            return False
+        if completion.ok:
+            if refusal is not None:
+                return False
+            if dialect is None:
+                return False
+            if not completion.response_format_sent:
+                return False
+            return _type(completion.response) is _agent_response
+        if refusal is None:
+            return False
+        if completion.response is not None:
+            return False
+        if completion.response_format_sent:
+            return False
+        if _pre_dialect(refusal):
+            return dialect is None
+        return dialect is not None
+
+    return _completion_state_ok
+
+
+_completion_state_ok = _restore_identity(
+    _closed_completion_check(), "_completion_state_ok", __name__
+)
+
+
 def _closed_exchange_entry_point():
     """Build :func:`request_structured_json` with its authorities in cells.
 
@@ -431,6 +577,7 @@ def _closed_exchange_entry_point():
     _dict = dict
     _getattr = getattr
     _callable = callable
+    _state_ok = _completion_state_ok
 
     def request_structured_json(
         backend: Any,
@@ -446,14 +593,26 @@ def _closed_exchange_entry_point():
     ) -> StructuredExchange:
         """Ask ``backend`` for schema-constrained JSON, then validate the answer.
 
-        Returns a :class:`StructuredExchange` for every reachable input. Transport
-        errors raised by the underlying SDK propagate, matching ``complete()``.
+        Returns a :class:`StructuredExchange` for every input this layer
+        decides itself. ``backend`` is accepted structurally, and its
+        ``complete_structured`` method is invoked directly with nothing
+        caught here, so whatever exceptions that method raises propagate
+        through this layer. For ``OpenAICompatBackend`` these include SDK
+        transport failures and the fixed, non-disclosing pre-transport error
+        for a message history whose tool-call arguments cannot be encoded as
+        strict JSON.
 
         ``backend`` is accepted as ``Any`` and checked structurally, so this
         function works with any backend exposing the OMI-V2 method and refuses
         cleanly for one that does not - ``MockBackend`` and ``AnthropicBackend``
         are out of scope for OMI-V2 and land on
         ``backend-not-structured-capable`` rather than on an ``AttributeError``.
+
+        **What comes back is checked, not just what type it is.** The completion
+        is put to :func:`_completion_state_ok` before any field of it is read, so
+        a backend that hands back a mutated carrier gets the same closed refusal
+        as one that hands back an unrelated object. Nothing about that check
+        catches exceptions: a backend that raises still raises.
 
         ``required_keys`` and ``max_chars`` are handed to
         ``validate_structured_output`` unchanged; their semantics, including the
@@ -474,9 +633,12 @@ def _closed_exchange_entry_point():
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        # Exact type, not duck typing: a foreign object reaching the branches
-        # below could otherwise supply its own `ok` and be believed.
-        if _type(completion) is not _completion_type:
+        # Exact type AND coherent state, before a single field is read. A
+        # foreign object could otherwise supply its own `ok` and be believed;
+        # so, less obviously, could a genuine `StructuredCompletion` whose
+        # fields a backend replaced after construction. Both land on the same
+        # closed token, because from the caller's side they are the same fact.
+        if _type(completion) is not _completion_type or not _state_ok(completion):
             return _exchange_type(
                 ok=False, request_refusal="backend-not-structured-capable"
             )

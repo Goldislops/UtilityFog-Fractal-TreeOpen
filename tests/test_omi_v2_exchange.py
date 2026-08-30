@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scripts.agent_backends.base import Message, ToolSpec
+from scripts.agent_backends.base import AgentResponse, Message, TextBlock, ToolSpec
 from scripts.agent_backends.openai_compat_backend import (
     OpenAICompatBackend,
     StructuredCompletion,
@@ -460,8 +460,12 @@ def test_the_package_ships_no_json_schema_validator(module_name):
             imported.add(node.module.split(".")[0])
 
     assert "jsonschema" not in imported
+    # `math` entered with the inbound non-finite correction: `math.isfinite`
+    # is the finiteness authority there, matching the outbound schema walk in
+    # `structured_request`. It is stdlib and validates no schema.
     assert imported <= {
-        "__future__", "dataclasses", "json", "types", "typing", "scripts",
+        "__future__", "dataclasses", "json", "math", "types", "typing",
+        "scripts",
     }, imported
 
 
@@ -486,3 +490,574 @@ def test_mutating_the_schema_after_the_call_cannot_change_what_was_sent():
 
     assert sent == before
     assert "injected" not in sent["json_schema"]["schema"]
+
+
+# ============================================================================
+# Fifth round - a returned completion is revalidated before it is consumed
+# ============================================================================
+#
+# `StructuredCompletion` is frozen, and freezing is not sealing:
+# `object.__setattr__` replaces any field after construction, and a backend is
+# caller-supplied code. An earlier revision checked only that the returned
+# object was exactly a `StructuredCompletion`, then truth-tested `.ok` and read
+# `.response.text` - so a backend that built a valid completion and then altered
+# one field could run its own `__bool__` or its own property from inside this
+# module, and could make `StructuredExchange` construction raise `ValueError`.
+# Both escaped as raw incidental exceptions from a function that promises a
+# result for every reachable input.
+#
+# Same-author evidence: written by the agent that wrote the code under test.
+
+
+def _good_completion():
+    return StructuredCompletion(
+        ok=True,
+        response=AgentResponse.from_content([TextBlock(text='{"ok": true}')]),
+        dialect="ollama",
+        response_format_sent=True,
+    )
+
+
+class TamperingBackend:
+    """Builds a VALID exact completion, then alters one field before returning.
+
+    Post-construction is the only way to produce these: the carrier refuses
+    every one of them at the door. A control that built them directly would be
+    testing the carrier, not this module.
+    """
+
+    def __init__(self, field, value):
+        self.field = field
+        self.value = value
+        self.calls = 0
+
+    def complete_structured(self, messages, tools, **kwargs):
+        self.calls += 1
+        completion = _good_completion()
+        object.__setattr__(completion, self.field, self.value)
+        return completion
+
+
+class _BoolHook:
+    fired: list = []
+
+    def __bool__(self):  # pragma: no cover - must never be reached
+        _BoolHook.fired.append("ok.__bool__")
+        raise RuntimeError("the __bool__ hook ran")
+
+
+class _TextHook:
+    fired: list = []
+
+    @property
+    def text(self):  # pragma: no cover - must never be reached
+        _TextHook.fired.append("response.text")
+        raise RuntimeError("the text property ran")
+
+
+def _round5_exchange(backend):
+    return request_structured_json(
+        backend, _MESSAGES, [], structured=_REQUEST, required_keys=("ok",)
+    )
+
+
+def test_a_tampered_ok_never_runs_its_bool_hook():
+    _BoolHook.fired = []
+    backend = TamperingBackend("ok", _BoolHook())
+    result = _round5_exchange(backend)
+    assert _BoolHook.fired == []
+    assert backend.calls == 1
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.dialect is None
+    assert result.response_format_sent is False
+
+
+def test_a_tampered_response_never_runs_its_text_property():
+    _TextHook.fired = []
+    backend = TamperingBackend("response", _TextHook())
+    result = _round5_exchange(backend)
+    assert _TextHook.fired == []
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # Hook-free but incoherent: every one of these is a state the carrier
+        # itself refuses to construct, so none can come from OMI-V2.
+        ("ok", 1),
+        ("ok", 0),
+        ("ok", "yes"),
+        ("ok", False),
+        ("response_format_sent", False),
+        ("response_format_sent", 1),
+        ("dialect", None),
+        ("dialect", "not-a-runtime"),
+        ("dialect", "sk-OMIV2SECRET1234567890"),
+        ("dialect", 5),
+        ("refusal", "schema-empty"),
+        ("refusal", "not-a-token"),
+        ("response", None),
+        ("response", "not an AgentResponse"),
+        ("response", 5),
+    ],
+    ids=[
+        "ok-int-1", "ok-int-0", "ok-str", "ok-false-no-refusal",
+        "sent-false-on-success", "sent-int",
+        "dialect-none-on-success", "dialect-unsupported", "dialect-secret",
+        "dialect-int",
+        "refusal-on-success", "refusal-not-a-token",
+        "response-none-on-success", "response-wrong-type", "response-int",
+    ],
+)
+def test_every_incoherent_completion_lands_on_one_closed_refusal(field, value):
+    backend = TamperingBackend(field, value)
+    result = _round5_exchange(backend)
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.request_refusal in sx.EXCHANGE_REFUSALS
+    assert result.value is None
+    assert result.dialect is None
+    assert result.response_format_sent is False
+    # Nothing of the tampered value survives into the result.
+    assert "sk-" not in repr(result)
+    assert "not-a-runtime" not in repr(result)
+
+
+def test_the_state_checker_accepts_exactly_what_the_carrier_can_construct():
+    """A differential, so the re-check cannot drift from the carrier it mirrors.
+
+    Every combination is put to the carrier by construction and to
+    `_completion_state_ok` by inspection, and the two verdicts must agree. That
+    is stronger than asserting the checker holds the right vocabularies: it
+    shows the same boundary, not merely the same values.
+    """
+    import itertools
+
+    response = AgentResponse.from_content([TextBlock(text='{"ok": true}')])
+    space = itertools.product(
+        [True, False],
+        [None, response],
+        [None, "backend-not-structured-capable", "dialect-not-configured",
+         "schema-empty", "tools-with-structured-unsupported"],
+        [None, "ollama"],
+        [True, False],
+    )
+    constructible = 0
+    rejects_valid = []
+    accepts_invalid = []
+    for ok, resp, refusal, dialect, sent in space:
+        try:
+            built = StructuredCompletion(
+                ok=ok, response=resp, refusal=refusal, dialect=dialect,
+                response_format_sent=sent,
+            )
+            carrier_accepts = True
+        except ValueError:
+            built = None
+            carrier_accepts = False
+        if carrier_accepts:
+            constructible += 1
+            if not sx._completion_state_ok(built):
+                rejects_valid.append((ok, resp is not None, refusal, dialect, sent))
+            continue
+        victim = _good_completion()
+        object.__setattr__(victim, "ok", ok)
+        object.__setattr__(victim, "response", resp)
+        object.__setattr__(victim, "refusal", refusal)
+        object.__setattr__(victim, "dialect", dialect)
+        object.__setattr__(victim, "response_format_sent", sent)
+        if sx._completion_state_ok(victim):
+            accepts_invalid.append((ok, resp is not None, refusal, dialect, sent))
+
+    assert constructible > 0
+    assert rejects_valid == []
+    assert accepts_invalid == []
+
+
+def test_the_state_checker_holds_the_backend_packages_own_authorities():
+    cells = dict(
+        zip(
+            sx._completion_state_ok.__code__.co_freevars,
+            (cell.cell_contents for cell in sx._completion_state_ok.__closure__ or ()),
+        )
+    )
+    from scripts.agent_backends import structured_request as sr
+
+    assert cells["_completion_type"] is StructuredCompletion
+    assert cells["_agent_response"] is AgentResponse
+    assert cells["_tokens"] is sr.REFUSAL_TOKENS
+    assert cells["_dialect_ok"] is sr.is_supported_dialect
+    assert cells["_pre_dialect"] is sr.is_pre_dialect_refusal
+
+
+def test_an_untampered_backend_still_succeeds_and_still_refuses_normally():
+    """Positive guard: the re-check rejects nothing OMI-V2 legitimately makes."""
+
+    class Honest:
+        def __init__(self, completion):
+            self.completion = completion
+
+        def complete_structured(self, messages, tools, **kwargs):
+            return self.completion
+
+    ok = _round5_exchange(Honest(_good_completion()))
+    assert ok.ok is True
+    assert dict(ok.value) == {"ok": True}
+    assert ok.dialect == "ollama"
+
+    refused = _round5_exchange(
+        Honest(
+            StructuredCompletion(
+                ok=False, refusal="schema-empty", dialect="ollama",
+                response_format_sent=False,
+            )
+        )
+    )
+    assert refused.ok is False
+    assert refused.request_refusal == "schema-empty"
+    assert refused.dialect == "ollama"
+
+    pre_dialect = _round5_exchange(
+        Honest(
+            StructuredCompletion(
+                ok=False, refusal="dialect-not-configured", response_format_sent=False
+            )
+        )
+    )
+    assert pre_dialect.request_refusal == "dialect-not-configured"
+    assert pre_dialect.dialect is None
+
+
+def test_a_raising_backend_still_raises():
+    """The re-check catches nothing. Transport failures are still transport failures."""
+
+    class Exploding:
+        def complete_structured(self, messages, tools, **kwargs):
+            raise RuntimeError("transport said no")
+
+    with pytest.raises(RuntimeError):
+        _round5_exchange(Exploding())
+
+
+def test_a_backend_that_reaches_the_network_is_not_converted_into_a_refusal():
+    """`HermeticViolation` must stay loud; no broad catch was added."""
+    from scripts.open_model.evaluation import HermeticViolation, hermetic_guard
+
+    class Breaching:
+        def complete_structured(self, messages, tools, **kwargs):
+            socket.socket()
+            raise AssertionError("unreachable while the guard is active")
+
+    with hermetic_guard():
+        with pytest.raises(HermeticViolation):
+            _round5_exchange(Breaching())
+
+
+# ============================================================================
+# round eight: fields DELETED from an exact completion, not merely replaced
+# ============================================================================
+#
+# Round five proved this module against `object.__setattr__`. It was never
+# proved against `object.__delattr__`, and a frozen dataclass refuses both
+# equally, so both need the same bypass.
+#
+# `StructuredCompletion` declares four of its five fields with a class-level
+# default, so a deleted instance attribute quietly reads as that default. Where
+# the default equals the value the carrier was built with, the deletion is
+# invisible. The fifth, `ok`, has no default at all, so reading it raised.
+
+
+def _completion_field_names():
+    import dataclasses
+
+    return [f.name for f in dataclasses.fields(StructuredCompletion)]
+
+
+def _deleted(carrier, name):
+    """A copy of ``carrier`` with one instance field removed."""
+    import copy
+
+    clone = copy.copy(carrier)
+    object.__delattr__(clone, name)
+    return clone
+
+
+def _success_completion():
+    return StructuredCompletion(
+        ok=True,
+        response=AgentResponse.from_content([TextBlock(text='{"ok": true}')]),
+        dialect="ollama",
+        response_format_sent=True,
+    )
+
+
+def _post_dialect_refusal_completion():
+    return StructuredCompletion(
+        ok=False, response=None, refusal="schema-empty",
+        dialect="ollama", response_format_sent=False,
+    )
+
+
+def _pre_dialect_refusal_completion():
+    return StructuredCompletion(
+        ok=False, response=None, refusal="dialect-unsupported",
+        dialect=None, response_format_sent=False,
+    )
+
+
+#: The three coherent shapes the carrier can be in, by name.
+_COHERENT_SHAPES = {
+    "success": _success_completion,
+    "post-dialect-refusal": _post_dialect_refusal_completion,
+    "pre-dialect-refusal": _pre_dialect_refusal_completion,
+}
+
+
+class DeletingBackend:
+    """Returns an exact, coherent completion with one instance field removed.
+
+    Post-construction deletion is the only way to produce these: the carrier
+    itself would refuse to be built this way, and a control that constructed one
+    directly would be testing the carrier rather than this module.
+    """
+
+    def __init__(self, build, field):
+        self.build = build
+        self.field = field
+        self.calls = 0
+
+    def complete_structured(self, messages, tools, **kwargs):
+        self.calls += 1
+        completion = self.build()
+        object.__delattr__(completion, self.field)
+        return completion
+
+
+def test_the_carrier_still_declares_exactly_the_five_fields_named_here():
+    """Pins the premise. If the carrier grows a field, this fails loudly rather
+    than letting the deletion controls below silently stop covering it."""
+    assert _completion_field_names() == [
+        "ok",
+        "response",
+        "refusal",
+        "dialect",
+        "response_format_sent",
+    ]
+
+
+def test_four_of_the_five_fields_really_do_carry_class_defaults():
+    """The premise of the silent half: ``getattr`` has somewhere to fall to."""
+    assert not hasattr(StructuredCompletion, "ok")
+    assert StructuredCompletion.response is None
+    assert StructuredCompletion.refusal is None
+    assert StructuredCompletion.dialect is None
+    assert StructuredCompletion.response_format_sent is False
+
+
+@pytest.mark.parametrize("shape", sorted(_COHERENT_SHAPES))
+@pytest.mark.parametrize("field", _completion_field_names())
+def test_a_deleted_completion_field_is_refused(shape, field):
+    """Every field, every coherent shape: the existing closed refusal.
+
+    No raw incidental exception, and no silent success. Before round eight,
+    deleting ``ok`` raised ``AttributeError`` out of ``_completion_state_ok``
+    for all three shapes, and six of the remaining twelve combinations were
+    accepted outright because the class default equalled the value that had
+    been deleted.
+    """
+    backend = DeletingBackend(_COHERENT_SHAPES[shape], field)
+    result = _round5_exchange(backend)
+
+    assert backend.calls == 1
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+    assert result.response_failure is None
+    assert result.value is None
+    assert result.response_format_sent is False
+
+
+def test_a_deleted_refusal_no_longer_passes_as_a_coherent_success():
+    """Jack's addition to the auditor's finding, pinned on its own.
+
+    ``refusal`` is ``None`` on a successful carrier *and* ``None`` as a class
+    default, so removing it changed nothing that attribute access could see. The
+    completion read as a coherent success and was consumed as one.
+    """
+    completion = _success_completion()
+    stripped = _deleted(completion, "refusal")
+
+    # Attribute access cannot tell these apart - that is the defect.
+    assert completion.refusal is None
+    assert stripped.refusal is None
+    assert getattr(stripped, "refusal", "SENTINEL") is None
+
+    # The module can.
+    assert sx._completion_state_ok(completion) is True
+    assert sx._completion_state_ok(stripped) is False
+
+    result = _round5_exchange(DeletingBackend(_success_completion, "refusal"))
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+@pytest.mark.parametrize(
+    "shape, field",
+    [
+        ("success", "refusal"),
+        ("post-dialect-refusal", "response"),
+        ("post-dialect-refusal", "response_format_sent"),
+        ("pre-dialect-refusal", "response"),
+        ("pre-dialect-refusal", "dialect"),
+        ("pre-dialect-refusal", "response_format_sent"),
+    ],
+)
+def test_a_deleted_field_whose_default_equals_its_value_is_still_refused(shape, field):
+    """The six combinations attribute access is blind to.
+
+    In each of these the class default is exactly the value the coherent carrier
+    held, so the deletion leaves every ordinary read unchanged. Presence is the
+    only thing that distinguishes them, which is why the gate reads the instance
+    dictionary rather than the attribute.
+    """
+    coherent = _COHERENT_SHAPES[shape]()
+    stripped = _deleted(coherent, field)
+    assert getattr(stripped, field) == getattr(coherent, field)
+    assert sx._completion_state_ok(coherent) is True
+    assert sx._completion_state_ok(stripped) is False
+
+    result = _round5_exchange(DeletingBackend(_COHERENT_SHAPES[shape], field))
+    assert result.ok is False
+    assert result.request_refusal == "backend-not-structured-capable"
+
+
+def test_a_class_level_default_does_not_count_as_instance_presence():
+    """The explicit statement of what the gate measures.
+
+    ``hasattr`` is ``True`` for every deleted defaulted field, and ``getattr``
+    with a sentinel never reaches the sentinel, because the class supplies the
+    answer first. Neither is usable here.
+    """
+    for field in ("response", "refusal", "dialect", "response_format_sent"):
+        stripped = _deleted(_success_completion(), field)
+        assert hasattr(stripped, field) is True
+        assert getattr(stripped, field, "SENTINEL") != "SENTINEL"
+        assert field not in vars(stripped)
+        assert sx._completion_state_ok(stripped) is False
+
+    # `ok` has no default, so it is the one field ordinary access could detect -
+    # by raising, which is not a verdict.
+    stripped = _deleted(_success_completion(), "ok")
+    assert hasattr(stripped, "ok") is False
+    assert "ok" not in vars(stripped)
+    assert sx._completion_state_ok(stripped) is False
+
+
+def test_the_presence_gate_would_fail_these_controls_if_reverted():
+    """Non-vacuity for the gate itself, not merely for the assertions.
+
+    This reproduces what ordinary attribute access reports for each deletion,
+    and requires it to disagree with the module's verdict. If the gate were
+    reverted to plain attribute reads, this control's expectations become the
+    module's behaviour and the controls above stop distinguishing anything.
+    """
+    reverted_would_raise = []
+    reverted_would_accept = []
+    for shape, build in _COHERENT_SHAPES.items():
+        for field in _completion_field_names():
+            stripped = _deleted(build(), field)
+            try:
+                # What a reverted implementation reads first.
+                _ = stripped.ok
+            except AttributeError:
+                reverted_would_raise.append((shape, field))
+                continue
+            if getattr(stripped, field) == getattr(build(), field):
+                reverted_would_accept.append((shape, field))
+
+    # Three raw exceptions and six invisible deletions - the round-eight finding.
+    assert len(reverted_would_raise) == 3
+    assert len(reverted_would_accept) == 6
+
+    # And every one of the nine is refused by the module as it now stands.
+    for shape, field in reverted_would_raise + reverted_would_accept:
+        stripped = _deleted(_COHERENT_SHAPES[shape](), field)
+        assert sx._completion_state_ok(stripped) is False, (shape, field)
+
+
+class _ConstantBackend:
+    """Returns one prepared completion, untouched."""
+
+    def __init__(self, completion):
+        self.completion = completion
+        self.calls = 0
+
+    def complete_structured(self, messages, tools, **kwargs):
+        self.calls += 1
+        return self.completion
+
+
+def test_deletion_does_not_disturb_the_coherent_states():
+    """The gate must refuse absence without refusing anything legitimate."""
+    for build in _COHERENT_SHAPES.values():
+        assert sx._completion_state_ok(build()) is True
+
+    ok = _round5_exchange(_ConstantBackend(_success_completion()))
+    assert ok.ok is True
+    assert ok.dialect == "ollama"
+    assert dict(ok.value) == {"ok": True}
+
+    refused = _round5_exchange(_ConstantBackend(_post_dialect_refusal_completion()))
+    assert refused.ok is False
+    assert refused.request_refusal == "schema-empty"
+
+    pre = _round5_exchange(_ConstantBackend(_pre_dialect_refusal_completion()))
+    assert pre.ok is False
+    assert pre.request_refusal == "dialect-unsupported"
+    assert pre.dialect is None
+
+
+def test_the_exact_type_gate_still_comes_before_the_presence_gate():
+    """Ordering, pinned. Nothing that is not exactly the carrier is inspected.
+
+    The presence gate reads ``__dict__`` through ``object.__getattribute__``,
+    and is only ever reached for an exact ``StructuredCompletion`` - whose
+    ``__dict__`` is the real one - because the exact-type test refuses
+    everything else first. A subclass that answers that lookup by raising is
+    therefore never asked, which is why the one ``except AttributeError`` in the
+    gate cannot become a place for something else to hide.
+    """
+    from scripts.open_model.evaluation import HermeticViolation
+
+    fired = []
+
+    class Hostile(StructuredCompletion):
+        @property
+        def __dict__(self):  # pragma: no cover - must never be reached
+            fired.append("__dict__")
+            raise HermeticViolation("reached for a socket")
+
+    assert sx._completion_state_ok(Hostile.__new__(Hostile)) is False
+    assert fired == []
+
+    class HookedType:
+        def __getattr__(self, name):  # pragma: no cover - must never be reached
+            fired.append(name)
+            return "anything you like"
+
+    assert sx._completion_state_ok(HookedType()) is False
+    assert fired == []
+
+
+def test_the_controls_in_this_file_are_not_silently_stripped():
+    """Prove a false assertion here would still fail under ``-O`` and ``-OO``.
+
+    Both flags discard ``assert`` statements, so a suite that passed under them
+    could in principle be asserting nothing. pytest rewrites assertions in
+    collected test modules into explicit raises first; this is the control that
+    proves the rewriting happened rather than trusting that it did.
+    """
+    with pytest.raises(AssertionError):
+        assert False, "if this does not raise, every control here is vacuous"
