@@ -4118,3 +4118,184 @@ def test_gv7_s_073_the_staged_token_is_identical_under_every_execution_mode():
     outcome = outcomes.pop()
     assert outcome != "ACCEPTED", "the doubly-faulted payload was accepted"
     assert outcome in sup.REQUIRED_REFUSAL_TOKENS, outcome
+
+
+def test_gv7_s_074_the_file_read_is_the_file_that_was_inspected(tmp_path, monkeypatch):
+    """The bytes read must come from the object whose inspection was recorded.
+
+    Reproduced against the present implementation: a document that refuses
+    ``missing-key`` was replaced by the full synthetic ledger in the instant
+    before the open, and the validator ACCEPTED the replacement.
+
+    Two things make this discriminating rather than merely red. The swap
+    happens at the OPEN, so every earlier resolution of the name saw the
+    original -- a validator that "binds" by looking the name up a second time
+    finds the two pre-swap lookups equal and reads the swapped file anyway.
+    And the two documents are the SAME LENGTH, so a validator that compares
+    the byte count with the recorded size is not fooled into looking correct.
+    Both shapes were measured passing an earlier version of this control while
+    still accepting the swap.
+    """
+    validate = sup.require_validate()
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(good)
+    target.write_bytes(sup.padded_refusable(len(good)))
+    assert target.stat().st_size == replacement.stat().st_size
+
+    # Unmolested, this document is refused at the content stage. That is the
+    # baseline the swap has to overturn for the defect to be visible at all.
+    with pytest.raises(validate.LedgerError) as baseline:
+        validate.validate_ledger_file(target)
+    assert baseline.value.token == "missing-key"
+
+    probe = sup.ReplaceBeforeOpen(target, replacement).install(monkeypatch)
+    refusal = None
+    try:
+        validate.validate_ledger_file(target)
+    except validate.LedgerError as error:
+        refusal = error
+
+    assert probe.replaced, (
+        "the file was never opened through a hooked opener, so this control "
+        "never entered the window it exists to test"
+    )
+    opened = probe.opened_identity()
+    assert probe.inspected != opened, "the probe did not change the object"
+    assert refusal is not None, (
+        "the replacement was ACCEPTED: the bytes read did not come from the "
+        f"object that was inspected -- inspected {probe.inspected}, "
+        f"read {opened}"
+    )
+    assert refusal.token == sup.PATH_IDENTITY_TOKEN, refusal.token
+    assert isinstance(refusal, validate.LedgerPathError)
+
+
+def test_gv7_s_075_the_identity_token_is_declared_and_raised_as_a_path_refusal(
+    tmp_path, monkeypatch
+):
+    """The token is in the production vocabulary, and is a path refusal.
+
+    Every assertion here reaches the production modules. An earlier version
+    compared two of the suite's own constants, which cannot fail.
+    """
+    schema = sup.require_schema()
+    validate = sup.require_validate()
+
+    assert sup.PATH_IDENTITY_TOKEN in schema.REFUSAL_TOKENS, (
+        "the production vocabulary does not declare the identity token"
+    )
+    assert schema.REFUSAL_TOKENS == tuple(sorted(set(schema.REFUSAL_TOKENS)))
+
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(good)
+    target.write_bytes(sup.padded_refusable(len(good)))
+    probe = sup.ReplaceBeforeOpen(target, replacement).install(monkeypatch)
+    with pytest.raises(validate.LedgerPathError) as excinfo:
+        validate.validate_ledger_file(target)
+    assert probe.replaced
+    assert excinfo.value.token == sup.PATH_IDENTITY_TOKEN
+    # The path family, and the ordinary refusal hygiene every token keeps.
+    assert isinstance(excinfo.value, schema.LedgerError)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    for marker in sup.MARKERS:
+        assert marker not in str(excinfo.value)
+
+
+def test_gv7_s_076_an_unprovable_identity_is_refused_not_assumed(
+    tmp_path, monkeypatch
+):
+    """A volume that reports no usable file index must not compare vacuously.
+
+    Where ``st_dev`` and ``st_ino`` are both zero, an identity comparison is
+    true of any two files, and a swap goes unnoticed. The contract requires
+    failing closed on an identity that is missing or zero, and this is that
+    rule's control.
+    """
+    validate = sup.require_validate()
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(good)
+    target.write_bytes(sup.padded_refusable(len(good)))
+
+    probe = sup.ReplaceBeforeOpen(target, replacement).install(monkeypatch)
+    sup.ZeroedIdentity().install(monkeypatch)
+    refusal = None
+    try:
+        validate.validate_ledger_file(target)
+    except validate.LedgerError as error:
+        refusal = error
+
+    assert probe.replaced, "the window was never entered"
+    assert refusal is not None, (
+        "on a volume reporting a zero identity the swap was ACCEPTED: an "
+        "identity comparison that cannot distinguish two files was treated "
+        "as proof that they are the same file"
+    )
+    assert refusal.token == sup.PATH_IDENTITY_TOKEN, refusal.token
+
+
+def test_gv7_s_077_the_identity_binding_holds_in_every_execution_mode(tmp_path):
+    """Ordinary, ``-O`` and ``-OO`` must agree, and must all refuse.
+
+    Asserting only that the three modes AGREE would pass on an implementation
+    that accepted the replacement in all three, so the outcome is pinned too.
+    The subprocess uses the same open-boundary swap as ``ReplaceBeforeOpen``,
+    rather than a second hand-rolled probe that could drift from it.
+    """
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+
+    script = (
+        "import builtins, os, sys, pathlib\n"
+        "target = pathlib.Path(sys.argv[1])\n"
+        "replacement = pathlib.Path(sys.argv[2])\n"
+        "from experiments.general_v7_ledger import validate as v\n"
+        "real = builtins.open\n"
+        "state = {'done': False}\n"
+        "def opener(file, *a, **k):\n"
+        "    try:\n"
+        "        same = os.path.normcase(os.fspath(file)) == os.path.normcase(str(target))\n"
+        "    except TypeError:\n"
+        "        same = False\n"
+        "    if same and not state['done']:\n"
+        "        os.replace(replacement, target)\n"
+        "        state['done'] = True\n"
+        "    return real(file, *a, **k)\n"
+        "builtins.open = opener\n"
+        "try:\n"
+        "    v.validate_ledger_file(target)\n"
+        "    sys.stdout.write('ACCEPTED')\n"
+        "except v.LedgerError as error:\n"
+        "    sys.stdout.write(error.token)\n"
+        "sys.stdout.write('|' + str(state['done']))\n"
+    )
+
+    outcomes = set()
+    for flags in ([], ["-O"], ["-OO"]):
+        replacement.write_bytes(good)
+        target.write_bytes(sup.padded_refusable(len(good)))
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONPATH"] = str(sup.REPO_ROOT)
+        completed = subprocess.run(
+            [sys.executable, *flags, "-c", script, str(target), str(replacement)],
+            capture_output=True,
+            env=environment,
+            cwd=str(sup.REPO_ROOT),
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+        outcomes.add(completed.stdout.decode("utf-8"))
+
+    assert len(outcomes) == 1, sorted(outcomes)
+    token, _, replaced = outcomes.pop().partition("|")
+    assert replaced == "True", "the replacement never happened in the subprocess"
+    assert token == sup.PATH_IDENTITY_TOKEN, token

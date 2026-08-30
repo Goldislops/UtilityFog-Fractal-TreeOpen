@@ -37,8 +37,8 @@ def _ids(letter, *spans):
 #: handback must be able to look up what ``GV7-S-040`` was and find that it was
 #: withdrawn, not find a different control wearing its name.
 AUTHORED_CONTROLS = {
-    "test_contract.py": _ids("D", (1, 42)),
-    "test_ledger_structure.py": _ids("S", (1, 37), (43, 44), (46, 73)),
+    "test_contract.py": _ids("D", (1, 44)),
+    "test_ledger_structure.py": _ids("S", (1, 37), (43, 44), (46, 77)),
     "test_inventory.py": _ids("I", (1, 28)),
     "test_provenance.py": _ids("P", (1, 28)),
     "test_controls_manifest.py": _ids("M", (1, 25)),
@@ -52,6 +52,11 @@ SUITE_ALLOWED_IMPORTS = frozenset(
     {
         "__future__",
         "ast",
+        # The identity probe hooks the opener, which is where the object read
+        # is decided. This is the SUITE's allowlist; the production allowlist
+        # in `sup.PRODUCTION_ALLOWED_IMPORTS` is untouched and still admits no
+        # such module.
+        "builtins",
         "hashlib",
         "importlib",
         "json",

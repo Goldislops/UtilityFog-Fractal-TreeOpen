@@ -16,6 +16,7 @@ no locator string here refers to a real resource.
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import importlib
 import json
@@ -1288,6 +1289,141 @@ REQUIRED_REFUSAL_TOKENS = (
     "type-not-exact",
     "undeclared-key",
 )
+
+#: The stage-1-adjacent token for a file whose identity is not the identity
+#: that was inspected. Named here so a control can demand it of the production
+#: vocabulary before any implementation exists.
+#:
+#: It is deliberately NOT folded into ``REQUIRED_REFUSAL_TOKENS`` while no
+#: implementation declares it: that list is what the pre-Correction-8 surface
+#: demanded, and adding to it would turn GV7-S-068 red for the same defect
+#: GV7-S-075 already reports. ``GV7-S-075`` demands the token of the production
+#: vocabulary directly, and does so whether or not the list has been updated,
+#: so folding it in later changes nothing.
+PATH_IDENTITY_TOKEN = "path-identity-changed"
+
+
+class ReplaceBeforeOpen:
+    """Replace a named file in the instant before it is opened.
+
+    Deterministic, not a race: the replacement happens inside the ``open`` call
+    itself, so every name resolution the validator performed BEFORE the open
+    saw the original object and every byte it reads comes from the replacement.
+
+    That is what makes this discriminating. A validator that "binds" by looking
+    the NAME up a second time compares two pre-swap resolutions, finds them
+    equal, and reads the swapped file -- which is the shape section 9 declares
+    insufficient. Only an identity taken from the opened handle sees the
+    difference. An earlier probe swapped at the first INSPECTION instead, and a
+    second-name-lookup implementation passed it while still accepting a swapped
+    document.
+
+    It hooks ``builtins.open`` and ``os.open`` -- the two stdlib ways to obtain
+    a handle. It assumes nothing about how the path was screened, so an
+    implementation may inspect with ``os.lstat``, ``os.stat(...,
+    follow_symlinks=False)`` or ``pathlib`` alike. If neither hook is ever
+    reached for the target, ``replaced`` stays ``False`` and the control using
+    this must fail rather than pass: the window it exists to test was never
+    entered.
+    """
+
+    def __init__(self, target, replacement):
+        self.target = pathlib.Path(target)
+        self.replacement = pathlib.Path(replacement)
+        self.inspected = None
+        self.replaced = False
+        self._open = builtins.open
+        self._os_open = os.open
+        self._lstat = os.lstat
+
+    def _same(self, path):
+        try:
+            return os.path.normcase(os.fspath(path)) == os.path.normcase(
+                str(self.target)
+            )
+        except TypeError:
+            return False
+
+    def _swap(self, path):
+        if self.replaced or not self._same(path):
+            return
+        current = self._lstat(self.target)
+        self.inspected = (current.st_dev, current.st_ino)
+        os.replace(self.replacement, self.target)
+        self.replaced = True
+
+    def install(self, monkeypatch):
+        def opener(file, *args, **kwargs):
+            self._swap(file)
+            return self._open(file, *args, **kwargs)
+
+        def os_opener(path, *args, **kwargs):
+            self._swap(path)
+            return self._os_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", opener)
+        monkeypatch.setattr(os, "open", os_opener)
+        return self
+
+    def opened_identity(self):
+        """The identity now behind that name -- what an open will reach."""
+        current = self._lstat(self.target)
+        return (current.st_dev, current.st_ino)
+
+
+class ZeroedIdentity:
+    """Report a volume that carries no usable file index.
+
+    Some filesystems return ``st_ino == 0``. A validator that compares the two
+    identities without checking they are meaningful then compares ``(0, 0)``
+    with ``(0, 0)``, which is vacuously true, and a swap goes unnoticed. This
+    simulates that platform so the contract's "missing or zero" clause carries
+    a control rather than only prose.
+    """
+
+    def __init__(self):
+        self._stat = os.stat
+        self._lstat = os.lstat
+
+    class _Zeroed:
+        """Every field the platform reported, with the two under test zeroed.
+
+        Rebuilding an ``os.stat_result`` from its ten base fields would drop
+        the Windows extended attributes the reparse screen reads, so this
+        forwards instead of fabricating.
+        """
+
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, name):
+            if name in ("st_dev", "st_ino"):
+                return 0
+            return getattr(self._wrapped, name)
+
+        def __getitem__(self, index):
+            return self._wrapped[index]
+
+    def install(self, monkeypatch):
+        def zero(result):
+            return ZeroedIdentity._Zeroed(result)
+
+        monkeypatch.setattr(os, "stat", lambda *a, **k: zero(self._stat(*a, **k)))
+        monkeypatch.setattr(os, "lstat", lambda *a, **k: zero(self._lstat(*a, **k)))
+        return self
+
+
+def padded_refusable(length):
+    """A JSON document that refuses at the content stage, of an exact length.
+
+    Equal-length fixtures matter: a validator that compares the number of bytes
+    read with the recorded size is not comparing identity at all, and a
+    different-length replacement lets that proxy look correct.
+    """
+    body = b"{}"
+    assert length >= len(body), length
+    return body + b" " * (length - len(body))
+
 
 #: Controls withdrawn by Correction 3, with the reason. Nothing is silently
 #: deleted: a retired id must never be reused, and must never reappear in a

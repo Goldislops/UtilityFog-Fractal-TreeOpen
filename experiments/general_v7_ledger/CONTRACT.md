@@ -637,8 +637,10 @@ path**, and nothing else:
 - the path must resolve to an **existing regular file**; a directory, a missing
   path, or a non-regular file is refused;
 - **no component of the supplied path may be a symbolic link, junction, or
-  other redirecting reparse point**, so a swapped directory on the way to the
-  file cannot redirect the read;
+  other redirecting reparse point**, so no redirecting component is admitted on
+  the way to the file. That screen alone does **not** establish that the bytes
+  read came from the object screened — see the identity rule below, which is
+  what actually binds the two;
 - **for a relative supplied path the current working-directory entry, and its
   own ancestors, are screened too.** The walk is over the path the process will
   actually open, never over the components that merely happen to be present in
@@ -650,9 +652,68 @@ path**, and nothing else:
   **must be refused alike**; accepting the first while refusing the second is
   an incomplete walk, not a decision to scope the rule to absolute paths;
 - it performs **no directory discovery, no adjacent-file discovery, no
-  environment lookup, no current-directory lookup, and no locator retrieval**;
+  environment lookup, no fallback-name lookup, and no locator retrieval**. The
+  current directory is consulted for exactly one purpose and no other:
+  **anchoring and screening an explicitly supplied relative path**, which is
+  required, because the path the process will open is
+  `<current directory>\<supplied path>` and the screen must cover it.
+  **Searching for, discovering, or falling back to an input** — through the
+  current directory, an adjacent file, environment state, or any name the
+  operator did not supply — remains **forbidden**. Consulting a directory to
+  screen a path the operator named is not the same act as looking for a file
+  the operator did not, and an earlier wording of these two bullets
+  contradicted itself by not saying so;
 - drive-relative, malformed, and reserved-name paths remain refused, and
   Windows path behaviour is safe.
+
+**The file read is the file inspected.** A pathname check followed by an
+independent pathname open is **insufficient**: the screen and the open resolve
+the same *name* twice, and nothing binds the two resolutions to the same
+*object*. Between them the name can be made to refer to a different file, and
+the validator then screens one object and reads another. That is not
+hypothetical — replacing the named file in the instant before the open made a
+validator accept a document it had just refused. The earlier claim that a
+swapped directory "cannot redirect the read" was false and is **withdrawn**.
+
+The validator therefore reads through a **bound handle** and proves the
+binding:
+
+- the final component's inspection records that object's identity — on this
+  platform the `st_dev` and `st_ino` pair, with regular-file status;
+- the file is opened **once**, and the bytes are read from **that handle**;
+- the identity compared against it is taken **from the handle** —
+  `os.stat(handle.fileno())` — and **never from the name a second time**. A
+  second lookup of the name is one more name resolution, not a binding: it
+  leaves exactly the same window open between itself and the open, and a
+  validator written that way still reads the swapped file;
+- if the two differ, the object read is not the object screened, and the
+  validation **fails closed** with the frozen token `path-identity-changed`;
+- if either identity is **missing or zero**, the comparison would hold of any
+  two files, so it proves nothing and the validation fails closed with the same
+  token. An unprovable binding is not a binding.
+
+`path-identity-changed` is raised as `LedgerPathError`, with the other path
+refusals, and is decided at the **open boundary** — after the stage-1 lexical
+and path-entry checks and before the stage-2 byte ceiling. The stage-1
+enumeration under "Refusal order" names it there for that reason.
+
+**What this establishes, and what it does not.** It establishes that the bytes
+read came from the object whose final-component inspection was recorded, or the
+document is refused. It does **not** prevent a swap, and — this is the part the
+first draft of this section wrongly claimed away — it does **not** detect every
+swap. A directory replaced *after* the ancestor screen and *before* the final
+component's inspection is **not** detected: the recorded identity and the
+handle identity then both resolve through the substituted directory and agree.
+Closing that would mean holding a handle on every ancestor and resolving
+relative to it, which this platform's standard library does not offer. **The
+residual is disclosed here rather than described away.** The guarantee is
+detection of a substitution across the inspection-to-open window, failing
+closed, and nothing wider.
+
+**Ordinary filesystem errors continue to propagate as themselves.** The
+identity rule adds a refusal for a *readable* identity that is absent, zero or
+different; it converts no `OSError` into a refusal, and an inspection or a
+handle query that raises propagates exactly as section 9 already requires.
 
 **Reparse points: redirection, not storage.** A path component is refused when
 it is a symbolic link, a mount point or junction, or carries any reparse tag
@@ -930,8 +991,10 @@ stated this way deliberately and is **not** relaxed to match a per-record
 implementation:
 
 1. lexical and path-entry checks — the shape of the supplied path,
-   drive-relative and reserved-name refusal, existence, regular-file, and
-   redirecting reparse points;
+   drive-relative and reserved-name refusal, existence, regular-file,
+   redirecting reparse points, and, at the open boundary that closes this
+   stage, the identity binding between the inspected file and the opened
+   handle;
 2. the byte ceiling, over captured bytes;
 3. JSON parsing, including the duplicate-key refusal;
 4. exact builtin types, and document-wide string encodability;

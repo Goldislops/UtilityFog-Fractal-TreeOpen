@@ -983,3 +983,79 @@ def test_gv7_d_042_the_contract_states_the_calibration_evidence_rules():
         "BIBLIOGRAPHY.md",
         "INTAKE_REPORT.md",
     }
+
+
+def test_gv7_d_043_the_contract_binds_the_inspected_file_to_the_opened_file():
+    """The rule, its narrower true guarantee, and its disclosed residual."""
+    text = contract_text()
+    for statement in (
+        "**The file read is the file inspected.**",
+        "A pathname check followed by an\nindependent pathname open is **insufficient**",
+        'The earlier claim that a\nswapped directory "cannot redirect the read" was false and is **withdrawn**',
+        "reads through a **bound handle**",
+        "the file is opened **once**, and the bytes are read from **that handle**",
+        "taken **from the handle**",
+        "**never from the name a second time**",
+        "A\n  second lookup of the name is one more name resolution, not a binding",
+        "still reads the swapped file",
+        "fails closed** with the frozen token `path-identity-changed`",
+        "if either identity is **missing or zero**",
+        "An unprovable binding is not a binding",
+        "decided at the **open boundary**",
+        # The guarantee, stated no wider than it is.
+        "It does **not** prevent a swap",
+        "it does **not** detect every\nswap",
+        "the first draft of this section wrongly claimed away",
+        "A directory replaced *after* the ancestor screen and *before* the final\ncomponent's inspection is **not** detected",
+        "The\nresidual is disclosed here rather than described away",
+        "detection of a substitution across the inspection-to-open window",
+        "Ordinary filesystem errors continue to propagate as themselves",
+        "it converts no `OSError` into a refusal",
+    ):
+        assert_phrase(text, statement)
+
+    flattened = flat(text)
+    # The withdrawn overclaim must not return, in either wording.
+    assert "so a swapped directory on the way to the file cannot redirect the read" not in flattened
+    assert "a swap cannot go unnoticed" not in flattened
+    assert "That screen alone does **not** establish" in flattened
+    assert sup.PATH_IDENTITY_TOKEN == "path-identity-changed"
+
+    # PLACEMENT, not mere presence. Text that satisfies a substring search from
+    # inside a "rejected drafts" appendix is not a requirement, so the rule
+    # must sit under the validator section itself. This is a bounded structural
+    # check over one document, not a reading of arbitrary prose -- section 8a
+    # says why that distinction matters.
+    anchor = text.index("**The file read is the file inspected.**")
+    headings = [
+        match for match in re.finditer(r"(?m)^## .*$", text) if match.start() < anchor
+    ]
+    assert headings, "the rule sits before every section heading"
+    assert headings[-1].group(0).startswith("## 9."), headings[-1].group(0)
+    # And the residual is stated where the guarantee is, not elsewhere.
+    residual = text.index("it does **not** detect every")
+    assert anchor < residual < text.index("## 10.", anchor)
+
+    # The stage enumeration names the decision point, so the token's stage is
+    # not asserted in one place and contradicted in another.
+    assert_phrase(
+        text, "and, at the open boundary that closes this stage, the identity binding"
+    )
+
+
+def test_gv7_d_044_the_contract_separates_anchoring_from_discovery():
+    """Consulting the current directory to screen a supplied path is required;
+    searching for an input through it remains forbidden."""
+    text = contract_text()
+    for statement in (
+        "The\n  current directory is consulted for exactly one purpose and no other",
+        "anchoring and screening an explicitly supplied relative path**, which is\n  required",
+        "Searching for, discovering, or falling back to an input",
+        "remains **forbidden**",
+        "Consulting a directory to\n  screen a path the operator named is not the same act as looking for a file\n  the operator did not",
+        "an earlier wording of these two bullets\n  contradicted itself by not saying so",
+        "no fallback-name lookup",
+    ):
+        assert_phrase(text, statement)
+    # The self-contradicting bullet is gone, and cannot come back.
+    assert "no current-directory lookup" not in flat(text)
