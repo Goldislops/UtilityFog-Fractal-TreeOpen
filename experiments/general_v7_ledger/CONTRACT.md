@@ -551,6 +551,75 @@ list, or any operational authorization.** Access controls and denials are stop
 conditions, not obstacles. Recording a proposal is not endorsing it, and no
 field can express endorsement.
 
+### 8a. What the structural validator does and does not decide
+
+The prohibitions above are **admission and governance rules for this ledger
+family**, and they remain in force in full. They bind the people and the
+process that admit material.
+
+**The structural validator does not, and cannot, establish the meaning of
+arbitrary prose.** Every free-text field — `claim_text`, `statement`,
+`positions`, `limitations`, `summary`, `rejection_basis`, `supplied_title`,
+`upstream_attribution` — accepts any string the type, length and encodability
+rules admit. Deciding otherwise would mean deciding natural language, which no
+finite pattern set does.
+
+So a sentence above of the form "no field can express X" states **what no field
+is designed or vocabulary-enabled to record**: there is no enum, no flag and no
+schema slot for adjudication, endorsement, promotion or authorization, and
+`resolution_state` is closed to `unresolved`. It does **not** claim that prose
+cannot be written to say such a thing. Written into a free-text field, it is
+structurally accepted — that is a governance failure for human audit to catch,
+not a refusal the validator can make. Read as absolutes about text, those
+sentences were **overstated, and the overstatement is withdrawn here**.
+
+**Bounded pattern checks over the committed calibration data are defence in
+depth only.** The acceptance surface screens that one fabricated corpus for a
+small enumerated set of operational shapes. That screen is a deny-list over
+shapes somebody thought of; **a deny-list is not a detector**. It decides
+nothing about text it does not happen to match, and it must never be described
+as establishing that the ledger is free of operational payload. Enlarging the
+keyword list does not change its kind, and doing so while calling the result
+complete is the failure this section exists to prevent.
+
+**A green structural suite proves conformance to this contract's structure. It
+proves nothing semantic.** No text field is executable authority, no text field
+is read as an instruction, and **human audit remains required before any
+real-source admission or any publication**. Access controls and denials remain
+stop conditions, not obstacles.
+
+### 8b. Evidence rules for the committed synthetic calibration candidate
+
+These bind the fabricated calibration data committed alongside this contract.
+They are **not** restrictions on a future legitimate real-source ledger, which
+will carry real hosts and real attributions by design.
+
+- every present `normalized_locator` in the committed calibration data uses the
+  reserved host `example.invalid`, and **no real-world locator appears** in the
+  calibration ledger or its bibliography — RFC 6761 reserves `.invalid`, so
+  nothing recorded there can resolve;
+- `BIBLIOGRAPHY.md` and `INTAKE_REPORT.md` each carry their **exact** boundary
+  sentence, in the preamble, before the first substantive line;
+- a boundary statement is **not** satisfied by an HTML comment, by text inside
+  a fenced block, by an HTML attribute value, by a negation, by a double
+  negation, or by an unrelated use of the word "synthetic". A declaration
+  standing beside an **enumerated** claim — of merge authority, or of
+  real-source verification — is refused too. **A refutation written in
+  arbitrary prose is not detected, and by section 8a it cannot be**: that is a
+  human-audit obligation, stated here rather than implied away. An earlier
+  draft of this bullet claimed the general case and was **withdrawn** for
+  exactly the reason section 8a gives;
+- `README.md`, `BIBLIOGRAPHY.md` and `INTAKE_REPORT.md` claim **no merge
+  authority and no real-source verification**.
+
+**The validator enforces none of this, deliberately.** Section 6c constrains a
+locator's *shape* — HTTPS-only and whitespace-canonical — and not its host,
+because a real-source ledger must be able to carry a real one. What protects
+this candidate is that its data is fabricated and that **no code path
+retrieves, opens, resolves or contacts a locator**. These are evidence rules
+about one committed artifact, and they are stated as such rather than dressed
+up as a safety property of the validator.
+
 ## 9. Structural and validator contract
 
 The future validator satisfies all of the following.
@@ -570,6 +639,16 @@ path**, and nothing else:
 - **no component of the supplied path may be a symbolic link, junction, or
   other redirecting reparse point**, so a swapped directory on the way to the
   file cannot redirect the read;
+- **for a relative supplied path the current working-directory entry, and its
+  own ancestors, are screened too.** The walk is over the path the process will
+  actually open, never over the components that merely happen to be present in
+  the argument text. A walk that starts at the supplied string inspects exactly
+  one entry for a bare filename — `ntpath.dirname("ledger.json")` is empty — so
+  it never reaches the current directory, while `open` resolves straight
+  through it. `ledger.json` and `.\ledger.json` supplied from inside a
+  redirecting directory name the same bytes behind the same junction, and
+  **must be refused alike**; accepting the first while refusing the second is
+  an incomplete walk, not a decision to scope the rule to absolute paths;
 - it performs **no directory discovery, no adjacent-file discovery, no
   environment lookup, no current-directory lookup, and no locator retrieval**;
 - drive-relative, malformed, and reserved-name paths remain refused, and
@@ -838,7 +917,17 @@ committed bytes are byte-identical before and after.
 **Refusal order.** Refusal is staged, and **the earliest applicable stage
 wins**. An input violating two rules is refused by the earlier one, always, so
 a refusal token identifies the stage that stopped the document and never a
-race between checks:
+race between checks.
+
+**The rule is document-wide, not per record.** "Earliest applicable stage"
+ranges over the whole payload: a stage-4 exact-type fault in the last record
+outranks a stage-6 vocabulary fault in the first, and a validator that walks
+record by record, running every stage within each record before moving on,
+inverts the rule for every pair of faults that happen to sit in that order. The
+stage a token names must be a property of the document, not of the traversal
+that found it, or the token reports the walk rather than the fault. The rule is
+stated this way deliberately and is **not** relaxed to match a per-record
+implementation:
 
 1. lexical and path-entry checks — the shape of the supplied path,
    drive-relative and reserved-name refusal, existence, regular-file, and

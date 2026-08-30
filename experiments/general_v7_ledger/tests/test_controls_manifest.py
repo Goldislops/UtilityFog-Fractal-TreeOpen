@@ -37,10 +37,10 @@ def _ids(letter, *spans):
 #: handback must be able to look up what ``GV7-S-040`` was and find that it was
 #: withdrawn, not find a different control wearing its name.
 AUTHORED_CONTROLS = {
-    "test_contract.py": _ids("D", (1, 39)),
-    "test_ledger_structure.py": _ids("S", (1, 37), (43, 44), (46, 69)),
-    "test_inventory.py": _ids("I", (1, 26)),
-    "test_provenance.py": _ids("P", (1, 26)),
+    "test_contract.py": _ids("D", (1, 42)),
+    "test_ledger_structure.py": _ids("S", (1, 37), (43, 44), (46, 73)),
+    "test_inventory.py": _ids("I", (1, 28)),
+    "test_provenance.py": _ids("P", (1, 28)),
     "test_controls_manifest.py": _ids("M", (1, 25)),
 }
 
@@ -597,8 +597,26 @@ def test_gv7_m_020_an_unresolvable_ancestor_reads_as_absence_by_decision(
     target.rmdir()
     assert sup.entry_is_absent(link / "ledger.json") is True
 
-    # The semantics is documented, not silent.
-    assert "ancestor" in (sup.entry_is_absent.__doc__ or "")
+    # The semantics is documented, not silent. Read from the SOURCE, not from
+    # a runtime `__doc__`: `python -OO` strips docstrings, and a control that
+    # cannot pass under an execution mode the suite is required to run in
+    # reports the mode rather than the fact.
+    # `optimize=0` is load-bearing. Since Python 3.13 `ast.parse` defaults to
+    # the interpreter's optimisation level, so under `python -OO` it strips
+    # docstrings from the TREE as well: the first body node of
+    # `entry_is_absent` parses as `Expr` ordinarily and as `Try` under -OO.
+    # Reading the source instead of `__doc__` is not enough by itself.
+    parsed = ast.parse(
+        sup.require_file(sup.TESTS_DIR / "_support.py", "_support.py"), optimize=0
+    )
+    documented = ast.get_docstring(
+        next(
+            node
+            for node in parsed.body
+            if isinstance(node, ast.FunctionDef) and node.name == "entry_is_absent"
+        )
+    )
+    assert documented and "ancestor" in documented
 
     # Absence therefore always means "the leaf under a present laboratory",
     # never "the suite was pointed at the wrong root".

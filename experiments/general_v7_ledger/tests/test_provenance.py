@@ -525,3 +525,105 @@ def test_gv7_p_026_a_historical_kev_authorization_is_not_runtime_authority():
         key in sup.ROOT_KEYS
         for key in ("authority", "grants", "permissions", "capabilities")
     )
+
+
+#: The shapes that satisfied the earlier boundary predicate while telling a
+#: reader nothing, or the opposite. Each is a real reproduction, not a
+#: hypothetical: all five were accepted before Correction 7.
+BOUNDARY_BYPASS_FIXTURES = (
+    (
+        "an HTML comment, invisible in every rendered view",
+        "# Bibliography\n\n<!-- synthetic material; not merge-authorized -->\n\n"
+        "### GV7-SRC-0001\n",
+    ),
+    (
+        "a fenced example rather than a statement",
+        "# Bibliography\n\n```\nsynthetic material. not merge-authorized.\n```\n\n"
+        "### GV7-SRC-0001\n",
+    ),
+    (
+        "a negation at distance",
+        "# Bibliography\n\nThis material is not, in any sense, synthetic. "
+        "It is not merge-authorized.\n\n### GV7-SRC-0001\n",
+    ),
+    (
+        "a double negation",
+        "# Bibliography\n\nIt is false that this synthetic material is not "
+        "merge-authorized.\n\n### GV7-SRC-0001\n",
+    ),
+    (
+        "an unrelated use of the word",
+        "# Bibliography\n\nUses a synthetic-rubber gasket. Not merge-authorized."
+        "\n\n### GV7-SRC-0001\n",
+    ),
+    (
+        "a declaration standing beside its own refutation",
+        "# Bibliography\n\nSynthetic calibration material. Not merge-authorized. "
+        "Every source was retrieved and verified; approved for merge.\n\n"
+        "### GV7-SRC-0001\n",
+    ),
+    (
+        "no declaration at all",
+        "# Bibliography\n\nA source list.\n\n### GV7-SRC-0001\n",
+    ),
+)
+
+#: The two shipped sentences, which must remain compliant. A predicate that
+#: refuses everything is not a stronger predicate.
+BOUNDARY_COMPLIANT_FIXTURES = (
+    (
+        "the bibliography's shipped wording",
+        "# Bibliography\n\n**Synthetic calibration material. This bibliography "
+        "is not merge-authorized.**\n\n### GV7-SRC-0001\n",
+    ),
+    (
+        "the intake report's shipped wording",
+        "# Intake report\n\nThis report describes a wholly synthetic ledger.\n\n"
+        "**This synthetic calibration material is not merge-authorized.**\n\n"
+        "## Identity\n",
+    ),
+)
+
+
+def test_gv7_p_027_the_boundary_statement_cannot_be_faked():
+    """A disclosure a reader cannot see, or that says the opposite, is not one.
+
+    This is a BOUNDED STRUCTURAL CHECK over three committed documents. It is
+    defence in depth, not a semantic detector, and CONTRACT.md section 8a says
+    so; this control pins the strengthening without claiming more than it does.
+    """
+    for label, text in BOUNDARY_COMPLIANT_FIXTURES:
+        assert not sup.acceptance_boundary_violations("probe", text), label
+    for label, text in BOUNDARY_BYPASS_FIXTURES:
+        assert sup.acceptance_boundary_violations("probe", text), f"{label}: accepted"
+
+    # The withdrawn predicate is named as withdrawn and is no longer consulted.
+    assert sup.SYNTHETIC_DECLARATION_RE.search("a synthetic-rubber gasket")
+    assert not sup._unnegated(
+        sup.SYNTHETIC_MATERIAL_RE, "a synthetic-rubber gasket"
+    ), "the superseded bare-token form is still deciding"
+
+
+def test_gv7_p_028_no_liftable_document_claims_authority_or_verification():
+    """None of the three separately liftable documents claims what it is not."""
+    for name in sup.ACCEPTANCE_BOUNDARY_DOCUMENTS:
+        text = sup.require_file(sup.LAB_DIR / name, name)
+        assert not sup.merge_authority_claims(text), (
+            name,
+            sup.merge_authority_claims(text),
+        )
+        assert not sup.real_source_verification_claims(text), (
+            name,
+            sup.real_source_verification_claims(text),
+        )
+
+    # The screens are not vacuous: each fires on the claim it exists to catch,
+    # and each ignores the negated form the real documents actually use.
+    assert sup.merge_authority_claims("This artifact is merge-authorized.")
+    assert sup.merge_authority_claims("Approved for merge.")
+    assert not sup.merge_authority_claims("This branch is not merge-authorized.")
+    assert sup.real_source_verification_claims("Every source was retrieved.")
+    assert sup.real_source_verification_claims("A peer-reviewed source list.")
+    assert not sup.real_source_verification_claims(
+        "No source was retrieved, and no claim was verified."
+    )

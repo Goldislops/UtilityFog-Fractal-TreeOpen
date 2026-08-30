@@ -711,3 +711,111 @@ def test_gv7_i_026_the_bibliography_predicate_detects_every_named_fault():
     )
     # And the shared value is NOT reported: sharing is lawful.
     assert not bibliography_violations(good, ledger)
+
+
+#: Every locator authority the calibration data may carry. Written as a scan
+#: over the committed text, not over parsed fields only, so a real host cannot
+#: hide in prose the parser never reads.
+LOCATOR_AUTHORITY_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*)://([^/\s\"'<>)\]]+)")
+
+#: A scheme is not required to name a host. `github.com/org/repo`,
+#: `//raw.githubusercontent.com/x` and `www.nature.com/a` are all locators to a
+#: reader, and the scheme-bearing scan above saw none of them.
+SCHEMELESS_AUTHORITY_RE = re.compile(
+    r"(?i)(?:^|[\s(<\[])(?://)?((?:www\.[a-z0-9-]+|[a-z0-9-]+)(?:\.[a-z0-9-]+)+)/"
+)
+
+#: A bounded list of real public suffixes, for a scan over ONE small committed
+#: corpus that is supposed to contain none of them. It is a deny-list and
+#: therefore decides nothing about a suffix it does not name -- CONTRACT.md
+#: section 8a says so, and this comment does not claim otherwise.
+REAL_SUFFIX_RE = re.compile(
+    r"(?i)\b[a-z0-9-]+\.(?:com|org|net|gov|edu|mil|int|io|ai|co|dev|app|info|biz"
+    r"|uk|de|fr|jp|cn|ru|us|eu|nl|se|ch|it|es|ca|au|in|br)\b"
+)
+
+
+def locator_authorities(text: str):
+    """``(scheme, authority)`` pairs, lowercased, for every URL-like span.
+
+    Scheme-less spellings are reported with the scheme ``"none"`` so a caller
+    that requires ``https`` refuses them rather than never seeing them.
+    """
+    found = {
+        (m.group(1).lower(), m.group(2).lower())
+        for m in LOCATOR_AUTHORITY_RE.finditer(text)
+    }
+    found |= {
+        ("none", m.group(1).lower()) for m in SCHEMELESS_AUTHORITY_RE.finditer(text)
+    }
+    return sorted(found)
+
+
+def test_gv7_i_027_the_calibration_locators_are_all_the_reserved_host():
+    """An evidence rule about this fabricated candidate, not about the validator.
+
+    The validator constrains a locator's SHAPE and not its host, deliberately,
+    because a real-source ledger must be able to carry a real one. So nothing
+    in the code prevents a live host here, and this control is what makes the
+    reserved-host property of the committed calibration data an asserted fact
+    rather than an accident: rewriting every locator to a live host previously
+    left the entire acceptance surface green.
+    """
+    ledger = sup.require_ledger()
+    host = sup.CALIBRATION_LOCATOR_HOST
+
+    present = [
+        source["normalized_locator"]
+        for source in ledger["sources"]
+        if source["normalized_locator"] is not None
+    ]
+    assert present, "no locator is present at all; the rule would pass vacuously"
+    for locator in present:
+        assert locator.startswith(f"https://{host}/") or locator == f"https://{host}", locator
+
+    # The whole committed text of both artifacts, scheme and authority exact.
+    # `example.invalid.evil.com`, `sub.example.invalid`, a port, and userinfo
+    # are each a different authority and each refused here.
+    for name, text in (
+        ("ledger.json", sup.require_file(sup.LEDGER_PATH, "ledger.json")),
+        ("BIBLIOGRAPHY.md", bibliography_text()),
+    ):
+        for scheme, authority in locator_authorities(text):
+            assert scheme == "https", (name, scheme, authority)
+            assert authority == host, (name, authority)
+        # A bounded second pass, for a corpus that should contain no real
+        # public suffix at all. Disclosed as bounded: it decides nothing about
+        # a suffix it does not name.
+        assert not REAL_SUFFIX_RE.findall(text), (
+            name,
+            sorted(set(REAL_SUFFIX_RE.findall(text))),
+        )
+
+    # And the supplied forms, which are preserved verbatim and may be
+    # deliberately malformed, still name no other host.
+    for source in ledger["sources"]:
+        supplied = source["supplied_locator"]
+        if supplied is None:
+            continue
+        assert host in supplied, supplied
+        for _scheme, authority in locator_authorities(supplied):
+            assert authority == host, supplied
+
+
+def test_gv7_i_028_each_liftable_document_carries_its_exact_boundary_sentence():
+    """The exact sentence, in the preamble, before the first substantive line."""
+    for name, sentence in sorted(sup.CALIBRATION_BOUNDARY_SENTENCES.items()):
+        text = sup.require_file(sup.LAB_DIR / name, name)
+        assert sentence in text, (name, sentence)
+        preamble = sup.acceptance_boundary_preamble(text)
+        assert preamble != text, name
+        assert sentence in preamble, (
+            name,
+            "the boundary sentence is present but sits after the content",
+        )
+        # And the document as a whole satisfies the strengthened predicate.
+        assert not sup.acceptance_boundary_violations(name, text), name
+
+    # README is bound by the same predicate even though its wording is its own.
+    readme = sup.require_file(sup.README_PATH, "README.md")
+    assert not sup.acceptance_boundary_violations("README.md", readme)
