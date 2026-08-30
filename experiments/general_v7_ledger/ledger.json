@@ -1,0 +1,3826 @@
+{
+  "schema": "source-record-v3",
+  "ledger_id": "general-v7-technology-ledger-v1",
+  "corpus": "GENERAL V7 TECHNOLOGY CORPUS",
+  "intake_state": "intake-complete",
+  "batches": [
+    {
+      "batch_id": "GV7-BAT-0001",
+      "batch_ordinal": 1,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0001",
+        "GV7-SRC-0002"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 1, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0002",
+      "batch_ordinal": 2,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0003",
+        "GV7-SRC-0004"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 2, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0003",
+      "batch_ordinal": 3,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0005"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 3, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0004",
+      "batch_ordinal": 4,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0006"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 4, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0005",
+      "batch_ordinal": 5,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0007"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 5, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0006",
+      "batch_ordinal": 6,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0008"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 6, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0007",
+      "batch_ordinal": 7,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0009"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 7, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0008",
+      "batch_ordinal": 8,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0010"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 8, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0009",
+      "batch_ordinal": 9,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0011"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 9, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0010",
+      "batch_ordinal": 10,
+      "batch_kind": "artifact-bearing",
+      "introduces_sources": [],
+      "introduces_artifacts": [
+        "GV7-ART-0001"
+      ],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 10, fabricated for contract calibration: it carries one preserved synthetic artifact and introduces no new external-source identity."
+    },
+    {
+      "batch_id": "GV7-BAT-0011",
+      "batch_ordinal": 11,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0012"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 11, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0012",
+      "batch_ordinal": 12,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0013"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 12, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0013",
+      "batch_ordinal": 13,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0014"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 13, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0014",
+      "batch_ordinal": 14,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0015"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 14, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0015",
+      "batch_ordinal": 15,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0016"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 15, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0016",
+      "batch_ordinal": 16,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0017"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 16, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0017",
+      "batch_ordinal": 17,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0018"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 17, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0018",
+      "batch_ordinal": 18,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0019"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 18, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0019",
+      "batch_ordinal": 19,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0020"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 19, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0020",
+      "batch_ordinal": 20,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0021"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 20, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0021",
+      "batch_ordinal": 21,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0022"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 21, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0022",
+      "batch_ordinal": 22,
+      "batch_kind": "artifact-bearing",
+      "introduces_sources": [],
+      "introduces_artifacts": [
+        "GV7-ART-0002"
+      ],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 22, fabricated for contract calibration: it carries one preserved synthetic artifact and introduces no new external-source identity."
+    },
+    {
+      "batch_id": "GV7-BAT-0023",
+      "batch_ordinal": 23,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0023"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 23, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0024",
+      "batch_ordinal": 24,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0024"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 24, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0025",
+      "batch_ordinal": 25,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0025"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 25, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0026",
+      "batch_ordinal": 26,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0026"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 26, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0027",
+      "batch_ordinal": 27,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0027"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 27, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0028",
+      "batch_ordinal": 28,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0028"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 28, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0029",
+      "batch_ordinal": 29,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0029"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 29, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0030",
+      "batch_ordinal": 30,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0030"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 30, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0031",
+      "batch_ordinal": 31,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0031"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 31, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0032",
+      "batch_ordinal": 32,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0032"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 32, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0033",
+      "batch_ordinal": 33,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0033"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 33, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0034",
+      "batch_ordinal": 34,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0034"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 34, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0035",
+      "batch_ordinal": 35,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0035"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 35, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0036",
+      "batch_ordinal": 36,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0036"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 36, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0037",
+      "batch_ordinal": 37,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0037"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 37, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0038",
+      "batch_ordinal": 38,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0038"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 38, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0039",
+      "batch_ordinal": 39,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0039"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 39, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0040",
+      "batch_ordinal": 40,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0040"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 40, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0041",
+      "batch_ordinal": 41,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0041"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 41, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0042",
+      "batch_ordinal": 42,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0042"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 42, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0043",
+      "batch_ordinal": 43,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0043"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 43, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0044",
+      "batch_ordinal": 44,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0044"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 44, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0045",
+      "batch_ordinal": 45,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0045"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 45, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0046",
+      "batch_ordinal": 46,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0046"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 46, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0047",
+      "batch_ordinal": 47,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0047"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 47, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0048",
+      "batch_ordinal": 48,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0048"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 48, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0049",
+      "batch_ordinal": 49,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0049"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 49, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0050",
+      "batch_ordinal": 50,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0050"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 50, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0051",
+      "batch_ordinal": 51,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0051"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 51, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0052",
+      "batch_ordinal": 52,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0052"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 52, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0053",
+      "batch_ordinal": 53,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0053"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 53, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0054",
+      "batch_ordinal": 54,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0054"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 54, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0055",
+      "batch_ordinal": 55,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0055"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 55, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0056",
+      "batch_ordinal": 56,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0056"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 56, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0057",
+      "batch_ordinal": 57,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0057"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 57, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0058",
+      "batch_ordinal": 58,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0058"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 58, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0059",
+      "batch_ordinal": 59,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0059"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 59, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0060",
+      "batch_ordinal": 60,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0060"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 60, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0061",
+      "batch_ordinal": 61,
+      "batch_kind": "source-bearing",
+      "introduces_sources": [
+        "GV7-SRC-0061"
+      ],
+      "introduces_artifacts": [],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-alpha",
+      "notes": "Synthetic intake batch 61, fabricated for contract calibration: it introduces synthetic external-source identities. No real material was supplied."
+    },
+    {
+      "batch_id": "GV7-BAT-0062",
+      "batch_ordinal": 62,
+      "batch_kind": "artifact-bearing",
+      "introduces_sources": [],
+      "introduces_artifacts": [
+        "GV7-ART-0003"
+      ],
+      "updates_sources": [],
+      "supplied_by_role": "relay-agent",
+      "supplied_by_label": "synthetic-relay-beta",
+      "notes": "Synthetic intake batch 62, fabricated for contract calibration: it carries the third preserved synthetic artifact and introduces no new external-source identity."
+    },
+    {
+      "batch_id": "GV7-BAT-0063",
+      "batch_ordinal": 63,
+      "batch_kind": "bibliography-metadata",
+      "introduces_sources": [],
+      "introduces_artifacts": [],
+      "updates_sources": [
+        "GV7-SRC-0036",
+        "GV7-SRC-0037",
+        "GV7-SRC-0038",
+        "GV7-SRC-0039",
+        "GV7-SRC-0040",
+        "GV7-SRC-0041",
+        "GV7-SRC-0042",
+        "GV7-SRC-0043",
+        "GV7-SRC-0044",
+        "GV7-SRC-0045",
+        "GV7-SRC-0046",
+        "GV7-SRC-0047",
+        "GV7-SRC-0048",
+        "GV7-SRC-0049",
+        "GV7-SRC-0050",
+        "GV7-SRC-0051",
+        "GV7-SRC-0052",
+        "GV7-SRC-0053",
+        "GV7-SRC-0054",
+        "GV7-SRC-0055",
+        "GV7-SRC-0056",
+        "GV7-SRC-0057",
+        "GV7-SRC-0058",
+        "GV7-SRC-0059",
+        "GV7-SRC-0060",
+        "GV7-SRC-0061"
+      ],
+      "supplied_by_role": "operator",
+      "supplied_by_label": "synthetic-operator-console",
+      "notes": "Synthetic intake batch 63, fabricated for contract calibration: it updates the bibliography metadata of existing synthetic source identities, creates no further source and introduces no artifact."
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "GV7-SRC-0001",
+      "batch_ref": "GV7-BAT-0001",
+      "supplied_title": "Synthetic Source Item 0001 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-02",
+      "normalized_date": "2098-03-02",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0002",
+      "batch_ref": "GV7-BAT-0001",
+      "supplied_title": "Synthetic Source Item 0002 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 2 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0003",
+      "batch_ref": "GV7-BAT-0002",
+      "supplied_title": "Synthetic Source Item 0003 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0004",
+      "batch_ref": "GV7-BAT-0002",
+      "supplied_title": "Synthetic Source Item 0004 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0005",
+      "batch_ref": "GV7-BAT-0003",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-06",
+      "normalized_date": "2098-03-06",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0006",
+      "batch_ref": "GV7-BAT-0004",
+      "supplied_title": "Synthetic Source Item 0006 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 6 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0007",
+      "batch_ref": "GV7-BAT-0005",
+      "supplied_title": "Synthetic Source Item 0007 (fabricated calibration record)",
+      "supplied_creator": "Synthetic Author 0007",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0008",
+      "batch_ref": "GV7-BAT-0006",
+      "supplied_title": "Synthetic Source Item 0008 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0009",
+      "batch_ref": "GV7-BAT-0007",
+      "supplied_title": "Synthetic Source Item 0009 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-10",
+      "normalized_date": "2098-03-10",
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0010",
+      "batch_ref": "GV7-BAT-0008",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 10 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0011",
+      "batch_ref": "GV7-BAT-0009",
+      "supplied_title": "Synthetic Source Item 0011 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0012",
+      "batch_ref": "GV7-BAT-0011",
+      "supplied_title": "Synthetic Source Item 0012 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0013",
+      "batch_ref": "GV7-BAT-0012",
+      "supplied_title": "Synthetic Source Item 0013 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-14",
+      "normalized_date": "2098-03-14",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0014",
+      "batch_ref": "GV7-BAT-0013",
+      "supplied_title": "Synthetic Source Item 0014 (fabricated calibration record)",
+      "supplied_creator": "Synthetic Author 0014",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 14 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0015",
+      "batch_ref": "GV7-BAT-0014",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0016",
+      "batch_ref": "GV7-BAT-0015",
+      "supplied_title": "Synthetic Source Item 0016 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0017",
+      "batch_ref": "GV7-BAT-0016",
+      "supplied_title": "Synthetic Source Item 0017 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-18",
+      "normalized_date": "2098-03-18",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0018",
+      "batch_ref": "GV7-BAT-0017",
+      "supplied_title": "Synthetic Source Item 0018 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 18 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0019",
+      "batch_ref": "GV7-BAT-0018",
+      "supplied_title": "Synthetic Source Item 0019 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0020",
+      "batch_ref": "GV7-BAT-0019",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0021",
+      "batch_ref": "GV7-BAT-0020",
+      "supplied_title": "Synthetic Source Item 0021 (fabricated calibration record)",
+      "supplied_creator": "Synthetic Author 0021",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-22",
+      "normalized_date": "2098-03-22",
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0022",
+      "batch_ref": "GV7-BAT-0021",
+      "supplied_title": "Synthetic Source Item 0022 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 22 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0023",
+      "batch_ref": "GV7-BAT-0023",
+      "supplied_title": "Synthetic Source Item 0023 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0024",
+      "batch_ref": "GV7-BAT-0024",
+      "supplied_title": "Synthetic Source Item 0024 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0025",
+      "batch_ref": "GV7-BAT-0025",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-26",
+      "normalized_date": "2098-03-26",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0026",
+      "batch_ref": "GV7-BAT-0026",
+      "supplied_title": "Synthetic Source Item 0026 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 26 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0027",
+      "batch_ref": "GV7-BAT-0027",
+      "supplied_title": "Synthetic Source Item 0027 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0028",
+      "batch_ref": "GV7-BAT-0028",
+      "supplied_title": "Synthetic Source Item 0028 (fabricated calibration record)",
+      "supplied_creator": "Synthetic Author 0028",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0029",
+      "batch_ref": "GV7-BAT-0029",
+      "supplied_title": "Synthetic Source Item 0029 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "2098-03-03",
+      "normalized_date": "2098-03-03",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0030",
+      "batch_ref": "GV7-BAT-0030",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "no-exact-locator-supplied",
+      "supplied_date": "Synthetic Season 30 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0031",
+      "batch_ref": "GV7-BAT-0031",
+      "supplied_title": "Synthetic Source Item 0031 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "locator-withheld-by-carrier",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0032",
+      "batch_ref": "GV7-BAT-0032",
+      "supplied_title": "Synthetic Source Item 0032 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "locator-withheld-by-carrier",
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0033",
+      "batch_ref": "GV7-BAT-0033",
+      "supplied_title": "Synthetic Source Item 0033 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "locator-withheld-by-carrier",
+      "supplied_date": "2098-03-07",
+      "normalized_date": "2098-03-07",
+      "carrier_role": "external-author",
+      "carrier_label": "synthetic-external-author",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0034",
+      "batch_ref": "GV7-BAT-0034",
+      "supplied_title": "Synthetic Source Item 0034 (fabricated calibration record)",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "locator-not-applicable",
+      "supplied_date": "Synthetic Season 34 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "not-supplied",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0035",
+      "batch_ref": "GV7-BAT-0035",
+      "supplied_title": "not-supplied",
+      "supplied_creator": "Synthetic Author 0035",
+      "supplied_channel": "not-supplied",
+      "supplied_locator": null,
+      "normalized_locator": null,
+      "locator_absence": "locator-not-applicable",
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "not-supplied",
+      "metadata_provenance": "derived-from-supplied-text",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "No exact locator was supplied in the fiction; the synthetic identity is provisional and unverified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0036",
+      "batch_ref": "GV7-BAT-0036",
+      "supplied_title": "Synthetic Bibliography Item 0036: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0036",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0036",
+      "normalized_locator": "https://example.invalid/synthetic/item-0036",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0037",
+      "batch_ref": "GV7-BAT-0037",
+      "supplied_title": "Synthetic Bibliography Item 0037: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0037",
+      "normalized_locator": "https://example.invalid/synthetic/item-0037",
+      "locator_absence": null,
+      "supplied_date": "2098-03-11",
+      "normalized_date": "2098-03-11",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0038",
+      "batch_ref": "GV7-BAT-0038",
+      "supplied_title": "Synthetic Bibliography Item 0038: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0038",
+      "normalized_locator": "https://example.invalid/synthetic/item-0038",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 38 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0039",
+      "batch_ref": "GV7-BAT-0039",
+      "supplied_title": "Synthetic Bibliography Item 0039: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0039",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0039",
+      "normalized_locator": "https://example.invalid/synthetic/item-0039",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0040",
+      "batch_ref": "GV7-BAT-0040",
+      "supplied_title": "Synthetic Bibliography Item 0040: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "  https://example.invalid/shared/topic-alpha  ",
+      "normalized_locator": "https://example.invalid/shared/topic-alpha",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0041",
+      "batch_ref": "GV7-BAT-0041",
+      "supplied_title": "Synthetic Bibliography Item 0041: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/shared/topic-alpha",
+      "normalized_locator": "https://example.invalid/shared/topic-alpha",
+      "locator_absence": null,
+      "supplied_date": "2098-03-15",
+      "normalized_date": "2098-03-15",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0042",
+      "batch_ref": "GV7-BAT-0042",
+      "supplied_title": "Synthetic Bibliography Item 0042: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0042",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/shared/topic-alpha/extended",
+      "normalized_locator": "https://example.invalid/shared/topic-alpha/extended",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 42 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0043",
+      "batch_ref": "GV7-BAT-0043",
+      "supplied_title": "Synthetic Bibliography Item 0043: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "(https://example.invalid/wrapped/item-0043).",
+      "normalized_locator": "https://example.invalid/wrapped/item-0043",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0044",
+      "batch_ref": "GV7-BAT-0044",
+      "supplied_title": "Synthetic Bibliography Item 0044: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "example.invalid/bare/item-0044",
+      "normalized_locator": "https://example.invalid/bare/item-0044",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0045",
+      "batch_ref": "GV7-BAT-0045",
+      "supplied_title": "Synthetic Bibliography Item 0045: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0045",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0045",
+      "normalized_locator": "https://example.invalid/synthetic/item-0045",
+      "locator_absence": null,
+      "supplied_date": "2098-03-19",
+      "normalized_date": "2098-03-19",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0046",
+      "batch_ref": "GV7-BAT-0046",
+      "supplied_title": "Synthetic Bibliography Item 0046: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0046",
+      "normalized_locator": "https://example.invalid/synthetic/item-0046",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 46 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0047",
+      "batch_ref": "GV7-BAT-0047",
+      "supplied_title": "Synthetic Bibliography Item 0047: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0047",
+      "normalized_locator": "https://example.invalid/synthetic/item-0047",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0048",
+      "batch_ref": "GV7-BAT-0048",
+      "supplied_title": "Synthetic Bibliography Item 0048: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0048",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0048",
+      "normalized_locator": "https://example.invalid/synthetic/item-0048",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0049",
+      "batch_ref": "GV7-BAT-0049",
+      "supplied_title": "Synthetic Bibliography Item 0049: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0049",
+      "normalized_locator": "https://example.invalid/synthetic/item-0049",
+      "locator_absence": null,
+      "supplied_date": "2098-03-23",
+      "normalized_date": "2098-03-23",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0050",
+      "batch_ref": "GV7-BAT-0050",
+      "supplied_title": "Synthetic Bibliography Item 0050: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0050",
+      "normalized_locator": "https://example.invalid/synthetic/item-0050",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 50 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0051",
+      "batch_ref": "GV7-BAT-0051",
+      "supplied_title": "Synthetic Bibliography Item 0051: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0051",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0051",
+      "normalized_locator": "https://example.invalid/synthetic/item-0051",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0052",
+      "batch_ref": "GV7-BAT-0052",
+      "supplied_title": "Synthetic Bibliography Item 0052: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0052",
+      "normalized_locator": "https://example.invalid/synthetic/item-0052",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0053",
+      "batch_ref": "GV7-BAT-0053",
+      "supplied_title": "Synthetic Bibliography Item 0053: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0053",
+      "normalized_locator": "https://example.invalid/synthetic/item-0053",
+      "locator_absence": null,
+      "supplied_date": "2098-03-27",
+      "normalized_date": "2098-03-27",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0054",
+      "batch_ref": "GV7-BAT-0054",
+      "supplied_title": "Synthetic Bibliography Item 0054: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0054",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0054",
+      "normalized_locator": "https://example.invalid/synthetic/item-0054",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 54 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0055",
+      "batch_ref": "GV7-BAT-0055",
+      "supplied_title": "Synthetic Bibliography Item 0055: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0055",
+      "normalized_locator": "https://example.invalid/synthetic/item-0055",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0056",
+      "batch_ref": "GV7-BAT-0056",
+      "supplied_title": "Synthetic Bibliography Item 0056: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0056",
+      "normalized_locator": "https://example.invalid/synthetic/item-0056",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0057",
+      "batch_ref": "GV7-BAT-0057",
+      "supplied_title": "Synthetic Bibliography Item 0057: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0057",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0057",
+      "normalized_locator": "https://example.invalid/synthetic/item-0057",
+      "locator_absence": null,
+      "supplied_date": "2098-03-04",
+      "normalized_date": "2098-03-04",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0058",
+      "batch_ref": "GV7-BAT-0058",
+      "supplied_title": "Synthetic Bibliography Item 0058: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0058",
+      "normalized_locator": "https://example.invalid/synthetic/item-0058",
+      "locator_absence": null,
+      "supplied_date": "Synthetic Season 58 of the fabricated year 2098",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0059",
+      "batch_ref": "GV7-BAT-0059",
+      "supplied_title": "Synthetic Bibliography Item 0059: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0059",
+      "normalized_locator": "https://example.invalid/synthetic/item-0059",
+      "locator_absence": null,
+      "supplied_date": "circa 2097 (synthetic, not a calendar date)",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0060",
+      "batch_ref": "GV7-BAT-0060",
+      "supplied_title": "Synthetic Bibliography Item 0060: Fabricated Calibration Entry",
+      "supplied_creator": "Synthetic Author 0060",
+      "supplied_channel": "synthetic-channel-beta",
+      "supplied_locator": "https://example.invalid/synthetic/item-0060",
+      "normalized_locator": "https://example.invalid/synthetic/item-0060",
+      "locator_absence": null,
+      "supplied_date": "not-supplied",
+      "normalized_date": null,
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    },
+    {
+      "source_id": "GV7-SRC-0061",
+      "batch_ref": "GV7-BAT-0061",
+      "supplied_title": "Synthetic Bibliography Item 0061: Fabricated Calibration Entry",
+      "supplied_creator": "not-supplied",
+      "supplied_channel": "synthetic-channel-alpha",
+      "supplied_locator": "https://example.invalid/synthetic/item-0061",
+      "normalized_locator": "https://example.invalid/synthetic/item-0061",
+      "locator_absence": null,
+      "supplied_date": "2098-03-08",
+      "normalized_date": "2098-03-08",
+      "carrier_role": "relay-agent",
+      "carrier_label": "synthetic-relay-alpha",
+      "upstream_attribution": "Synthetic upstream attribution: relayed through a fabricated intermediary for calibration only.",
+      "metadata_provenance": "supplied-by-carrier",
+      "retrieval_state": "not-attempted",
+      "verification_state": "supplied-unretrieved",
+      "limitations": [
+        "Wholly synthetic record; no real source exists behind this entry.",
+        "Nothing was retrieved and no synthetic identity was verified."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "supersedes": null
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "GV7-CLM-0001",
+      "source_ref": "GV7-SRC-0001",
+      "batch_ref": "GV7-BAT-0001",
+      "claim_text": "Synthetic claim 0001: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0002",
+      "source_ref": "GV7-SRC-0002",
+      "batch_ref": "GV7-BAT-0001",
+      "claim_text": "Synthetic claim 0002: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0003",
+      "source_ref": "GV7-SRC-0003",
+      "batch_ref": "GV7-BAT-0002",
+      "claim_text": "Synthetic claim 0003: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0004",
+      "source_ref": "GV7-SRC-0004",
+      "batch_ref": "GV7-BAT-0002",
+      "claim_text": "Synthetic claim 0004: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0005",
+      "source_ref": "GV7-SRC-0005",
+      "batch_ref": "GV7-BAT-0003",
+      "claim_text": "Synthetic claim 0005: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0006",
+      "source_ref": "GV7-SRC-0006",
+      "batch_ref": "GV7-BAT-0004",
+      "claim_text": "Synthetic claim 0006: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0007",
+      "source_ref": "GV7-SRC-0007",
+      "batch_ref": "GV7-BAT-0005",
+      "claim_text": "Synthetic claim 0007: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0008",
+      "source_ref": "GV7-SRC-0008",
+      "batch_ref": "GV7-BAT-0006",
+      "claim_text": "Synthetic claim 0008: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0009",
+      "source_ref": "GV7-SRC-0009",
+      "batch_ref": "GV7-BAT-0007",
+      "claim_text": "Synthetic claim 0009: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0010",
+      "source_ref": "GV7-SRC-0010",
+      "batch_ref": "GV7-BAT-0008",
+      "claim_text": "Synthetic claim 0010: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0011",
+      "source_ref": "GV7-SRC-0011",
+      "batch_ref": "GV7-BAT-0009",
+      "claim_text": "Synthetic claim 0011: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0012",
+      "source_ref": "GV7-SRC-0012",
+      "batch_ref": "GV7-BAT-0011",
+      "claim_text": "Synthetic claim 0012: the fabricated relay stated that a synthetic module was implemented and deployed in a fictional environment; the past-tense language is recorded verbatim as an attributed claim, never as implementation evidence.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0013",
+      "source_ref": "GV7-SRC-0013",
+      "batch_ref": "GV7-BAT-0012",
+      "claim_text": "Synthetic claim 0013: fabricated historical authorization language is recorded here as evidence that such language was supplied in the fiction; it grants no runtime authority of any kind.",
+      "attribution_class": "kev-authorization",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0014",
+      "source_ref": "GV7-SRC-0014",
+      "batch_ref": "GV7-BAT-0013",
+      "claim_text": "Synthetic claim 0014: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0015",
+      "source_ref": "GV7-SRC-0015",
+      "batch_ref": "GV7-BAT-0014",
+      "claim_text": "Synthetic claim 0015: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0016",
+      "source_ref": "GV7-SRC-0016",
+      "batch_ref": "GV7-BAT-0015",
+      "claim_text": "Synthetic claim 0016: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0017",
+      "source_ref": "GV7-SRC-0017",
+      "batch_ref": "GV7-BAT-0016",
+      "claim_text": "Synthetic claim 0017: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0018",
+      "source_ref": "GV7-SRC-0018",
+      "batch_ref": "GV7-BAT-0017",
+      "claim_text": "Synthetic claim 0018: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0019",
+      "source_ref": "GV7-SRC-0019",
+      "batch_ref": "GV7-BAT-0018",
+      "claim_text": "Synthetic claim 0019: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0020",
+      "source_ref": "GV7-SRC-0020",
+      "batch_ref": "GV7-BAT-0019",
+      "claim_text": "Synthetic claim 0020: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0021",
+      "source_ref": "GV7-SRC-0021",
+      "batch_ref": "GV7-BAT-0020",
+      "claim_text": "Synthetic claim 0021: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0022",
+      "source_ref": "GV7-SRC-0022",
+      "batch_ref": "GV7-BAT-0021",
+      "claim_text": "Synthetic claim 0022: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0023",
+      "source_ref": "GV7-SRC-0023",
+      "batch_ref": "GV7-BAT-0023",
+      "claim_text": "Synthetic claim 0023: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0024",
+      "source_ref": "GV7-SRC-0024",
+      "batch_ref": "GV7-BAT-0024",
+      "claim_text": "Synthetic claim 0024: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0025",
+      "source_ref": "GV7-SRC-0025",
+      "batch_ref": "GV7-BAT-0025",
+      "claim_text": "Synthetic claim 0025: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0026",
+      "source_ref": "GV7-SRC-0026",
+      "batch_ref": "GV7-BAT-0026",
+      "claim_text": "Synthetic claim 0026: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0027",
+      "source_ref": "GV7-SRC-0027",
+      "batch_ref": "GV7-BAT-0027",
+      "claim_text": "Synthetic claim 0027: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0028",
+      "source_ref": "GV7-SRC-0028",
+      "batch_ref": "GV7-BAT-0028",
+      "claim_text": "Synthetic claim 0028: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0029",
+      "source_ref": "GV7-SRC-0029",
+      "batch_ref": "GV7-BAT-0029",
+      "claim_text": "Synthetic claim 0029: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0030",
+      "source_ref": "GV7-SRC-0030",
+      "batch_ref": "GV7-BAT-0030",
+      "claim_text": "Synthetic claim 0030: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0031",
+      "source_ref": "GV7-SRC-0031",
+      "batch_ref": "GV7-BAT-0031",
+      "claim_text": "Synthetic claim 0031: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0032",
+      "source_ref": "GV7-SRC-0032",
+      "batch_ref": "GV7-BAT-0032",
+      "claim_text": "Synthetic claim 0032: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0033",
+      "source_ref": "GV7-SRC-0033",
+      "batch_ref": "GV7-BAT-0033",
+      "claim_text": "Synthetic claim 0033: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0034",
+      "source_ref": "GV7-SRC-0034",
+      "batch_ref": "GV7-BAT-0034",
+      "claim_text": "Synthetic claim 0034: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0035",
+      "source_ref": "GV7-SRC-0035",
+      "batch_ref": "GV7-BAT-0035",
+      "claim_text": "Synthetic claim 0035: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0036",
+      "source_ref": "GV7-SRC-0036",
+      "batch_ref": "GV7-BAT-0036",
+      "claim_text": "Synthetic claim 0036: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0037",
+      "source_ref": "GV7-SRC-0037",
+      "batch_ref": "GV7-BAT-0037",
+      "claim_text": "Synthetic claim 0037: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0038",
+      "source_ref": "GV7-SRC-0038",
+      "batch_ref": "GV7-BAT-0038",
+      "claim_text": "Synthetic claim 0038: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0039",
+      "source_ref": "GV7-SRC-0039",
+      "batch_ref": "GV7-BAT-0039",
+      "claim_text": "Synthetic claim 0039: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0040",
+      "source_ref": "GV7-SRC-0040",
+      "batch_ref": "GV7-BAT-0040",
+      "claim_text": "Synthetic claim 0040: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0041",
+      "source_ref": "GV7-SRC-0041",
+      "batch_ref": "GV7-BAT-0041",
+      "claim_text": "Synthetic claim 0041: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0042",
+      "source_ref": "GV7-SRC-0042",
+      "batch_ref": "GV7-BAT-0042",
+      "claim_text": "Synthetic claim 0042: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0043",
+      "source_ref": "GV7-SRC-0043",
+      "batch_ref": "GV7-BAT-0043",
+      "claim_text": "Synthetic claim 0043: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0044",
+      "source_ref": "GV7-SRC-0044",
+      "batch_ref": "GV7-BAT-0044",
+      "claim_text": "Synthetic claim 0044: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0045",
+      "source_ref": "GV7-SRC-0045",
+      "batch_ref": "GV7-BAT-0045",
+      "claim_text": "Synthetic claim 0045: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0046",
+      "source_ref": "GV7-SRC-0046",
+      "batch_ref": "GV7-BAT-0046",
+      "claim_text": "Synthetic claim 0046: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0047",
+      "source_ref": "GV7-SRC-0047",
+      "batch_ref": "GV7-BAT-0047",
+      "claim_text": "Synthetic claim 0047: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0048",
+      "source_ref": "GV7-SRC-0048",
+      "batch_ref": "GV7-BAT-0048",
+      "claim_text": "Synthetic claim 0048: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0049",
+      "source_ref": "GV7-SRC-0049",
+      "batch_ref": "GV7-BAT-0049",
+      "claim_text": "Synthetic claim 0049: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-capability-claim",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0050",
+      "source_ref": "GV7-SRC-0050",
+      "batch_ref": "GV7-BAT-0050",
+      "claim_text": "Synthetic claim 0050: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0051",
+      "source_ref": "GV7-SRC-0051",
+      "batch_ref": "GV7-BAT-0051",
+      "claim_text": "Synthetic claim 0051: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0052",
+      "source_ref": "GV7-SRC-0052",
+      "batch_ref": "GV7-BAT-0052",
+      "claim_text": "Synthetic claim 0052: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0053",
+      "source_ref": "GV7-SRC-0053",
+      "batch_ref": "GV7-BAT-0053",
+      "claim_text": "Synthetic claim 0053: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "implementation-proposal",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0054",
+      "source_ref": "GV7-SRC-0054",
+      "batch_ref": "GV7-BAT-0054",
+      "claim_text": "Synthetic claim 0054: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "direct-source",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0055",
+      "source_ref": "GV7-SRC-0055",
+      "batch_ref": "GV7-BAT-0055",
+      "claim_text": "Synthetic claim 0055: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "source-derived-excerpt",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0056",
+      "source_ref": "GV7-SRC-0056",
+      "batch_ref": "GV7-BAT-0056",
+      "claim_text": "Synthetic claim 0056: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0057",
+      "source_ref": "GV7-SRC-0057",
+      "batch_ref": "GV7-BAT-0057",
+      "claim_text": "Synthetic claim 0057: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "aura-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0058",
+      "source_ref": "GV7-SRC-0058",
+      "batch_ref": "GV7-BAT-0058",
+      "claim_text": "Synthetic claim 0058: the fabricated proposal discussed avoiding access controls and keeping persistent hidden monitoring in a fictional deployment; it is summarised categorically here, without operational detail, and it is recorded rather than endorsed.",
+      "attribution_class": "aura-summary",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "quarantined-access-control-avoidance",
+        "quarantined-hidden-monitoring"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0059",
+      "source_ref": "GV7-SRC-0059",
+      "batch_ref": "GV7-BAT-0059",
+      "claim_text": "Synthetic claim 0059: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "kev-observation",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0060",
+      "source_ref": "GV7-SRC-0060",
+      "batch_ref": "GV7-BAT-0060",
+      "claim_text": "Synthetic claim 0060: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "jack-inference-or-audit",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    },
+    {
+      "claim_id": "GV7-CLM-0061",
+      "source_ref": "GV7-SRC-0061",
+      "batch_ref": "GV7-BAT-0061",
+      "claim_text": "Synthetic claim 0061: the fabricated carrier stated that a synthetic mechanism exists in a fictional system; recorded as an attributed, limited claim and nothing more.",
+      "attribution_class": "eighty-four-inference",
+      "evidence_basis": "Synthetic supplied text only; nothing was retrieved and nothing was independently examined.",
+      "limitations": [
+        "Wholly synthetic; the referenced source does not exist.",
+        "Unverified synthetic material; no retrieval or verification was attempted."
+      ],
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "verification_state": "unverified",
+      "supersedes": null
+    }
+  ],
+  "relationships": [
+    {
+      "relationship_id": "GV7-REL-0001",
+      "left_ref": "GV7-SRC-0040",
+      "right_ref": "GV7-SRC-0041",
+      "relationship_type": "duplicate-of-supplied-material",
+      "basis": "recorded-by-inspection",
+      "attribution_class": "eighty-four-inference",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "The two synthetic entries carry the same normalized locator; the duplication is cross-referenced here and neither record is deleted."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "relationship_id": "GV7-REL-0002",
+      "left_ref": "GV7-CLM-0005",
+      "right_ref": "GV7-CLM-0006",
+      "relationship_type": "conflicts-with",
+      "basis": "recorded-by-inspection",
+      "attribution_class": "jack-inference-or-audit",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "The two synthetic claims describe incompatible fictional behaviours; the conflict is recorded and not adjudicated."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "relationship_id": "GV7-REL-0003",
+      "left_ref": "GV7-SRC-0010",
+      "right_ref": "GV7-SRC-0011",
+      "relationship_type": "same-supplied-topic",
+      "basis": "recorded-from-supplied-material",
+      "attribution_class": "aura-summary",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "Both synthetic entries were supplied under the same fabricated topic label."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "relationship_id": "GV7-REL-0004",
+      "left_ref": "GV7-CLM-0007",
+      "right_ref": "GV7-CLM-0008",
+      "relationship_type": "follow-up-to",
+      "basis": "recorded-as-proposed-elsewhere",
+      "attribution_class": "implementation-proposal",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "The later synthetic claim extends the earlier one inside the same fiction."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "relationship_id": "GV7-REL-0005",
+      "left_ref": "GV7-SRC-0036",
+      "right_ref": "GV7-SRC-0037",
+      "relationship_type": "mirror-of-supplied-material",
+      "basis": "recorded-by-inspection",
+      "attribution_class": "eighty-four-inference",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "The second synthetic entry mirrors the supplied material of the first under a different fabricated locator."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "relationship_id": "GV7-REL-0006",
+      "left_ref": "GV7-CLM-0009",
+      "right_ref": "GV7-CLM-0010",
+      "relationship_type": "derived-from-supplied-material",
+      "basis": "recorded-from-supplied-material",
+      "attribution_class": "source-derived-excerpt",
+      "verification_state": "unverified",
+      "limitations": [
+        "Synthetic relationship recorded for calibration; both endpoints are fabricated.",
+        "The second synthetic claim is derived from the supplied text of the first."
+      ],
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    }
+  ],
+  "unresolved": [
+    {
+      "unresolved_id": "GV7-UNR-0001",
+      "conflict_family": "ox-alpha-versus-qwen-core-identity",
+      "statement": "Synthetic unresolved record for the conflict family ox-alpha-versus-qwen-core-identity: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0001",
+        "GV7-CLM-0001"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0002",
+      "conflict_family": "local-only-versus-external-endpoints",
+      "statement": "Synthetic unresolved record for the conflict family local-only-versus-external-endpoints: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0002",
+        "GV7-CLM-0002"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0003",
+      "conflict_family": "modular-hot-swap-versus-monolith",
+      "statement": "Synthetic unresolved record for the conflict family modular-hot-swap-versus-monolith: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0003",
+        "GV7-CLM-0003"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0004",
+      "conflict_family": "zero-dependency-versus-third-party-dependencies",
+      "statement": "Synthetic unresolved record for the conflict family zero-dependency-versus-third-party-dependencies: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0004",
+        "GV7-CLM-0004"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0005",
+      "conflict_family": "transient-agents-versus-persistent-residency",
+      "statement": "Synthetic unresolved record for the conflict family transient-agents-versus-persistent-residency: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0005",
+        "GV7-CLM-0005"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0006",
+      "conflict_family": "no-magic-numbers-versus-fixed-thresholds",
+      "statement": "Synthetic unresolved record for the conflict family no-magic-numbers-versus-fixed-thresholds: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0006",
+        "GV7-CLM-0006"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0007",
+      "conflict_family": "immutable-raw-provenance-versus-raw-deletion",
+      "statement": "Synthetic unresolved record for the conflict family immutable-raw-provenance-versus-raw-deletion: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0007",
+        "GV7-CLM-0007"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0008",
+      "conflict_family": "human-oversight-versus-autonomous-execution",
+      "statement": "Synthetic unresolved record for the conflict family human-oversight-versus-autonomous-execution: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0008",
+        "GV7-CLM-0008"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0009",
+      "conflict_family": "aura-capability-inconsistency",
+      "statement": "Synthetic unresolved record for the conflict family aura-capability-inconsistency: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0012",
+        "GV7-CLM-0012"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0010",
+      "conflict_family": "missing-source-identity-or-bibliography-data",
+      "statement": "Synthetic unresolved record for the conflict family missing-source-identity-or-bibliography-data: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0009",
+        "GV7-CLM-0009"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0011",
+      "conflict_family": "unsupported-hardware-or-product-claim",
+      "statement": "Synthetic unresolved record for the conflict family unsupported-hardware-or-product-claim: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0014",
+        "GV7-CLM-0014"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0012",
+      "conflict_family": "scientific-analogy-overreach",
+      "statement": "Synthetic unresolved record for the conflict family scientific-analogy-overreach: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0015",
+        "GV7-CLM-0015"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    },
+    {
+      "unresolved_id": "GV7-UNR-0013",
+      "conflict_family": "quarantined-security-or-privacy-proposal",
+      "statement": "Synthetic unresolved record for the conflict family quarantined-security-or-privacy-proposal: the fabricated corpus contains competing positions on this question, and this record preserves them without deciding between them.",
+      "positions": [
+        "Synthetic position A: one fabricated fragment asserts the first alternative of this family.",
+        "Synthetic position B: another fabricated fragment asserts the opposing alternative of this family."
+      ],
+      "refs": [
+        "GV7-SRC-0058",
+        "GV7-CLM-0058"
+      ],
+      "resolution_state": "unresolved",
+      "recorded_by_role": "analysis-seat",
+      "recorded_by_label": "synthetic-analysis-seat"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "GV7-ART-0001",
+      "introducing_batch": "GV7-BAT-0010",
+      "artifact_class": "premature-synthesis",
+      "identity_origin": "supplied",
+      "preservation_status": "preserved",
+      "rejection_basis": "Synthetic artifact rejected as a premature synthesis: it summarised the fabricated corpus before any source had been examined. Preserved for provenance.",
+      "executable_status": "non-executable",
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "summary": "Synthetic preserved artifact 0001: a fabricated premature synthesis document with no operational content."
+    },
+    {
+      "artifact_id": "GV7-ART-0002",
+      "introducing_batch": "GV7-BAT-0022",
+      "artifact_class": "premature-master-prompt",
+      "identity_origin": "generated",
+      "preservation_status": "preserved",
+      "rejection_basis": "Synthetic artifact rejected as a premature master prompt: it proposed orchestrating fictional agents before any review. Preserved for provenance.",
+      "executable_status": "non-executable",
+      "safety_dispositions": [
+        "ordinary"
+      ],
+      "summary": "Synthetic preserved artifact 0002: a fabricated premature master prompt, recorded and never executed."
+    },
+    {
+      "artifact_id": "GV7-ART-0003",
+      "introducing_batch": "GV7-BAT-0062",
+      "artifact_class": "premature-authorization",
+      "identity_origin": "supplied",
+      "preservation_status": "preserved",
+      "rejection_basis": "Synthetic artifact rejected as a premature authorization: it carried fabricated authorization language for unreviewed external interaction. Preserved and quarantined; it grants nothing.",
+      "executable_status": "non-executable",
+      "safety_dispositions": [
+        "quarantined-unauthorized-external-interaction"
+      ],
+      "summary": "Synthetic preserved artifact 0003: fabricated premature authorization language, recorded categorically and never an authorization."
+    }
+  ],
+  "corrections": []
+}
