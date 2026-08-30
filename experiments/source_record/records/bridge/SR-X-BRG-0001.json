@@ -1,0 +1,16 @@
+{
+ "basis": "recorded-by-inspection",
+ "bridge_type": "apparent-textual-overlap",
+ "origin": "synthetic-fixture",
+ "record_id": "SR-X-BRG-0001",
+ "record_type": "bridge",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "bridge",
+ "schema": "source-record-v1",
+ "side_a": "SR-A-SRC-0001",
+ "side_b": "SR-B-SRC-0001",
+ "supersedes": null,
+ "verification_state": "unverified"
+}

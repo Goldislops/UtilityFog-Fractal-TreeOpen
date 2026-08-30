@@ -1,0 +1,16 @@
+{
+ "basis": "recorded-by-inspection",
+ "left_ref": "SR-A-SRC-0001",
+ "link_type": "apparent-textual-overlap",
+ "origin": "synthetic-fixture",
+ "record_id": "SR-A-LNK-0001",
+ "record_type": "link",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "register-a",
+ "right_ref": "SR-A-SRC-0002",
+ "schema": "source-record-v1",
+ "supersedes": null,
+ "verification_state": "unverified"
+}

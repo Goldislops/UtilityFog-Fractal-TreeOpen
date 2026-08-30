@@ -1,0 +1,16 @@
+{
+ "conflict_basis": "same-property-mutually-exclusive-values",
+ "left_assertion_ref": "SR-A-ASR-0001",
+ "origin": "synthetic-fixture",
+ "record_id": "SR-A-CTR-0001",
+ "record_type": "contradiction",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "register-a",
+ "resolution_state": "unresolved",
+ "right_assertion_ref": "SR-A-ASR-0002",
+ "schema": "source-record-v1",
+ "supersedes": null,
+ "verification_state": "unverified"
+}

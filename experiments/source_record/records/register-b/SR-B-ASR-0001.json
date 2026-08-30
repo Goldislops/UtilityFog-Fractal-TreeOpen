@@ -1,0 +1,21 @@
+{
+ "asserted_by_role": "external-author",
+ "attributed_author": "synthetic exemplar author three",
+ "attribution_class": "attributed-assertion",
+ "claim_text": "a synthetic exemplar claim recorded in the second register",
+ "derived_from": null,
+ "instrument_context": null,
+ "message_ref": "SR-B-MSG-0001",
+ "origin": "synthetic-fixture",
+ "record_id": "SR-B-ASR-0001",
+ "record_type": "assertion",
+ "recorded_by_label": "synthetic exemplar recorder",
+ "recorded_by_role": "operator",
+ "recorded_date": "2026-08-28",
+ "register": "register-b",
+ "schema": "source-record-v1",
+ "subject_ref": "SR-B-SRC-0001",
+ "supersedes": null,
+ "verification_evidence": null,
+ "verification_state": "unverified"
+}
