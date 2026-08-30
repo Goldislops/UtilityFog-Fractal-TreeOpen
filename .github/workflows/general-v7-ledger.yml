@@ -1,0 +1,53 @@
+name: general-v7-ledger
+
+on:
+  pull_request:
+    paths:
+      - "experiments/general_v7_ledger/**"
+      - ".github/workflows/general-v7-ledger.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/general_v7_ledger/**"
+      - ".github/workflows/general-v7-ledger.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: general-v7-ledger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: general-v7-ledger (${{ matrix.label }}, informational, path-scoped)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ordinary
+            python-flags: ""
+          - label: optimized
+            python-flags: "-O"
+          - label: double-optimized
+            python-flags: "-OO"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependency
+        run: pip install pytest==9.0.2
+      - name: Collect the General V7 acceptance surface
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python ${{ matrix.python-flags }} -B -m pytest --collect-only -q -p no:cacheprovider experiments/general_v7_ledger/tests
+      - name: Run the General V7 acceptance surface
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python ${{ matrix.python-flags }} -B -m pytest -q -p no:cacheprovider experiments/general_v7_ledger/tests
+      - name: Validate the committed synthetic ledger
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python ${{ matrix.python-flags }} -B -m experiments.general_v7_ledger.validate experiments/general_v7_ledger/ledger.json

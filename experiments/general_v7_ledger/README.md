@@ -2,14 +2,15 @@
 
 A complete, standard-library-only implementation candidate for the accepted
 `general-v7-technology-ledger-v1` admission contract (`CONTRACT.md`), built
-against the frozen 179-control acceptance surface in `tests/`.
+against the frozen 199-control acceptance surface in `tests/`.
 
 **Everything in this candidate is synthetic.** The ledger, bibliography and
 intake report were fabricated for engineering calibration; no real corpus
 material was consulted, and no record here is evidence about any real
 source, person, product or organization. Every locator uses the reserved
-`example.invalid` name. This branch is a disposable engineering candidate
-and is not merge-authorized.
+`example.invalid` name. This synthetic candidate is not merge-authorized by its
+contents; any integration authority must be supplied separately by Kev for an
+exact reviewed head.
 
 ## Surfaces
 
