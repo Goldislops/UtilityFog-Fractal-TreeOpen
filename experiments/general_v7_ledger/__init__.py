@@ -361,6 +361,7 @@ REFUSAL_TOKENS = (
     "ordinal-id-mismatch",
     "path-device-namespace",
     "path-drive-relative",
+    "path-identity-changed",
     "path-missing",
     "path-not-file",
     "path-reserved-name",
@@ -1172,7 +1173,12 @@ def validate_ledger_file(path):
     # for, and `os.getcwd()` reports the directory as it was entered, junction
     # and all.
     if ntpath.isabs(value):
-        walked = value
+        # The same lexical collapse the relative branch gets, and for the same
+        # reason: Windows resolves `.` and `..` before touching the filesystem,
+        # so a spelling that steps back out of a junction never traverses it.
+        # Applying it to one branch only made the identical object refused
+        # under its absolute spelling and accepted under its relative one.
+        walked = ntpath.normpath(value)
     else:
         # `normpath` is the same purely LEXICAL collapse Windows itself applies
         # to `.` and `..` before touching the filesystem: it follows nothing and
@@ -1215,7 +1221,39 @@ def validate_ledger_file(path):
     if not stat.S_ISREG(status.st_mode):
         _refuse_path("path-not-file")
 
+    # The identity of the object the screen just finished inspecting. A
+    # component the platform does not supply, or supplies as zero, identifies
+    # nothing: the comparison below would hold of two different files, so it
+    # would prove nothing and the document is refused instead.
+    inspected = (
+        getattr(status, "st_dev", None),
+        getattr(status, "st_ino", None),
+    )
+    if not inspected[0] or not inspected[1]:
+        _refuse_path("path-identity-changed")
+
+    # Opened ONCE, by name, at the point of use. Screening a pathname and then
+    # opening that pathname resolves the same name twice and binds nothing:
+    # between the two resolutions the name can be made to refer to a different
+    # file, and the validator then screens one object and reads another. So the
+    # identity compared here is taken from the descriptor this handle holds --
+    # never from the name again, before the open or after it -- and the bytes
+    # are read from that same handle.
+    #
+    # The decision is made before the byte ceiling: a document read from an
+    # object that was never screened is refused on that ground, not measured.
     with open(value, "rb") as handle:
+        bound = os.fstat(handle.fileno())
+        if not stat.S_ISREG(bound.st_mode):
+            _refuse_path("path-identity-changed")
+        opened = (
+            getattr(bound, "st_dev", None),
+            getattr(bound, "st_ino", None),
+        )
+        if not opened[0] or not opened[1]:
+            _refuse_path("path-identity-changed")
+        if opened != inspected:
+            _refuse_path("path-identity-changed")
         raw = handle.read(MAX_LEDGER_BYTES + 1)
     if len(raw) > MAX_LEDGER_BYTES:
         _refuse_ceiling("ledger-bytes-ceiling")
