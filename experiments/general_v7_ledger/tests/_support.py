@@ -19,6 +19,7 @@ from __future__ import annotations
 import builtins
 import hashlib
 import importlib
+import io
 import json
 import ntpath
 import os
@@ -1298,41 +1299,76 @@ REQUIRED_REFUSAL_TOKENS = (
 #: implementation declares it: that list is what the pre-Correction-8 surface
 #: demanded, and adding to it would turn GV7-S-068 red for the same defect
 #: GV7-S-075 already reports. ``GV7-S-075`` demands the token of the production
-#: vocabulary directly, and does so whether or not the list has been updated,
-#: so folding it in later changes nothing.
+#: vocabulary directly, and does so whether or not the list has been updated.
 PATH_IDENTITY_TOKEN = "path-identity-changed"
+
+
+def _open_via_builtins(path):
+    return builtins.open(path, "rb")
+
+
+def _open_via_io(path):
+    return io.open(path, "rb")
+
+
+def _open_via_pathlib(path):
+    return pathlib.Path(path).open("rb")
+
+
+def _open_via_os(path):
+    return os.fdopen(os.open(path, os.O_RDONLY), "rb")
+
+
+#: Every standard-library route to a read handle a production module may use.
+#: ``io.open`` IS ``builtins.open`` -- the same function object -- but they are
+#: two module ATTRIBUTES, so patching one leaves the other bound to the
+#: original. ``pathlib.Path.open`` calls ``io.open``, which is how a compliant
+#: implementation slipped past a probe that hooked only ``builtins``.
+#: GV7-S-078 proves every route here actually reaches the fixture.
+OPENER_ROUTES = (
+    ("builtins.open", _open_via_builtins),
+    ("io.open", _open_via_io),
+    ("pathlib.Path.open", _open_via_pathlib),
+    ("os.open + os.fdopen", _open_via_os),
+)
 
 
 class ReplaceBeforeOpen:
     """Replace a named file in the instant before it is opened.
 
-    Deterministic, not a race: the replacement happens inside the ``open`` call
-    itself, so every name resolution the validator performed BEFORE the open
-    saw the original object and every byte it reads comes from the replacement.
+    Deterministic, not a race: the replacement happens inside the opener call,
+    so every name resolution performed BEFORE the open saw the original object
+    and every byte read comes from the replacement.
 
-    That is what makes this discriminating. A validator that "binds" by looking
-    the NAME up a second time compares two pre-swap resolutions, finds them
-    equal, and reads the swapped file -- which is the shape section 9 declares
-    insufficient. Only an identity taken from the opened handle sees the
-    difference. An earlier probe swapped at the first INSPECTION instead, and a
-    second-name-lookup implementation passed it while still accepting a swapped
-    document.
+    That is what makes it discriminating. A validator that "binds" by looking
+    the NAME up again -- before the open or after it -- compares two
+    resolutions that do not include the opened object, and reads the swapped
+    file anyway. Only an identity taken from the open descriptor sees the
+    difference; ``IdentityQueryLog`` is what proves that is where it came from.
 
-    It hooks ``builtins.open`` and ``os.open`` -- the two stdlib ways to obtain
-    a handle. It assumes nothing about how the path was screened, so an
-    implementation may inspect with ``os.lstat``, ``os.stat(...,
-    follow_symlinks=False)`` or ``pathlib`` alike. If neither hook is ever
-    reached for the target, ``replaced`` stays ``False`` and the control using
-    this must fail rather than pass: the window it exists to test was never
-    entered.
+    Every route in ``OPENER_ROUTES`` is hooked. If none is reached for the
+    target, ``replaced`` stays ``False`` and the control using this must fail
+    rather than pass: the window it exists to test was never entered.
     """
 
-    def __init__(self, target, replacement):
+    def __init__(self, target, replacement, swap_on=1):
         self.target = pathlib.Path(target)
         self.replacement = pathlib.Path(replacement)
+        #: Which open of the target the swap lands before. The default lands
+        #: before the first, which is the ordinary check-then-open window. A
+        #: validator that opens a PROBE descriptor, inspects it, closes it and
+        #: opens again to read has a second window, between its two opens, and
+        #: passes every control when the swap can only land before the first.
+        self.swap_on = swap_on
         self.inspected = None
         self.replaced = False
-        self._open = builtins.open
+        #: How many times the TARGET was opened. The contract says the file is
+        #: opened once and the bytes are read from that handle; an
+        #: implementation that opens a probe descriptor, stats it, closes it and
+        #: then opens again to read was measured green on every other control.
+        self.open_count = 0
+        self._builtins_open = builtins.open
+        self._io_open = io.open
         self._os_open = os.open
         self._lstat = os.lstat
 
@@ -1345,25 +1381,56 @@ class ReplaceBeforeOpen:
             return False
 
     def _swap(self, path):
-        if self.replaced or not self._same(path):
+        if not self._same(path):
+            return
+        self.open_count += 1
+        if self.replaced or self.open_count < self.swap_on:
             return
         current = self._lstat(self.target)
         self.inspected = (current.st_dev, current.st_ino)
         os.replace(self.replacement, self.target)
         self.replaced = True
 
-    def install(self, monkeypatch):
-        def opener(file, *args, **kwargs):
+    def _patches(self):
+        def builtins_open(file, *args, **kwargs):
             self._swap(file)
-            return self._open(file, *args, **kwargs)
+            return self._builtins_open(file, *args, **kwargs)
 
-        def os_opener(path, *args, **kwargs):
+        def io_open(file, *args, **kwargs):
+            self._swap(file)
+            return self._io_open(file, *args, **kwargs)
+
+        def os_open(path, *args, **kwargs):
             self._swap(path)
             return self._os_open(path, *args, **kwargs)
 
-        monkeypatch.setattr(builtins, "open", opener)
-        monkeypatch.setattr(os, "open", os_opener)
+        return (
+            (builtins, "open", builtins_open),
+            (io, "open", io_open),
+            (os, "open", os_open),
+        )
+
+    def install(self, monkeypatch):
+        for module, name, replacement in self._patches():
+            monkeypatch.setattr(module, name, replacement)
         return self
+
+    def install_raw(self):
+        """Install without pytest, and return a callable that undoes it.
+
+        GV7-S-077 runs in a subprocess and must use these exact semantics, not
+        a narrower hand-written copy that could drift from them.
+        """
+        originals = [(module, name, getattr(module, name))
+                     for module, name, _ in self._patches()]
+        for module, name, replacement in self._patches():
+            setattr(module, name, replacement)
+
+        def restore():
+            for module, name, original in originals:
+                setattr(module, name, original)
+
+        return restore
 
     def opened_identity(self):
         """The identity now behind that name -- what an open will reach."""
@@ -1371,45 +1438,147 @@ class ReplaceBeforeOpen:
         return (current.st_dev, current.st_ino)
 
 
-class ZeroedIdentity:
-    """Report a volume that carries no usable file index.
+class IdentityQueryLog:
+    """Record whether an identity was asked of a DESCRIPTOR or of a name.
 
-    Some filesystems return ``st_ino == 0``. A validator that compares the two
-    identities without checking they are meaningful then compares ``(0, 0)``
-    with ``(0, 0)``, which is vacuously true, and a swap goes unnoticed. This
-    simulates that platform so the contract's "missing or zero" clause carries
-    a control rather than only prose.
+    The contract requires the compared identity to come from the opened handle
+    and never from a second lookup of the name. Both a pre-open and a post-open
+    re-inspection of the pathname produce the right token against a swapped
+    file while proving nothing about the object actually read -- a post-open
+    re-check with a full zero guard was measured passing every outcome control.
+
+    So the evidence is dynamic: ``os.stat``/``os.fstat`` called with an ``int``
+    is a query against an open descriptor; called with anything else it is one
+    more name resolution. A control can then require that the implementation
+    asked a descriptor at all.
     """
 
     def __init__(self):
+        self.descriptor_queries = 0
+        self.path_queries = 0
+        #: Which objects were asked. Counting queries alone is satisfied by
+        #: `os.fstat(0)`; naming the identity that came back is not.
+        self.descriptor_identities = set()
+        self._stat = os.stat
+        self._fstat = os.fstat
+
+    def _record(self, first, result):
+        if isinstance(first, int) and not isinstance(first, bool):
+            self.descriptor_queries += 1
+            dev = getattr(result, "st_dev", None)
+            ino = getattr(result, "st_ino", None)
+            self.descriptor_identities.add((dev, ino))
+        else:
+            self.path_queries += 1
+
+    @staticmethod
+    def _subject(args, kwargs, keys):
+        """The thing being asked about, however the caller spelled the call."""
+        if args:
+            return args[0]
+        for key in keys:
+            if key in kwargs:
+                return kwargs[key]
+        return None
+
+    def _patches(self):
+        def stat_(*args, **kwargs):
+            result = self._stat(*args, **kwargs)
+            self._record(self._subject(args, kwargs, ("path",)), result)
+            return result
+
+        def fstat_(*args, **kwargs):
+            result = self._fstat(*args, **kwargs)
+            self._record(self._subject(args, kwargs, ("fd",)), result)
+            return result
+
+        return ((os, "stat", stat_), (os, "fstat", fstat_))
+
+    def install(self, monkeypatch):
+        for module, name, replacement in self._patches():
+            monkeypatch.setattr(module, name, replacement)
+        return self
+
+    def install_raw(self):
+        """Install without pytest, and return a callable that undoes it."""
+        originals = [(module, name, getattr(module, name))
+                     for module, name, _ in self._patches()]
+        for module, name, replacement in self._patches():
+            setattr(module, name, replacement)
+
+        def restore():
+            for module, name, original in originals:
+                setattr(module, name, original)
+
+        return restore
+
+
+#: The ways an identity can fail to prove anything. Each is pinned separately:
+#: a guard that fires only when BOTH components are zero was measured passing
+#: every control while accepting a swap on a volume that zeroes just one.
+UNPROVABLE_IDENTITY_CASES = ("dev-zero", "ino-zero", "both-zero",
+                             "dev-absent", "ino-absent")
+
+
+class UnprovableIdentity:
+    """Report a platform whose file identity does not identify anything."""
+
+    def __init__(self, case):
+        assert case in UNPROVABLE_IDENTITY_CASES, case
+        self.case = case
         self._stat = os.stat
         self._lstat = os.lstat
+        #: `os.fstat` is masked too. Masking only the name routes left the
+        #: descriptor side UNMASKED, so the two identities always differed,
+        #: every implementation appeared to refuse, and one with no zero guard
+        #: at all was green on the whole suite.
+        self._fstat = os.fstat
 
-    class _Zeroed:
-        """Every field the platform reported, with the two under test zeroed.
+    class _Masked:
+        """The platform's own result, with the fields under test suppressed.
 
         Rebuilding an ``os.stat_result`` from its ten base fields would drop
         the Windows extended attributes the reparse screen reads, so this
         forwards instead of fabricating.
         """
 
-        def __init__(self, wrapped):
+        def __init__(self, wrapped, case):
             self._wrapped = wrapped
+            self._case = case
 
         def __getattr__(self, name):
-            if name in ("st_dev", "st_ino"):
-                return 0
-            return getattr(self._wrapped, name)
+            case = object.__getattribute__(self, "_case")
+            if name == "st_dev":
+                if case in ("dev-zero", "both-zero"):
+                    return 0
+                if case == "dev-absent":
+                    raise AttributeError(name)
+            if name == "st_ino":
+                if case in ("ino-zero", "both-zero"):
+                    return 0
+                if case == "ino-absent":
+                    raise AttributeError(name)
+            return getattr(object.__getattribute__(self, "_wrapped"), name)
+
+        #: `os.stat_result` supports the tuple protocol, and the stdlib ships
+        #: `stat.ST_DEV` / `stat.ST_INO` for exactly that access style. Masking
+        #: only attribute reads let an implementation index past the mask.
+        _INDEX_OF = {"st_ino": 1, "st_dev": 2}
 
         def __getitem__(self, index):
-            return self._wrapped[index]
+            wrapped = object.__getattribute__(self, "_wrapped")
+            for field, position in UnprovableIdentity._Masked._INDEX_OF.items():
+                if index == position:
+                    return getattr(self, field)
+            return wrapped[index]
 
     def install(self, monkeypatch):
-        def zero(result):
-            return ZeroedIdentity._Zeroed(result)
+        def mask(result):
+            return UnprovableIdentity._Masked(result, self.case)
 
-        monkeypatch.setattr(os, "stat", lambda *a, **k: zero(self._stat(*a, **k)))
-        monkeypatch.setattr(os, "lstat", lambda *a, **k: zero(self._lstat(*a, **k)))
+        monkeypatch.setattr(os, "stat", lambda *a, **k: mask(self._stat(*a, **k)))
+        monkeypatch.setattr(os, "lstat", lambda *a, **k: mask(self._lstat(*a, **k)))
+        monkeypatch.setattr(os, "fstat", lambda *a, **k: mask(self._fstat(*a, **k)))
         return self
 
 

@@ -681,16 +681,42 @@ binding:
 - the final component's inspection records that object's identity — on this
   platform the `st_dev` and `st_ino` pair, with regular-file status;
 - the file is opened **once**, and the bytes are read from **that handle**;
-- the identity compared against it is taken **from the handle** —
-  `os.stat(handle.fileno())` — and **never from the name a second time**. A
-  second lookup of the name is one more name resolution, not a binding: it
-  leaves exactly the same window open between itself and the open, and a
-  validator written that way still reads the swapped file;
+- the identity compared against it is taken **from the open descriptor** —
+  `os.stat(handle.fileno())` or `os.fstat(...)` — and **never from the name
+  again, before the open or after it**. A second lookup of the name is one more
+  name resolution, not a binding: a *pre-open* re-check leaves the same window
+  open between itself and the open, and a *post-open* re-check reports what the
+  name means afterwards while never asking the handle what it is holding. Both
+  emit the right token against a swapped file and prove nothing about the
+  bytes actually read, so the acceptance surface requires the descriptor query
+  itself, not merely the token;
+- the handle may be obtained by any route the production import allowlist
+  already admits: the builtin `open`, `pathlib.Path.open`, or `os.open` with
+  `os.fdopen`. **`io` is not among them** — a production module may not import
+  it — although `pathlib.Path.open` reaches `io.open` internally, and `io.open`
+  and `builtins.open` are one function object under two module attributes, so
+  an acceptance probe must hook both to see either. The choice of permitted
+  route is not part of this requirement. The opener must be **called by its
+  name at the point of use**: an alias captured at import time — `_OPEN = open`
+  at module scope — is unobservable to any acceptance surface, so it is refused
+  for that reason and no other;
+- **once the handle exists the name is finished with**: the supplied path is
+  not resolved again, by any call, for any purpose. A validator that questions
+  the right descriptor and then decides on a post-open `lstat` of the name
+  cannot be separated from a compliant one by behaviour alone on this platform
+  — restoring the original object over the name fails while a handle is open on
+  the replacement, because the standard library does not open with delete
+  sharing — so that shape is refused by **source shape**, and the limitation is
+  recorded here rather than left as a silent gap;
 - if the two differ, the object read is not the object screened, and the
   validation **fails closed** with the frozen token `path-identity-changed`;
-- if either identity is **missing or zero**, the comparison would hold of any
-  two files, so it proves nothing and the validation fails closed with the same
-  token. An unprovable binding is not a binding.
+- if **either** identity component is **missing or zero** — `st_dev` alone,
+  `st_ino` alone, both, or an attribute the platform does not supply at all —
+  the comparison would hold of two different files, so it proves nothing and
+  the validation fails closed with the same token. Each of those cases stands
+  on its own: a guard that fires only when *both* components are zero still
+  accepts a substitution wherever a platform zeroes just one. An unprovable
+  binding is not a binding.
 
 `path-identity-changed` is raised as `LedgerPathError`, with the other path
 refusals, and is decided at the **open boundary** — after the stage-1 lexical
