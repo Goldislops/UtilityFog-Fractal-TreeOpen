@@ -499,9 +499,18 @@ def binding_census(tree, name):
     everywhere it could have said "every".
 
     A PEP 695 *type parameter* -- ``def _f[validate_ledger]() -> None`` -- is
-    deliberately NOT collected: it binds inside the function's annotation
-    scope and never touches the module namespace, so refusing it would be a
-    false positive rather than a closed route.
+    deliberately NOT collected HERE: it binds inside the function's annotation
+    scope and never touches the module namespace, so censusing it as a binding
+    of the module name would be a false positive.
+
+    That reasoning is right about the name being pinned and was WRONG as a
+    justification for ignoring type parameters altogether. The type-parameter
+    scope lexically encloses the body, so it shadows the module names the body
+    READS: ``def _refuse_ceiling[LedgerCeilingError](token)`` leaves the frozen
+    raise dumping identically while raising ``TypeError`` at runtime, because
+    the exception class now resolves to the TypeVar. A critic reproduced it on
+    the shipped implementation. Type parameters are therefore refused by the
+    definition pins below, which is a different question from this census.
     """
     import ast
 
@@ -600,69 +609,15 @@ def binding_census(tree, name):
 def frozen_refusal_helper(sources, defining_module):
     """``None``, or the defect in the sole production ``_refuse``.
 
-    Exactly one ``_refuse`` may be DEFINED, at module scope, and it must live in
-    ``defining_module`` -- the module carrying the sole ``validate_ledger``
-    definition -- because a helper the defining module does not itself define is
-    not demonstrably the helper the frozen block calls.
-
-    The signature and the body are both compared structurally, so a dead or
-    conditional ``raise``, a ``return`` before or instead of raising, and an
-    extra executable statement are each refused by the same equality rather
-    than by a list of shapes somebody thought of.
+    Kept as the name GV7-S-005 and the Correction 6 evidence use, but it is now
+    one call into ``frozen_helper_defect``. The two were near-identical and
+    drifted inside a single correction -- the type-parameter refusal landed in
+    one while ``frozen_root_decision`` called the other, so the root pin
+    accepted a helper the helper pin refused. A rule now has one home.
     """
-    import ast
-
-    definitions = []
-    census = []
-    for name, source in sorted(sources.items()):
-        tree = ast.parse(source)
-        for kind, node in binding_census(tree, "_refuse"):
-            census.append((name, kind, node))
-        for statement in tree.body:
-            if isinstance(statement, ast.FunctionDef) and statement.name == "_refuse":
-                definitions.append((name, statement))
-
-    if len(definitions) != 1:
-        return (
-            "expected exactly one module-scope `_refuse` definition, found "
-            f"{len(definitions)}"
-        )
-    module, function = definitions[0]
-    if module != defining_module:
-        return (
-            f"`_refuse` is defined in {module}, not in {defining_module} where "
-            "validate_ledger is defined"
-        )
-
-    stray = sorted(
-        {
-            f"{name}:{kind}"
-            for name, kind, node in census
-            if node is not function
-        }
+    return frozen_helper_defect(
+        sources, defining_module, "_refuse", FROZEN_REFUSE_SIGNATURE, FROZEN_REFUSE_BODY
     )
-    if stray:
-        return f"`_refuse` carries other bindings: {stray}"
-
-    if function.decorator_list:
-        return "`_refuse` carries a decorator"
-    expected = ast.parse(FROZEN_REFUSE_SIGNATURE).body[0]
-    if ast.dump(function.args) != ast.dump(expected.args):
-        return "`_refuse` does not take exactly (token, path=())"
-
-    body = list(function.body)
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
-    ):
-        body = body[1:]
-    if len(body) != 1:
-        return f"`_refuse` has {len(body)} executable statements, not one"
-    if ast.dump(body[0]) != ast.dump(ast.parse(FROZEN_REFUSE_BODY).body[0]):
-        return "`_refuse` does not raise exactly LedgerError(token, path) from None"
-    return None
 
 
 #: The names by which a module reaches its own namespace AS DATA, and so
@@ -675,6 +630,9 @@ def frozen_refusal_helper(sources, defining_module):
 #: was aimed at a SPELLING and not at the capability. A production module has no
 #: use for any of these, and the shipped package calls none of them, so the
 #: capability is refused rather than one of its shapes.
+#: Attributes that ARE a module namespace, however they are reached.
+NAMESPACE_DUNDERS = ("__dict__", "__globals__", "__builtins__")
+
 NAMESPACE_REACH_NAMES = (
     "globals",
     "vars",
@@ -705,10 +663,18 @@ def namespace_reach_violations(tree):
             and node.func.id in NAMESPACE_REACH_NAMES
         ):
             violations.append(("namespace-builtin-call", node.func.id))
-        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+        elif isinstance(node, ast.Attribute) and node.attr in NAMESPACE_DUNDERS:
             # `sys.modules[__name__].__dict__["validate_ledger"] = ...` is a
             # namespace write that no name scan over the target would see.
-            violations.append(("dunder-dict-reach", "__dict__"))
+            #
+            # `__globals__` is the same dictionary through a different door,
+            # and it does not have to be read off the pinned name to reach it:
+            # `_leaky.__globals__["_refuse"] = _leaky`, written on ANY function
+            # in the module, replaces the pinned helper while every census
+            # rooted at `_refuse` sees nothing. Correction 7 closed only the
+            # spelling rooted at the pinned name; a critic reproduced the other
+            # door end to end, with the whole suite at baseline.
+            violations.append(("module-namespace-reach", node.attr))
     return violations
 
 
@@ -747,6 +713,156 @@ def _core_is_the_package(tree):
         and isinstance(value.slice, ast.Constant)
         and value.slice.value == sup.SYS_MODULES_SELF_BINDING_KEY
     )
+
+
+def frozen_helper_defect(sources, defining_module, helper, signature, body):
+    """``None``, or the defect in the sole production ``helper``.
+
+    Correction 6 pinned ``_refuse`` and nothing else. ``_refuse_path``,
+    ``_refuse_ceiling`` and ``_refuse_input`` carry ten of the thirty-nine
+    tokens between them -- every stage-1 path refusal, the stage-2 ceiling and
+    all three stage-3 parse refusals -- and appeared nowhere in the acceptance
+    surface, so a sibling that returned instead of raising passed the whole
+    suite and then accepted a ledger read through a redirecting junction.
+
+    The same pin, generalised: one module-scope definition in the module that
+    defines ``validate_ledger``, no other binding of the name anywhere, no
+    decorator, the exact signature, and exactly one executable statement equal
+    to the frozen ``raise``. Signature and body are compared by ``ast.dump``,
+    so a dead or conditional raise, a wrong exception class, a missing
+    ``from None``, a return, and an extra statement are all refused by the same
+    equality rather than by a list of shapes somebody thought of.
+    """
+    import ast
+
+    definitions = []
+    census = []
+    for name, source in sorted(sources.items()):
+        tree = ast.parse(source)
+        for kind, node in binding_census(tree, helper):
+            census.append((name, kind, node))
+        for statement in tree.body:
+            if isinstance(statement, ast.FunctionDef) and statement.name == helper:
+                definitions.append((name, statement))
+
+    if len(definitions) != 1:
+        return (
+            f"expected exactly one module-scope `{helper}` definition, found "
+            f"{len(definitions)}"
+        )
+    module, function = definitions[0]
+    if module != defining_module:
+        return (
+            f"`{helper}` is defined in {module}, not in {defining_module} where "
+            "validate_ledger is defined"
+        )
+
+    stray = sorted(
+        {f"{name}:{kind}" for name, kind, node in census if node is not function}
+    )
+    if stray:
+        return f"`{helper}` carries other bindings: {stray}"
+
+    reach = sorted(
+        {
+            f"{name}:{kind}:{detail}"
+            for name, source in sorted(sources.items())
+            for kind, detail in namespace_reach_violations(ast.parse(source))
+        }
+    )
+    if reach:
+        return f"a production module reaches its namespace as data: {reach}"
+
+    if function.decorator_list:
+        return f"`{helper}` carries a decorator"
+    if getattr(function, "type_params", ()):
+        # A type parameter shadows the module names the frozen body reads.
+        return f"`{helper}` carries type parameters"
+    expected = ast.parse(signature).body[0]
+    if ast.dump(function.args) != ast.dump(expected.args):
+        return f"`{helper}` does not take exactly the frozen signature"
+
+    statements = list(function.body)
+    if (
+        statements
+        and isinstance(statements[0], ast.Expr)
+        and isinstance(statements[0].value, ast.Constant)
+        and isinstance(statements[0].value.value, str)
+    ):
+        statements = statements[1:]
+    if len(statements) != 1:
+        return f"`{helper}` has {len(statements)} executable statements, not one"
+    if ast.dump(statements[0]) != ast.dump(ast.parse(body).body[0]):
+        return f"`{helper}` does not raise exactly the frozen statement"
+    return None
+
+
+def defining_module_of(sources, name="validate_ledger"):
+    """The production module carrying the sole module-scope definition."""
+    import ast
+
+    found = [
+        module
+        for module, source in sorted(sources.items())
+        for statement in ast.parse(source).body
+        if isinstance(statement, ast.FunctionDef) and statement.name == name
+    ]
+    assert len(found) == 1, found
+    return found[0]
+
+
+#: One mutation per defeat shape, applied to EVERY helper in turn, so no helper
+#: is pinned only by a shape some other helper happened to be tested for.
+#: ``{h}`` is the helper name, ``{a}`` its parameter list, ``{r}`` its frozen
+#: raise statement.
+HELPER_MUTATIONS = (
+    ("returns normally instead of raising",
+     "def {h}({a}):\n    return token\n", "does not raise"),
+    ("a dead raise under `if False:`, then a return",
+     "def {h}({a}):\n    if False:\n        {r}\n    return token\n",
+     "executable statements"),
+    ("a conditional raise",
+     "def {h}({a}):\n    if token:\n        {r}\n", "does not raise"),
+    ("a raise swallowed by its own try",
+     "def {h}({a}):\n    try:\n        {r}\n    except Exception:\n        pass\n",
+     "does not raise"),
+    ("the wrong exception class",
+     "def {h}({a}):\n    raise ValueError(token) from None\n", "does not raise"),
+    ("no `from None`",
+     "def {h}({a}):\n    {n}\n", "does not raise"),
+    ("an extra executable statement before the raise",
+     "def {h}({a}):\n    _log(token)\n    {r}\n", "executable statements"),
+    ("a decorator that could wrap or replace it",
+     "@wrapper\ndef {h}({a}):\n    {r}\n", "carries a decorator"),
+    ("an async definition",
+     "async def {h}({a}):\n    {r}\n", "found 0"),
+    ("a class of the same name",
+     "class {h}:\n    pass\n", "found 0"),
+    ("a definition behind a module-scope condition",
+     "if _FLAG:\n    def {h}({a}):\n        {r}\n", "found 0"),
+    ("a duplicated definition",
+     "def {h}({a}):\n    {r}\n\n\ndef {h}({a}):\n    {r}\n", "found 2"),
+    ("a nested definition beside the module-scope one",
+     "def {h}({a}):\n    {r}\n\n\ndef _factory():\n    def {h}({a}):\n"
+     "        return token\n    return {h}\n", "carries other bindings"),
+    ("rebound after definition",
+     "def {h}({a}):\n    {r}\n\n\n{h} = _noop\n", "carries other bindings"),
+    ("imported over the definition",
+     "def {h}({a}):\n    {r}\n\n\nfrom _elsewhere import {h}\n",
+     "carries other bindings"),
+    ("its __code__ replaced",
+     "def {h}({a}):\n    {r}\n\n\n{h}.__code__ = _tame.__code__\n",
+     "carries other bindings"),
+    ("deleted after definition",
+     "def {h}({a}):\n    {r}\n\n\ndel {h}\n", "carries other bindings"),
+    ("a wrong signature",
+     "def {h}(token, extra, *rest, **kw):\n    {r}\n", "frozen signature"),
+    ("a type parameter shadowing the exception class it raises",
+     "def {h}[LedgerError]({a}):\n    {r}\n", "type parameters"),
+    ("a namespace write through another function's __globals__",
+     "def {h}({a}):\n    {r}\n\n\ndef _other():\n    pass\n"
+     "\n\n_other.__globals__['{h}'] = _tame\n", "namespace as data"),
+)
 
 
 def frozen_root_decision(sources):
@@ -863,6 +979,8 @@ def frozen_root_decision(sources):
     # `if`. None is permitted.
     if function.decorator_list:
         return None, "validate_ledger carries a decorator"
+    if getattr(function, "type_params", ()):
+        return None, "validate_ledger carries type parameters"
     if isinstance(function, ast.AsyncFunctionDef):
         return None, "validate_ledger is async"
     arguments = function.args
@@ -1442,7 +1560,26 @@ REFUSAL_AND_BINDING_FIXTURES = (
     (
         "a write through the helper's __globals__ (reviewer A6)",
         _module(CONFORMING_CORE + "\n\n_refuse.__globals__['_refuse'] = _tame\n"),
-        "attribute-access",
+        "module-namespace-reach",
+    ),
+    (
+        "a write through ANOTHER function's __globals__ (critic C7-A)",
+        _module(
+            CONFORMING_CORE
+            + "\n\ndef _leaky(token, path=()):\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n\n_leaky.__globals__['_refuse'] = _leaky\n"
+        ),
+        "module-namespace-reach",
+    ),
+    (
+        "a type parameter shadowing the exception class (critic C7-A)",
+        _module(
+            "def _refuse[LedgerError](token, path=()):\n"
+            "    raise LedgerError(token, path) from None\n"
+            "\n\n" + CONFORMING_DEFINITION
+        ),
+        "type parameters",
     ),
     (
         "a star import that may bind anything (reviewer B6)",
@@ -1503,7 +1640,7 @@ REFUSAL_AND_BINDING_FIXTURES = (
             + "\n\nimport sys\n"
             "sys.modules[__name__].__dict__['validate_ledger'] = _h\n"
         ),
-        "dunder-dict-reach",
+        "module-namespace-reach",
     ),
     (
         "a re-export whose _core is an aliased import (reviewer B6)",
@@ -3737,3 +3874,247 @@ def test_gv7_s_069_a_refusal_is_byte_identical_under_a_hostile_environment(
     hostile = capsys.readouterr()
     assert hostile.out == baseline.out
     assert hostile.err == baseline.err
+
+
+def test_gv7_s_070_a_relative_path_is_screened_against_the_current_directory(
+    tmp_path, monkeypatch
+):
+    """Every spelling of one file under a redirecting directory refuses alike.
+
+    Reproduced against the present implementation: ``ledger.json`` supplied
+    from inside a junction is ACCEPTED, while ``.\\ledger.json`` supplied from
+    the same place is refused ``path-symlink-refused``. Both name the same
+    bytes behind the same junction, so the difference is an incomplete ancestor
+    walk, not a decision to scope the rule to absolute paths --
+    ``ntpath.dirname("ledger.json")`` is empty, the walk stops after one entry,
+    and the current directory is never inspected while ``open`` resolves
+    straight through it.
+
+    The fixture is a real directory junction, unprivileged and bounded to
+    ``tmp_path``. ``sup.make_reparse_directory`` raises rather than skipping if
+    no mechanism exists, so a platform that cannot build one fails loudly and
+    never manufactures a pass.
+    """
+    validate = sup.require_validate()
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "ledger.json").write_text("{}", encoding="utf-8")
+    nested = real_dir / "nested"
+    nested.mkdir()
+    (nested / "ledger.json").write_text("{}", encoding="utf-8")
+
+    link_dir = tmp_path / "linked"
+    mechanism = sup.make_reparse_directory(link_dir, real_dir)
+    assert sup.is_refused_reparse_point(link_dir), mechanism
+    assert not sup.is_refused_reparse_point(real_dir)
+
+    spellings = (
+        ("absolute, through the junction", tmp_path,
+         str(link_dir / "ledger.json")),
+        ("relative, junction component present", tmp_path,
+         os.path.join("linked", "ledger.json")),
+        ("bare filename, from inside the junction", link_dir, "ledger.json"),
+        ("dot-relative, from inside the junction", link_dir,
+         os.path.join(".", "ledger.json")),
+        ("nested relative, from inside the junction", link_dir,
+         os.path.join("nested", "ledger.json")),
+    )
+    escaped = []
+    for label, cwd, supplied in spellings:
+        monkeypatch.chdir(cwd)
+        try:
+            validate.validate_ledger_file(supplied)
+        except validate.LedgerPathError as error:
+            if error.token != "path-symlink-refused":
+                escaped.append((label, f"wrong token {error.token}"))
+            continue
+        except validate.LedgerError as error:
+            # The path stage passed and a later stage stopped it, so the
+            # redirection was followed.
+            escaped.append((label, f"path accepted; stopped later at {error.token}"))
+            continue
+        escaped.append((label, "accepted outright"))
+    assert not escaped, escaped
+
+
+def test_gv7_s_071_every_refusal_helper_is_pinned_not_only_the_first():
+    """All four helpers, by the same executable pin, with per-shape negatives."""
+    sources = {
+        name: sup.require_file(sup.LAB_DIR / name, name)
+        for name in sup.PRODUCTION_MODULES
+    }
+    defining = defining_module_of(sources)
+
+    # The matcher discriminates, proved on self-contained fixtures BEFORE it is
+    # pointed at anything real. Every mutation is applied to every helper.
+    for helper, signature, body in sup.FROZEN_REFUSAL_HELPERS:
+        arguments = signature.split("(", 1)[1].rsplit(")", 1)[0]
+        raise_statement = body.strip()
+        without_cause = raise_statement.replace(" from None", "")
+        conforming = f"def {helper}({arguments}):\n    {raise_statement}\n"
+        assert (
+            frozen_helper_defect(
+                {"m.py": conforming}, "m.py", helper, signature, body
+            )
+            is None
+        ), helper
+        for label, template, fragment in HELPER_MUTATIONS:
+            source = template.format(
+                h=helper, a=arguments, r=raise_statement, n=without_cause
+            )
+            defect = frozen_helper_defect(
+                {"m.py": source}, "m.py", helper, signature, body
+            )
+            assert defect is not None, f"{helper}: {label}: accepted"
+            assert fragment in defect, (helper, label, defect)
+
+    # A helper defined in a module other than the defining one is not
+    # demonstrably the helper the refusals call.
+    for helper, signature, body in sup.FROZEN_REFUSAL_HELPERS:
+        arguments = signature.split("(", 1)[1].rsplit(")", 1)[0]
+        elsewhere = {
+            "__init__.py": "def validate_ledger(payload):\n    pass\n",
+            "schema.py": f"def {helper}({arguments}):\n    {body.strip()}\n",
+        }
+        defect = frozen_helper_defect(elsewhere, "__init__.py", helper, signature, body)
+        assert defect and "not in __init__.py" in defect, (helper, defect)
+
+    # The production definitions themselves.
+    for helper, signature, body in sup.FROZEN_REFUSAL_HELPERS:
+        defect = frozen_helper_defect(sources, defining, helper, signature, body)
+        assert defect is None, defect
+
+
+#: Each pair violates two stages. The token must name the EARLIER stage,
+#: wherever in the document that fault sits. Every fault is also checked alone,
+#: so a pair that reports the wrong stage cannot be excused as a fixture that
+#: never triggered.
+STAGE_ORDER_PAIRS = (
+    (
+        "stage 4 and stage 6 within one record",
+        (("claims", 0, "evidence_basis", 5), ("claims", 0, "attribution_class", "bogus")),
+        "type-not-exact",
+    ),
+    (
+        "stage 4 in a LATER record, stage 6 in an EARLIER one",
+        (("batches", 40, "batch_ordinal", True), ("batches", 0, "batch_kind", "bogus")),
+        "type-not-exact",
+    ),
+    (
+        "stage 5 in a LATER record, stage 6 in an EARLIER one",
+        (("claims", 5, "an_undeclared_probe", 1), ("claims", 0, "attribution_class", "bogus")),
+        "undeclared-key",
+    ),
+    (
+        "stage 4 in sources, stage 6 in batches",
+        (("sources", 60, "supplied_title", 1.0), ("batches", 0, "batch_kind", "bogus")),
+        "float-refused",
+    ),
+    (
+        "stage 4 and stage 5 within one record",
+        (("claims", 0, "evidence_basis", 5), ("claims", 0, "an_undeclared_probe", 1)),
+        "type-not-exact",
+    ),
+    (
+        "stage 4 in a LATER record, stage 5 in an EARLIER one",
+        (("claims", 9, "evidence_basis", 5), ("claims", 0, "an_undeclared_probe", 1)),
+        "type-not-exact",
+    ),
+    (
+        "stage 4 in batches, stage 6 in sources",
+        (("batches", 40, "batch_ordinal", True), ("sources", 0, "retrieval_state", "bogus")),
+        "type-not-exact",
+    ),
+)
+
+#: The token each single fault must produce on its own.
+STAGE_ORDER_SINGLES = {
+    ("claims", 0, "evidence_basis", 5): "type-not-exact",
+    ("claims", 0, "attribution_class", "bogus"): "enum-value-invalid",
+    ("batches", 40, "batch_ordinal", True): "type-not-exact",
+    ("batches", 0, "batch_kind", "bogus"): "enum-value-invalid",
+    ("claims", 5, "an_undeclared_probe", 1): "undeclared-key",
+    ("sources", 60, "supplied_title", 1.0): "float-refused",
+    ("sources", 0, "retrieval_state", "bogus"): "enum-value-invalid",
+    ("claims", 9, "evidence_basis", 5): "type-not-exact",
+    ("claims", 0, "an_undeclared_probe", 1): "undeclared-key",
+}
+
+
+def apply_faults(ledger, faults):
+    payload = json.loads(json.dumps(ledger))
+    for collection, index, field, value in faults:
+        payload[collection][index][field] = value
+    return payload
+
+
+def test_gv7_s_072_the_earliest_stage_wins_across_the_whole_document():
+    """"Earliest applicable stage" ranges over the payload, not over one record.
+
+    A validator that walks record by record, running every stage inside each
+    record before moving on, inverts the rule for every pair of faults that
+    happens to sit in that order: a stage-6 vocabulary fault in the first
+    record outruns a stage-4 exact-type fault in the last. The token then
+    reports the traversal rather than the fault.
+    """
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+
+    # Each fault alone first, so a pair cannot pass by never triggering.
+    for fault, token in sorted(STAGE_ORDER_SINGLES.items()):
+        refuse(schema, apply_faults(ledger, (fault,)), token)
+
+    for label, faults, token in STAGE_ORDER_PAIRS:
+        payload = apply_faults(ledger, faults)
+        with pytest.raises(schema.LedgerError) as excinfo:
+            schema.validate_ledger(payload)
+        assert excinfo.value.token == token, (label, token, excinfo.value.token)
+
+
+def test_gv7_s_073_the_staged_token_is_identical_under_every_execution_mode():
+    """Determinism, separately from correctness.
+
+    This pins that the token does not depend on hash seed or optimisation
+    level. It deliberately asserts only that every mode agrees -- which stage
+    ought to win is GV7-S-072's question, and conflating the two would let a
+    wrong-but-stable answer look like two passing controls.
+    """
+    ledger = sup.require_ledger()
+    payload = apply_faults(ledger, STAGE_ORDER_PAIRS[0][1])
+    document = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    script = (
+        "import json,sys\n"
+        "import experiments.general_v7_ledger as core\n"
+        "payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))\n"
+        "try:\n"
+        "    core.validate_ledger(payload)\n"
+        "    sys.stdout.write('ACCEPTED')\n"
+        "except core.LedgerError as error:\n"
+        "    sys.stdout.write(error.token)\n"
+    )
+    outcomes = set()
+    for seed in ("0", "1", "12345"):
+        for flags in ([], ["-O"], ["-OO"]):
+            environment = dict(os.environ)
+            environment["PYTHONHASHSEED"] = seed
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PYTHONPATH"] = str(sup.REPO_ROOT)
+            completed = subprocess.run(
+                [sys.executable, *flags, "-c", script],
+                input=document,
+                capture_output=True,
+                env=environment,
+                cwd=str(sup.REPO_ROOT),
+                check=False,
+            )
+            assert completed.returncode == 0, completed.stderr.decode(
+                "utf-8", "replace"
+            )
+            outcomes.add(completed.stdout.decode("utf-8"))
+    assert len(outcomes) == 1, sorted(outcomes)
+    # And a refusal actually happened. Asserting only that nine modes agree
+    # would pass on an implementation that accepts the doubly-faulted payload
+    # in all nine, which pins nothing at all.
+    outcome = outcomes.pop()
+    assert outcome != "ACCEPTED", "the doubly-faulted payload was accepted"
+    assert outcome in sup.REQUIRED_REFUSAL_TOKENS, outcome

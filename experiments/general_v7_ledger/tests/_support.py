@@ -994,6 +994,12 @@ ACCEPTANCE_BOUNDARY_DOCUMENTS = (
     "README.md",
 )
 
+#: SUPERSEDED by ``SYNTHETIC_MATERIAL_RE`` in Correction 7, and kept only so an
+#: auditor reading an earlier handback can find what it was. It is no longer
+#: consulted by ``acceptance_boundary_violations``: its fixed-width lookbehinds
+#: guard only the immediately adjacent word, so "not, in any sense, synthetic"
+#: satisfied it.
+#:
 #: The PHRASE the contract names, not a bare token. A bare ``synthetic`` is
 #: satisfied by a locator such as ``https://example.invalid/synthetic/item-0001``
 #: or by an identifier, with no prose disclaimer anywhere -- so the token form
@@ -1025,6 +1031,158 @@ SUBSTANTIVE_LINE_RE = re.compile(
 URL_ANYWHERE_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\bwww\.)")
 
 
+#: The four production refusal helpers, each pinned by exact signature and
+#: exact single executable statement.
+#:
+#: Correction 6 pinned ``_refuse`` alone. The three siblings carry ten of the
+#: thirty-nine tokens between them -- every stage-1 path refusal, the stage-2
+#: ceiling and all three stage-3 parse refusals -- and appeared nowhere in the
+#: acceptance surface, so a sibling that returned instead of raising passed the
+#: whole suite and then accepted a ledger read through a redirecting junction.
+#: That is the Correction 6 defeat one helper over, and this closes it.
+FROZEN_REFUSAL_HELPERS = (
+    (
+        "_refuse",
+        "def _refuse(token, path=()):\n    pass\n",
+        "raise LedgerError(token, path) from None\n",
+    ),
+    (
+        "_refuse_path",
+        "def _refuse_path(token):\n    pass\n",
+        "raise LedgerPathError(token) from None\n",
+    ),
+    (
+        "_refuse_ceiling",
+        "def _refuse_ceiling(token):\n    pass\n",
+        "raise LedgerCeilingError(token) from None\n",
+    ),
+    (
+        "_refuse_input",
+        "def _refuse_input(token):\n    pass\n",
+        "raise LedgerInputError(token) from None\n",
+    ),
+)
+
+#: The one host every locator in the COMMITTED synthetic calibration data uses.
+#: This is an evidence rule about this fabricated candidate, **not** a rule the
+#: validator enforces and not a restriction on a future legitimate real-source
+#: ledger. RFC 6761 reserves ``.invalid``, so nothing here can resolve.
+CALIBRATION_LOCATOR_HOST = "example.invalid"
+
+#: The exact boundary sentence each liftable document must carry, and the
+#: heading it must sit after. Position is checked separately, by the preamble
+#: rule below: a sentence that appears only after the records is not a boundary.
+CALIBRATION_BOUNDARY_SENTENCES = {
+    "BIBLIOGRAPHY.md": (
+        "**Synthetic calibration material. "
+        "This bibliography is not merge-authorized.**"
+    ),
+    "INTAKE_REPORT.md": (
+        "**This synthetic calibration material is not merge-authorized.**"
+    ),
+}
+
+#: Spans that carry no meaning to a reader of the rendered document. A
+#: declaration only a source-reader can see is not a disclosure, so these are
+#: removed before the declaration is looked for.
+HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+FENCED_BLOCK_RE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$")
+#: A tag and everything inside its angle brackets. An attribute value renders
+#: as nothing at all: `<img alt="Synthetic calibration material...">` satisfied
+#: the declaration while showing a reader an image and no sentence.
+HTML_TAG_RE = re.compile(r"(?s)<[^<>]*>")
+
+#: The declaration must be an ASSERTION ABOUT THE MATERIAL, in one of two
+#: ordinary shapes: "<synthetic> <material-noun>", or "is/are <synthetic>".
+#: A bare token is not enough -- "synthetic-rubber gasket" satisfied the earlier
+#: form -- and neither is a word inside a locator, which is why URL spans are
+#: stripped first.
+SYNTHETIC_MATERIAL_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:synthetic|fabricated)\b[\s,]+"
+    r"(?:wholly\s+|entirely\s+|purely\s+|calibration\s+|engineering\s+|test\s+)*"
+    r"(?:material|data|ledger|bibliograph\w*|report|records?|candidate|corpus"
+    r"|documents?|fixtures?|entries|entry)"
+    r"|\b(?:is|are|was|were)\s+"
+    r"(?:wholly\s+|entirely\s+|purely\s+|deliberately\s+)*"
+    r"(?:synthetic|fabricated)\b"
+    r")"
+)
+
+#: Words that reverse the sentence around them. Checked over the WORDS BEFORE a
+#: match, never inside it, so "is not merge-authorized" is not read as negating
+#: its own declaration while "It is false that this ... is not merge-authorized"
+#: is.
+NEGATION_CUE_RE = re.compile(
+    r"(?i)(?:\bnon-|\b(?:not|no|never|false|falsely|neither|nor|hardly|untrue"
+    r"|contrary|opposite)\b)"
+)
+
+#: How many words before a declaration are read for a negation cue.
+NEGATION_LOOKBACK_WORDS = 8
+
+#: An affirmative claim of merge authority, and an affirmative claim that real
+#: sources were obtained or checked. Both are screened only AFTER their negated
+#: forms are removed, because "not merge-authorized" contains "merge-authorized"
+#: and "no source was retrieved" contains "was retrieved".
+MERGE_AUTHORITY_RE = re.compile(
+    r"(?i)\b(?:merge[- ]authoris?(?:ed|ation|zed|zation)"
+    r"|approved\s+for\s+merge|cleared\s+(?:to|for)\s+merge|ready\s+to\s+merge)\b"
+)
+REAL_SOURCE_VERIFICATION_RE = re.compile(
+    r"(?i)\b(?:peer[- ]reviewed|independently\s+verified|corroborated"
+    r"|authenticated|retrieved\s+and\s+verified|verified\s+sources?"
+    r"|(?:sources?|claims?|identit(?:y|ies))\s+(?:were|was|are|is)\s+"
+    r"(?:retrieved|verified)"
+    r"|(?:was|were|is|are)\s+(?:retrieved|verified))\b"
+)
+
+
+def _visible_prose(text: str) -> str:
+    """``text`` with the spans a reader of the rendered document never sees."""
+    without_comments = HTML_COMMENT_RE.sub(" ", text)
+    without_fences = FENCED_BLOCK_RE.sub(" ", without_comments)
+    return HTML_TAG_RE.sub(" ", without_fences)
+
+
+def _unnegated(pattern, text: str) -> bool:
+    """True when ``pattern`` matches with no negation cue in the words before it.
+
+    This is a BOUNDED STRUCTURAL CHECK over a small committed corpus of three
+    documents, not a semantic detector. It cannot decide the meaning of
+    arbitrary prose and does not claim to; see CONTRACT.md section 8a.
+    """
+    for match in pattern.finditer(text):
+        before = text[: match.start()].split()[-NEGATION_LOOKBACK_WORDS:]
+        if not NEGATION_CUE_RE.search(" ".join(before)):
+            return True
+    return False
+
+
+def merge_authority_claims(text: str):
+    """Affirmative merge-authority claims, with the negated form removed."""
+    stripped = NOT_MERGE_AUTHORIZED_RE.sub(" ", _visible_prose(text))
+    return sorted({match.group(0).lower() for match in MERGE_AUTHORITY_RE.finditer(stripped)})
+
+
+def real_source_verification_claims(text: str):
+    """Affirmative real-source claims, by the same look-back as everything else.
+
+    An earlier form searched the WHOLE sentence for a negation cue, including
+    the text after the match, so "Every source was retrieved and verified, and
+    no entry was omitted" was silenced by the unrelated "no". The cue is read
+    only over the words BEFORE the match, which is the discipline
+    ``NEGATION_CUE_RE`` documents and ``_unnegated`` already follows.
+    """
+    found = []
+    for sentence in re.split(r"(?<=[.!?])\s+", _visible_prose(text)):
+        for match in REAL_SOURCE_VERIFICATION_RE.finditer(sentence):
+            before = sentence[: match.start()].split()[-NEGATION_LOOKBACK_WORDS:]
+            if not NEGATION_CUE_RE.search(" ".join(before)):
+                found.append(match.group(0).lower())
+    return sorted(set(found))
+
+
 def acceptance_boundary_preamble(text: str) -> str:
     """Everything before the document's first substantive line.
 
@@ -1047,7 +1205,21 @@ def acceptance_boundary_preamble(text: str) -> str:
 
 
 def acceptance_boundary_violations(name: str, text: str):
-    """``(name, defect)`` for each missing statement. Empty means compliant."""
+    """``(name, defect)`` for each missing statement. Empty means compliant.
+
+    Correction 7. The earlier predicate was satisfied by an HTML comment, by
+    text inside a fenced block, by "synthetic-rubber gasket", by a sentence
+    NEGATING the declaration at any distance, and by a double negation -- five
+    shapes a reader would never accept as a disclosure. The declaration must
+    now be visible in the rendered document, be an assertion about the material,
+    carry no negation cue in the words before it, and stand beside no
+    refutation of itself.
+
+    This remains a BOUNDED STRUCTURAL CHECK over three committed documents. It
+    is defence in depth, not a semantic detector, and it establishes nothing
+    about arbitrary prose; CONTRACT.md section 8a states that limit and this
+    docstring does not exceed it.
+    """
     preamble = acceptance_boundary_preamble(text)
     found = []
     if preamble == text:
@@ -1057,11 +1229,18 @@ def acceptance_boundary_violations(name: str, text: str):
         found.append(
             (name, "no substantive content boundary: the placement rule cannot bind")
         )
-    prose = URL_SPAN_RE.sub(" ", preamble)
-    if not SYNTHETIC_DECLARATION_RE.search(prose):
+    visible = _visible_prose(preamble)
+    prose = URL_SPAN_RE.sub(" ", visible)
+    if not _unnegated(SYNTHETIC_MATERIAL_RE, prose):
         found.append((name, "no synthetic-calibration statement before the content"))
-    if not NOT_MERGE_AUTHORIZED_RE.search(preamble):
+    if not _unnegated(NOT_MERGE_AUTHORIZED_RE, visible):
         found.append((name, "no not-merge-authorized statement before the content"))
+    for claim in merge_authority_claims(preamble):
+        found.append((name, f"the preamble claims merge authority: {claim}"))
+    for claim in real_source_verification_claims(preamble):
+        found.append(
+            (name, f"the preamble claims real-source verification: {claim}")
+        )
     return found
 
 

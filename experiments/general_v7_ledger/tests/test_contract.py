@@ -899,3 +899,87 @@ def test_gv7_d_039_the_contract_demotes_the_call_name_scan_to_a_tripwire():
         assert generic not in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, generic
     for specific in ("urlopen", "create_connection", "Popen"):
         assert specific in sup.RETRIEVAL_CALL_TRIPWIRE_NAMES, specific
+
+
+def test_gv7_d_040_the_contract_screens_the_current_directory_for_relative_paths():
+    text = contract_text()
+    for statement in (
+        "for a relative supplied path the current working-directory entry, and its",
+        "own ancestors, are screened too",
+        "the path the process will\nactually open",
+        "never over the components that merely happen to be present in\nthe argument text",
+        "must be refused alike",
+        "an incomplete walk, not a decision to scope the rule to absolute paths",
+    ):
+        assert_phrase(text, statement)
+
+
+def test_gv7_d_041_the_contract_separates_structure_from_semantic_governance():
+    """The absolutes are kept as governance and withdrawn as claims about text."""
+    text = contract_text()
+    for statement in (
+        "What the structural validator does and does not decide",
+        "admission and governance rules for this ledger\nfamily",
+        "they remain in force in full",
+        "The structural validator does not, and cannot, establish the meaning of\narbitrary prose",
+        "Deciding otherwise would mean deciding natural language",
+        "what no field\nis designed or vocabulary-enabled to record",
+        "It does **not** claim that prose\ncannot be written to say such a thing",
+        "a governance failure for human audit to catch",
+        "were **overstated, and the overstatement is withdrawn here**",
+        "Bounded pattern checks over the committed calibration data are defence in\ndepth only",
+        "a deny-list is not a detector",
+        "Enlarging the\nkeyword list does not change its kind",
+        "It\nproves nothing semantic",
+        "text field is executable authority",
+        "human audit remains required before any\nreal-source admission or any publication",
+        "Access controls and denials remain\nstop conditions, not obstacles",
+    ):
+        assert_phrase(text, statement)
+
+    flattened = flat(text)
+    # Negative pins over the SPECIFIC withdrawn wordings. These are tripwires,
+    # not paraphrase-proofing: a critic re-asserted every one of these claims
+    # in different words with the suite unchanged, which is the same limit
+    # section 8a states about prose generally. What actually binds is that the
+    # limitation sentences above are still present, asserted positively.
+    for forbidden in (
+        "proves that the ledger is free of operational payload",
+        "establishes that no field can express",
+        "a green suite proves semantic safety",
+        "the validator decides the meaning",
+        "the keyword list is complete",
+    ):
+        assert forbidden not in flattened.lower(), forbidden
+    assert flattened.count("a deny-list is not a detector") >= 1
+
+
+def test_gv7_d_042_the_contract_states_the_calibration_evidence_rules():
+    text = contract_text()
+    for statement in (
+        "Evidence rules for the committed synthetic calibration candidate",
+        "They are **not** restrictions on a future legitimate real-source ledger",
+        "uses the\n  reserved host `example.invalid`",
+        "**no real-world locator appears**",
+        "RFC 6761 reserves `.invalid`",
+        "each carry their **exact** boundary\n  sentence",
+        "satisfied by an HTML comment",
+        "by an HTML attribute value",
+        "**A refutation written in\n  arbitrary prose is not detected, and by section 8a it cannot be**",
+        "a human-audit obligation, stated here rather than implied away",
+        "claimed the general case and was **withdrawn**",
+        "by a negation, by a double negation, or by an unrelated use of\n  the word",
+        "claim **no merge\n  authority and no real-source verification**",
+        "The validator enforces none of this, deliberately",
+        "constrains a\nlocator's *shape*",
+        "not its host,\nbecause a real-source ledger must be able to carry a real one",
+        "no code path\nretrieves, opens, resolves or contacts a locator",
+        "stated as such rather than dressed\nup as a safety property of the validator",
+    ):
+        assert_phrase(text, statement)
+    # The evidence rules are carried in the suite as data, not only as prose.
+    assert sup.CALIBRATION_LOCATOR_HOST == "example.invalid"
+    assert set(sup.CALIBRATION_BOUNDARY_SENTENCES) == {
+        "BIBLIOGRAPHY.md",
+        "INTAKE_REPORT.md",
+    }
