@@ -3711,14 +3711,16 @@ def _fake_quarantine_root_metadata(monkeypatch, directory, *, replace=None,
                                    raise_with=None):
     """Fake `.retention_quarantine`'s metadata ONLY, leaving all else real."""
     real_lstat = os.lstat
-    target = os.path.normcase(os.fspath(_quarantine_root(directory)))
+    target_info = real_lstat(_quarantine_root(directory))
+    target_identity = (target_info.st_dev, target_info.st_ino)
 
     def _lstat(path, *args, **kwargs):
-        if os.path.normcase(os.fspath(path)) == target:
+        info = real_lstat(path, *args, **kwargs)
+        if (info.st_dev, info.st_ino) == target_identity:
             if raise_with is not None:
                 raise raise_with
-            return replace(real_lstat(path, *args, **kwargs))
-        return real_lstat(path, *args, **kwargs)
+            return replace(info)
+        return info
 
     monkeypatch.setattr(retention.os, "lstat", _lstat)
 
@@ -4604,11 +4606,12 @@ def test_the_empty_success_paths_carry_no_binding(tmp_path):
 class _Repointing:
     """The two identities a repointing fixture actually produced."""
 
-    __slots__ = ("before", "after")
+    __slots__ = ("before", "after", "blocked")
 
     def __init__(self):
         self.before = None
         self.after = None
+        self.blocked = None
 
 
 def _repointing_scan(monkeypatch, live, aside, replacement=True):
@@ -4632,10 +4635,15 @@ def _repointing_scan(monkeypatch, live, aside, replacement=True):
         decoy = Path(os.fspath(live) + ".decoy")
         if replacement:
             decoy.mkdir()
-        os.rename(live, aside)
-        if replacement:
-            os.rename(decoy, live)
-            record.after = _directory_identity(live)
+        try:
+            os.rename(live, aside)
+            if replacement:
+                os.rename(decoy, live)
+                record.after = _directory_identity(live)
+        except OSError as error:
+            record.blocked = error
+            if decoy.exists():
+                decoy.rmdir()
         return result
 
     monkeypatch.setattr(retention, "scan_retention_candidates",
@@ -4643,31 +4651,30 @@ def _repointing_scan(monkeypatch, live, aside, replacement=True):
     return record
 
 
-def test_a_live_plan_refuses_a_root_replaced_after_the_scan(tmp_path,
-                                                            monkeypatch):
+def test_a_live_plan_stays_bound_when_the_path_moves_after_the_scan(
+        tmp_path, monkeypatch):
     live = tmp_path / "live"
     live.mkdir()
     _populate(live, snapshots=4)
     record = _repointing_scan(monkeypatch, live, tmp_path / "aside")
     report = _live_plan(live)
-    # Non-vacuity, asserted rather than inferred: the pathname really did come
-    # to name a DIFFERENT object. A refusal over a fixture that never swapped
-    # anything would look identical here and would prove nothing.
     assert record.before is not None, "the original root was never identified"
-    assert record.after is not None, "no substitute was installed at the name"
-    assert record.before != record.after, (
-        "the fixture did not actually change the root's identity")
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert list(live.iterdir()) == []
+    if record.blocked is None:
+        assert record.after is not None, "no substitute was installed at the name"
+        assert record.before != record.after, (
+            "the fixture did not actually change the root's identity")
+        assert list(live.iterdir()) == [], "PLAN mutated the replacement"
+    else:
+        assert record.after is None
+    assert report.refused is None
+    assert report.planned_actions_count == 3
+    assert report.moved == 0
 
 
-def test_quarantine_creates_nothing_when_the_root_was_replaced(tmp_path,
-                                                               monkeypatch):
-    """The defect itself. The replacement is a perfectly usable directory, so
-    every check that only asks "is this a directory" passes -- and the
-    quarantine root, the pass directory and the manifest all get built inside
-    a directory this pass never scanned."""
+def test_quarantine_stays_on_the_scanned_object_when_its_path_is_replaced(
+        tmp_path, monkeypatch):
+    """A permitted POSIX rename must not redirect any mutation; Windows may
+    deny the rename while the same exact-object guarantee remains held."""
     live = tmp_path / "live"
     live.mkdir()
     aside = tmp_path / "aside"
@@ -4675,52 +4682,64 @@ def test_quarantine_creates_nothing_when_the_root_was_replaced(tmp_path,
     record = _repointing_scan(monkeypatch, live, aside)
     report = _run(live)
     assert record.before is not None, "the original root was never identified"
-    assert record.after is not None, "no substitute was installed at the name"
-    assert record.before != record.after, (
-        "the fixture did not actually change the root's identity")
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert report.moved == 0
-    assert not _quarantine_root(live).exists(), "root built in the replacement"
-    assert not _quarantine_root(aside).exists(), "root built in the original"
-    assert list(live.iterdir()) == [], "the replacement was mutated"
-    assert sorted(path.name for path in aside.iterdir()) == sorted(
-        path.name for path in made)
+    assert report.refused is None
+    assert report.moved == report.planned_actions_count == 5
+    if record.blocked is None:
+        assert record.after is not None, "no substitute was installed at the name"
+        assert record.before != record.after, (
+            "the fixture did not actually change the root's identity")
+        assert list(live.iterdir()) == [], "the replacement was mutated"
+        assert not _quarantine_root(live).exists(), (
+            "quarantine was built in the unscanned replacement")
+        assert _quarantine_root(aside).is_dir(), (
+            "quarantine did not follow the held scanned object")
+        assert sum(path.is_file() for path in aside.iterdir()) == 1
+    else:
+        assert record.after is None
+        assert not aside.exists()
+        assert _quarantine_root(live).is_dir()
+        assert sum(path.exists() for path in made) == 1
 
 
-def test_quarantine_creates_nothing_when_the_root_simply_vanishes(
+def test_quarantine_stays_on_the_scanned_object_when_its_path_vanishes(
         tmp_path, monkeypatch):
     live = tmp_path / "live"
     live.mkdir()
     aside = tmp_path / "aside"
     _populate(live, snapshots=6)
-    _repointing_scan(monkeypatch, live, aside, replacement=False)
+    record = _repointing_scan(monkeypatch, live, aside, replacement=False)
     report = _run(live)
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert report.moved == 0
-    assert not live.exists()
-    assert not _quarantine_root(aside).exists()
+    assert report.refused is None
+    assert report.moved == report.planned_actions_count == 5
+    if record.blocked is None:
+        assert not live.exists()
+        assert _quarantine_root(aside).is_dir()
+    else:
+        assert live.is_dir()
+        assert not aside.exists()
+        assert _quarantine_root(live).is_dir()
 
 
-def test_an_idle_quarantine_pass_refuses_a_root_replaced_after_the_scan(
+def test_an_idle_quarantine_pass_stays_bound_after_its_path_is_replaced(
         tmp_path, monkeypatch):
-    """The no-action branch creates nothing, but it still REPORTS. A clean
-    no-op taken over a root the pass never scanned tells an operator the
-    directory is healthy on the strength of a reading taken somewhere else."""
+    """The no-action report remains about the held object and creates nothing."""
     live = tmp_path / "live"
     live.mkdir()
     _populate(live, snapshots=2, age_days=0)      # far inside the horizon
     record = _repointing_scan(monkeypatch, live, tmp_path / "aside")
     report = _run(live)
     assert record.before is not None, "the original root was never identified"
-    assert record.after is not None, "no substitute was installed at the name"
-    assert record.before != record.after, (
-        "the fixture did not actually change the root's identity")
     assert report.planned_actions == ()
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
+    assert report.refused is None
     assert not _quarantine_root(live).exists()
+    if record.blocked is None:
+        assert record.after is not None, "no substitute was installed at the name"
+        assert record.before != record.after, (
+            "the fixture did not actually change the root's identity")
+        assert list(live.iterdir()) == [], "the replacement was mutated"
+        assert not _quarantine_root(tmp_path / "aside").exists()
+    else:
+        assert record.after is None
 
 
 def test_a_root_that_appears_after_an_empty_scan_is_not_accepted(
@@ -4941,37 +4960,29 @@ def _replace_root_after_the_scan(monkeypatch, root, *, contents=()):
     return swap
 
 
-def test_per_entry_identity_alone_does_not_stop_the_directory_mutations(
+def test_the_held_root_routes_directory_mutations_to_the_scanned_object(
         tmp_path, monkeypatch):
-    """The sharpest statement of the defect.
-
-    The substitute holds the SAME basenames as the scanned directory, so the
-    per-file check does its job perfectly -- every planned action names an
-    object whose inode no longer matches, and every one would be skipped. And
-    the UNBOUND pass still created a quarantine root, a pass directory and a
-    manifest inside a directory it never opened, because those three mutations
-    happen BEFORE the loop that does the skipping. Per-file identity was never
-    able to prevent them; only the root binding can.
-    """
+    """Matching replacement basenames cannot redirect quarantine mutations."""
     root = _scanned_root(tmp_path, snapshots=3)
     names = _listing(root)
     swap = _replace_root_after_the_scan(monkeypatch, root, contents=names)
     report = _headroom_run(root, _headroom_policy(1_000))
 
-    assert swap.replacement.before != swap.replacement.after, (
-        "the fixture did not actually change the root's identity")
-    assert swap.replacement.decoy_names == tuple(names), (
-        "the substitute must carry the same names, or it proves nothing")
-
-    assert _listing(root) == names, (
-        "a quarantine root, pass directory and journal were created inside a "
-        "directory that was never scanned")
-    assert not _quarantine_root(root).exists()
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert report.skipped == 0, (
-        "skipping is what per-file identity already did; it is not the fix")
-    assert report.moved == 0
+    assert report.refused is None
+    assert report.skipped == 0
+    assert report.moved == report.planned_actions_count == 2
+    if swap.replacement is None:
+        assert swap.blocked is not None
+        assert not (tmp_path / "data.displaced").exists()
+        assert _quarantine_root(root).is_dir()
+    else:
+        assert swap.replacement.before != swap.replacement.after, (
+            "the fixture did not actually change the root's identity")
+        assert swap.replacement.decoy_names == tuple(names), (
+            "the substitute must carry the same names, or it proves nothing")
+        assert _listing(root) == names, "the replacement was mutated"
+        assert not _quarantine_root(root).exists()
+        assert _quarantine_root(swap.replacement.displaced).is_dir()
 
 
 def test_the_cli_never_reports_over_an_unscanned_root(
@@ -5002,15 +5013,17 @@ def test_the_cli_never_reports_over_an_unscanned_root(
     assert str(tmp_path) not in printed.out
 
 
-def test_a_root_binding_refusal_renders_a_path_free_line(tmp_path,
-                                                         monkeypatch):
-    """The refusal keeps the emitted line as path-free as every other."""
+def test_a_held_root_success_renders_a_path_free_line(tmp_path, monkeypatch):
+    """Exact-object continuation keeps the emitted line path-free."""
     root = _scanned_root(tmp_path, snapshots=3)
     swap = _replace_root_after_the_scan(monkeypatch, root)
     line = retention.format_report(
         _headroom_run(root, _headroom_policy(1_000)))
-    assert swap.replacement.before != swap.replacement.after
-    assert "identity_unavailable" in line
+    if swap.replacement is None:
+        assert swap.blocked is not None
+    else:
+        assert swap.replacement.before != swap.replacement.after
+    assert "refused=none" in line
     for leak in ("v070_gen", ".npz", "telemetry_", str(tmp_path), "/", "\\",
                  "Traceback", "Errno"):
         assert leak not in line, leak
@@ -5093,7 +5106,7 @@ def test_an_entry_removed_from_the_same_root_is_not_a_replacement(
         victim = Path(os.fspath(directory)) / _snap_name(3, 3)
         # Carried OUT of the root, so an entry genuinely leaves. Renaming it
         # in place would change the listing without changing the entry count.
-        os.rename(victim, victim.parent.parent / "carried_away")
+        os.rename(victim, root.parent / "carried_away")
         return observed
 
     monkeypatch.setattr(retention, "scan_retention_candidates",
@@ -5399,7 +5412,8 @@ class _ScandirThatMovesTheRootUnderTheOpen:
     """
 
     __slots__ = ("_root", "_contents", "_when", "_vanish", "_real",
-                 "calls", "replacement", "displaced", "iterators")
+                 "calls", "replacement", "displaced", "iterators",
+                 "blocked")
 
     def __init__(self, root, *, contents=(), when="after_open", vanish=False):
         self._root = Path(os.fspath(root))
@@ -5411,18 +5425,27 @@ class _ScandirThatMovesTheRootUnderTheOpen:
         self.replacement = None
         self.displaced = None
         self.iterators = []
+        self.blocked = None
 
     def _substitute(self):
         if self._when == "never":
             return
-        if self._vanish:
-            self.displaced = self._root.with_name(
-                self._root.name + ".displaced")
-            os.rename(self._root, self.displaced)
-            return
-        self.replacement = _replace_root_pathname(self._root,
-                                                  contents=self._contents)
-        self.displaced = self.replacement.displaced
+        try:
+            if self._vanish:
+                self.displaced = self._root.with_name(
+                    self._root.name + ".displaced")
+                os.rename(self._root, self.displaced)
+                return
+            self.replacement = _replace_root_pathname(
+                self._root, contents=self._contents)
+            self.displaced = self.replacement.displaced
+        except OSError as error:
+            self.blocked = error
+            decoy = self._root.with_name(self._root.name + ".decoy")
+            if decoy.exists():
+                for child in decoy.iterdir():
+                    child.unlink()
+                decoy.rmdir()
 
     def _wrap(self, iterator):
         recorded = _RecordedIterator(iterator)
@@ -5621,66 +5644,49 @@ def test_the_refusal_is_about_which_directory_and_not_about_a_bad_one(
 
 # -- and what the two live modes do with it ----------------------------------
 
-def test_a_live_plan_refuses_a_root_replaced_between_the_open_and_the_proof(
+def test_a_live_plan_stays_bound_when_the_path_moves_during_the_scan(
         tmp_path, monkeypatch):
-    """`PLAN` reports. A report taken over a directory the pass never opened
-    describes somewhere else entirely, and the operator CLI exits 0 on it.
-    """
+    """`PLAN` reports only on the held object, never the replacement name."""
     root, names, contents = _root_and_matching_substitute(tmp_path)
     swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
     report = _live_plan(root, policy=_headroom_policy(1_000))
 
-    assert swap.replacement.before != swap.replacement.after
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert report.planned_actions == ()
-    assert report.planned_actions_count == 0
-    assert (report.processed, report.inspected) == (0, 0)
+    if swap.replacement is None:
+        assert swap.blocked is not None
+    else:
+        assert swap.replacement.before != swap.replacement.after
+        assert _listing(root) == sorted(contents), "PLAN mutated the replacement"
+        assert _listing(swap.displaced) == sorted(
+            names + [_ORIGINAL_MARKER]), "PLAN mutated the scanned object"
+    assert report.refused is None
+    assert report.planned_actions_count == 2
+    assert (report.processed, report.inspected) == (4, 3)
     assert report.moved == 0
-    assert _listing(root) == sorted(contents), "the substitute was mutated"
-    assert _listing(swap.displaced) == sorted(
-        names + [_ORIGINAL_MARKER]), "the scanned directory was mutated"
 
 
-def test_quarantine_creates_nothing_when_the_root_moves_under_the_open(
+def test_quarantine_stays_on_the_scanned_object_when_its_path_moves_under_open(
         tmp_path, monkeypatch):
-    """The whole cost of the defect, in one control.
-
-    Unbound, this pass creates the quarantine root, the pass directory and the
-    journal inside the substitute and moves the substitute's files into them
-    -- and every per-file identity check passes while it does, because the
-    scan's own metadata reads resolved by PATHNAME into the substitute too.
-    Bound, nothing is created, nothing is moved, and the mover is never
-    reached.
-    """
-    def _forbidden(source, destination):  # pragma: no cover - must not run
-        raise AssertionError("a mover ran on a pass that proved no root")
-
+    """The scan window cannot redirect quarantine into an unscanned object."""
     root, names, contents = _root_and_matching_substitute(tmp_path)
     swap = _move_the_root_under_the_open(monkeypatch, root, contents=contents)
-    report = _headroom_run(root, _headroom_policy(1_000), mover=_forbidden)
+    report = _headroom_run(root, _headroom_policy(1_000))
 
-    assert swap.replacement.before != swap.replacement.after
-    assert set(names) <= set(swap.replacement.decoy_names)
-
-    assert report.refused is (
-        retention.RetentionFailureReason.IDENTITY_UNAVAILABLE)
-    assert report.moved == 0
-    assert report.skipped == 0, (
-        "skipping is what per-file identity already did; it is not the fix")
+    assert report.refused is None
+    assert report.moved == report.planned_actions_count == 2
+    assert report.skipped == 0
     assert report.unmanifested == 0
     assert report.halted is False
-    assert report.planned_actions == ()
-
-    assert not _quarantine_root(root).exists(), (
-        "a quarantine tree was built inside the substitute")
-    assert not _quarantine_root(swap.displaced).exists(), (
-        "a quarantine tree was built inside the scanned directory")
-    assert _manifests_beneath(tmp_path) == [], (
-        "a journal was written for a pass that proved no root")
-    assert _listing(root) == sorted(contents), "the substitute was mutated"
-    assert _listing(swap.displaced) == sorted(names + [_ORIGINAL_MARKER]), (
-        "the scanned directory was mutated")
+    if swap.replacement is None:
+        assert swap.blocked is not None
+        assert _quarantine_root(root).is_dir()
+    else:
+        assert swap.replacement.before != swap.replacement.after
+        assert set(names) <= set(swap.replacement.decoy_names)
+        assert not _quarantine_root(root).exists(), (
+            "a quarantine tree was built inside the replacement")
+        assert _quarantine_root(swap.displaced).is_dir(), (
+            "quarantine did not follow the held scanned object")
+        assert _listing(root) == sorted(contents), "the replacement was mutated"
 
 
 # -- the two windows a pre-open proof creates, which it must also close ------
@@ -7371,6 +7377,50 @@ def test_the_survey_refusal_emits_nothing_at_all(tmp_path, monkeypatch,
                  "Errno", "OSError", "Traceback", ".decoy", ".displaced"):
         assert leak not in printed.out, leak
         assert leak not in printed.err, leak
+
+
+def test_main_fails_closed_when_the_held_lock_parent_cannot_be_released(
+        tmp_path, monkeypatch, capsys):
+    """A borrowed anchor close failure cannot follow a clean-success line."""
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=3)
+    real_release = retention._DirectoryAnchor.release
+
+    def _failed_release(anchor):
+        real_release(anchor)
+        return False
+
+    monkeypatch.setattr(retention._DirectoryAnchor, "release",
+                        _failed_release)
+    status = retention.main([str(data), "--lock", str(lock_path)])
+    printed = capsys.readouterr()
+
+    assert status == 1
+    assert "refused=lock_unavailable" in printed.out
+    assert "halted=True" in printed.out
+    assert printed.err == ""
+
+
+def test_main_fails_closed_when_the_held_target_cannot_be_released(
+        tmp_path, monkeypatch, capsys):
+    """A borrowed target close failure is part of the operator outcome."""
+    data, lock_path = _lock_layout(tmp_path)
+    _populate(data, snapshots=3)
+    real_release = retention._DirectoryBinding.release
+
+    def _failed_release(binding):
+        real_release(binding)
+        return False
+
+    monkeypatch.setattr(retention._DirectoryBinding, "release",
+                        _failed_release)
+    status = retention.main([str(data), "--lock", str(lock_path)])
+    printed = capsys.readouterr()
+
+    assert status == 1
+    assert "refused=identity_unavailable" in printed.out
+    assert "halted=True" in printed.out
+    assert printed.err == ""
 
 
 # -- what the handle did, and what it must not have done ---------------------
@@ -9088,6 +9138,34 @@ def test_trusted_held_routes_do_not_reenter_the_untrusted_path_proof(
     assert status == 0
     assert "refused=none" in printed.out
     assert lock.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-route contract")
+def test_an_ordinary_directory_at_a_descriptor_spelling_is_never_trusted(
+        tmp_path, monkeypatch):
+    """A chroot can make the conventional fd spelling ordinary namespace."""
+    held_root = tmp_path / "held"
+    held_root.mkdir()
+    impostor = tmp_path / "impostor"
+    impostor.mkdir()
+    held_info = os.stat(held_root)
+    expected = (held_info.st_dev, held_info.st_ino)
+    real_lstat = os.lstat
+    real_stat = os.stat
+
+    def _ordinary_candidate(path, *args, **kwargs):
+        if str(path).startswith(("/proc/self/fd/", "/dev/fd/")):
+            return real_lstat(impostor)
+        return real_lstat(path, *args, **kwargs)
+
+    def _followed_candidate(path, *args, **kwargs):
+        if str(path).startswith(("/proc/self/fd/", "/dev/fd/")):
+            return real_stat(impostor)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(retention.os, "lstat", _ordinary_candidate)
+    monkeypatch.setattr(retention.os, "stat", _followed_candidate)
+    assert retention._trusted_posix_descriptor_route(123, expected) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor ancestry")
