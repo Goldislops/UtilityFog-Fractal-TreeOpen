@@ -37,6 +37,35 @@ def assert_phrase(text: str, phrase: str) -> None:
     assert flat(phrase) in flat(text), phrase
 
 
+#: Wordings that put a requirement out of force where it stands. A rule can be
+#: left verbatim and negated in the sentence above it, which every
+#: substring-presence check passes. This is a BOUNDED list over one document,
+#: not a reading of arbitrary prose -- CONTRACT.md section 8a says why that
+#: distinction matters, and this comment does not exceed it.
+NEGATING_WORDINGS = (
+    "none of the following is required",
+    "not requirements",
+    "nothing in this section is in force",
+    "retained for historical reference",
+    "the following text was considered and rejected",
+    "rejected drafts",
+    "that whole proposal is withdrawn",
+    "is not in force",
+    "no longer required",
+)
+
+
+def assert_rule_is_in_force(text: str, anchor: str) -> None:
+    """The rule at ``anchor`` sits under section 9 and is not disowned."""
+    where = text.index(anchor)
+    headings = [m for m in re.finditer(r"(?m)^## .*$", text) if m.start() < where]
+    assert headings, anchor
+    assert headings[-1].group(0).startswith("## 9."), headings[-1].group(0)
+    preceding = flat(text[max(0, where - 900):where]).lower()
+    disowned = [w for w in NEGATING_WORDINGS if w in preceding]
+    assert not disowned, (anchor, disowned)
+
+
 def test_gv7_d_001_the_contract_declares_the_frozen_identity():
     text = contract_text()
     for token in (sup.SCHEMA_ID, sup.LEDGER_ID, sup.CORPUS, sup.INTAKE_STATE):
@@ -983,3 +1012,116 @@ def test_gv7_d_042_the_contract_states_the_calibration_evidence_rules():
         "BIBLIOGRAPHY.md",
         "INTAKE_REPORT.md",
     }
+
+
+def test_gv7_d_043_the_contract_binds_the_inspected_file_to_the_opened_file():
+    """The rule, its narrower true guarantee, and its disclosed residual."""
+    text = contract_text()
+    for statement in (
+        "**The file read is the file inspected.**",
+        "A pathname check followed by an\nindependent pathname open is **insufficient**",
+        'The earlier claim that a\nswapped directory "cannot redirect the read" was false and is **withdrawn**',
+        "reads through a **bound handle**",
+        "the file is opened **once**, and the bytes are read from **that handle**",
+        "taken **from the open descriptor**",
+        "**never from the name\nagain, before the open or after it**",
+        "A\n  second lookup of the name is one more name resolution, not a binding",
+        "prove nothing about the\n  bytes actually read",
+        "fails closed** with the frozen token `path-identity-changed`",
+        "if **either** identity component is **missing or zero**",
+        "An unprovable binding is not a binding",
+        "decided at the **open boundary**",
+        # The guarantee, stated no wider than it is.
+        "It does **not** prevent a swap",
+        "it does **not** detect every\nswap",
+        "the first draft of this section wrongly claimed away",
+        "A directory replaced *after* the ancestor screen and *before* the final\ncomponent's inspection is **not** detected",
+        "The\nresidual is disclosed here rather than described away",
+        "detection of a substitution across the inspection-to-open window",
+        "Ordinary filesystem errors continue to propagate as themselves",
+        "it converts no `OSError` into a refusal",
+    ):
+        assert_phrase(text, statement)
+
+    flattened = flat(text)
+    # The withdrawn overclaim must not return, in either wording.
+    assert "so a swapped directory on the way to the file cannot redirect the read" not in flattened
+    assert "a swap cannot go unnoticed" not in flattened
+    assert "That screen alone does **not** establish" in flattened
+    assert sup.PATH_IDENTITY_TOKEN == "path-identity-changed"
+
+    # PLACEMENT, not mere presence. Text that satisfies a substring search from
+    # inside a "rejected drafts" appendix is not a requirement, so the rule
+    # must sit under the validator section itself. This is a bounded structural
+    # check over one document, not a reading of arbitrary prose -- section 8a
+    # says why that distinction matters.
+    anchor = text.index("**The file read is the file inspected.**")
+    headings = [
+        match for match in re.finditer(r"(?m)^## .*$", text) if match.start() < anchor
+    ]
+    assert headings, "the rule sits before every section heading"
+    assert headings[-1].group(0).startswith("## 9."), headings[-1].group(0)
+    # And the residual is stated where the guarantee is, not elsewhere.
+    residual = text.index("it does **not** detect every")
+    assert anchor < residual < text.index("## 10.", anchor)
+
+    assert_rule_is_in_force(text, "**The file read is the file inspected.**")
+
+    # The stage enumeration names the decision point, so the token's stage is
+    # not asserted in one place and contradicted in another.
+    assert_phrase(
+        text, "and, at the open boundary that closes this stage, the identity binding"
+    )
+
+
+def test_gv7_d_044_the_contract_separates_anchoring_from_discovery():
+    """Consulting the current directory to screen a supplied path is required;
+    searching for an input through it remains forbidden."""
+    text = contract_text()
+    for statement in (
+        "The\n  current directory is consulted for exactly one purpose and no other",
+        "anchoring and screening an explicitly supplied relative path**, which is\n  required",
+        "Searching for, discovering, or falling back to an input",
+        "remains **forbidden**",
+        "Consulting a directory to\n  screen a path the operator named is not the same act as looking for a file\n  the operator did not",
+        "an earlier wording of these two bullets\n  contradicted itself by not saying so",
+        "no fallback-name lookup",
+    ):
+        assert_phrase(text, statement)
+    # The self-contradicting bullet is gone, and cannot come back.
+    assert "no current-directory lookup" not in flat(text)
+
+
+def test_gv7_d_045_the_contract_requires_the_descriptor_and_enumerates_the_gaps():
+    """The identity must come from the descriptor, and every unprovable case
+    is named rather than left to one combined guard."""
+    text = contract_text()
+    for statement in (
+        "taken **from the open descriptor**",
+        "`os.stat(handle.fileno())` or `os.fstat(...)`",
+        "**never from the name\nagain, before the open or after it**",
+        "a *post-open* re-check reports what the\n  name means afterwards while never asking the handle what it is holding",
+        "requires the descriptor query\n  itself, not merely the token",
+        "the handle may be obtained by any route the production import allowlist\n  already admits",
+        "**`io` is not among them**",
+        "although `pathlib.Path.open` reaches `io.open` internally",
+        "an acceptance probe must hook both to see either",
+        "one function object under two module attributes",
+        "if **either** identity component is **missing or zero**",
+        "`st_dev` alone,\n  `st_ino` alone, both, or an attribute the platform does not supply at all",
+        "Each of those cases stands\n  on its own",
+        "a guard that fires only when *both* components are zero still\n  accepts a substitution wherever a platform zeroes just one",
+    ):
+        assert_phrase(text, statement)
+    # The enumerated cases and the opener routes are carried as data too, so a
+    # future edit cannot drop one from the suite while leaving the prose.
+    assert set(sup.UNPROVABLE_IDENTITY_CASES) == {
+        "dev-zero", "ino-zero", "both-zero", "dev-absent", "ino-absent"
+    }
+    assert {name for name, _opener in sup.OPENER_ROUTES} == {
+        "builtins.open", "io.open", "pathlib.Path.open", "os.open + os.fdopen"
+    }
+    assert_rule_is_in_force(text, "taken **from the open descriptor**")
+
+    # And the residual stays disclosed, unweakened.
+    assert_phrase(text, "it does **not** detect every\nswap")

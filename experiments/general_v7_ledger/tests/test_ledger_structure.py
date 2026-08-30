@@ -4118,3 +4118,377 @@ def test_gv7_s_073_the_staged_token_is_identical_under_every_execution_mode():
     outcome = outcomes.pop()
     assert outcome != "ACCEPTED", "the doubly-faulted payload was accepted"
     assert outcome in sup.REQUIRED_REFUSAL_TOKENS, outcome
+
+
+def identity_fixture(tmp_path):
+    """A refusable document and an equal-length valid replacement."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(good)
+    target.write_bytes(sup.padded_refusable(len(good)))
+    assert target.stat().st_size == replacement.stat().st_size
+    return target, replacement
+
+
+def test_gv7_s_074_the_compared_identity_comes_from_the_opened_descriptor(
+    tmp_path, monkeypatch
+):
+    """The bytes read must come from the object whose inspection was recorded,
+    and the proof of that must come from the DESCRIPTOR, not from the name.
+
+    Three shapes were measured passing an earlier version of this control while
+    still failing the requirement: a pre-open second lookup of the name, a
+    byte-count proxy, and -- fully green on all 196 -- a post-open re-inspection
+    of the pathname with a complete zero guard. The last one emits the right
+    token for the right document and never once asks the open handle what it is
+    holding, which is precisely what the contract forbids.
+
+    So the outcome is checked AND the query is: the swap happens at the open
+    boundary, the two documents are the same length, and ``os.stat``/``os.fstat``
+    must have been called with an actual open descriptor.
+    """
+    validate = sup.require_validate()
+    target, replacement = identity_fixture(tmp_path)
+
+    # Unmolested, this document is refused at the content stage. That is the
+    # baseline the swap has to overturn for the defect to be visible at all.
+    with pytest.raises(validate.LedgerError) as baseline:
+        validate.validate_ledger_file(target)
+    assert baseline.value.token == "missing-key"
+
+    probe = sup.ReplaceBeforeOpen(target, replacement).install(monkeypatch)
+    queries = sup.IdentityQueryLog().install(monkeypatch)
+    refusal = None
+    try:
+        validate.validate_ledger_file(target)
+    except validate.LedgerError as error:
+        refusal = error
+
+    assert probe.replaced, (
+        "the file was never opened through any hooked opener, so this control "
+        "never entered the window it exists to test"
+    )
+    opened = probe.opened_identity()
+    assert probe.inspected != opened, "the probe did not change the object"
+    assert refusal is not None, (
+        "the replacement was ACCEPTED: the bytes read did not come from the "
+        f"object that was inspected -- inspected {probe.inspected}, "
+        f"read {opened}"
+    )
+    assert refusal.token == sup.PATH_IDENTITY_TOKEN, refusal.token
+    assert isinstance(refusal, validate.LedgerPathError)
+    assert queries.descriptor_queries >= 1, (
+        "the refusal is right but its evidence is not: no identity was ever "
+        "asked of an open descriptor, so the comparison rested on another "
+        f"resolution of the name ({queries.path_queries} name queries)"
+    )
+    assert opened in queries.descriptor_identities, (
+        "a descriptor was queried, but never the one holding the bytes that "
+        f"were read: asked {sorted(queries.descriptor_identities)}, read "
+        f"{opened}"
+    )
+    assert probe.open_count == 1, (
+        "the contract opens the file ONCE and reads from that handle; this "
+        f"implementation opened the target {probe.open_count} times, so the "
+        "descriptor it inspected need not be the one it read"
+    )
+
+    # The window BETWEEN two opens. An implementation that opens a probe
+    # descriptor, inspects it, closes it and opens again to read refuses
+    # correctly when the swap lands before its first open -- and accepts a
+    # document swapped between the two. One that opens once never enters this
+    # window, and nothing is asserted of it here.
+    with monkeypatch.context() as second_pass:
+        later_target, later_replacement = identity_fixture(tmp_path / "between-opens")
+        later = sup.ReplaceBeforeOpen(
+            later_target, later_replacement, swap_on=2
+        ).install(second_pass)
+        later_refusal = None
+        try:
+            validate.validate_ledger_file(later_target)
+        except validate.LedgerError as error:
+            later_refusal = error
+    if later.open_count >= 2:
+        assert later.replaced, "the second-open window was never entered"
+        assert later_refusal is not None, (
+            "the target was opened twice and a document swapped BETWEEN the "
+            "opens was ACCEPTED: the descriptor that was inspected is not the "
+            "descriptor the bytes came from"
+        )
+        assert later_refusal.token == sup.PATH_IDENTITY_TOKEN, later_refusal.token
+
+
+def test_gv7_s_075_the_identity_token_is_declared_and_raised_as_a_path_refusal(
+    tmp_path, monkeypatch
+):
+    """The token is in the production vocabulary, and is a path refusal."""
+    schema = sup.require_schema()
+    validate = sup.require_validate()
+
+    assert sup.PATH_IDENTITY_TOKEN in schema.REFUSAL_TOKENS, (
+        "the production vocabulary does not declare the identity token"
+    )
+    assert schema.REFUSAL_TOKENS == tuple(sorted(set(schema.REFUSAL_TOKENS)))
+
+    target, replacement = identity_fixture(tmp_path)
+    probe = sup.ReplaceBeforeOpen(target, replacement).install(monkeypatch)
+    with pytest.raises(validate.LedgerPathError) as excinfo:
+        validate.validate_ledger_file(target)
+    assert probe.replaced
+    assert excinfo.value.token == sup.PATH_IDENTITY_TOKEN
+    assert isinstance(excinfo.value, schema.LedgerError)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    for marker in sup.MARKERS:
+        assert marker not in str(excinfo.value)
+
+
+def test_gv7_s_076_every_unprovable_identity_is_refused_not_assumed(
+    tmp_path, monkeypatch
+):
+    """Each way an identity can prove nothing is pinned on its own.
+
+    A guard that fires only when BOTH components are zero was measured green on
+    all 196 while accepting a swap wherever a platform zeroes just one of them,
+    so "both zero" alone is not a control -- each component, and each absence,
+    is checked separately.
+    """
+    validate = sup.require_validate()
+    ledger_text = sup.require_file(sup.LEDGER_PATH, "ledger.json")
+
+    # No swap anywhere here. An earlier version relied on one to create the
+    # difference, so the two identities differed whatever the implementation
+    # did -- and the dev-zero case pinned nothing at all, because both fixture
+    # files sit on one volume and share `st_dev`. The document is VALID and
+    # unmodified: an implementation that proves the binding must refuse it
+    # because the identity cannot be proven, and one that does not will accept
+    # it. That is the difference this control exists to see.
+    for case in sup.UNPROVABLE_IDENTITY_CASES:
+        work = tmp_path / case
+        work.mkdir(parents=True, exist_ok=True)
+        target = work / "ledger.json"
+        target.write_text(ledger_text, encoding="utf-8")
+        # Unmasked, this exact file is accepted.
+        validate.validate_ledger_file(target)
+
+        with monkeypatch.context() as patched:
+            sup.UnprovableIdentity(case).install(patched)
+            refusal = None
+            try:
+                validate.validate_ledger_file(target)
+            except validate.LedgerError as error:
+                refusal = error
+            except AttributeError as error:  # noqa: PERF203 - reported, not hidden
+                raise AssertionError(
+                    f"{case}: an absent identity component escaped the closed "
+                    f"refusal vocabulary as {type(error).__name__}"
+                ) from None
+        assert refusal is not None, (
+            f"{case}: an identity that cannot distinguish two files was "
+            "treated as proof that this is the right file, and the document "
+            "was ACCEPTED on it"
+        )
+        assert refusal.token == sup.PATH_IDENTITY_TOKEN, (case, refusal.token)
+
+
+def test_gv7_s_077_the_identity_binding_holds_in_every_execution_mode(tmp_path):
+    """Ordinary, ``-O`` and ``-OO`` must agree, and must all refuse.
+
+    The subprocess installs the SHARED probe through ``install_raw``, so it
+    covers exactly the opener routes ``ReplaceBeforeOpen`` covers. A narrower
+    hand-written copy hooked only ``builtins.open`` and falsely rejected a
+    compliant implementation that opened through ``os.open``.
+    """
+    good = sup.require_file(sup.LEDGER_PATH, "ledger.json").encode("utf-8")
+    target = tmp_path / "ledger.json"
+    replacement = tmp_path / "replacement.json"
+
+    script = (
+        "import sys, pathlib\n"
+        "from experiments.general_v7_ledger.tests import _support as sup\n"
+        "from experiments.general_v7_ledger import validate as v\n"
+        "target = pathlib.Path(sys.argv[1])\n"
+        "replacement = pathlib.Path(sys.argv[2])\n"
+        "probe = sup.ReplaceBeforeOpen(target, replacement)\n"
+        "queries = sup.IdentityQueryLog()\n"
+        "restore = probe.install_raw()\n"
+        "undo = queries.install_raw()\n"
+        "try:\n"
+        "    v.validate_ledger_file(target)\n"
+        "    outcome = 'ACCEPTED'\n"
+        "except v.LedgerError as error:\n"
+        "    outcome = error.token\n"
+        "finally:\n"
+        "    undo()\n"
+        "    restore()\n"
+        "sys.stdout.write(outcome + '|' + str(probe.replaced) + '|'\n"
+        "                 + str(queries.descriptor_queries > 0))\n"
+    )
+
+    outcomes = set()
+    for flags in ([], ["-O"], ["-OO"]):
+        replacement.write_bytes(good)
+        target.write_bytes(sup.padded_refusable(len(good)))
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONPATH"] = str(sup.REPO_ROOT)
+        completed = subprocess.run(
+            [sys.executable, *flags, "-c", script, str(target), str(replacement)],
+            capture_output=True,
+            env=environment,
+            cwd=str(sup.REPO_ROOT),
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+        outcomes.add(completed.stdout.decode("utf-8"))
+
+    assert len(outcomes) == 1, sorted(outcomes)
+    token, replaced, asked = outcomes.pop().split("|")
+    assert replaced == "True", "the replacement never happened in the subprocess"
+    assert token == sup.PATH_IDENTITY_TOKEN, token
+    # The token alone would pass an implementation whose descriptor query sits
+    # behind `if __debug__:` and vanishes under -O.
+    assert asked == "True", (
+        "the three modes agree on the token, but no identity was asked of a "
+        "descriptor in them"
+    )
+
+
+def test_gv7_s_078_every_permitted_opener_route_reaches_the_fixture(tmp_path):
+    """The probe's own self-test: a route it misses must fail loudly.
+
+    ``io.open`` IS ``builtins.open`` -- one function object under two module
+    attributes -- so hooking one leaves the other bound to the original.
+    ``pathlib.Path.open`` calls ``io.open``, and a compliant implementation
+    opening that way walked straight past a probe that hooked only
+    ``builtins``, which showed up as a false rejection rather than as a hole.
+    Every route is therefore exercised here, against the probe itself, with no
+    validator involved.
+    """
+    assert sup.OPENER_ROUTES, "no opener route is declared"
+    missed = []
+    for name, opener in sup.OPENER_ROUTES:
+        work = tmp_path / name.replace(".", "_").replace(" ", "").replace("+", "_")
+        work.mkdir(parents=True)
+        target = work / "ledger.json"
+        replacement = work / "replacement.json"
+        target.write_bytes(b"original")
+        replacement.write_bytes(b"replacement")
+
+        probe = sup.ReplaceBeforeOpen(target, replacement)
+        restore = probe.install_raw()
+        try:
+            with opener(target) as handle:
+                content = handle.read()
+        finally:
+            restore()
+
+        if not probe.replaced or content != b"replacement":
+            missed.append((name, probe.replaced, content))
+    assert not missed, (
+        "these opener routes are not intercepted, so a compliant "
+        f"implementation using them would be judged on nothing: {missed}"
+    )
+
+
+#: Calls that resolve a NAME rather than question a descriptor.
+NAME_RESOLVING_CALLS = ("lstat", "stat", "open", "fdopen", "scandir", "listdir",
+                        "access", "readlink", "realpath", "samefile")
+
+
+def name_resolutions_after_open(source):
+    """``(line, call)`` for each name resolution after the file is opened.
+
+    A descriptor query is exempt: its argument is a ``.fileno()`` call, or a
+    name bound from one. Everything else re-resolves the pathname, which the
+    contract forbids once the handle exists.
+    """
+    import ast as syntax
+
+    tree = syntax.parse(source)
+    function = next(
+        node for node in tree.body
+        if isinstance(node, syntax.FunctionDef) and node.name == "validate_ledger_file"
+    )
+    opens = [
+        node.lineno
+        for node in syntax.walk(function)
+        if isinstance(node, syntax.Call)
+        and (
+            (isinstance(node.func, syntax.Name) and node.func.id == "open")
+            or (isinstance(node.func, syntax.Attribute) and node.func.attr in ("open", "fdopen"))
+        )
+    ]
+    if not opens:
+        return [(
+            "no named opener",
+            "the handle is not obtained by calling a named standard-library "
+            "opener. An alias captured at import time -- `_OPEN = open` at "
+            "module scope -- is unobservable to any acceptance surface, so the "
+            "contract requires the named call itself",
+        )]
+    first_open = min(opens)
+
+    descriptors = set()
+    for node in syntax.walk(function):
+        if isinstance(node, syntax.Assign) and isinstance(node.value, syntax.Call):
+            call = node.value
+            if isinstance(call.func, syntax.Attribute) and call.func.attr in ("open", "fileno"):
+                for target in node.targets:
+                    if isinstance(target, syntax.Name):
+                        descriptors.add(target.id)
+
+    def questions_a_descriptor(call):
+        if not call.args:
+            return False
+        first = call.args[0]
+        if isinstance(first, syntax.Call) and isinstance(first.func, syntax.Attribute):
+            return first.func.attr == "fileno"
+        return isinstance(first, syntax.Name) and first.id in descriptors
+
+    found = []
+    for node in syntax.walk(function):
+        if not isinstance(node, syntax.Call) or node.lineno <= first_open:
+            continue
+        name = None
+        if isinstance(node.func, syntax.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, syntax.Name):
+            name = node.func.id
+        if name in ("fstat",) or name not in NAME_RESOLVING_CALLS:
+            continue
+        if questions_a_descriptor(node):
+            # `os.fstat(fd)`, `os.stat(handle.fileno())` and
+            # `os.fdopen(descriptor)` all question a descriptor the function
+            # already holds. None of them resolves the name again.
+            continue
+        found.append((node.lineno, name))
+    return found
+
+
+def test_gv7_s_079_the_name_is_not_resolved_again_after_the_open():
+    """Once the handle exists, the name is finished with.
+
+    A validator that queries the read handle's descriptor, throws the answer
+    away and decides on a post-open `os.lstat(path)` satisfies every
+    behavioural control in this suite. The probe that would separate it --
+    restoring the original object over the name while the handle is open --
+    fails with WinError 5 on this platform, because CPython does not open with
+    FILE_SHARE_DELETE. That shape is therefore refused by source shape here.
+
+    This is a BOUNDED structural check over one function, not a reading of
+    arbitrary code, and CONTRACT.md section 8a says why that distinction
+    matters. It closes the one shape the behavioural controls cannot reach on
+    this platform; it is not a second, independent proof of the same property.
+    """
+    source = sup.require_file(sup.VALIDATE_PATH, "validate.py")
+    core = sup.require_file(sup.LAB_DIR / "__init__.py", "__init__.py")
+    # The pipeline may live in either surface; it is pinned wherever it is.
+    where = core if "def validate_ledger_file" in core else source
+    offenders = name_resolutions_after_open(where)
+    assert not offenders, (
+        "the supplied name is resolved again after the file is opened, so the "
+        f"decision need not rest on the handle at all: {offenders}"
+    )
