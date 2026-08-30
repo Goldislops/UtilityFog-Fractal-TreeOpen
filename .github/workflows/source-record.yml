@@ -1,0 +1,36 @@
+name: source-record
+
+on:
+  pull_request:
+    paths:
+      - "experiments/source_record/**"
+      - ".github/workflows/source-record.yml"
+  push:
+    branches: [main]
+    paths:
+      - "experiments/source_record/**"
+      - ".github/workflows/source-record.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-record-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: source-record (informational, path-scoped)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      # Contacts the configured Python package index. Pinned exactly.
+      - name: Install test dependencies
+        run: pip install pytest==9.0.2
+      - name: Collect the acceptance surface
+        run: python -m pytest --collect-only -q experiments/source_record/tests
+      - name: Run the acceptance suite
+        run: python -m pytest -q -p no:cacheprovider experiments/source_record/tests
