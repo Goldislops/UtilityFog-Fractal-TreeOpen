@@ -248,7 +248,7 @@ def test_g7s_s_024_the_ledger_equals_its_own_canonical_serialization():
     deciding it.
     """
     ledger = sup.require_ledger()
-    raw = sup.LEDGER_PATH.read_bytes()
+    raw = sup.committed_blob(f"{sup.LAB_POSIX}/ledger.json")
     canonical = sup.canonical_bytes(ledger)
     assert not canonical.endswith(b"\n"), "canonical form must carry no newline"
     assert raw == canonical + b"\n", "ledger.json is not canonical bytes plus one LF"
