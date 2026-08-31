@@ -157,14 +157,21 @@ normalized fields, and a locator may appear in no field other than these four.
 
 ## 5. Frozen inventory, by evidence standing
 
-Figures are recorded with the standing of the evidence behind them. The two
-classes are never mixed, and an interpretive figure is never asserted as a
-structural fact.
+Figures are recorded with the standing of the evidence behind them. **Three**
+classes are distinguished and are never mixed:
 
-### 5a. Structural --- independently reproduced from the packet
+1. figures reproduced from the packet;
+2. facts about this admission process and this ledger's boundary, which no
+   reading of the packet could establish;
+3. prior interpretive expectations, inherited and unreproduced.
 
-These were reproduced by the authoring seat directly from the packet bytes and
-are frozen:
+An interpretive figure is never asserted as a packet fact, and a fact about
+this process is never described as reproduced from packet bytes.
+
+### 5a. Packet-derived facts --- independently reproduced from the packet
+
+These six were reproduced by the authoring seat directly from the packet bytes
+and are frozen. Every one of them is a property of the supplied material:
 
 | Quantity | Value |
 | --- | --- |
@@ -174,18 +181,40 @@ are frozen:
 | `origin_type` inline_user_message rows | `3` |
 | Bibliography title entries | `26` |
 | Distinct supplied video identifiers | `26` |
-| Sources retrieved | `0` |
-| Sources verified | `0` |
-| Claims verified | `0` |
-| Relationships verified | `0` |
-| UAP V6 records | `0` |
-| Bridge Register records | `0` |
 
 The bibliography relation is one-to-one: each of the 26 bibliography entries
 yields exactly one distinct supplied video identifier, and the 26 entries
 yield 26 distinct identifiers.
 
-### 5b. Prior interpretive expectations --- recorded, not frozen
+### 5b. Admission standing --- what this process did, not what the packet contains
+
+These six are frozen too, and they are **not** packet-derived. No reading of
+the packet could establish any of them: they record what this admission
+process did and where this ledger's boundary was drawn. Nothing in this
+laboratory may describe them as reproduced from packet bytes.
+
+| Quantity | Value | Witness |
+| --- | --- | --- |
+| Sources retrieved | `0` | `PACKET_RECEIPT.md` section 9 |
+| Sources verified | `0` | `PACKET_RECEIPT.md` section 9 |
+| Claims verified | `0` | `PACKET_RECEIPT.md` section 9 |
+| Relationships verified | `0` | `PACKET_RECEIPT.md` section 9 |
+| Admitted UAP V6 records | `0` | section 12 of this contract |
+| Admitted Bridge Register records | `0` | section 12 of this contract |
+
+**The two kinds of zero in this table are different in kind and are not
+interchangeable.** The first four are counted: a population will exist --- the
+sources, claims and relationships this ledger will hold --- and the count over
+it is required to be zero, because no retrieval and no verification was
+attempted and none is authorized in v1. At this phase no ledger exists, so
+those four are forward commitments with no live witness; the controls that
+check them fail with `implementation-absent` until there is a ledger. The last
+two are not counts at all. The schema exposes no record type into which a UAP
+V6 or a Bridge Register record could be placed, so there is nothing to
+enumerate; the zero records a structural impossibility, not an empty search.
+A prohibition is stronger than a count of zero, and section 12 carries it.
+
+### 5c. Prior interpretive expectations --- recorded, not frozen
 
 These figures were **not** reproduced from packet structure by this phase.
 They are inherited from the adjacent `general-v7-technology-ledger-v1`
@@ -195,17 +224,32 @@ laboratory, where they are frozen constants over the same supplied corpus:
 | --- | --- |
 | Provisional source identities | `61` |
 | Identities without an exact locator | `35` |
+| Identities with an exact locator | `26` |
 | Non-admitted artifacts | `3` |
 
-The relation `26 + 35 = 61` is an internal arithmetic reconciliation of these
-three figures and is recorded as such.
+The relation `26 + 35 = 61` reconciles these inherited figures **among
+themselves**. The 26 appearing in it is the inherited count of identities with
+an exact locator; it is **not** the packet-reproduced bibliography or
+identifier count of section 5a, even though the two coincide. An earlier form
+of this reconciliation spent the section 5a constant as its 26, which made an
+inherited, unreproduced relation load-bearing on a reproduced one.
 
-**No control asserts 61, 35 or 3 as a structural fact**, and the schema does
-not freeze a count for `sources` or for `non_admitted`. Freezing them would
-launder an unreproduced interpretation into structure. The `non_admitted`
-collection may legitimately be empty.
+**No control asserts 61, 35, 26 or 3 of this ledger.** None requires the
+`sources` collection to hold 61 records, or 35 of them to lack a locator, or
+26 to carry one, or `non_admitted` to hold 3. A control does assert these
+values as the *content of the inherited record* --- a statement about what was
+inherited from the adjacent laboratory, not about this corpus --- and the
+schema does not freeze a count for `sources` or for `non_admitted`. Freezing
+them would launder an unreproduced interpretation into structure. The
+`non_admitted` collection may legitimately be empty.
 
-### 5c. Counts that are deliberately not frozen
+The integer `3` is asserted elsewhere as the `origin_type`
+inline_user_message row count, which is a reproduced packet fact and a
+**different quantity** that merely shares a value; section 13 forbids
+equating the two. The guarantee above is about quantities, never about bare
+integers: `0` and `26` likewise recur across classes.
+
+### 5d. Counts that are deliberately not frozen
 
 The number of supplied **locator surface forms** is not frozen at any value.
 The count is an artifact of how a tokenizer cuts the supplied text: the same
@@ -226,16 +270,28 @@ Two committed witnesses carry packet facts, and they carry different kinds:
   facts --- the archive digest and byte size, the entry census, the member
   manifest and its checksum result, the line-ending and encoding censuses.
   Every control that checks one of those checks it against the receipt.
-- **This contract** carries the **content-derived** structural figures in
-  section 5a --- the `ORIGINS.tsv` row census, the `origin_type` split, and
-  the bibliography and identifier counts. They are recorded here under the
-  authoring seat's own standing, because deriving them required reading batch
-  content, and section 8.5 of the receipt deliberately keeps content-derived
-  counts out of the receipt.
+- **This contract** carries the **content-derived** packet facts in section
+  5a --- the `ORIGINS.tsv` row census, the `origin_type` split, and the
+  bibliography and identifier counts. Section 5a additionally lists the
+  supplied-batch count, which is archive-level rather than content-derived and
+  for which the receipt is authoritative. They are recorded here under the
+  authoring seat's own standing, because deriving them required reading the
+  supplied `ORIGINS.tsv` row by row and the bibliography batch line by line,
+  which the receipt does not do, and because section 8.5 of the receipt
+  deliberately keeps content-derived counts out of the receipt.
 
-Neither document witnesses the other's figures, and neither claims to. A
-figure's standing is whichever of the two records it, and section 5b figures
-are recorded by neither: they are inherited and unreproduced.
+The two documents do overlap, and saying otherwise would be false. Both record
+the 63 supplied batches; both record the three inline members; and both record
+the four retrieval-and-verification zeros of section 5b. The two corpus rows
+of section 5b appear in this contract alone: the receipt records nothing about
+either corpus, and section 12 is their sole witness. Where they overlap, authority is
+assigned rather than shared: the **receipt** is authoritative for the
+archive-level figures and for the retrieval and verification boundary it
+states in its section 9, and **this contract** is authoritative for the
+content-derived figures of section 5a and for the corpus prohibitions of
+section 12. Neither document witnesses the other's *authoritative* figures,
+and section 5c figures are authoritative in neither: they are inherited and
+unreproduced.
 
 ## 6. Provenance requirements
 
@@ -376,7 +432,8 @@ The `correction_kind` vocabulary is closed to exactly `correction`,
 2. A correction may not target another correction. That refusal is distinct
    from an unresolved-reference refusal: the target exists and is refused for
    being the wrong kind.
-3. Corrections never reduce a frozen structural count.
+3. Corrections never reduce a frozen packet-fact count, and never alter a
+   frozen admission-standing value.
 4. A withdrawn record is retired, never deleted and never renumbered, and its
    id is reserved with a reason so that an auditor reading an earlier handback
    can find what it was.
@@ -505,9 +562,18 @@ substitutes for the other.
 **The UAP V6 corpus is absent from this ledger.** **The Bridge Register is
 absent from this ledger.** Neither contributes a record, a field, a vocabulary
 token or an identifier namespace, and the schema exposes no record type into
-which either could be placed. Separation is enforced by a key **allowlist**,
-not by a name blocklist, because a blocklist admits every name coined
-tomorrow.
+which either could be placed. Separation is enforced **primarily** by a key
+allowlist, because a blocklist admits every name coined tomorrow. A narrow
+substring scan over the two known corpus names is retained as a second layer
+only; it is defence in depth and is **not** the mechanism, and no control may
+present it as one.
+
+Because the boundary must be stated in order to be enforced, the exclusion
+vocabulary --- the corpus names, the forbidden package names, the zero-valued
+admission rows --- **necessarily appears** in this contract and in the
+acceptance suite. Those appearances are guardrails. They are not admitted
+records, and their presence must never be reported as the presence of the
+corpora they exclude.
 
 There is **no transfer of truth from synthetic calibration data.** Any
 synthetic record committed for calibration is evidence about validator

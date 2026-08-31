@@ -195,3 +195,24 @@ def test_g7s_q_012_no_liftable_document_reproduces_packet_prose():
         assert "```" not in text, "a liftable document carries a fenced block"
         for line in text.split("\n"):
             assert len(line) <= 500, "an over-long line suggests pasted packet prose"
+
+
+def test_g7s_q_013_no_record_type_can_hold_a_sealed_corpus_record():
+    """The witness for the two corpus standings, where the contract puts it.
+
+    CONTRACT.md section 5b says these two zeros are not counts: the schema
+    exposes no record type into which a UAP V6 or Bridge Register record could
+    be placed, so there is nothing to enumerate and the zero records a
+    structural impossibility. The honest witness is therefore the declared key
+    sets --- an allowlist, per section 12 --- and not a search of the data.
+    """
+    schema = sup.require_schema()
+    for collection, keys in sorted(schema.KEYS_BY_COLLECTION.items()):
+        for key in sorted(keys):
+            lowered = key.lower()
+            assert "uap" not in lowered, (collection, key)
+            assert "bridge" not in lowered, (collection, key)
+    assert set(schema.KEYS_BY_COLLECTION) == set(sup.COLLECTIONS)
+    standing = sup.FROZEN_ADMISSION_STANDING
+    assert standing["admitted_uap_v6_records"] == 0
+    assert standing["admitted_bridge_records"] == 0

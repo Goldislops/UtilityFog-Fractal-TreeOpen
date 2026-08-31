@@ -41,18 +41,18 @@ def _ids(letter: str, *spans) -> tuple:
 #: earlier handback must be able to look one up and find that it was
 #: withdrawn, not find a different control wearing its name.
 AUTHORED_CONTROLS = {
-    "test_contract.py": _ids("D", (1, 47)),
-    "test_controls_manifest.py": _ids("M", (1, 36)),
+    "test_contract.py": _ids("D", (1, 48)),
+    "test_controls_manifest.py": _ids("M", (1, 38)),
     "test_packet_manifest.py": _ids("R", (1, 20)),
     "test_inventory.py": _ids("I", (1, 16)),
     "test_schema.py": _ids("S", (1, 33)),
     "test_provenance.py": _ids("P", (1, 16)),
-    "test_quarantine.py": _ids("Q", (1, 12)),
+    "test_quarantine.py": _ids("Q", (1, 13)),
 }
 
-FAMILY_TOTALS = {"D": 47, "M": 36, "R": 20, "I": 16, "S": 33, "P": 16, "Q": 12}
+FAMILY_TOTALS = {"D": 48, "M": 38, "R": 20, "I": 16, "S": 33, "P": 16, "Q": 13}
 
-GRAND_TOTAL = 180
+GRAND_TOTAL = 184
 
 BANNED_MARKS = frozenset({"skip", "skipif", "xfail"})
 BANNED_CALLS = frozenset({"skip", "xfail", "importorskip", "exit", "fail"})
@@ -434,8 +434,8 @@ def test_g7s_m_018_the_two_groups_partition_the_census_exactly():
             raise AssertionError(f"module in neither group: {filename}")
     assert not contract_only & implementation_dependent
     assert contract_only | implementation_dependent == all_declared()
-    assert len(contract_only) == 103, len(contract_only)
-    assert len(implementation_dependent) == 77, len(implementation_dependent)
+    assert len(contract_only) == 106, len(contract_only)
+    assert len(implementation_dependent) == 78, len(implementation_dependent)
 
 
 def test_g7s_m_019_every_gated_control_calls_its_gate_first():
@@ -694,33 +694,200 @@ def test_g7s_m_035_the_frozen_constants_are_internally_consistent():
     assert sup.EXPECTED_ORIGIN_ROWS == sup.EXPECTED_BATCHES
     assert sup.EXPECTED_BIBLIOGRAPHY_ENTRIES == sup.EXPECTED_VIDEO_IDENTIFIERS
     assert sum(sup.LINE_ENDING_CENSUS.values()) == sup.PACKET_ENTRY_COUNT
-    assert sup.LINE_ENDING_CENSUS["lf-only"] + sup.LINE_ENDING_CENSUS["mixed"] == (
-        sup.EXPECTED_INLINE_ROWS
-    )
+    # The line-ending census and the inline-row count are NOT reconciled here.
+    # PACKET_RECEIPT.md section 4 records their correlation as an observation
+    # about how the material was captured and says in terms that it is "not
+    # treated as a classification of those members". Asserting it would convert
+    # a recorded observation into an enforced invariant, and would make a
+    # future correction finding a mixed-ending attachment fail a control that
+    # the receipt's own framing says must be allowed to happen. It would also
+    # weld a receipt-witnessed archive figure to a contract-witnessed
+    # content-derived one, which is precisely the cross-witnessing that
+    # CONTRACT.md section 5 assigns rather than shares.
 
 
-def test_g7s_m_036_no_interpretive_figure_is_frozen_as_structural():
-    """The control that keeps 61, 35 and 3 out of the structural inventory.
+def test_g7s_m_036_no_interpretive_figure_is_frozen_in_either_class():
+    """Keeps 61, 35, 26-inherited and 3 out of BOTH frozen classes.
 
-    ``3`` legitimately appears as the inline-row count, which is a reproduced
-    structural fact, so the check is on the named interpretive quantities
-    rather than on the bare integers.
+    Two earlier defects are closed here. First, the key guard listed
+    ``sources``, ``non_admitted``, ``claims`` and ``relationships`` --- none of
+    which was ever a key of the frozen dict, whose actual keys were
+    ``verified_sources``, ``verified_claims`` and ``verified_relationships``.
+    The guard therefore passed vacuously while three counts over exactly those
+    collections were frozen and labelled structural: the control that existed
+    to keep the taxonomy clean was asleep. Second, everything was discharged
+    against a single dict, so after the split it would have guarded one class
+    and left the other unguarded.
+
+    Value blacklisting works for 61 and 35 only, and only by luck of this
+    packet. It cannot work for 3, 0 or 26, each of which is a legitimate value
+    in a frozen class as well as an interpretive one. Class membership is
+    therefore proved by key, positively, in ``G7S-M-037``.
     """
     interpretive = sup.PRIOR_INTERPRETIVE_EXPECTATIONS
     assert set(interpretive) == {
         "provisional_source_identities",
         "identities_without_exact_locator",
+        "identities_with_exact_locator",
         "non_admitted_artifacts",
     }
     assert interpretive["provisional_source_identities"] == 61
     assert interpretive["identities_without_exact_locator"] == 35
+    assert interpretive["identities_with_exact_locator"] == 26
     assert interpretive["non_admitted_artifacts"] == 3
+    # Closes within the interpretive dict; spends no packet-derived constant.
     assert (
         interpretive["identities_without_exact_locator"]
-        + sup.EXPECTED_VIDEO_IDENTIFIERS
+        + interpretive["identities_with_exact_locator"]
         == interpretive["provisional_source_identities"]
     )
-    for key in ("sources", "non_admitted", "claims", "relationships"):
-        assert key not in sup.FROZEN_STRUCTURAL_INVENTORY, key
-    assert 61 not in sup.FROZEN_STRUCTURAL_INVENTORY.values()
-    assert 35 not in sup.FROZEN_STRUCTURAL_INVENTORY.values()
+    # No interpretive KEY may appear in either frozen class.
+    assert not set(interpretive) & set(sup.FROZEN_INVENTORY), sorted(
+        set(interpretive) & set(sup.FROZEN_INVENTORY)
+    )
+    frozen_values = {value for value, _class in sup.FROZEN_INVENTORY.values()}
+    for uniquely_interpretive in (61, 35):
+        assert uniquely_interpretive not in frozen_values, uniquely_interpretive
+    # Subject check, by subject rather than by exact spelling. The vacuous
+    # ancestor of this loop looked for bare collection names that were never
+    # keys; these substrings match the names actually used.
+    for key in sup.FROZEN_PACKET_FACTS:
+        for subject in ("retriev", "verif", "uap", "bridge", "admitted"):
+            assert subject not in key, (key, subject)
+    for key in sup.FROZEN_ADMISSION_STANDING:
+        for subject in ("batch", "origin", "bibliograph", "video", "attachment"):
+            assert subject not in key, (key, subject)
+    # Every inherited value must be a LITERAL, never a reference to a frozen
+    # constant. This is the one property no value comparison can see: binding
+    # `identities_with_exact_locator` to EXPECTED_VIDEO_IDENTIFIERS leaves the
+    # value 26 and every equality above still true, while quietly restoring the
+    # defect where an inherited relation is load-bearing on a reproduced one.
+    # Convergence by reference is only visible to a static read.
+    source = sup.require_file(sup.TESTS_DIR / "_support.py", "_support.py")
+    tree = parse(source)
+    interpretive_nodes = []
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        for target in targets:
+            if getattr(target, "id", None) == "PRIOR_INTERPRETIVE_EXPECTATIONS":
+                interpretive_nodes.append(node.value)
+    assert len(interpretive_nodes) == 1, "expected one interpretive assignment"
+    mapping = interpretive_nodes[0]
+    assert isinstance(mapping, ast.Dict), type(mapping).__name__
+    non_literal = [
+        getattr(value, "id", type(value).__name__)
+        for value in mapping.values
+        if not isinstance(value, ast.Constant)
+    ]
+    assert not non_literal, f"non-literal interpretive value(s): {non_literal}"
+
+
+#: The key-to-class map, declared here and compared against the structure in
+#: ``_support``. Declaration and structure sit on opposite sides of the
+#: comparison on purpose: a check whose two halves come from the same constant
+#: proves nothing.
+EXPECTED_EVIDENCE_CLASSES = {
+    "batches": "packet-derived",
+    "origin_rows": "packet-derived",
+    "attachment_rows": "packet-derived",
+    "inline_rows": "packet-derived",
+    "bibliography_entries": "packet-derived",
+    "video_identifiers": "packet-derived",
+    "retrieved": "admission-standing",
+    "verified_sources": "admission-standing",
+    "verified_claims": "admission-standing",
+    "verified_relationships": "admission-standing",
+    "admitted_uap_v6_records": "admission-standing",
+    "admitted_bridge_records": "admission-standing",
+}
+
+
+def test_g7s_m_037_every_frozen_figure_carries_its_declared_evidence_class():
+    """Pins WHICH class each figure carries, not merely that classes exist.
+
+    Disjointness plus a union size is satisfied by ANY bipartition of the
+    twelve names. Swapping ``retrieved`` into the packet class and
+    ``inline_rows`` into the admission class keeps the two sets disjoint, keeps
+    the union at twelve, keeps every value an int, and keeps 61 and 35 out ---
+    and silently redraws the evidence boundary. Only a positive, literal
+    key-to-class pin closes that, so that is what this control is.
+    """
+    actual = {
+        key: evidence_class
+        for key, (_value, evidence_class) in sup.FROZEN_INVENTORY.items()
+    }
+    assert actual == EXPECTED_EVIDENCE_CLASSES, sorted(
+        key
+        for key in set(actual) | set(EXPECTED_EVIDENCE_CLASSES)
+        if actual.get(key) != EXPECTED_EVIDENCE_CLASSES.get(key)
+    )
+    assert len(sup.FROZEN_INVENTORY) == 12
+    assert set(sup.EVIDENCE_CLASSES) == {"packet-derived", "admission-standing"}
+    # The two published views are derived from the classification, so they
+    # cannot disagree with it -- but prove they are in fact the derivations.
+    assert sup.FROZEN_PACKET_FACTS == {
+        key: sup.FROZEN_INVENTORY[key][0]
+        for key, evidence_class in EXPECTED_EVIDENCE_CLASSES.items()
+        if evidence_class == sup.PACKET_DERIVED
+    }
+    assert sup.FROZEN_ADMISSION_STANDING == {
+        key: sup.FROZEN_INVENTORY[key][0]
+        for key, evidence_class in EXPECTED_EVIDENCE_CLASSES.items()
+        if evidence_class == sup.ADMISSION_STANDING
+    }
+    assert not set(sup.FROZEN_PACKET_FACTS) & set(sup.FROZEN_ADMISSION_STANDING)
+    assert len(sup.FROZEN_PACKET_FACTS) == 6
+    assert len(sup.FROZEN_ADMISSION_STANDING) == 6
+    # Each entry must still BE its named constant. Authoring the table with
+    # bare integer literals would make it an independent copy free to drift
+    # from the constant it claims to mirror.
+    bindings = {
+        "batches": sup.EXPECTED_BATCHES,
+        "origin_rows": sup.EXPECTED_ORIGIN_ROWS,
+        "attachment_rows": sup.EXPECTED_ATTACHMENT_ROWS,
+        "inline_rows": sup.EXPECTED_INLINE_ROWS,
+        "bibliography_entries": sup.EXPECTED_BIBLIOGRAPHY_ENTRIES,
+        "video_identifiers": sup.EXPECTED_VIDEO_IDENTIFIERS,
+        "retrieved": sup.EXPECTED_RETRIEVED,
+        "verified_sources": sup.EXPECTED_VERIFIED_SOURCES,
+        "verified_claims": sup.EXPECTED_VERIFIED_CLAIMS,
+        "verified_relationships": sup.EXPECTED_VERIFIED_RELATIONSHIPS,
+        "admitted_uap_v6_records": sup.EXPECTED_ADMITTED_UAP_V6_RECORDS,
+        "admitted_bridge_records": sup.EXPECTED_ADMITTED_BRIDGE_RECORDS,
+    }
+    assert set(bindings) == set(EXPECTED_EVIDENCE_CLASSES)
+    for key, constant in sorted(bindings.items()):
+        assert sup.FROZEN_INVENTORY[key][0] == constant, key
+
+
+
+def test_g7s_m_038_no_banner_claims_packet_derivation_for_admission_standing():
+    """CONTRACT.md section 5b forbids describing these as packet-reproduced.
+
+    That rule had no control, and the correction that introduced section 5b
+    promptly broke it: a banner in ``_support.py`` claimed the admission
+    constants were "reproduced ... from the packet bytes and witnessed by
+    PACKET_RECEIPT.md". A rule nothing checks is a rule that drifts.
+    """
+    source = sup.require_file(sup.TESTS_DIR / "_support.py", "_support.py")
+    opening = source.index("ADMISSION AND PROCESS STANDING")
+    closing = source.index("LINE_ENDING_CENSUS")
+    assert opening < closing, "the admission block markers are out of order"
+    block = source[opening:closing]
+    assert "Not packet-derived" in block, "the admission block must say so"
+    for forbidden in (
+        "reproduced by the authoring seat",
+        "reproduced from the packet",
+        "witnessed by PACKET_RECEIPT",
+        "from the packet bytes",
+    ):
+        assert forbidden not in block, forbidden
+    for constant in (
+        "EXPECTED_RETRIEVED",
+        "EXPECTED_VERIFIED_SOURCES",
+        "EXPECTED_VERIFIED_CLAIMS",
+        "EXPECTED_VERIFIED_RELATIONSHIPS",
+        "EXPECTED_ADMITTED_UAP_V6_RECORDS",
+        "EXPECTED_ADMITTED_BRIDGE_RECORDS",
+    ):
+        assert constant in block, constant

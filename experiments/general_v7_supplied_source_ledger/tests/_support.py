@@ -437,12 +437,12 @@ FORBIDDEN_PROMOTION_FRAGMENTS = (
 FORBIDDEN_COLLAPSE_PARAMETERS = ("dedupe", "unique", "distinct", "merge", "collapse")
 
 # --------------------------------------------------------------------------
-# Frozen packet receipt constants. STRUCTURAL: reproduced by the authoring
-# seat directly from the packet bytes.
+# Archive-level packet constants. Reproduced by the authoring seat from the
+# packet bytes and witnessed by PACKET_RECEIPT.md.
 #
 # The packet is NOT committed to this repository. No control reads it at run
-# time. PACKET_RECEIPT.md is the sole committed witness, and these constants
-# are reconciled against that document rather than against the archive.
+# time. The receipt is the committed witness for these, and they are
+# reconciled against that document rather than against the archive.
 # --------------------------------------------------------------------------
 
 PACKET_ARCHIVE_NAME = "general-v7-material-packet-2026-08-29.zip"
@@ -465,6 +465,14 @@ PACKET_ORIGINS_SHA256 = (
     "c16f5815a9abf5a56ee3e7225c35c9e432ce09fcbeb00d996a735cf79789005d"
 )
 
+# --------------------------------------------------------------------------
+# Content-derived packet facts. Reproduced from packet CONTENT and witnessed
+# by CONTRACT.md section 5a, **not** by the receipt: none of 60, 26 or the
+# ORIGINS.tsv row count appears in PACKET_RECEIPT.md at all. The two
+# exceptions are the supplied-batch count and the inline-row count, which both
+# documents record and for which the receipt is authoritative.
+# --------------------------------------------------------------------------
+
 EXPECTED_BATCHES = 63
 EXPECTED_ORIGIN_ROWS = 63
 EXPECTED_ATTACHMENT_ROWS = 60
@@ -472,12 +480,27 @@ EXPECTED_INLINE_ROWS = 3
 EXPECTED_BIBLIOGRAPHY_ENTRIES = 26
 EXPECTED_VIDEO_IDENTIFIERS = 26
 
+# --------------------------------------------------------------------------
+# ADMISSION AND PROCESS STANDING. **Not packet-derived.**
+#
+# These record what THIS admission process did and where THIS ledger's
+# boundary was drawn. No reading of the packet could establish any of them,
+# and no control may describe them as reproduced from packet bytes.
+#
+# The four retrieval and verification values are counted: a population exists
+# and the count over it is zero. The two corpus values are different in kind
+# --- the schema exposes no record type into which a UAP V6 or Bridge Register
+# record could be placed, so there is nothing to enumerate and the zero
+# records a structural impossibility rather than an empty search. CONTRACT.md
+# section 5b keeps the two kinds of zero apart.
+# --------------------------------------------------------------------------
+
 EXPECTED_RETRIEVED = 0
 EXPECTED_VERIFIED_SOURCES = 0
 EXPECTED_VERIFIED_CLAIMS = 0
 EXPECTED_VERIFIED_RELATIONSHIPS = 0
-EXPECTED_UAP_V6_RECORDS = 0
-EXPECTED_BRIDGE_RECORDS = 0
+EXPECTED_ADMITTED_UAP_V6_RECORDS = 0
+EXPECTED_ADMITTED_BRIDGE_RECORDS = 0
 
 LINE_ENDING_CENSUS = {
     "crlf-only": 62,
@@ -490,30 +513,79 @@ LINE_ENDING_CENSUS = {
 #: structure by this phase; they are inherited from the adjacent
 #: ``general-v7-technology-ledger-v1`` laboratory. They are recorded so an
 #: auditor can see what was expected, and they are **never** asserted as
-#: structural facts. ``G7S-D-012`` and ``G7S-M-036`` keep them out of the
-#: frozen inventory.
+#: structural facts. ``G7S-D-012`` and ``G7S-M-036`` keep them out of both
+#: frozen classes.
+#:
+#: ``identities_with_exact_locator`` is inherited too, and is listed here so
+#: the reconciliation 26 + 35 = 61 closes **within this dict**. An earlier
+#: form spent ``EXPECTED_VIDEO_IDENTIFIERS`` --- a frozen packet fact --- as
+#: the 26, which made an inherited, unreproduced relation load-bearing on a
+#: reproduced constant: correcting the packet figure would have failed an
+#: interpretive reconciliation, and the failure would have read as a
+#: structural defect. The two 26s coincide; they are not the same quantity.
 PRIOR_INTERPRETIVE_EXPECTATIONS = {
     "provisional_source_identities": 61,
     "identities_without_exact_locator": 35,
+    "identities_with_exact_locator": 26,
     "non_admitted_artifacts": 3,
 }
 
-#: The frozen structural inventory. Every value here was reproduced from the
-#: packet. No interpretive figure appears in it.
-FROZEN_STRUCTURAL_INVENTORY = {
-    "batches": EXPECTED_BATCHES,
-    "origin_rows": EXPECTED_ORIGIN_ROWS,
-    "attachment_rows": EXPECTED_ATTACHMENT_ROWS,
-    "inline_rows": EXPECTED_INLINE_ROWS,
-    "bibliography_entries": EXPECTED_BIBLIOGRAPHY_ENTRIES,
-    "video_identifiers": EXPECTED_VIDEO_IDENTIFIERS,
-    "retrieved": EXPECTED_RETRIEVED,
-    "verified_sources": EXPECTED_VERIFIED_SOURCES,
-    "verified_claims": EXPECTED_VERIFIED_CLAIMS,
-    "verified_relationships": EXPECTED_VERIFIED_RELATIONSHIPS,
-    "uap_v6_records": EXPECTED_UAP_V6_RECORDS,
-    "bridge_records": EXPECTED_BRIDGE_RECORDS,
+#: The two evidence classes a frozen figure may carry. A figure's class is a
+#: STORED fact, not an implication of which literal it was typed into.
+PACKET_DERIVED = "packet-derived"
+ADMISSION_STANDING = "admission-standing"
+EVIDENCE_CLASSES = (PACKET_DERIVED, ADMISSION_STANDING)
+
+#: The single classified source of truth for every frozen figure.
+#:
+#: One dict, one class token per key. This shape is deliberate. Two sibling
+#: dicts would store the classification *nowhere* --- it would be implied by
+#: which literal a row was typed into, so swapping one packet fact for one
+#: admission value between them would keep both sets disjoint, keep the union
+#: at twelve names, and silently redraw the class boundary with nothing able
+#: to see it. Here a key has exactly one class and a re-merge is not
+#: expressible; ``G7S-M-037`` pins the key-to-class map literally, so a class
+#: swap is a one-token diff caught by one equality.
+#:
+#: Every value binds by REFERENCE to its constant above. Authoring these as
+#: bare integer literals would make the table an independent copy that could
+#: drift from the constant it claims to mirror.
+FROZEN_INVENTORY = {
+    "batches": (EXPECTED_BATCHES, PACKET_DERIVED),
+    "origin_rows": (EXPECTED_ORIGIN_ROWS, PACKET_DERIVED),
+    "attachment_rows": (EXPECTED_ATTACHMENT_ROWS, PACKET_DERIVED),
+    "inline_rows": (EXPECTED_INLINE_ROWS, PACKET_DERIVED),
+    "bibliography_entries": (EXPECTED_BIBLIOGRAPHY_ENTRIES, PACKET_DERIVED),
+    "video_identifiers": (EXPECTED_VIDEO_IDENTIFIERS, PACKET_DERIVED),
+    "retrieved": (EXPECTED_RETRIEVED, ADMISSION_STANDING),
+    "verified_sources": (EXPECTED_VERIFIED_SOURCES, ADMISSION_STANDING),
+    "verified_claims": (EXPECTED_VERIFIED_CLAIMS, ADMISSION_STANDING),
+    "verified_relationships": (EXPECTED_VERIFIED_RELATIONSHIPS, ADMISSION_STANDING),
+    "admitted_uap_v6_records": (
+        EXPECTED_ADMITTED_UAP_V6_RECORDS,
+        ADMISSION_STANDING,
+    ),
+    "admitted_bridge_records": (
+        EXPECTED_ADMITTED_BRIDGE_RECORDS,
+        ADMISSION_STANDING,
+    ),
 }
+
+
+def _view(evidence_class: str) -> dict:
+    return {
+        key: value
+        for key, (value, carried) in FROZEN_INVENTORY.items()
+        if carried == evidence_class
+    }
+
+
+#: Figures reproduced from packet structure or packet content.
+FROZEN_PACKET_FACTS = _view(PACKET_DERIVED)
+
+#: Facts about this admission process and this ledger's boundary. Derived, so
+#: the two views can never disagree with the classification above.
+FROZEN_ADMISSION_STANDING = _view(ADMISSION_STANDING)
 
 #: Controls whose bodies legitimately contain absolute-, UNC- and
 #: device-shaped path STRINGS, because their whole purpose is to hand such a

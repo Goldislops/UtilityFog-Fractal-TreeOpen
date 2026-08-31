@@ -6,6 +6,11 @@ structural, cryptographic and manifest facts --- including how the supplied
 content. It records nothing about what the batches say, and no batch text is
 reproduced here.
 
+It additionally records, and marks separately, two things that are **not**
+properties of the packet: the authorship standings of section 7, and the
+retrieval and execution boundary of section 9. Those are statements about what
+this admission process did.
+
 ## 1. Archive identity
 
 | Property | Value |
@@ -138,10 +143,24 @@ verification, and neither is evidence about any external resource.
    it records --- the archive digest and byte size, the entry census, the
    member manifest and checksum result, and the line-ending and encoding
    censuses --- and every control that checks one of those checks it here.
-   It is **not** the witness for the content-derived structural figures; those
-   are carried by `CONTRACT.md` section 5a under the authoring seat's own
-   standing, for the reason given in item 5 below. Neither document witnesses
-   the other's figures.
+   It is **not** the witness for the content-derived packet facts; those are
+   carried by `CONTRACT.md` section 5a, which after this correction records
+   packet-derived facts **only**: five content-derived, plus the supplied-batch
+   count, which this receipt also records at archive level and for which this
+   receipt is authoritative. They are carried there under the authoring seat's
+   own standing, for the reason given in item 5 below.
+
+   The two documents do overlap, and saying otherwise would be false. Both
+   record the 63 supplied batches, both record the three inline members, and
+   both record the four retrieval-and-verification zeros. The two corpus rows
+   of the contract's section 5b appear there alone: this receipt records
+   nothing about the UAP V6 corpus or the Bridge Register, and the contract's
+   section 12 is their sole witness. Where they overlap, authority is
+   assigned rather than shared: this receipt is authoritative for the
+   archive-level figures and for the retrieval and verification boundary of
+   section 9, and the contract is authoritative for the content-derived
+   figures of its section 5a and the corpus prohibitions of its section 12.
+   Neither document witnesses the other's **authoritative** figures.
 2. Cryptographic provenance establishes that the bytes received are the bytes
    the manifest describes. It establishes nothing about where the material
    originally came from, whether any statement in it is accurate, or whether
@@ -150,9 +169,13 @@ verification, and neither is evidence about any external resource.
 4. The supplied `ORIGINS.tsv` is tab-delimited and has no quoting mechanism,
    so a field containing a tab would be unrepresentable. No such field is
    present in this packet.
-5. This receipt records structural and cryptographic facts only. Counts that
-   depend on interpreting batch content are **not** recorded here; the
-   contract records them separately and marks their evidence standing.
+5. **Sections 1 to 6 record structural and cryptographic facts only.**
+   Sections 7 and 9 record authorship standing and the retrieval and execution
+   boundary of this admission process; those are statements about what this
+   process did, not properties of the packet, and are marked as such where
+   they appear. Counts that depend on interpreting batch content are **not**
+   recorded anywhere in this receipt; the contract records them separately in
+   its section 5a and marks their evidence standing.
 
 ## 9. Retrieval and execution boundary
 

@@ -61,7 +61,11 @@ def test_g7s_p_002_no_claim_is_verified_at_intake():
         for record in records(ledger, "claims")
         if record["verification_state"] != "unverified"
     ]
-    assert len(verified) == sup.EXPECTED_VERIFIED_CLAIMS, verified
+    # Emptiness is computed. CONTRACT.md section 7 requires counts to be
+    # computed and never asserted from a constant; the declared admission
+    # standing is then reconciled against it rather than standing in for it.
+    assert not verified, verified
+    assert len(verified) == sup.FROZEN_ADMISSION_STANDING["verified_claims"]
 
 
 def test_g7s_p_003_every_verification_state_is_in_its_fixed_vocabulary():
@@ -234,23 +238,37 @@ def test_g7s_p_015_every_relationship_type_is_in_the_closed_vocabulary():
         assert record["relationship_type"] in sup.RELATIONSHIP_TYPES
 
 
-def test_g7s_p_016_the_zero_counts_are_computed_from_the_collections():
+def test_g7s_p_016_nothing_is_retrieved_or_verified_and_the_standing_agrees():
+    """Emptiness first, reconciliation second.
+
+    An earlier form was named for computing counts while comparing each
+    computed length to a frozen constant that section 5a then advertised as
+    packet-reproduced --- the exact path by which an admission value could
+    masquerade as a packet fact. The emptiness checks below need no constant
+    at all; the declared admission standing is reconciled against them
+    afterwards, and is now classified as admission standing rather than as a
+    packet fact.
+    """
     ledger = sup.require_ledger()
     retrieved = [
         record
         for record in records(ledger, "sources")
         if record["retrieval_state"] != "not-attempted"
     ]
-    assert len(retrieved) == sup.EXPECTED_RETRIEVED
+    assert not retrieved, retrieved
     verified = [
         record
         for record in records(ledger, "sources")
         if record["verification_state"] != "supplied-unretrieved"
     ]
-    assert len(verified) == sup.EXPECTED_VERIFIED_SOURCES
+    assert not verified, verified
     verified_relationships = [
         record
         for record in records(ledger, "relationships")
         if record["verification_state"] != "unverified"
     ]
-    assert len(verified_relationships) == sup.EXPECTED_VERIFIED_RELATIONSHIPS
+    assert not verified_relationships, verified_relationships
+    standing = sup.FROZEN_ADMISSION_STANDING
+    assert len(retrieved) == standing["retrieved"]
+    assert len(verified) == standing["verified_sources"]
+    assert len(verified_relationships) == standing["verified_relationships"]

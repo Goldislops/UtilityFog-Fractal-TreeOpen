@@ -136,20 +136,25 @@ def test_g7s_d_010_the_contract_forbids_interpretive_inputs_to_identity():
 
 
 def test_g7s_d_011_the_contract_freezes_only_reproduced_structural_figures():
+    """Section 5a now holds packet-derived facts and nothing else.
+
+    An earlier form of this control required the heading "independently
+    reproduced from the packet" and the six admission-standing rows to
+    co-occur, which made the conflation an enforced property. The six
+    admission rows moved to section 5b and are asserted there by
+    ``G7S-D-048``, which also proves no row sits in the wrong section.
+    """
     phrases(
-        "Structural --- independently reproduced from the packet",
+        "Packet-derived facts --- independently reproduced from the packet",
+        "These six were reproduced by the authoring seat directly from the "
+        "packet bytes",
+        "Every one of them is a property of the supplied material",
         "Supplied batches | 63",
         "ORIGINS.tsv data rows | 63",
         "origin_type attachment rows | 60",
         "origin_type inline_user_message rows | 3",
         "Bibliography title entries | 26",
         "Distinct supplied video identifiers | 26",
-        "Sources retrieved | 0",
-        "Sources verified | 0",
-        "Claims verified | 0",
-        "Relationships verified | 0",
-        "UAP V6 records | 0",
-        "Bridge Register records | 0",
         "each of the 26 bibliography entries yields exactly one distinct "
         "supplied video identifier",
     )
@@ -162,12 +167,21 @@ def test_g7s_d_012_the_contract_records_interpretive_figures_without_freezing():
         "general-v7-technology-ledger-v1",
         "Provisional source identities | 61",
         "Identities without an exact locator | 35",
+        "Identities with an exact locator | 26",
         "Non-admitted artifacts | 3",
-        "The relation 26 + 35 = 61 is an internal arithmetic reconciliation",
-        "No control asserts 61, 35 or 3 as a structural fact",
+        "The relation 26 + 35 = 61 reconciles these inherited figures among "
+        "themselves",
+        "it is not the packet-reproduced bibliography or identifier count of "
+        "section 5a",
+        "No control asserts 61, 35, 26 or 3 of this ledger",
+        "a statement about what was inherited from the adjacent laboratory, not "
+        "about this corpus",
         "Freezing them would launder an unreproduced interpretation into "
         "structure",
         "The non_admitted collection may legitimately be empty",
+        "which is a reproduced packet fact and a different quantity that "
+        "merely shares a value",
+        "The guarantee above is about quantities, never about bare integers",
     )
 
 
@@ -325,7 +339,8 @@ def test_g7s_d_026_the_contract_makes_corrections_additive_only():
         "A correction may not target another correction",
         "distinct from an unresolved-reference refusal",
         "the target exists and is refused for being the wrong kind",
-        "Corrections never reduce a frozen structural count",
+        "Corrections never reduce a frozen packet-fact count, and never "
+        "alter a frozen admission-standing value",
         "retired, never deleted and never renumbered",
     )
 
@@ -411,8 +426,17 @@ def test_g7s_d_033_the_contract_separates_the_corpora():
         "The UAP V6 corpus is absent from this ledger",
         "The Bridge Register is absent from this ledger",
         "the schema exposes no record type into which either could be placed",
-        "Separation is enforced by a key allowlist, not by a name blocklist",
+        "Separation is enforced primarily by a key allowlist",
         "a blocklist admits every name coined tomorrow",
+        "A narrow substring scan over the two known corpus names is retained "
+        "as a second layer only",
+        "it is defence in depth and is not the mechanism, and no control may "
+        "present it as one",
+        "the exclusion vocabulary --- the corpus names, the forbidden package "
+        "names, the zero-valued admission rows --- necessarily appears",
+        "Those appearances are guardrails",
+        "their presence must never be reported as the presence of the corpora "
+        "they exclude",
         "no transfer of truth from synthetic calibration data",
         "It is never evidence about a source, a claim or a relationship",
     )
@@ -574,18 +598,30 @@ def test_g7s_d_042_the_declared_id_grammar_accepts_and_rejects_exactly():
 
 
 def test_g7s_d_043_the_support_constants_agree_with_the_contract_text():
+    """Type discipline over BOTH frozen classes, never one of them.
+
+    An earlier form iterated a single conflated dict and carried an escape
+    clause exempting the interpretive ``3`` by value. Value exemptions cannot
+    work here: ``3`` is also the legitimate inline-row count, and ``0`` and
+    ``26`` recur across classes too. Class membership is proved by key, in
+    ``G7S-M-037``; this control proves the values are well typed wherever they
+    sit, and that the interpretive dict closes its own reconciliation.
+    """
     phrases(sup.LEDGER_ID, sup.SCHEMA_ID, sup.CORPUS, sup.NAMESPACE)
-    for value in sup.FROZEN_STRUCTURAL_INVENTORY.values():
-        assert isinstance(value, int) and not isinstance(value, bool)
+    for name, (value, evidence_class) in sorted(sup.FROZEN_INVENTORY.items()):
+        assert isinstance(value, int) and not isinstance(value, bool), name
+        assert evidence_class in sup.EVIDENCE_CLASSES, (name, evidence_class)
+    for view in (sup.FROZEN_PACKET_FACTS, sup.FROZEN_ADMISSION_STANDING):
+        assert view, "an evidence class is empty"
+        for name, value in sorted(view.items()):
+            assert isinstance(value, int) and not isinstance(value, bool), name
+    interpretive = sup.PRIOR_INTERPRETIVE_EXPECTATIONS
     assert (
-        sup.PRIOR_INTERPRETIVE_EXPECTATIONS["identities_without_exact_locator"]
-        + sup.EXPECTED_VIDEO_IDENTIFIERS
-        == sup.PRIOR_INTERPRETIVE_EXPECTATIONS["provisional_source_identities"]
+        interpretive["identities_without_exact_locator"]
+        + interpretive["identities_with_exact_locator"]
+        == interpretive["provisional_source_identities"]
     )
-    for value in sup.PRIOR_INTERPRETIVE_EXPECTATIONS.values():
-        assert value not in sup.FROZEN_STRUCTURAL_INVENTORY.values() or value in (
-            sup.EXPECTED_INLINE_ROWS,
-        )
+    assert not set(interpretive) & set(sup.FROZEN_INVENTORY)
 
 
 def test_g7s_d_044_the_contract_blob_is_clean_and_lf_only():
@@ -672,9 +708,14 @@ def test_g7s_d_047_the_contract_declares_every_record_field_it_requires():
     )
     phrases(
         "PACKET_RECEIPT.md is the sole committed witness for archive-level",
-        "This contract carries the content-derived structural figures in "
-        "section 5a",
-        "Neither document witnesses the other's figures, and neither claims to",
+        "This contract carries the content-derived packet facts in section 5a",
+        "which is archive-level rather than content-derived and for which the "
+        "receipt is authoritative",
+        "The two documents do overlap, and saying otherwise would be false",
+        "both record the four retrieval-and-verification zeros of section 5b",
+        "The two corpus rows of section 5b appear in this contract alone",
+        "Where they overlap, authority is assigned rather than shared",
+        "Neither document witnesses the other's authoritative figures",
         "This prohibition binds controlled-vocabulary and status fields only",
         "It does not reach supplied text",
         "The committed ledger.json is exactly those canonical bytes followed "
@@ -684,4 +725,146 @@ def test_g7s_d_047_the_contract_declares_every_record_field_it_requires():
         "components with a trailing dot or trailing space are each refused",
         "The claim that it is the only warning is environment-conditional",
         "no control asserts a warning count",
+    )
+
+
+#: The twelve frozen rows as they render in the flattened contract, and the
+#: section each one must appear in. Positive and exhaustive: every row is
+#: required in its own section AND required absent from the other two. A
+#: one-sided "no row is in the wrong table" check is satisfied by an empty
+#: table, which is exactly how a taxonomy quietly disappears.
+ROW_SECTIONS = {
+    "5a": (
+        "Supplied batches | 63",
+        "ORIGINS.tsv data rows | 63",
+        "origin_type attachment rows | 60",
+        "origin_type inline_user_message rows | 3",
+        "Bibliography title entries | 26",
+        "Distinct supplied video identifiers | 26",
+    ),
+    "5b": (
+        "Sources retrieved | 0 | PACKET_RECEIPT.md section 9",
+        "Sources verified | 0 | PACKET_RECEIPT.md section 9",
+        "Claims verified | 0 | PACKET_RECEIPT.md section 9",
+        "Relationships verified | 0 | PACKET_RECEIPT.md section 9",
+        "Admitted UAP V6 records | 0 | section 12 of this contract",
+        "Admitted Bridge Register records | 0 | section 12 of this contract",
+    ),
+    "5c": (
+        "Provisional source identities | 61",
+        "Identities without an exact locator | 35",
+        "Identities with an exact locator | 26",
+        "Non-admitted artifacts | 3",
+    ),
+}
+
+
+#: The header row of each frozen table, which is not a data row.
+TABLE_HEADERS = frozenset(
+    {
+        "Quantity | Value",
+        "Quantity | Value | Witness",
+        "Quantity | Prior expectation",
+    }
+)
+
+
+def contract_sections() -> dict:
+    """The section-5 slices, returned RAW so row boundaries survive.
+
+    ``CONTRACT`` is one flattened string and ``phrase()`` is a bare substring
+    test, so neither carries positional information: a row moved from section
+    5b back into section 5a would still satisfy every phrase control. Slicing
+    between the headings is what makes placement checkable at all.
+
+    The preamble slice --- everything between the section 5 heading and 5a ---
+    is returned too. Without it, a duplicate frozen table planted above 5a
+    would lie outside every slice and be invisible to a control that only ever
+    looks inside them.
+    """
+    raw = sup.contract_text()
+    markers = ("## 5. ", "### 5a.", "### 5b.", "### 5c.", "### 5d.", "## 6.")
+    names = ("preamble", "5a", "5b", "5c", "5d")
+    cuts = []
+    for marker in markers:
+        index = raw.find(marker)
+        assert index != -1, f"section marker missing: {marker}"
+        cuts.append(index)
+    assert cuts == sorted(cuts), "section 5 headings are out of order"
+    return {
+        names[position]: raw[cuts[position] : cuts[position + 1]]
+        for position in range(len(names))
+    }
+
+
+def table_rows(raw_slice: str) -> set:
+    """Every data row of every markdown table in one raw slice."""
+    found = set()
+    for line in raw_slice.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if all(set(cell) <= set("-: ") for cell in cells):
+            continue
+        row = plain(" | ".join(cells))
+        if row in TABLE_HEADERS:
+            continue
+        found.add(row)
+    return found
+
+
+def test_g7s_d_048_every_frozen_row_sits_in_its_declared_evidence_section():
+    """Closed over section CONTENT, not merely exhaustive over declared rows.
+
+    An earlier form asked only "is each declared row where it belongs, and
+    absent from the other two". That left three ways through. An UNDECLARED
+    row could be planted in 5a --- so the contract would read "These six" above
+    a table of seven, the seventh laundering an inherited figure under the
+    heading "independently reproduced from the packet". A declared row could
+    be duplicated into 5d, because the leak loop iterated the three declared
+    sections and never looked at the fourth. And a duplicate table could be
+    planted in the section 5 preamble, which lay outside every slice.
+
+    The suite already applies the closed standard to itself --- ``G7S-M-002``
+    and ``G7S-M-003`` close the control census in both directions --- so the
+    document census is closed the same way: each section's actual rows must
+    EQUAL its declared rows, 5d is declared empty, and the preamble carries no
+    table at all.
+    """
+    sections = contract_sections()
+    assert set(sections) == {"preamble", "5a", "5b", "5c", "5d"}, sorted(sections)
+    expected = dict(ROW_SECTIONS)
+    expected["5d"] = ()
+    expected["preamble"] = ()
+    for name, rows in sorted(expected.items()):
+        actual = table_rows(sections[name])
+        declared = set(rows)
+        assert actual == declared, (
+            name,
+            sorted(actual - declared),
+            sorted(declared - actual),
+        )
+    declared_total = sum(len(rows) for rows in ROW_SECTIONS.values())
+    assert declared_total == len(sup.FROZEN_INVENTORY) + len(
+        sup.PRIOR_INTERPRETIVE_EXPECTATIONS
+    ), declared_total
+    phrases(
+        "Three classes are distinguished and are never mixed",
+        "figures reproduced from the packet",
+        "facts about this admission process and this ledger's boundary, which "
+        "no reading of the packet could establish",
+        "prior interpretive expectations, inherited and unreproduced",
+        "An interpretive figure is never asserted as a packet fact, and a fact "
+        "about this process is never described as reproduced from packet bytes",
+        "Admission standing --- what this process did, not what the packet "
+        "contains",
+        "These six are frozen too, and they are not packet-derived",
+        "No reading of the packet could establish any of them",
+        "Nothing in this laboratory may describe them as reproduced from "
+        "packet bytes",
+        "The two kinds of zero in this table are different in kind and are not "
+        "interchangeable",
+        "the zero records a structural impossibility, not an empty search",
+        "A prohibition is stronger than a count of zero",
     )

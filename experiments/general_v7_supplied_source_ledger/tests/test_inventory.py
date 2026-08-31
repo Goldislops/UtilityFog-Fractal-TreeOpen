@@ -203,9 +203,26 @@ def test_g7s_i_014_the_intake_report_reconciles_with_the_ledger():
     assert sup.LEDGER_ID in text
 
 
-def test_g7s_i_015_neither_sealed_corpus_appears_in_the_ledger():
+def test_g7s_i_015_no_sealed_corpus_name_appears_in_a_key_or_value():
+    """Defence in depth, and NOT the separation mechanism.
+
+    CONTRACT.md section 12 makes the key allowlist the mechanism, precisely
+    because a blocklist admits every name coined tomorrow. This substring scan
+    is a second layer, and its earlier name --- "neither sealed corpus appears
+    in the ledger" --- promised a corpus-evidence finding that four substring
+    tests cannot deliver.
+
+    It deliberately does NOT count admitted corpus records. An earlier form of
+    this control incremented a counter and then asserted the same condition
+    false on the next line, so the counter was provably zero and witnessed
+    nothing; worse, enumerating is the wrong shape entirely. CONTRACT.md
+    section 5b says the two corpus zeros "are not counts at all" and that
+    "there is nothing to enumerate". The witness for those two standings is
+    therefore ``G7S-Q-013``, over the schema's declared key sets, which is
+    where the contract locates the prohibition.
+    """
     ledger = sup.require_ledger()
-    for collection, record in every_record(ledger):
+    for _collection, record in every_record(ledger):
         for key in record:
             lowered = key.lower()
             assert "uap" not in lowered, (record["record_id"], key)

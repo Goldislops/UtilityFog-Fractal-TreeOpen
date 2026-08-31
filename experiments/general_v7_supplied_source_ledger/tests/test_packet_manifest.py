@@ -7,8 +7,10 @@ census, the member manifest and checksum result, and the line-ending and
 encoding censuses --- so these controls reconcile the receipt against itself
 and against the frozen constants in ``_support``, and never against the
 archive. The content-derived structural figures are carried by ``CONTRACT.md``
-section 5a instead, and family D checks those; neither document witnesses the
-other's figures.
+section 5a instead, and family D checks those. The two documents do overlap
+--- both record the 63 supplied batches, the three inline members and the
+admission-standing zeros --- so authority is assigned rather than shared, and
+neither witnesses the other's AUTHORITATIVE figures.
 
 That independence is not left to convention: ``G7S-R-019`` and ``G7S-R-020``
 make "no control reads the packet at run time" a statically checked property
@@ -227,14 +229,26 @@ def test_g7s_r_016_the_receipt_states_its_own_limitations():
         "Nothing in the acceptance surface reads the packet at run time",
         "This receipt is the sole committed witness for the archive-level "
         "facts it records",
-        "It is not the witness for the content-derived structural figures",
-        "Neither document witnesses the other's figures",
+        "It is not the witness for the content-derived packet facts",
+        "which after this correction records packet-derived facts only: five "
+        "content-derived, plus the supplied-batch count",
+        "both record the four retrieval-and-verification zeros",
+        "this receipt records nothing about the UAP V6 corpus or the Bridge "
+        "Register",
+        "The two documents do overlap, and saying otherwise would be false",
+        "Where they overlap, authority is assigned rather than shared",
+        "Neither document witnesses the other's authoritative figures",
+        "Sections 1 to 6 record structural and cryptographic facts only",
+        "Sections 7 and 9 record authorship standing and the retrieval and "
+        "execution boundary of this admission process",
         "It establishes nothing about where the material originally came "
         "from",
         "whether any locator in it resolves to anything",
         "tab-delimited and has no quoting mechanism",
         "Counts that depend on interpreting batch content are not recorded "
-        "here",
+        "anywhere in this receipt",
+        "It additionally records, and marks separately, two things that are "
+        "not properties of the packet",
     )
 
 
