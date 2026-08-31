@@ -367,3 +367,40 @@ def test_g7s_s_033_a_well_formed_minimal_document_is_accepted_unchanged():
     assert isinstance(value, dict), type(value).__name__
     assert value["batches"][0]["record_id"] == "G7S-BAT-0001"
     assert sup.canonical_bytes(value) == sup.canonical_bytes(json.loads(document))
+
+
+def minimal_source() -> dict:
+    return {
+        "record_id": "G7S-SRC-0001",
+        "introducing_batch_ref": "G7S-BAT-0001",
+        "locator_carrier_batch_ref": None,
+        "supplied_locator": None,
+        "normalized_locator": None,
+        "normalized_identifier": None,
+        "locator_absence_reason": "no-locator-supplied",
+        "bibliography_entry": False,
+        "supplied_text": None,
+        "retrieval_state": "not-attempted",
+        "verification_state": "supplied-unretrieved",
+        "verification_evidence": None,
+    }
+
+
+def test_g7s_s_034_a_supplied_locator_without_a_carrier_is_refused():
+    """The refusal section 6.5 requires, as distinct from the I-018 audit.
+
+    ``locator_carrier_batch_ref`` is nullable, so a supplied locator paired
+    with a null carrier is representable and parses. Section 6.5 once claimed
+    the state could not be expressed at all; since it can, the validator must
+    refuse it, and an audit over committed data would not be that refusal.
+    """
+    validate = sup.require_validate()
+    record = minimal_source()
+    record["supplied_locator"] = "https://example.invalid/supplied"
+    record["locator_absence_reason"] = None
+    record["locator_carrier_batch_ref"] = None
+    refuses(
+        validate,
+        json.dumps({"sources": [record]}),
+        "locator-without-carrier",
+    )

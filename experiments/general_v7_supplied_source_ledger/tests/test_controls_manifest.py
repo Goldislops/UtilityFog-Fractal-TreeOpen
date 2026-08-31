@@ -44,15 +44,15 @@ AUTHORED_CONTROLS = {
     "test_contract.py": _ids("D", (1, 48)),
     "test_controls_manifest.py": _ids("M", (1, 38)),
     "test_packet_manifest.py": _ids("R", (1, 20)),
-    "test_inventory.py": _ids("I", (1, 16)),
-    "test_schema.py": _ids("S", (1, 33)),
+    "test_inventory.py": _ids("I", (1, 18)),
+    "test_schema.py": _ids("S", (1, 34)),
     "test_provenance.py": _ids("P", (1, 16)),
     "test_quarantine.py": _ids("Q", (1, 13)),
 }
 
-FAMILY_TOTALS = {"D": 48, "M": 38, "R": 20, "I": 16, "S": 33, "P": 16, "Q": 13}
+FAMILY_TOTALS = {"D": 48, "M": 38, "R": 20, "I": 18, "S": 34, "P": 16, "Q": 13}
 
-GRAND_TOTAL = 184
+GRAND_TOTAL = 187
 
 BANNED_MARKS = frozenset({"skip", "skipif", "xfail"})
 BANNED_CALLS = frozenset({"skip", "xfail", "importorskip", "exit", "fail"})
@@ -435,7 +435,7 @@ def test_g7s_m_018_the_two_groups_partition_the_census_exactly():
     assert not contract_only & implementation_dependent
     assert contract_only | implementation_dependent == all_declared()
     assert len(contract_only) == 106, len(contract_only)
-    assert len(implementation_dependent) == 78, len(implementation_dependent)
+    assert len(implementation_dependent) == 81, len(implementation_dependent)
 
 
 def test_g7s_m_019_every_gated_control_calls_its_gate_first():

@@ -115,16 +115,52 @@ shorthand matches Arabic-Indic and Devanagari digits and `int()` parses them.
 
 An identity is stable only if nothing that may later be corrected takes part
 in forming it. Permitted id inputs are: the batch ordinal taken from the
-member filename, and monotone allocation order within a collection. **Forbidden
+member filename, and, for the six collections other than `sources`, monotone
+allocation order within that collection. A source identifier takes the batch
+ordinal and nothing else. **Forbidden
 id inputs** are: `origin_type`, the presence or absence of a locator,
 admission status, any count, and any interpretive classification.
 
-Consequently, **the ledger must not partition an id range by an interpretive
-property.** Numbering sources so that one contiguous id block means "has a
-locator" and another means "has none" welds an interpretation into identity,
-and correcting that interpretation would then require renumbering --- which
-this contract's additive-only rule forbids. Locator presence is a field, never
-an id range.
+Consequently, **no locator-derived value may determine or alter a source
+identifier.** Locator presence, locator absence, bibliography presence, and any
+value computed from a locator are fields and derivations. None of them may take
+part in forming an identifier, and none may cause an identifier to change.
+Locator presence is a field, never an id **input**.
+
+A source identifier derives from the ordinal of the batch that introduced it,
+and from nothing else. That derivation is what makes the identifier stable
+under correction: revising an interpretation about a locator cannot move an
+identifier, because the identifier never consulted the locator.
+
+**An incidental contiguous block is legitimate and is not a defect.** When the
+supplied material happens to carry its bibliography in a single late batch, the
+locator-bearing sources fall in a contiguous identifier range as a
+*consequence* of batch ordering. That is a fact about where the packet put its
+bibliography, not an interpretation welded into identity. A control that
+forbade the observable pattern would reject a correct ordinal assignment and
+would force renumbering to satisfy a shape --- the very renumbering this
+contract's additive-only rule exists to prevent.
+
+What is checked is therefore the **derivation**. The implementation exposes its
+own identifier derivation as `schema.source_identifier`, and the acceptance
+surface calls it on each source three further times: once with every
+locator-derived field removed, once with the source's locator presence
+inverted, and once with locator presence reassigned to a different source. The
+identifier it returns must be unchanged every time. A derivation that consulted
+a locator could not survive any of the three.
+
+**Stated honestly, and this is a real limit.** The derivation is proved against
+the batch each source *declares* as its introducer. Nothing in the committed
+material witnesses that the declaration is truthful: batch content is not
+committed, and no field ties a source's text back to a batch. An implementation
+that assigned identifiers by locator presence and then wrote each
+`introducing_batch_ref` to match would satisfy every automated control here, by
+construction. Detecting that is a **human-audit obligation**, in the same terms
+as the import allowlist in section 6.6, and no control in this laboratory may
+be described as closing it. One partial constraint is available and is
+enforced: where a locator's carrier differs from the introducing batch, the
+carrier's ordinal must be the greater, because a bibliography batch supplies
+locators for sources introduced before it.
 
 Allocation is monotone. A retired id is never reused and never renumbered.
 Gaps are legal and are not a defect.
@@ -139,7 +175,7 @@ no others.
 | --- | --- |
 | root | `schema_id`, `ledger_id`, `corpus`, `counts`, and the seven collections |
 | `batch` | `record_id`, `batch_ordinal`, `member_filename`, `member_sha256`, `packet_sha256`, `origin_type`, `origin_id`, `line_ending_form` |
-| `source` | `record_id`, `supplied_locator`, `normalized_locator`, `normalized_identifier`, `locator_absence_reason`, `bibliography_entry`, `supplied_text`, `retrieval_state`, `verification_state`, `verification_evidence` |
+| `source` | `record_id`, `introducing_batch_ref`, `locator_carrier_batch_ref`, `supplied_locator`, `normalized_locator`, `normalized_identifier`, `locator_absence_reason`, `bibliography_entry`, `supplied_text`, `retrieval_state`, `verification_state`, `verification_evidence` |
 | `claim` | `record_id`, `batch_ref`, `attribution_class`, `verification_state`, `byte_evidence`, `limitations` |
 | `relationship` | `record_id`, `left_ref`, `right_ref`, `relationship_type`, `verification_state` |
 | `unresolved` | `record_id`, `state` |
@@ -147,7 +183,18 @@ no others.
 | `non_admitted` | `record_id`, `carrier_batch_ref`, `carrier_member_sha256`, `presence`, `admission_status`, `executable_status`, `normative_status` |
 
 A field name ending `_ref` holds exactly one record id and is resolved by the
-reference-integrity rule. `counts` is a mapping from collection name to that
+reference-integrity rule.
+
+`introducing_batch_ref` is the batch that introduced the source, and its
+ordinal is the sole input to the source's identifier. `locator_carrier_batch_ref`
+is the batch that carried the source's locator, which is a **different** batch
+whenever a late bibliography batch supplies locators for sources introduced
+earlier; it is `null` exactly when no locator was supplied. Section 6.5
+requires every locator to have a carrier, and this is the field that carries
+it --- without it, a supplied locator would have nowhere to record where it
+came from. Where the two differ, the carrier's ordinal must be **greater** than
+the introducing batch's: a bibliography batch supplies locators for sources
+introduced before it, never after. `counts` is a mapping from collection name to that
 collection's length; every entry in it is computed, and a `counts` block that
 disagrees with any collection length is refused.
 
@@ -310,10 +357,16 @@ unreproduced.
    character that was not supplied. No scheme insertion, no host completion,
    no identifier reconstruction from a partial. Where normalization would have
    to guess, `normalized_locator` is `null`.
-5. **Every locator has a carrier.** A locator record carries the batch that
-   carried it. There is no field in which a locator without a carrier could be
-   stored, so an uncarried locator is unrepresentable rather than merely
-   disallowed.
+5. **Every locator has a carrier.** A source that carries a supplied locator
+   names the batch that carried it in `locator_carrier_batch_ref`, and a source
+   with no supplied locator leaves that field `null`. Because the field is
+   nullable, an uncarried locator is **representable and refused**, not
+   unrepresentable: a document pairing a supplied locator with a null carrier
+   parses, and the validator refuses it with `locator-without-carrier`. An
+   earlier form of this rule claimed the state could not be expressed at all,
+   which stopped being true the moment the carrier became a nullable field; a
+   rule enforced only by reading committed data would be an audit, and section
+   14g forbids describing an audit as validator-enforced.
 6. **No source or locator retrieval is authorized.** No validator retrieves,
    opens, resolves, dereferences or contacts a locator. The static import
    allowlist is one layer of a layered assurance; it walks import statements
@@ -514,6 +567,10 @@ surface has a fixed target rather than a guess:
   type.
 - `schema.canonical_bytes(value)` --- the canonical serialization of section
   11.
+- `schema.source_identifier(record)` --- the implementation's own derivation of
+  a source identifier from a source record. Declared so the acceptance surface
+  can call it on blinded, flipped and permuted inputs; a derivation that stayed
+  private could only be checked by re-implementing it, which proves nothing.
 
 The refusal vocabulary is closed to exactly:
 
@@ -526,6 +583,7 @@ The refusal vocabulary is closed to exactly:
 - `encoding-not-permitted`
 - `float-not-permitted`
 - `integer-out-of-bounds`
+- `locator-without-carrier`
 - `malformed-document`
 - `missing-key`
 - `non-ascii-digit`

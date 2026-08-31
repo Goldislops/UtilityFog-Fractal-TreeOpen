@@ -127,9 +127,26 @@ def test_g7s_d_010_the_contract_forbids_interpretive_inputs_to_identity():
         "An identity is stable only if nothing that may later be corrected "
         "takes part in forming it",
         "Forbidden id inputs",
-        "the ledger must not partition an id range by an interpretive "
-        "property",
-        "Locator presence is a field, never an id range",
+        "no locator-derived value may determine or alter a source identifier",
+        "None of them may take part in forming an identifier, and none may "
+        "cause an identifier to change",
+        "A source identifier derives from the ordinal of the batch that "
+        "introduced it, and from nothing else",
+        "An incidental contiguous block is legitimate and is not a defect",
+        "would force renumbering to satisfy a shape",
+        "The implementation exposes its own identifier derivation as "
+        "schema.source_identifier",
+        "once with every locator-derived field removed, once with the source's "
+        "locator presence inverted, and once with locator presence reassigned "
+        "to a different source",
+        "Stated honestly, and this is a real limit",
+        "Nothing in the committed material witnesses that the declaration is "
+        "truthful",
+        "would satisfy every automated control here, by construction",
+        "Detecting that is a human-audit obligation",
+        "no control in this laboratory may be described as closing it",
+        "Locator presence is a field, never an id input",
+        "A source identifier takes the batch ordinal and nothing else",
         "A retired id is never reused and never renumbered",
         "Gaps are legal and are not a defect",
     )
@@ -219,10 +236,21 @@ def test_g7s_d_015_the_contract_forbids_inferred_locator_completion():
     )
 
 
-def test_g7s_d_016_the_contract_makes_an_uncarried_locator_unrepresentable():
+def test_g7s_d_016_the_contract_refuses_an_uncarried_locator():
+    """Renamed with the rule it now states.
+
+    The predecessor pinned "unrepresentable rather than merely disallowed".
+    That stopped being true when `locator_carrier_batch_ref` became a nullable
+    field: the state is expressible, so it must be refused rather than declared
+    impossible, and section 14g forbids passing an audit off as enforcement.
+    """
     phrases(
-        "A locator record carries the batch that carried it",
-        "unrepresentable rather than merely disallowed",
+        "names the batch that carried it in locator_carrier_batch_ref",
+        "an uncarried locator is representable and refused, not "
+        "unrepresentable",
+        "the validator refuses it with locator-without-carrier",
+        "a rule enforced only by reading committed data would be an audit",
+        "the carrier's ordinal must be greater than the introducing batch's",
     )
 
 
@@ -649,6 +677,9 @@ def test_g7s_d_046_the_contract_declares_the_minimal_validator_surface():
         "schema.REFUSAL_TOKENS",
         "schema.KEYS_BY_COLLECTION",
         "schema.canonical_bytes(value)",
+        "schema.source_identifier(record)",
+        "a derivation that stayed private could only be checked by "
+        "re-implementing it, which proves nothing",
         "The refusal vocabulary is closed to exactly",
         "A refusal carries exactly one token",
         "the exception carries no rejected-value slot",

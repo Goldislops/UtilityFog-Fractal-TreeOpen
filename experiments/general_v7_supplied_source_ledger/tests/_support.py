@@ -273,6 +273,7 @@ REFUSAL_TOKENS = (
     "encoding-not-permitted",
     "float-not-permitted",
     "integer-out-of-bounds",
+    "locator-without-carrier",
     "malformed-document",
     "missing-key",
     "non-ascii-digit",
@@ -306,6 +307,7 @@ REQUIRED_SCHEMA_ATTRIBUTES = (
     "REFUSAL_TOKENS",
     "KEYS_BY_COLLECTION",
     "canonical_bytes",
+    "source_identifier",
 )
 
 #: The declared field names per record kind, mirroring CONTRACT.md section 4b.
@@ -333,6 +335,8 @@ RECORD_FIELDS = {
     ),
     "sources": (
         "record_id",
+        "introducing_batch_ref",
+        "locator_carrier_batch_ref",
         "supplied_locator",
         "normalized_locator",
         "normalized_identifier",

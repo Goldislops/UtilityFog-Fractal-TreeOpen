@@ -141,28 +141,69 @@ def test_g7s_i_010_every_cross_reference_resolves_without_a_cycle():
             assert value != record["record_id"], (record["record_id"], key)
 
 
-def test_g7s_i_011_no_id_range_is_partitioned_by_locator_presence():
-    """Identity must not encode an interpretation. CONTRACT.md section 4a.
+#: Every field of a source whose value is a locator, is derived from a locator,
+#: or reports the presence or absence of one. None may take part in forming an
+#: identifier. CONTRACT.md section 4a.
+LOCATOR_DERIVED_FIELDS = (
+    "supplied_locator",
+    "normalized_locator",
+    "normalized_identifier",
+    "locator_absence_reason",
+    "bibliography_entry",
+    "supplied_text",
+    "locator_carrier_batch_ref",
+)
 
-    Checked by counting runs rather than by comparing one end to the other. A
-    single-ended comparison catches only one of the two contiguous layouts:
-    numbering the locator-bearing sources FIRST is just as much a partition as
-    numbering them last, and an earlier form of this control passed it.
 
-    In id order the has-locator flags must not form exactly two runs. One run
-    means every source is alike, which is no partition at all. Three or more
-    means the two kinds interleave, so presence cannot be read off the id.
+def identifier_from_batch(record: dict) -> str:
+    """Recompute a source identifier from its introducing batch ordinal alone."""
+    ordinal = int(record["introducing_batch_ref"].split("-")[2])
+    return f"G7S-SRC-{ordinal:04d}"
+
+
+def test_g7s_i_011_a_source_identifier_derives_from_its_introducing_batch():
+    """The derivation, which is what CONTRACT.md section 4a actually requires.
+
+    An earlier form of this control forbade the observable *pattern*: it
+    counted runs of has-locator flags in identifier order and refused exactly
+    two. That rejected a correct ordinal assignment. When the supplied material
+    carries its bibliography in a single late batch, the locator-bearing
+    sources land in one contiguous identifier range as a consequence of batch
+    ordering, and the only way to satisfy a run-count rule would have been to
+    renumber records to fit a shape --- the renumbering section 4a exists to
+    prevent. Contiguity is now explicitly legitimate; the derivation is what is
+    checked, here and in ``G7S-I-017``.
+
+    **What this cannot establish.** The identifier is checked against the batch
+    the source *declares* as its introducer. Nothing committed witnesses that
+    the declaration is truthful, so an implementation that assigned identifiers
+    by locator presence and then wrote each ``introducing_batch_ref`` to match
+    would pass this control by construction. CONTRACT.md section 4a records
+    that residue as a human-audit obligation, and this control must never be
+    described as closing it.
+
+    The ordinal is parsed from the batch record id rather than from the batch's
+    own ``batch_ordinal`` field. ``G7S-I-004`` makes those the same number: it
+    pins ``record_id == G7S-BAT-{ordinal:04d}`` and
+    ``member_filename == BATCH_{ordinal:03d}.txt`` together, so the parsed
+    segment is transitively the member-filename ordinal that section 4a names.
     """
     ledger = sup.require_ledger()
-    ordered = sorted(records(ledger, "sources"), key=lambda r: r["record_id"])
-    flags = [record["supplied_locator"] is not None for record in ordered]
-    if not flags or len(set(flags)) == 1:
-        return
-    runs = 1 + sum(1 for a, b in zip(flags, flags[1:]) if a != b)
-    assert runs != 2, (
-        "sources are numbered so that locator presence is a contiguous id "
-        "block; locator presence is a field, never an id range"
-    )
+    sources = records(ledger, "sources")
+    batch_ids = {record["record_id"] for record in records(ledger, "batches")}
+    seen = []
+    for record in sources:
+        introducing = record["introducing_batch_ref"]
+        assert introducing in batch_ids, (record["record_id"], introducing)
+        assert introducing.split("-")[1] == "BAT", introducing
+        assert record["record_id"] == identifier_from_batch(record), (
+            record["record_id"],
+            introducing,
+        )
+        seen.append(introducing)
+    # One source per introducing batch. Gaps in the ordinal sequence are legal
+    # and are NOT checked here: CONTRACT.md section 4a says so in terms.
+    assert len(seen) == len(set(seen)), "two sources share an introducing batch"
 
 
 def test_g7s_i_012_every_emitted_count_equals_its_collection_length():
@@ -239,3 +280,101 @@ def test_g7s_i_016_no_locator_appears_outside_a_declared_locator_field():
         if not URL_LIKE.search(value):
             continue
         assert path and path[-1] in sup.LOCATOR_FIELDS, (path, value[:60])
+
+
+def test_g7s_i_017_the_implementation_derivation_ignores_every_locator_value():
+    """Blind, flip and permute --- against the IMPLEMENTATION's own derivation.
+
+    An earlier form of this control ran the three transformations against a
+    helper in this module that read only ``introducing_batch_ref``. Since that
+    field is not locator-derived, no transformation could ever change the
+    result: the three parts were three copies of one tautology, and the
+    set-level comparison they used was strictly weaker than ``G7S-I-011``'s
+    per-record check, because a set cannot see a permutation.
+
+    The transformations are only meaningful against the derivation the
+    implementation actually uses, so ``schema.source_identifier`` is part of
+    the declared surface in CONTRACT.md section 11a and is what is called here,
+    per record rather than per set. A derivation that consulted a locator
+    returns a different identifier on the flipped input and fails.
+    """
+    schema = sup.require_schema()
+    ledger = sup.require_ledger()
+    sources = records(ledger, "sources")
+    assert sources, "no source to check"
+
+    # The blinding set must cover every locator-derived field the declared
+    # shape has. An unreconciled list would silently under-blind.
+    declared = set(sup.RECORD_FIELDS["sources"])
+    assert set(LOCATOR_DERIVED_FIELDS) <= declared, sorted(
+        set(LOCATOR_DERIVED_FIELDS) - declared
+    )
+    assert declared - set(LOCATOR_DERIVED_FIELDS) == {
+        "record_id",
+        "introducing_batch_ref",
+        "retrieval_state",
+        "verification_state",
+        "verification_evidence",
+    }, sorted(declared - set(LOCATOR_DERIVED_FIELDS))
+
+    for record in sources:
+        expected = record["record_id"]
+        assert schema.source_identifier(record) == expected, expected
+
+        blinded = {
+            key: value
+            for key, value in record.items()
+            if key not in LOCATOR_DERIVED_FIELDS
+        }
+        assert schema.source_identifier(blinded) == expected, ("blinded", expected)
+
+        flipped = dict(record)
+        flipped["supplied_locator"] = (
+            None if record["supplied_locator"] is not None else "supplied-flipped"
+        )
+        flipped["bibliography_entry"] = not bool(record.get("bibliography_entry"))
+        flipped["normalized_identifier"] = (
+            None if record["normalized_identifier"] is not None else "FLIPPEDID00"
+        )
+        assert schema.source_identifier(flipped) == expected, ("flipped", expected)
+
+    presences = [record["supplied_locator"] for record in sources][::-1]
+    for record, presence in zip(sources, presences):
+        permuted = dict(record)
+        permuted["supplied_locator"] = presence
+        assert schema.source_identifier(permuted) == record["record_id"], (
+            "permuted",
+            record["record_id"],
+        )
+
+
+def test_g7s_i_018_every_supplied_locator_names_the_batch_that_carried_it():
+    """CONTRACT.md section 6.5, as an audit over committed data.
+
+    Split out of ``G7S-I-017``, where it was the only part doing work while the
+    control's name promised a blinding experiment. Its own id makes what it
+    proves visible.
+
+    This is an AUDIT: it reads what is recorded. The matching refusal, which is
+    what section 6.5 actually requires of the validator, is ``G7S-S-034``.
+    Section 14g forbids describing one as the other.
+    """
+    ledger = sup.require_ledger()
+    sources = records(ledger, "sources")
+    batch_ids = {record["record_id"] for record in records(ledger, "batches")}
+    for record in sources:
+        carrier = record["locator_carrier_batch_ref"]
+        if record["supplied_locator"] is None:
+            assert carrier is None, record["record_id"]
+            continue
+        assert carrier in batch_ids, (record["record_id"], carrier)
+        assert carrier.split("-")[1] == "BAT", carrier
+        introducing = record["introducing_batch_ref"]
+        if carrier != introducing:
+            # A bibliography batch supplies locators for sources introduced
+            # before it, never after. CONTRACT.md section 4b.
+            assert int(carrier.split("-")[2]) > int(introducing.split("-")[2]), (
+                record["record_id"],
+                carrier,
+                introducing,
+            )
