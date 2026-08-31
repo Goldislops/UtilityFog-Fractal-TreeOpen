@@ -268,6 +268,11 @@ def validate_document(text: str):
             raise _refuse("wrong-type", "root")
     if set(value) - schema.ROOT_KEYS:
         raise _refuse("unknown-key", "root")
+    frozen_identity = {
+        "schema_id": schema.SCHEMA_ID,
+        "ledger_id": schema.LEDGER_ID,
+        "corpus": schema.CORPUS,
+    }
     for name in schema.ROOT_METADATA_KEYS:
         if name not in value:
             continue
@@ -282,7 +287,9 @@ def validate_document(text: str):
                 if type(count) is not int:
                     raise _refuse("wrong-type", "root.counts." + key)
         else:
-            _require_text(value[name], "root." + name)
+            identity = _require_text(value[name], "root." + name)
+            if identity != frozen_identity[name]:
+                raise _refuse("vocabulary-token-not-permitted", "root." + name)
     for collection in schema.COLLECTIONS:
         if collection not in value:
             continue
