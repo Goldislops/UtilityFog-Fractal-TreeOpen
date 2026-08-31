@@ -20,6 +20,11 @@ passing test does not establish source verification or independent acceptance.
 | Record id namespace | `G7S-` |
 | Laboratory | `experiments/general_v7_supplied_source_ledger` |
 
+Whenever an identity field is present, the validator requires the exact
+frozen value above: a different `ledger_id`, `schema_id`, or `corpus` is
+refused with `vocabulary-token-not-permitted`. A partial document may omit an
+identity field; a complete ledger must carry all three.
+
 The namespace prefix is `G7S-` and is deliberately **not** `GV7-`. The adjacent
 laboratory `experiments/general_v7_ledger` holds
 `general-v7-technology-ledger-v1` and owns the `GV7-` namespace. Reusing that

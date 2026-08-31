@@ -248,7 +248,7 @@ def test_g7s_s_024_the_ledger_equals_its_own_canonical_serialization():
     deciding it.
     """
     ledger = sup.require_ledger()
-    raw = sup.LEDGER_PATH.read_bytes()
+    raw = sup.committed_blob(f"{sup.LAB_POSIX}/ledger.json")
     canonical = sup.canonical_bytes(ledger)
     assert not canonical.endswith(b"\n"), "canonical form must carry no newline"
     assert raw == canonical + b"\n", "ledger.json is not canonical bytes plus one LF"
@@ -404,3 +404,20 @@ def test_g7s_s_034_a_supplied_locator_without_a_carrier_is_refused():
         json.dumps({"sources": [record]}),
         "locator-without-carrier",
     )
+
+
+def test_g7s_s_035_wrong_root_identity_constants_are_refused():
+    validate = sup.require_validate()
+    identity = {
+        "schema_id": sup.SCHEMA_ID,
+        "ledger_id": sup.LEDGER_ID,
+        "corpus": sup.CORPUS,
+    }
+    for key in sorted(identity):
+        malformed = dict(identity)
+        malformed[key] = "wrong-" + key
+        refuses(
+            validate,
+            json.dumps(malformed),
+            "vocabulary-token-not-permitted",
+        )
