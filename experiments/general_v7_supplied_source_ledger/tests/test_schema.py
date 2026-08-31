@@ -404,3 +404,20 @@ def test_g7s_s_034_a_supplied_locator_without_a_carrier_is_refused():
         json.dumps({"sources": [record]}),
         "locator-without-carrier",
     )
+
+
+def test_g7s_s_035_wrong_root_identity_constants_are_refused():
+    validate = sup.require_validate()
+    identity = {
+        "schema_id": sup.SCHEMA_ID,
+        "ledger_id": sup.LEDGER_ID,
+        "corpus": sup.CORPUS,
+    }
+    for key in sorted(identity):
+        malformed = dict(identity)
+        malformed[key] = "wrong-" + key
+        refuses(
+            validate,
+            json.dumps(malformed),
+            "vocabulary-token-not-permitted",
+        )

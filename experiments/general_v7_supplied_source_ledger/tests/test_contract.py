@@ -899,3 +899,14 @@ def test_g7s_d_048_every_frozen_row_sits_in_its_declared_evidence_section():
         "the zero records a structural impossibility, not an empty search",
         "A prohibition is stronger than a count of zero",
     )
+
+
+def test_g7s_d_049_identity_constants_are_validator_enforced():
+    phrases(
+        "Whenever an identity field is present, the validator requires the "
+        "exact frozen value above",
+        "a different ledger_id, schema_id, or corpus is refused with "
+        "vocabulary-token-not-permitted",
+        "A partial document may omit an identity field; a complete ledger "
+        "must carry all three",
+    )

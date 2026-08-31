@@ -41,18 +41,18 @@ def _ids(letter: str, *spans) -> tuple:
 #: earlier handback must be able to look one up and find that it was
 #: withdrawn, not find a different control wearing its name.
 AUTHORED_CONTROLS = {
-    "test_contract.py": _ids("D", (1, 48)),
+    "test_contract.py": _ids("D", (1, 49)),
     "test_controls_manifest.py": _ids("M", (1, 38)),
     "test_packet_manifest.py": _ids("R", (1, 20)),
     "test_inventory.py": _ids("I", (1, 18)),
-    "test_schema.py": _ids("S", (1, 34)),
+    "test_schema.py": _ids("S", (1, 35)),
     "test_provenance.py": _ids("P", (1, 16)),
     "test_quarantine.py": _ids("Q", (1, 13)),
 }
 
-FAMILY_TOTALS = {"D": 48, "M": 38, "R": 20, "I": 18, "S": 34, "P": 16, "Q": 13}
+FAMILY_TOTALS = {"D": 49, "M": 38, "R": 20, "I": 18, "S": 35, "P": 16, "Q": 13}
 
-GRAND_TOTAL = 187
+GRAND_TOTAL = 189
 
 BANNED_MARKS = frozenset({"skip", "skipif", "xfail"})
 BANNED_CALLS = frozenset({"skip", "xfail", "importorskip", "exit", "fail"})
