@@ -434,8 +434,8 @@ def test_g7s_m_018_the_two_groups_partition_the_census_exactly():
             raise AssertionError(f"module in neither group: {filename}")
     assert not contract_only & implementation_dependent
     assert contract_only | implementation_dependent == all_declared()
-    assert len(contract_only) == 106, len(contract_only)
-    assert len(implementation_dependent) == 81, len(implementation_dependent)
+    assert len(contract_only) == 107, len(contract_only)
+    assert len(implementation_dependent) == 82, len(implementation_dependent)
 
 
 def test_g7s_m_019_every_gated_control_calls_its_gate_first():
