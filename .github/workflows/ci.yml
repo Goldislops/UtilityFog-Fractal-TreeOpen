@@ -40,7 +40,7 @@ jobs:
           pip install numpy pytest pytest-asyncio matplotlib flask pyzmq openai
 
       - name: Setup Rust toolchain (uft_ca pyo3 extension)
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master-history action pin; rolling stable selected below
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master-history action pin; rolling stable selected below
         with:
           toolchain: stable
 
