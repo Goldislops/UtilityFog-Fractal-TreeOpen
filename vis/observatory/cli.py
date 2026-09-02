@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import errno
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -354,43 +357,100 @@ def _emit_json(report) -> None:
     print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(",", ":")))
 
 
-def _examined(predicate, raw: str) -> bool:
-    """Run a filesystem predicate, translating a path the OS cannot examine.
+# Failures that positively establish "there is nothing at this path". These
+# are the errnos `pathlib` has always read as absence, named here so the CLI's
+# answer stops depending on which Python version runs it. Windows reports an
+# unresolvable reparse point -- its symlink loop -- as ERROR_CANT_RESOLVE_
+# FILENAME rather than as ELOOP, so that one is matched on the winerror.
+_ABSENCE_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
-    `Path.exists()` and `Path.is_dir()` return False for an absent path, but
-    they RAISE for one the filesystem rejects outright -- a name past
-    NAME_MAX, or one containing a byte the filesystem forbids. `_ignore_error`
-    covers ENOENT/ENOTDIR/EBADF/ELOOP and nothing else, so ENAMETOOLONG and
-    EACCES propagate.
+# Windows answers with a winerror where POSIX answers with an errno, and the
+# two do not line up: it collapses most absence onto ENOENT, signals its own
+# symlink loop as ERROR_CANT_RESOLVE_FILENAME rather than ELOOP, and reports
+# a name the filesystem cannot hold -- a component past 255 characters, or one
+# containing a character NTFS forbids -- as ERROR_INVALID_NAME with EINVAL.
+# That last one is absence, not ignorance: no file can ever carry that name,
+# which is why POSIX, where those same bytes are legal, simply reports the
+# path as missing.
+_ABSENCE_WINERRORS = frozenset({
+    123,   # ERROR_INVALID_NAME
+    1921,  # ERROR_CANT_RESOLVE_FILENAME
+})
 
-    That is an expected input problem, not a defect: the user named something
-    unusable. Without this it escaped as a traceback on the status-1 lane,
-    which is exactly the class of failure this contract exists to make
-    parseable.
+# The opposite case, and the reason this is a separate set rather than another
+# errno: ERROR_FILENAME_EXCED_RANGE arrives as ENOENT, so the errno alone
+# would read as "absent". It is not. It means this system could not reach the
+# path -- the same path is examinable on a machine with long paths enabled --
+# so it is ignorance, and it is tested first.
+_UNEXAMINABLE_WINERRORS = frozenset({206})  # ERROR_FILENAME_EXCED_RANGE
 
-    The code is always the honest ``input-error`` fallback. When the OS
-    refuses to look at a path, NOTHING has been established about what kind of
-    thing it is -- so reporting `snapshot-wrong-path-kind` would assert it is
-    a directory, and `snapshot-not-found` would assert it is absent, neither
-    of which was determined. The specific codes stay reserved for paths
-    positively established to be a directory, missing, or of an unsupported
-    suffix.
+
+def _examined(raw: str):
+    """Look at `raw` once and return what was actually established.
+
+    Returns an `os.stat_result` for a path that is there, or None for one
+    positively established to be absent. For a path the OS could not examine
+    it raises `_UserError` with the honest ``input-error`` fallback.
+
+    This deliberately does not use `Path.exists()` / `Path.is_dir()`. Those
+    answer False for two entirely different situations -- "nothing is there"
+    and "I could not look" -- and telling those apart is the whole of this
+    contract:
+
+      * every Python version swallows `ValueError`, which is what Windows
+        raises for an over-long path ("path too long for Windows") and what
+        every platform raises for a name containing NUL. A `ValueError` is
+        not an `OSError`, so no amount of catching `OSError` around a
+        predicate can recover it;
+      * from 3.14 the predicates delegate to `os.path.exists()` /
+        `os.path.isdir()`, which swallow every `OSError`, so EACCES and
+        ENAMETOOLONG answer False as well. Before 3.14 `pathlib._ignore_error`
+        let those through on POSIX but already swallowed ERROR_INVALID_NAME
+        on Windows.
+
+    Asking `os.stat` directly is what makes the distinction visible: it
+    either hands back affirmative evidence or names a concrete failure. Doing
+    it once also means the kind, the presence and the absence of a path are
+    read from a single observation rather than two that could disagree.
+
+    What is examined is `Path(raw)`, not `raw`, because `Path(raw)` is what
+    the rest of the CLI then operates on -- `Path("")` is the current
+    directory and a trailing separator is dropped, neither of which survives
+    stat'ing the user's literal text.
     """
     try:
-        return predicate()
-    except OSError as exc:
+        return os.stat(Path(raw))
+    except ValueError as exc:
         raise _UserError(
             f"cannot examine path {raw}: {exc}", "input-error"
+        ) from exc
+    except OSError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror not in _UNEXAMINABLE_WINERRORS and (
+            exc.errno in _ABSENCE_ERRNOS or winerror in _ABSENCE_WINERRORS
+        ):
+            return None
+        # EACCES, ENAMETOOLONG, a drive that is not ready, a path this
+        # system cannot reach. NOTHING was established about what is there,
+        # so the specific codes stay reserved: `snapshot-wrong-path-kind`
+        # would assert it is a directory and `snapshot-not-found` would
+        # assert it is absent, and neither was determined. Reporting
+        # `strerror` rather than the exception itself
+        # keeps the path from appearing a second time -- `OSError.__str__`
+        # embeds it, and the prose lane does not clip.
+        raise _UserError(
+            f"cannot examine path {raw}: {exc.strerror or exc}", "input-error"
         ) from exc
 
 
 def _validated_snapshot_path(raw: str) -> Path:
     """Check a snapshot argument is a supported, readable file before loading."""
     path = Path(raw)
+    status = _examined(raw)
     # Directory first: a bare directory has no suffix, so checking the suffix
     # ahead of this would report "unsupported format" for what is really a
     # wrong kind of path.
-    if _examined(path.is_dir, raw):
+    if status is not None and stat.S_ISDIR(status.st_mode):
         raise _UserError(
             f"snapshot path is a directory, not a file: {raw}",
             "snapshot-wrong-path-kind",
@@ -401,7 +461,7 @@ def _validated_snapshot_path(raw: str) -> Path:
             f"expected one of {', '.join(SUPPORTED_SNAPSHOT_SUFFIXES)}",
             "snapshot-unsupported-suffix",
         )
-    if not _examined(path.exists, raw):
+    if status is None:
         raise _UserError(f"snapshot not found: {raw}", "snapshot-not-found")
     return path
 
@@ -409,11 +469,12 @@ def _validated_snapshot_path(raw: str) -> Path:
 def _validated_directory(raw: str) -> Path:
     """Check an animation argument is an existing, usable directory."""
     path = Path(raw)
-    if not _examined(path.exists, raw):
+    status = _examined(raw)
+    if status is None:
         raise _UserError(
             f"directory not found: {raw}", "animation-directory-invalid"
         )
-    if not _examined(path.is_dir, raw):
+    if not stat.S_ISDIR(status.st_mode):
         raise _UserError(f"not a directory: {raw}", "animation-directory-invalid")
     return path
 
