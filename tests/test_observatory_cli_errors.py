@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 import pytest
@@ -1365,11 +1366,16 @@ def test_not_found_animation_directory_keeps_its_code(
 
 
 # Windows names the failure in `winerror` and then maps it onto whichever
-# errno is closest, which is not always the one that matters. These pin the
-# classification of the four Windows conditions the CLI has to tell apart.
-# They are synthetic on purpose: 206 and 21 cannot be provoked on a machine
-# with long paths enabled and no removable drive, and 123 needs NTFS, so
-# relying on native production would leave the contract untested wherever the
+# errno is closest, which is not always the one that matters -- ERROR_INVALID_
+# DRIVE, ERROR_BAD_NETPATH and ERROR_BAD_NET_NAME all arrive as ENOENT, so the
+# errno alone would call them absent. These pin the classification of the
+# seven Windows conditions the CLI has to tell apart.
+#
+# They are synthetic on purpose, and must stay that way. 206 and 21 cannot be
+# provoked on a machine with long paths enabled and no removable drive; 15, 53
+# and 67 would need an unmapped drive letter or an unreachable share, which
+# this suite must never go looking for; and 123 needs a Win32 path parser.
+# Relying on native production would leave the contract untested wherever the
 # suite actually runs.
 WINDOWS_NAME_FAILURES = [
     pytest.param(errno.EINVAL, 123, id="winerror-123-invalid-name"),
@@ -1379,6 +1385,9 @@ WINDOWS_NAME_FAILURES = [
 WINDOWS_UNEXAMINABLE_FAILURES = [
     pytest.param(errno.ENOENT, 206, id="winerror-206-filename-exceeds-range"),
     pytest.param(errno.EACCES, 21, id="winerror-21-drive-not-ready"),
+    pytest.param(errno.ENOENT, 15, id="winerror-15-invalid-drive"),
+    pytest.param(errno.ENOENT, 53, id="winerror-53-bad-netpath"),
+    pytest.param(errno.ENOENT, 67, id="winerror-67-bad-net-name"),
 ]
 
 
@@ -1386,12 +1395,25 @@ WINDOWS_UNEXAMINABLE_FAILURES = [
 def test_windows_name_failures_keep_the_not_found_code(
     capsys, tmp_path, monkeypatch, code, winerror
 ):
-    """ERROR_INVALID_NAME and ERROR_CANT_RESOLVE_FILENAME are the two Windows
-    conditions `pathlib` has always answered False for, so they keep reporting
-    not-found. That is a compatibility mapping, not a search of the
-    filesystem: the name could not be used, and POSIX -- where those same
-    bytes are legal and that same link chain simply fails to resolve --
-    reports the identical argument the identical way."""
+    """The two Windows conditions `pathlib` has always answered False for, so
+    they keep reporting not-found. That is a compatibility mapping, not a
+    search of the filesystem: the name could not be used.
+
+    ERROR_INVALID_NAME is narrower than "a character NTFS forbids". It is the
+    Win32 path parser refusing a final component that contains one of
+    ``< > " | ? *`` or a control character, or that is longer than 255
+    characters. A colon is NOT one of them -- it is read as an alternate-data-
+    stream separator and yields ordinary ENOENT -- and trailing spaces and
+    dots are stripped before the lookup.
+
+    POSIX agrees only for the reserved characters, where those bytes are legal
+    and the path is merely missing. It does NOT agree for an over-long
+    component: POSIX answers ENAMETOOLONG there and so reports `input-error`,
+    while Windows has already rejected the name. That divergence is real and
+    is why no cross-platform test asserts a single answer for it.
+
+    ERROR_CANT_RESOLVE_FILENAME is the separate case: a link chain that will
+    not resolve, the counterpart of POSIX ELOOP."""
     target = tmp_path / "s.npz"
     monkeypatch.setattr(
         os, "stat", _stat_failing_for(target, _os_error(code, winerror))
@@ -1478,6 +1500,12 @@ def test_the_winerror_outranks_the_errno_it_arrives_with(
     )
     assert _run_json(argv) == 1
     assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 53))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
 
     monkeypatch.setattr(
         os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL, 1921))
@@ -1748,3 +1776,160 @@ def test_last_matching_envelope_wins_when_several_are_present():
     found = _envelopes_in(stream)
     assert len(found) == 2
     assert _envelope_line(stream)["code"] == "unknown-command"
+
+
+# --- the module's own surface --------------------------------------------
+
+
+# `vis.observatory.cli` declares no `__all__`, so `from ... import *` takes
+# every non-underscored name. That makes the set below the module's real
+# export surface, whether or not anyone intended it as one: anything landing
+# here can be imported out of the module and depended on from elsewhere.
+#
+# This is a drift alarm, not a reconciliation against any earlier commit.
+# Three of these -- `errno`, `os` and `stat` -- are newer than the rest and
+# are accepted for what they are: ordinary module imports used throughout the
+# body, exactly like the `argparse`, `difflib`, `json` and `sys` already here.
+# What does not belong is typing machinery, which is why the test above tests
+# for that by identity rather than by trusting this list.
+WILDCARD_VISIBLE_NAMES = frozenset({
+    "NUM_MEMORY_CHANNELS",
+    "Path",
+    "SUPPORTED_SNAPSHOT_SUFFIXES",
+    "annotations",
+    "argparse",
+    "cli_errors",
+    "difflib",
+    "errno",
+    "json",
+    "main",
+    "os",
+    "stat",
+    "sys",
+})
+
+
+def test_the_module_exports_no_typing_helper():
+    """A typing helper is not part of this CLI's surface.
+
+    `from typing import Optional` annotates one private function and, as a
+    side effect, publishes `cli.Optional` for anything doing `import *` to
+    pick up and come to depend on. Aliasing it under a leading underscore
+    keeps the annotation and keeps the surface.
+
+    Identity against `typing.__all__` rather than a name check, so importing
+    some OTHER helper plainly is caught too. `typing.__all__` and not
+    `vars(typing)`: typing imports `sys` itself, so a predicate built on its
+    module dict reports this module's ordinary `import sys` as a leak.
+    """
+    exported = [
+        getattr(typing, name)
+        for name in typing.__all__
+        if not isinstance(
+            getattr(typing, name, None), (bool, int, float, str, bytes, type(None))
+        )
+    ]
+    leaked = sorted(
+        name
+        for name in vars(cli_mod)
+        if not name.startswith("_")
+        and (
+            getattr(cli_mod, name) is typing
+            or any(getattr(cli_mod, name) is helper for helper in exported)
+        )
+    )
+    assert leaked == [], f"typing machinery published as module attributes: {leaked}"
+
+
+def test_the_wildcard_surface_is_exactly_what_it_should_be():
+    """The whole set, pinned. A per-name assertion would have missed the
+    `Optional` leak until someone thought to look for it.
+
+    `__all__` is honoured if one ever appears, because that is what `import *`
+    would then bind -- and an `__all__` must not be able to hide a leak that
+    is still reachable as an attribute, which is why the identity test above
+    stands separately.
+    """
+    declared = getattr(cli_mod, "__all__", None)
+    visible = (
+        set(declared)
+        if declared is not None
+        else {name for name in vars(cli_mod) if not name.startswith("_")}
+    )
+    assert visible == WILDCARD_VISIBLE_NAMES
+
+
+def test_examined_keeps_an_accurate_return_annotation():
+    """The annotation has to survive being made private, and has to stay
+    RESOLVABLE: the module defers annotations, so a name that cannot be looked
+    up in module globals is a string that only looks like a type."""
+    annotation = cli_mod._examined.__annotations__["return"]
+    assert "os.stat_result" in annotation
+    # The load-bearing line. Deferred annotations make a stale name silent:
+    # aliasing the import and forgetting the annotation still imports, still
+    # runs, and still passes every behavioural test in this file. Only
+    # resolving it catches that.
+    resolved = typing.get_type_hints(cli_mod._examined)
+    assert resolved["return"] == typing.Optional[os.stat_result]
+
+
+def test_the_two_winerror_classes_stay_disjoint():
+    """One winerror cannot mean both 'nothing is there' and 'I could not
+    look'. Nothing else asserts this, and the two sets are edited by hand."""
+    assert cli_mod._NOT_FOUND_WINERRORS.isdisjoint(cli_mod._UNEXAMINABLE_WINERRORS)
+
+
+def test_validating_a_path_raises_no_mutating_audit_event(tmp_path):
+    """Stronger than watching the directory afterwards: every mutating syscall
+    this test NAMES is refused outright, on any path, not merely inside the
+    directory being watched. The named set is not all of them -- `os.setxattr`,
+    for one, would not be caught -- so this is a broad guard rather than a
+    proof of total immutability."""
+    watched = {
+        "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link",
+        "os.symlink", "os.truncate", "os.chmod", "os.chown", "os.utime",
+        "shutil.copyfile", "shutil.move", "shutil.rmtree",
+    }
+    seen = []
+    active = [True]
+
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+    def hook(event, args):
+        if not active[0]:
+            return
+        if event in watched:
+            seen.append(event)
+        elif event == "open":
+            mode = args[1] if len(args) > 1 else None
+            flags = args[2] if len(args) > 2 else 0
+            writing = bool(mode) and bool(set(str(mode)) & set("wxa+"))
+            # `os.open` reports mode None and carries the intent in the flags,
+            # so a mode-only check lets a descriptor-route write straight past.
+            if not writing and isinstance(flags, int):
+                writing = bool(flags & write_flags)
+            if writing:
+                seen.append(f"open:{args[0]}")
+
+    # An audit hook cannot be removed -- `sys` offers no `removeaudithook` --
+    # so it is switched off by flag once this test is done, rather than left
+    # doing work and growing a list for every later test in the session.
+    sys.addaudithook(hook)
+    try:
+        for argv in (
+            ["info", str(tmp_path / "absent.npz")],
+            ["info", str(tmp_path)],
+            ["animate", str(tmp_path / "absent_dir")],
+            ["info", f"{tmp_path}{os.sep}{'q' * 60000}.npz"],
+        ):
+            _run_json(["--error-format", "json", *argv])
+        assert seen == [], f"validation performed mutating operations: {seen}"
+
+        # Positive control: without it a misspelled event name would make every
+        # assertion above vacuous forever.
+        probe = tmp_path / "control_probe.txt"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        assert seen, "the audit hook is not observing anything; it is vacuous"
+    finally:
+        active[0] = False
