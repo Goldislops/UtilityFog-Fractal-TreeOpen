@@ -25,6 +25,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from typing import Optional
 
 from vis.observatory import cli_errors
 
@@ -357,40 +358,74 @@ def _emit_json(report) -> None:
     print(json.dumps(report, sort_keys=True, allow_nan=False, separators=(",", ":")))
 
 
-# Failures that positively establish "there is nothing at this path". These
-# are the errnos `pathlib` has always read as absence, named here so the CLI's
-# answer stops depending on which Python version runs it. Windows reports an
-# unresolvable reparse point -- its symlink loop -- as ERROR_CANT_RESOLVE_
-# FILENAME rather than as ELOOP, so that one is matched on the winerror.
-_ABSENCE_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+# Failures the CLI reports as not-found. Two of these are ordinary absence and
+# two are not, and the difference is worth stating plainly:
+#
+#   * ENOENT and ENOTDIR are the filesystem reporting that nothing is at the
+#     path, which is genuinely established;
+#   * ELOOP and EBADF establish nothing of the sort -- a link chain that will
+#     not resolve, and a bad descriptor. They are mapped to the same not-found
+#     answer for COMPATIBILITY: `Path.exists()` has always returned False for
+#     them, and that answer is part of the published contract.
+#
+# Naming them here is what stops the CLI's answer depending on which Python
+# version runs it.
+_NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
-# Windows answers with a winerror where POSIX answers with an errno, and the
-# two do not line up: it collapses most absence onto ENOENT, signals its own
-# symlink loop as ERROR_CANT_RESOLVE_FILENAME rather than ELOOP, and reports
-# a name the filesystem cannot hold -- a component past 255 characters, or one
-# containing a character NTFS forbids -- as ERROR_INVALID_NAME with EINVAL.
-# That last one is absence, not ignorance: no file can ever carry that name,
-# which is why POSIX, where those same bytes are legal, simply reports the
-# path as missing.
-_ABSENCE_WINERRORS = frozenset({
+# The same compatibility mapping on the Windows side, which needs its own set
+# because Windows names the failure in `winerror` and then maps it onto
+# whichever errno is closest -- ERROR_INVALID_NAME arrives as EINVAL, which on
+# its own means unexaminable. Neither of these is a search of the filesystem:
+#
+#   * ERROR_INVALID_NAME is a name the filesystem cannot express: one
+#     containing a character NTFS reserves, or a component of 256 characters
+#     or more. Nothing was looked for, but nothing can be found under a name
+#     that cannot exist. For the reserved-character case POSIX reaches the
+#     same answer by a different route -- those bytes are legal there, so the
+#     path is merely missing. For the over-long component the two platforms
+#     genuinely differ: POSIX answers ENAMETOOLONG and so reports
+#     `input-error`, having declined to look at all, while Windows has already
+#     rejected the name. Each is honest about what its own kernel established;
+#   * ERROR_CANT_RESOLVE_FILENAME is the Windows spelling of a link chain that
+#     will not resolve, the counterpart of ELOOP above.
+#
+# Both keep the not-found answer `Path.exists()` has always given them.
+#
+# ERROR_NOT_READY (21) is the deliberate exception, and worth naming because
+# `pathlib` ignores it too: preserving the historical answer is the rationale
+# for 123 and 1921, and it is NOT the rule applied here. A drive that is not
+# spinning establishes nothing about what is on it, so this is the one place
+# the classifier knowingly departs from that answer -- which is the correction
+# this contract exists to make.
+_NOT_FOUND_WINERRORS = frozenset({
     123,   # ERROR_INVALID_NAME
     1921,  # ERROR_CANT_RESOLVE_FILENAME
 })
 
 # The opposite case, and the reason this is a separate set rather than another
-# errno: ERROR_FILENAME_EXCED_RANGE arrives as ENOENT, so the errno alone
-# would read as "absent". It is not. It means this system could not reach the
-# path -- the same path is examinable on a machine with long paths enabled --
-# so it is ignorance, and it is tested first.
+# errno: ERROR_FILENAME_EXCED_RANGE arrives carrying ENOENT, so the errno
+# alone would read as not-found. It is not. It means this system could not
+# reach the path -- the same path is examinable on a machine with long paths
+# enabled -- which leaves the CLI ignorant, so it is tested FIRST and
+# overrides the errno it arrived with.
+#
+# The carve-out is deliberately limited to 206. Other Windows failures also
+# arrive as ENOENT without establishing absence -- an unreachable share (53,
+# 67), a drive letter that is not mapped (15) -- and they keep the not-found
+# answer `Path.exists()` has always given them. Widening this set would change
+# user-visible behaviour, so it belongs to a decision of its own rather than
+# to a wording correction.
 _UNEXAMINABLE_WINERRORS = frozenset({206})  # ERROR_FILENAME_EXCED_RANGE
 
 
-def _examined(raw: str):
+def _examined(raw: str) -> Optional[os.stat_result]:
     """Look at `raw` once and return what was actually established.
 
-    Returns an `os.stat_result` for a path that is there, or None for one
-    positively established to be absent. For a path the OS could not examine
-    it raises `_UserError` with the honest ``input-error`` fallback.
+    Returns an `os.stat_result` for a path that is there, or None for one the
+    CLI reports as not-found -- ordinary absence, or one of the resolution and
+    name failures mapped to that answer for compatibility. For a path the OS
+    could not examine it raises `_UserError` with the honest ``input-error``
+    fallback.
 
     This deliberately does not use `Path.exists()` / `Path.is_dir()`. Those
     answer False for two entirely different situations -- "nothing is there"
@@ -427,7 +462,7 @@ def _examined(raw: str):
     except OSError as exc:
         winerror = getattr(exc, "winerror", None)
         if winerror not in _UNEXAMINABLE_WINERRORS and (
-            exc.errno in _ABSENCE_ERRNOS or winerror in _ABSENCE_WINERRORS
+            exc.errno in _NOT_FOUND_ERRNOS or winerror in _NOT_FOUND_WINERRORS
         ):
             return None
         # EACCES, ENAMETOOLONG, a drive that is not ready, a path this
