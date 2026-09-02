@@ -25,7 +25,7 @@ import os
 import stat
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional as _Optional
 
 from vis.observatory import cli_errors
 
@@ -369,7 +369,9 @@ def _emit_json(report) -> None:
 #     them, and that answer is part of the published contract.
 #
 # Naming them here is what stops the CLI's answer depending on which Python
-# version runs it.
+# version runs it. The numeric content is still platform-dependent: on Windows
+# `errno.ELOOP` is 10062, a Winsock value `os.stat` never raises, so the
+# Windows spelling of a chain that will not resolve is the winerror below.
 _NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 # The same compatibility mapping on the Windows side, which needs its own set
@@ -377,13 +379,17 @@ _NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.E
 # whichever errno is closest -- ERROR_INVALID_NAME arrives as EINVAL, which on
 # its own means unexaminable. Neither of these is a search of the filesystem:
 #
-#   * ERROR_INVALID_NAME is a name the filesystem cannot express: one
-#     containing a character NTFS reserves, or a component of 256 characters
-#     or more. Nothing was looked for, but nothing can be found under a name
-#     that cannot exist. For the reserved-character case POSIX reaches the
-#     same answer by a different route -- those bytes are legal there, so the
-#     path is merely missing. For the over-long component the two platforms
-#     genuinely differ: POSIX answers ENAMETOOLONG and so reports
+#   * ERROR_INVALID_NAME is the Win32 path PARSER refusing a final component
+#     -- one containing `< > " | ? *` or a control character, or one longer
+#     than 255 characters. It is narrower than "a character NTFS forbids": a
+#     colon is read as an alternate-data-stream separator and yields ordinary
+#     ENOENT, and trailing spaces and dots are stripped before the lookup. An
+#     over-long component that is NOT the final one arrives as
+#     ERROR_PATH_NOT_FOUND instead. Nothing was looked for, but nothing can be
+#     found under a name that cannot be used. For the reserved characters
+#     POSIX reaches the same answer by another route -- those bytes are legal
+#     there, so the path is merely missing. For an over-long component the two
+#     platforms genuinely differ: POSIX answers ENAMETOOLONG and so reports
 #     `input-error`, having declined to look at all, while Windows has already
 #     rejected the name. Each is honest about what its own kernel established;
 #   * ERROR_CANT_RESOLVE_FILENAME is the Windows spelling of a link chain that
@@ -409,16 +415,27 @@ _NOT_FOUND_WINERRORS = frozenset({
 # enabled -- which leaves the CLI ignorant, so it is tested FIRST and
 # overrides the errno it arrived with.
 #
-# The carve-out is deliberately limited to 206. Other Windows failures also
-# arrive as ENOENT without establishing absence -- an unreachable share (53,
-# 67), a drive letter that is not mapped (15) -- and they keep the not-found
-# answer `Path.exists()` has always given them. Widening this set would change
-# user-visible behaviour, so it belongs to a decision of its own rather than
-# to a wording correction.
-_UNEXAMINABLE_WINERRORS = frozenset({206})  # ERROR_FILENAME_EXCED_RANGE
+# Three more arrive the same way and mean the same thing: a drive letter that
+# is not mapped, and the two ways a network name fails to resolve. None of
+# them looked at anything, and every sibling network failure -- 51, 52, 54,
+# 55, 64, 65 and the rest -- already reports `input-error`, purely because
+# CPython happens to map those onto EINVAL or EACCES rather than ENOENT.
+# Naming these three removes that accident.
+#
+# ERROR_BAD_PATHNAME (161) is deliberately NOT here. It also arrives as
+# ENOENT, but it is a name-syntax rejection like ERROR_INVALID_NAME above, so
+# not-found is the answer that matches its siblings -- it reaches that answer
+# through the errno rather than by being named, which is worth knowing if this
+# set is ever revisited.
+_UNEXAMINABLE_WINERRORS = frozenset({
+    15,   # ERROR_INVALID_DRIVE
+    53,   # ERROR_BAD_NETPATH
+    67,   # ERROR_BAD_NET_NAME
+    206,  # ERROR_FILENAME_EXCED_RANGE
+})
 
 
-def _examined(raw: str) -> Optional[os.stat_result]:
+def _examined(raw: str) -> _Optional[os.stat_result]:
     """Look at `raw` once and return what was actually established.
 
     Returns an `os.stat_result` for a path that is there, or None for one the
