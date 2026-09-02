@@ -18,6 +18,7 @@ Two distinctions this module exists to pin down:
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import os
 import subprocess
@@ -1230,6 +1231,233 @@ def test_positively_established_path_kinds_keep_their_specific_codes(capsys, tmp
     for target, expected in cases:
         assert _run_json(["--error-format", "json", "info", target]) == 1
         assert _only_envelope(capsys)["code"] == expected, target
+
+
+# --- unexaminable: pinned per failure mode, not per platform ---------------
+
+
+def _stat_failing_for(target, exc):
+    """A drop-in `os.stat` that fails only for `target`.
+
+    The classifier's contract is stated in terms of specific failures --
+    EACCES, ELOOP, ENAMETOOLONG, a non-encodable name -- but no single real
+    filesystem produces all of them: NTFS, ext4 and a CI container disagree,
+    and some need privileges a test runner does not have. Injecting the
+    failure at the one syscall the classifier depends on pins the contract
+    itself, identically on every platform and Python version.
+
+    Every other path is delegated to the real `os.stat` untouched, so imports
+    and pytest's own machinery keep working while the patch is installed.
+    """
+    real = os.stat
+    wanted = str(Path(target))
+
+    def fake(path, *args, **kwargs):
+        try:
+            same = str(Path(os.fspath(path))) == wanted
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            raise exc
+        return real(path, *args, **kwargs)
+
+    return fake
+
+
+# A path the OS refused to look at. Nothing is established about it, so every
+# one of these must reach the honest fallback rather than a specific code.
+UNEXAMINABLE_FAILURES = [
+    pytest.param(OSError(errno.EACCES, "Permission denied"), id="eacces"),
+    pytest.param(OSError(errno.ENAMETOOLONG, "File name too long"), id="enametoolong"),
+    pytest.param(OSError(errno.EINVAL, "Invalid argument"), id="einval"),
+    pytest.param(ValueError("stat: path too long for Windows"), id="valueerror-too-long"),
+    pytest.param(ValueError("embedded null character in path"), id="valueerror-nul"),
+]
+
+# A path the OS positively reported as not there. `Path.exists()` has always
+# answered False for these, and they must keep their specific codes: the
+# fallback exists for ignorance, not for every failure.
+ABSENT_FAILURES = [
+    pytest.param(errno.ENOENT, id="enoent"),
+    pytest.param(errno.ENOTDIR, id="enotdir"),
+    pytest.param(errno.ELOOP, id="eloop"),
+    pytest.param(errno.EBADF, id="ebadf"),
+]
+
+
+@pytest.mark.parametrize("failure", UNEXAMINABLE_FAILURES)
+def test_every_unexaminable_failure_mode_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, failure
+):
+    """`ValueError` is the one that bites: it is not an `OSError`, and every
+    Python version's `pathlib` swallows it silently, so a predicate-based
+    check cannot see it at all. It is also exactly what Windows raises for an
+    over-long path."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(os, "stat", _stat_failing_for(target, failure))
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "input-error"
+    assert document["category"] == "input"
+
+
+@pytest.mark.parametrize("failure", UNEXAMINABLE_FAILURES)
+def test_every_unexaminable_animation_directory_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, failure
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(os, "stat", _stat_failing_for(target, failure))
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+@pytest.mark.parametrize("code", ABSENT_FAILURES)
+def test_positively_absent_paths_are_not_swallowed_by_the_fallback(
+    capsys, tmp_path, monkeypatch, code
+):
+    """The mirror image of the fix. These errnos are the OS saying "there is
+    nothing there", which IS an established fact, so the specific code must
+    survive. A repair that routed every failure to `input-error` would pass
+    the tests above and still be wrong."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(code, "gone"))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+
+@pytest.mark.parametrize("code", ABSENT_FAILURES)
+def test_positively_absent_animation_directory_keeps_its_code(
+    capsys, tmp_path, monkeypatch, code
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(code, "gone"))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "animation-directory-invalid"
+    )
+
+
+def test_unexaminable_outranks_the_lexical_suffix_test(capsys, tmp_path, monkeypatch):
+    """Suffix is a guess made from the name alone. Reporting it for a path the
+    OS refused to examine asserts "I looked, and this is a file of the wrong
+    format" -- which never happened. Examination therefore comes first."""
+    target = tmp_path / "s.bogus"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(errno.EACCES, "denied"))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def test_absent_path_with_an_unsupported_suffix_still_reports_the_suffix(
+    capsys, tmp_path
+):
+    """The established precedence, pinned so the repair cannot quietly
+    reorder it: a name the CLI could never load is reported as unsupported
+    even though it is also absent."""
+    assert _run_json(
+        ["--error-format", "json", "info", str(tmp_path / "absent.bogus")]
+    ) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-unsupported-suffix"
+    )
+
+
+def test_a_directory_outranks_its_own_misleading_suffix(capsys, tmp_path):
+    """A directory named `d.txt` is a wrong KIND of path, not an unsupported
+    format -- the kind check has to precede the suffix check to say so."""
+    directory = tmp_path / "d.txt"
+    directory.mkdir()
+    assert _run_json(["--error-format", "json", "info", str(directory)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-wrong-path-kind"
+    )
+
+
+def test_path_spelling_is_normalised_exactly_as_before(capsys, tmp_path):
+    """Two spellings that only survive because the classifier examines
+    `Path(raw)` rather than the raw string: `Path("")` is the current
+    directory, and a trailing separator is dropped. Stat'ing the raw text
+    instead would turn both into errors the CLI never used to report."""
+    assert _run_json(["--error-format", "json", "info", ""]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-wrong-path-kind"
+    )
+
+    snapshot = tmp_path / "s.npz"
+    snapshot.write_bytes(b"not really an archive")
+    assert _run_json(
+        ["--error-format", "json", "info", str(snapshot) + os.sep]
+    ) == 1
+    # Past validation entirely: the loader rejects the bytes, which is a
+    # different code and proves the trailing separator was tolerated.
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-unreadable"
+
+
+def test_symlink_classification_is_unchanged(capsys, tmp_path):
+    """The repair must resolve symlinks, exactly as `Path.is_dir()` did. An
+    `lstat`-based classifier would pass all the tests above and still flip a
+    symlinked directory from `snapshot-wrong-path-kind` to something else."""
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform/user cannot create symlinks")
+    probe.unlink()
+
+    directory = tmp_path / "real_dir"
+    directory.mkdir()
+    to_dir = tmp_path / "to_dir.npz"
+    to_dir.symlink_to(directory)
+    broken = tmp_path / "broken.npz"
+    broken.symlink_to(tmp_path / "nowhere")
+    loop_a = tmp_path / "loop_a.npz"
+    loop_b = tmp_path / "loop_b.npz"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+
+    cases = [
+        (to_dir, "snapshot-wrong-path-kind"),
+        (broken, "snapshot-not-found"),
+        (loop_a, "snapshot-not-found"),
+    ]
+    for target, expected in cases:
+        assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+        assert _only_envelope(capsys, expect_status=1)["code"] == expected, target
+
+
+def test_an_unexaminable_path_still_yields_one_bounded_envelope(capsys, tmp_path):
+    """The whole point of the contract: even a 60 000-character argument
+    leaves exactly one parseable line on stderr, with every field clipped."""
+    long_path = f"{tmp_path}{os.sep}{'q' * 60000}.npz"
+    assert _run_json(["--error-format", "json", "info", long_path]) == 1
+    text = capsys.readouterr().err
+    assert len([line for line in text.splitlines() if line.strip()]) == 1
+    document = json.loads(text)
+    assert document["code"] == "input-error"
+    assert len(document["message"]) <= cli_errors.MAX_FIELD_LENGTH + 3
+
+
+def test_validating_a_path_never_touches_the_filesystem(tmp_path):
+    """Validation answers a question; it must not create, open for writing or
+    delete anything on the way."""
+    before = sorted(p.name for p in tmp_path.iterdir())
+    for argv in (
+        ["info", str(tmp_path / "absent.npz")],
+        ["info", str(tmp_path)],
+        ["animate", str(tmp_path / "absent_dir")],
+        ["info", f"{tmp_path}{os.sep}{'q' * 60000}.npz"],
+    ):
+        _run_json(["--error-format", "json", *argv])
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
 # --- stderr framing: a schema-bearing line, not "the last line" ------------
