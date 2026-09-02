@@ -1264,6 +1264,22 @@ def _stat_failing_for(target, exc):
     return fake
 
 
+def _os_error(code, winerror=None, message="synthetic failure"):
+    """Build an `OSError` carrying a chosen errno and, portably, a winerror.
+
+    Assigning the attribute is the only construction that behaves the same on
+    both platforms. The four-argument `OSError(0, msg, None, winerror)` form
+    sets `winerror` on Windows -- remapping the errno as it goes -- but
+    silently discards it on POSIX, so a test written that way would pin the
+    Windows lane on Windows and assert nothing whatsoever on the Linux runner
+    that actually gates this repository.
+    """
+    exc = OSError(code, message)
+    if winerror is not None:
+        exc.winerror = winerror
+    return exc
+
+
 # A path the OS refused to look at. Nothing is established about it, so every
 # one of these must reach the honest fallback rather than a specific code.
 UNEXAMINABLE_FAILURES = [
@@ -1274,10 +1290,14 @@ UNEXAMINABLE_FAILURES = [
     pytest.param(ValueError("embedded null character in path"), id="valueerror-nul"),
 ]
 
-# A path the OS positively reported as not there. `Path.exists()` has always
-# answered False for these, and they must keep their specific codes: the
-# fallback exists for ignorance, not for every failure.
-ABSENT_FAILURES = [
+# Failures the CLI reports as not-found. ENOENT and ENOTDIR are ordinary
+# absence; ELOOP and EBADF are not -- a link chain that will not resolve and a
+# bad descriptor establish nothing about what is at the path. They are mapped
+# to not-found for compatibility, because `Path.exists()` has always answered
+# False for them and that answer is part of the published contract. Either
+# way they must keep their specific codes: the fallback exists for the
+# failures that leave the CLI ignorant, not for every failure.
+NOT_FOUND_FAILURES = [
     pytest.param(errno.ENOENT, id="enoent"),
     pytest.param(errno.ENOTDIR, id="enotdir"),
     pytest.param(errno.ELOOP, id="eloop"),
@@ -1311,14 +1331,16 @@ def test_every_unexaminable_animation_directory_reaches_the_fallback(
     assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
 
 
-@pytest.mark.parametrize("code", ABSENT_FAILURES)
-def test_positively_absent_paths_are_not_swallowed_by_the_fallback(
+@pytest.mark.parametrize("code", NOT_FOUND_FAILURES)
+def test_not_found_failures_are_not_swallowed_by_the_fallback(
     capsys, tmp_path, monkeypatch, code
 ):
-    """The mirror image of the fix. These errnos are the OS saying "there is
-    nothing there", which IS an established fact, so the specific code must
-    survive. A repair that routed every failure to `input-error` would pass
-    the tests above and still be wrong."""
+    """The mirror image of the fix. ENOENT and ENOTDIR are the OS reporting
+    ordinary absence; ELOOP and EBADF are resolution and descriptor failures
+    that `Path.exists()` has always answered False for, and are mapped to the
+    same not-found code to keep that published answer. Both kinds must keep
+    their specific code: a repair that routed every failure to `input-error`
+    would pass the tests above and still be wrong."""
     target = tmp_path / "s.npz"
     monkeypatch.setattr(
         os, "stat", _stat_failing_for(target, OSError(code, "gone"))
@@ -1327,8 +1349,8 @@ def test_positively_absent_paths_are_not_swallowed_by_the_fallback(
     assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
 
 
-@pytest.mark.parametrize("code", ABSENT_FAILURES)
-def test_positively_absent_animation_directory_keeps_its_code(
+@pytest.mark.parametrize("code", NOT_FOUND_FAILURES)
+def test_not_found_animation_directory_keeps_its_code(
     capsys, tmp_path, monkeypatch, code
 ):
     target = tmp_path / "frames"
@@ -1340,6 +1362,219 @@ def test_positively_absent_animation_directory_keeps_its_code(
         _only_envelope(capsys, expect_status=1)["code"]
         == "animation-directory-invalid"
     )
+
+
+# Windows names the failure in `winerror` and then maps it onto whichever
+# errno is closest, which is not always the one that matters. These pin the
+# classification of the four Windows conditions the CLI has to tell apart.
+# They are synthetic on purpose: 206 and 21 cannot be provoked on a machine
+# with long paths enabled and no removable drive, and 123 needs NTFS, so
+# relying on native production would leave the contract untested wherever the
+# suite actually runs.
+WINDOWS_NAME_FAILURES = [
+    pytest.param(errno.EINVAL, 123, id="winerror-123-invalid-name"),
+    pytest.param(errno.EINVAL, 1921, id="winerror-1921-cannot-resolve-name"),
+]
+
+WINDOWS_UNEXAMINABLE_FAILURES = [
+    pytest.param(errno.ENOENT, 206, id="winerror-206-filename-exceeds-range"),
+    pytest.param(errno.EACCES, 21, id="winerror-21-drive-not-ready"),
+]
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_NAME_FAILURES)
+def test_windows_name_failures_keep_the_not_found_code(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    """ERROR_INVALID_NAME and ERROR_CANT_RESOLVE_FILENAME are the two Windows
+    conditions `pathlib` has always answered False for, so they keep reporting
+    not-found. That is a compatibility mapping, not a search of the
+    filesystem: the name could not be used, and POSIX -- where those same
+    bytes are legal and that same link chain simply fails to resolve --
+    reports the identical argument the identical way."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_NAME_FAILURES)
+def test_windows_name_failures_keep_the_animation_directory_code(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "animation-directory-invalid"
+    )
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_UNEXAMINABLE_FAILURES)
+def test_windows_unexaminable_failures_reach_the_fallback(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    """A name past what the system can express, and a drive that is not
+    spinning. Neither establishes anything about what is at the path."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "input-error"
+    assert document["category"] == "input"
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_UNEXAMINABLE_FAILURES)
+def test_windows_unexaminable_animation_directory_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def test_the_winerror_outranks_the_errno_it_arrives_with(
+    capsys, tmp_path, monkeypatch
+):
+    """The precedence that makes the Windows lane correct, pinned in the only
+    way that can catch its removal: the SAME errno twice, once carrying the
+    winerror and once not.
+
+    ERROR_FILENAME_EXCED_RANGE arrives as ENOENT, so reading the errno alone
+    would report the path absent -- the exact conflation this contract exists
+    to prevent. ERROR_INVALID_NAME and ERROR_CANT_RESOLVE_FILENAME arrive as
+    EINVAL, which on its own is unexaminable, so it must be the winerror that
+    pulls those back to not-found. A classifier that consulted only the errno,
+    or that swapped any of these winerrors between the sets, passes every
+    other test in this file and fails a leg of this one.
+    """
+    target = tmp_path / "s.npz"
+    argv = ["--error-format", "json", "info", str(target)]
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 206))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL, 123))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL, 1921))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def _path_of_total_length(root, total, suffix=".npz"):
+    """Build a path of exactly `total` characters from legal components.
+
+    The component that carries the suffix is fixed short and reserved FIRST.
+    Sized last it could exceed NAME_MAX for a long `root`, and the test would
+    quietly stop testing the thing it names -- an over-long TOTAL -- by
+    smuggling in an over-long COMPONENT, which is a different failure.
+
+    A one-character shortfall cannot be spent as a component, since a
+    component costs a separator plus at least one character; that case is
+    retried with a longer tail.
+    """
+    name_max = min(255, os.pathconf(str(root), "PC_NAME_MAX"))
+    for padding in (8, 9):
+        tail = "d" * padding + suffix
+        parts = []
+
+        def spent():
+            return (
+                len(str(root))
+                + sum(1 + len(part) for part in parts)
+                + 1
+                + len(tail)
+            )
+
+        while spent() + 1 + name_max <= total:
+            parts.append("d" * name_max)
+        shortfall = total - spent()
+        if shortfall == 1:
+            continue
+        if shortfall:
+            parts.append("d" * (shortfall - 1))
+        built = os.path.join(str(root), *parts, tail)
+        assert len(built) == total
+        assert all(1 <= len(part) <= name_max for part in built.split(os.sep) if part)
+        assert Path(built).suffix == suffix
+        return built
+    raise AssertionError(f"could not build a legal path of length {total}")
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "pathconf"),
+    reason="PATH_MAX is a POSIX limit; Windows bounds a path differently",
+)
+def test_the_path_max_boundary_separates_absence_from_ignorance(capsys, tmp_path):
+    """The other way a path can be too long, pinned as a BOUNDARY rather than
+    as a single case.
+
+    Every component here is a legal length and it is the TOTAL the kernel
+    refuses, with ENAMETOOLONG. One character shorter and the kernel does
+    look, finds nothing, and says ENOENT -- so the two sides must report
+    different codes.
+
+    Asserting only the long side would be satisfied by an implementation that
+    never reads the errno at all and simply calls any long path unexaminable.
+    That is why both sides are here, one character apart, and why each asserts
+    its own premise: a test whose input silently stops producing the error it
+    was written for passes for the wrong reason.
+
+    Nothing is created on disk -- the kernel rejects the name as it copies it
+    in, before resolving a single component.
+    """
+    path_max = os.pathconf(str(tmp_path), "PC_PATH_MAX")
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    shorter = _path_of_total_length(tmp_path, path_max - 1)
+    with pytest.raises(OSError) as raised:
+        os.stat(Path(shorter))
+    assert raised.value.errno == errno.ENOENT, "premise: the kernel looked"
+    assert _run_json(["--error-format", "json", "info", shorter]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    longer = _path_of_total_length(tmp_path, path_max)
+    with pytest.raises(OSError) as raised:
+        os.stat(Path(longer))
+    assert raised.value.errno == errno.ENAMETOOLONG, "premise: it declined to look"
+    assert _run_json(["--error-format", "json", "info", longer]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    assert _run_json(["--error-format", "json", "animate", longer]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
 
 
 def test_unexaminable_outranks_the_lexical_suffix_test(capsys, tmp_path, monkeypatch):
