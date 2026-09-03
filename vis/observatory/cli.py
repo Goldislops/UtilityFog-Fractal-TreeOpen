@@ -19,12 +19,18 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import errno
 import json
-import os
-import stat
 import sys
 from pathlib import Path
+
+# Bound privately, all four of them. This module declares no `__all__`, so a
+# plain `import errno` publishes `cli.errno` for `from ... import *` to bind
+# and for other code to start depending on. These are implementation helpers,
+# not part of what this CLI offers, and the underscore is what keeps the
+# module's export surface the ten names it has always had.
+import errno as _errno
+import os as _os
+import stat as _stat
 from typing import Optional as _Optional
 
 from vis.observatory import cli_errors
@@ -372,23 +378,34 @@ def _emit_json(report) -> None:
 # version runs it. The numeric content is still platform-dependent: on Windows
 # `errno.ELOOP` is 10062, a Winsock value `os.stat` never raises, so the
 # Windows spelling of a chain that will not resolve is the winerror below.
-_NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+_NOT_FOUND_ERRNOS = frozenset(
+    {_errno.ENOENT, _errno.ENOTDIR, _errno.EBADF, _errno.ELOOP}
+)
 
 # The same compatibility mapping on the Windows side, which needs its own set
 # because Windows names the failure in `winerror` and then maps it onto
 # whichever errno is closest -- ERROR_INVALID_NAME arrives as EINVAL, which on
 # its own means unexaminable. Neither of these is a search of the filesystem:
 #
-#   * ERROR_INVALID_NAME is the Win32 path PARSER refusing a final component
-#     -- one containing `< > " | ? *` or a control character, or one longer
-#     than 255 characters. It is narrower than "a character NTFS forbids": a
-#     colon is read as an alternate-data-stream separator and yields ordinary
-#     ENOENT, and trailing spaces and dots are stripped before the lookup. An
-#     over-long component that is NOT the final one arrives as
-#     ERROR_PATH_NOT_FOUND instead. Nothing was looked for, but nothing can be
-#     found under a name that cannot be used. For the reserved characters
-#     POSIX reaches the same answer by another route -- those bytes are legal
-#     there, so the path is merely missing. For an over-long component the two
+#   * ERROR_INVALID_NAME is the Win32 path PARSER refusing a name it cannot
+#     parse: any component containing `< > " | ? *` or a control character, or
+#     a FINAL component longer than 255 characters. An over-long component
+#     that is not the final one arrives as ERROR_PATH_NOT_FOUND instead, and
+#     trailing spaces and dots are stripped before the lookup.
+#
+#     It is narrower than "a character NTFS forbids", and a colon shows why. A
+#     colon opens an alternate-data-stream reference, which is then resolved
+#     like any other name: `name.npz:stream` SUCCEEDS if that stream exists
+#     and gives ordinary ENOENT if it does not. What produces
+#     ERROR_INVALID_NAME is a malformed stream type -- `name.npz::stream`,
+#     `name.npz:::stream`, a bare trailing `name.npz:` -- and not the doubled
+#     colon itself, since the canonical `name.npz::$DATA` names the default
+#     data stream and succeeds. All measured, not inferred.
+#
+#     Nothing was looked for, but nothing can be found under a name that
+#     cannot be used. For the reserved characters POSIX reaches the same
+#     answer by another route -- those bytes are legal there, so the path is
+#     merely missing. For an over-long component the two
 #     platforms genuinely differ: POSIX answers ENAMETOOLONG and so reports
 #     `input-error`, having declined to look at all, while Windows has already
 #     rejected the name. Each is honest about what its own kernel established;
@@ -397,12 +414,13 @@ _NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.E
 #
 # Both keep the not-found answer `Path.exists()` has always given them.
 #
-# ERROR_NOT_READY (21) is the deliberate exception, and worth naming because
-# `pathlib` ignores it too: preserving the historical answer is the rationale
-# for 123 and 1921, and it is NOT the rule applied here. A drive that is not
-# spinning establishes nothing about what is on it, so this is the one place
-# the classifier knowingly departs from that answer -- which is the correction
-# this contract exists to make.
+# `pathlib` also ignores ERROR_NOT_READY (21), so the compatibility rationale
+# used for 123 and 1921 would have covered it too. It is classified the other
+# way, with the unexaminable codes below: a drive that is not spinning
+# establishes nothing about what is on it. It is not the only such departure
+# -- 15, 53, 67 and 206 are classified on the same reasoning -- so the
+# rationale for 123 and 1921 is compatibility where the name itself could not
+# be used, not compatibility everywhere.
 _NOT_FOUND_WINERRORS = frozenset({
     123,   # ERROR_INVALID_NAME
     1921,  # ERROR_CANT_RESOLVE_FILENAME
@@ -415,12 +433,16 @@ _NOT_FOUND_WINERRORS = frozenset({
 # enabled -- which leaves the CLI ignorant, so it is tested FIRST and
 # overrides the errno it arrived with.
 #
-# Three more arrive the same way and mean the same thing: a drive letter that
-# is not mapped, and the two ways a network name fails to resolve. None of
-# them looked at anything, and every sibling network failure -- 51, 52, 54,
-# 55, 64, 65 and the rest -- already reports `input-error`, purely because
-# CPython happens to map those onto EINVAL or EACCES rather than ENOENT.
-# Naming these three removes that accident.
+# Four arrive the same way and mean the same thing: a drive that is not ready,
+# a drive letter that is not mapped, and the two ways a network name fails to
+# resolve. None of them looked at anything.
+#
+# For 15, 53 and 67 this also removes an accident rather than creating an
+# exception. Neighbouring Windows failures meaning much the same thing already
+# report `input-error` WITHOUT being named here, because CPython maps them onto
+# something other than ENOENT -- 51, 52, 54, 55 and 64 onto EINVAL, and 65 onto
+# EACCES, each checked against CPython's mapping rather than assumed. 15, 53
+# and 67 differed from those only in which errno they happened to be given.
 #
 # ERROR_BAD_PATHNAME (161) is deliberately NOT here. It also arrives as
 # ENOENT, but it is a name-syntax rejection like ERROR_INVALID_NAME above, so
@@ -429,13 +451,14 @@ _NOT_FOUND_WINERRORS = frozenset({
 # set is ever revisited.
 _UNEXAMINABLE_WINERRORS = frozenset({
     15,   # ERROR_INVALID_DRIVE
+    21,   # ERROR_NOT_READY
     53,   # ERROR_BAD_NETPATH
     67,   # ERROR_BAD_NET_NAME
     206,  # ERROR_FILENAME_EXCED_RANGE
 })
 
 
-def _examined(raw: str) -> _Optional[os.stat_result]:
+def _examined(raw: str) -> _Optional[_os.stat_result]:
     """Look at `raw` once and return what was actually established.
 
     Returns an `os.stat_result` for a path that is there, or None for one the
@@ -471,7 +494,7 @@ def _examined(raw: str) -> _Optional[os.stat_result]:
     stat'ing the user's literal text.
     """
     try:
-        return os.stat(Path(raw))
+        return _os.stat(Path(raw))
     except ValueError as exc:
         raise _UserError(
             f"cannot examine path {raw}: {exc}", "input-error"
@@ -502,7 +525,7 @@ def _validated_snapshot_path(raw: str) -> Path:
     # Directory first: a bare directory has no suffix, so checking the suffix
     # ahead of this would report "unsupported format" for what is really a
     # wrong kind of path.
-    if status is not None and stat.S_ISDIR(status.st_mode):
+    if status is not None and _stat.S_ISDIR(status.st_mode):
         raise _UserError(
             f"snapshot path is a directory, not a file: {raw}",
             "snapshot-wrong-path-kind",
@@ -526,7 +549,7 @@ def _validated_directory(raw: str) -> Path:
         raise _UserError(
             f"directory not found: {raw}", "animation-directory-invalid"
         )
-    if not stat.S_ISDIR(status.st_mode):
+    if not _stat.S_ISDIR(status.st_mode):
         raise _UserError(f"not a directory: {raw}", "animation-directory-invalid")
     return path
 
