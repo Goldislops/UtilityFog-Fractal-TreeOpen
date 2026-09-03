@@ -388,10 +388,17 @@ _NOT_FOUND_ERRNOS = frozenset(
 # its own means unexaminable. Neither of these is a search of the filesystem:
 #
 #   * ERROR_INVALID_NAME is the Win32 path PARSER refusing a name it cannot
-#     parse: any component containing `< > " | ? *` or a control character, or
-#     a FINAL component longer than 255 characters. An over-long component
-#     that is not the final one arrives as ERROR_PATH_NOT_FOUND instead, and
-#     trailing spaces and dots are stripped before the lookup.
+#     parse: any component containing `< > " | ? *` or a control character
+#     other than NUL, or a FINAL component longer than 255 characters. An
+#     over-long component that is not the final one arrives as
+#     ERROR_PATH_NOT_FOUND instead, and trailing spaces and dots are stripped
+#     before the lookup.
+#
+#     NUL is the exception among the control characters and is excluded above
+#     deliberately: CPython raises `ValueError` for an embedded NUL before it
+#     ever calls the OS, so such a path never reaches the Win32 parser, never
+#     carries a winerror, and is handled by the ValueError branch below rather
+#     than by this set.
 #
 #     It is narrower than "a character NTFS forbids", and a colon shows why. A
 #     colon opens an alternate-data-stream reference, which is then resolved
