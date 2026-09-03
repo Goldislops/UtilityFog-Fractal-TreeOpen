@@ -1401,16 +1401,34 @@ def test_windows_name_failures_keep_the_not_found_code(
 
     ERROR_INVALID_NAME is narrower than "a character NTFS forbids", and the
     two rules that produce it have different scopes. A reserved Win32
-    character -- ``< > " | ? *``, or a control character -- produces it in ANY
-    component, final or not. The 255-character limit produces it only in the
-    FINAL component: an over-long component earlier in the path comes back as
+    character -- ``< > " | ? *``, or any control character in the range
+    U+0001 through U+001F, exactly that range and no wider, since U+007F is
+    legal in an ordinary name -- produces it in ANY ORDINARY component, final
+    or not: that rule governs the filename and directory portions of a path.
+
+    Those same characters are PERMITTED inside an alternate-data-stream NAME,
+    where they are ordinary bytes. All 31 control characters U+0001 through
+    U+001F were measured creatable as a stream -- alternate data streams
+    require NTFS -- with `os.stat` then succeeding on the created stream, and
+    before creation such a name gives ordinary ENOENT with winerror 2 rather
+    than winerror 123. The reserved characters behave the same way there.
+
+    A colon is the one character there that is not simply another byte, and
+    not because it is forbidden: it ends the stream name and begins the
+    stream TYPE, so `name.npz:stream:$DATA` names the same stream as
+    `name.npz:stream`. What is refused is a malformed TYPE, below.
+
+    The 255-character limit produces ERROR_INVALID_NAME only in the FINAL
+    component: an over-long component earlier in the path comes back as
     ERROR_PATH_NOT_FOUND instead. Trailing spaces and dots are stripped
     before the lookup.
 
-    An embedded NUL never reaches the Win32 parser at all. CPython rejects it
-    as `ValueError` before the OS call, so it carries no winerror and is not
-    an ERROR_INVALID_NAME case; it reaches the fallback by the separate
-    ValueError route.
+    An embedded NUL is a separate matter, and not a Win32 rule at all.
+    CPython rejects a path containing U+0000 by raising `ValueError` BEFORE
+    the operating-system call, so it never reaches the Win32 parser, carries
+    no winerror, and is not an ERROR_INVALID_NAME case; it reaches the
+    fallback by the separate ValueError route. That holds in an ordinary
+    component and inside a stream name alike.
 
     A colon is not simply exempt either. A colon opens an alternate-data-
     stream reference, which is then resolved like any other name:
