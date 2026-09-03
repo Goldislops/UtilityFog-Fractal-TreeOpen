@@ -1890,15 +1890,28 @@ def test_the_wildcard_surface_is_exactly_what_it_should_be():
     """The whole set, pinned. A per-name assertion would have missed the
     `Optional` leak until someone thought to look for it.
 
-    `__all__` is honoured if one ever appears, because that is what `import *`
-    would then bind -- and an `__all__` must not be able to hide a leak that
-    is still reachable as an attribute, which is why the identity test above
-    stands separately.
+    Three assertions, kept apart because each has a failure mode the other
+    two do not.
+
+    The wildcard-set assertion honours `__all__` if one ever appears, because
+    that is what `import *` would then bind. That is deliberate, and it has a
+    measured consequence: a curated `__all__` naming exactly these ten names
+    HIDES an additional public attribute from that assertion. It does not
+    hide it from this file. The third assertion reads the non-underscored
+    `vars()` attribute surface directly and catches the extra name.
+
+    The typing-identity test above is not the generic safeguard either. It
+    detects exported typing machinery specifically, by identity, so an
+    ordinary public attribute passes it untouched.
     """
-    # Load-bearing on its own, and asserted first: `__all__` must be ABSENT,
-    # not merely consistent with the set below. Declaring one would redefine
-    # the very surface this test exists to pin, and would let a later leak
-    # hide behind a curated list rather than showing up here.
+    # Asserted first, and load-bearing on its own: this pins the historical
+    # ABSENCE of `__all__`, independently of whether a declared one would
+    # happen to agree with the set below.
+    #
+    # Measured on a disposable copy: with a curated `__all__` of these ten
+    # names plus one extra public attribute, deleting this line leaves the
+    # wildcard-set assertion PASSING and the attribute-surface assertion
+    # below FAILING on the extra name.
     assert "__all__" not in vars(cli_mod)
 
     declared = getattr(cli_mod, "__all__", None)
