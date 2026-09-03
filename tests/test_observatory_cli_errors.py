@@ -1399,17 +1399,26 @@ def test_windows_name_failures_keep_the_not_found_code(
     they keep reporting not-found. That is a compatibility mapping, not a
     search of the filesystem: the name could not be used.
 
-    ERROR_INVALID_NAME is narrower than "a character NTFS forbids". It is the
-    Win32 path parser refusing a final component that contains one of
-    ``< > " | ? *`` or a control character, or that is longer than 255
-    characters. Trailing spaces and dots are stripped before the lookup.
+    ERROR_INVALID_NAME is narrower than "a character NTFS forbids", and the
+    two rules that produce it have different scopes. A reserved Win32
+    character -- ``< > " | ? *``, or a control character -- produces it in ANY
+    component, final or not. The 255-character limit produces it only in the
+    FINAL component: an over-long component earlier in the path comes back as
+    ERROR_PATH_NOT_FOUND instead. Trailing spaces and dots are stripped
+    before the lookup.
 
-    A colon is not simply exempt, and the honest statement is narrower than
-    that: WELL-FORMED alternate-data-stream syntax (`name.npz:stream`) parses
-    and yields ordinary ENOENT whether or not the base name exists, but
-    MALFORMED colon syntax does not -- `name.npz::stream`, `name.npz:::stream`
-    and a bare trailing `name.npz:` each yield ERROR_INVALID_NAME. So a colon
-    can land on either side of this classification depending on its shape.
+    An embedded NUL never reaches the Win32 parser at all. CPython rejects it
+    as `ValueError` before the OS call, so it carries no winerror and is not
+    an ERROR_INVALID_NAME case; it reaches the fallback by the separate
+    ValueError route.
+
+    A colon is not simply exempt either. A colon opens an alternate-data-
+    stream reference, which is then resolved like any other name:
+    `name.npz:stream` SUCCEEDS when that stream exists and gives ordinary
+    ENOENT when it does not, and the canonical `name.npz::$DATA` succeeds for
+    an existing file. What produces ERROR_INVALID_NAME is a malformed stream
+    type -- measured for `name.npz::stream`, `name.npz:::stream` and a bare
+    trailing `name.npz:` -- not the doubled colon itself.
 
     POSIX agrees only for the reserved characters, where those bytes are legal
     and the path is merely missing. It does NOT agree for an over-long
@@ -1868,6 +1877,12 @@ def test_the_wildcard_surface_is_exactly_what_it_should_be():
     is still reachable as an attribute, which is why the identity test above
     stands separately.
     """
+    # Load-bearing on its own, and asserted first: `__all__` must be ABSENT,
+    # not merely consistent with the set below. Declaring one would redefine
+    # the very surface this test exists to pin, and would let a later leak
+    # hide behind a curated list rather than showing up here.
+    assert "__all__" not in vars(cli_mod)
+
     declared = getattr(cli_mod, "__all__", None)
     visible = (
         set(declared)
