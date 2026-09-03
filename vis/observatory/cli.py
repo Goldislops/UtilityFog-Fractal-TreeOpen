@@ -388,17 +388,29 @@ _NOT_FOUND_ERRNOS = frozenset(
 # its own means unexaminable. Neither of these is a search of the filesystem:
 #
 #   * ERROR_INVALID_NAME is the Win32 path PARSER refusing a name it cannot
-#     parse: any component containing `< > " | ? *` or a control character
-#     other than NUL, or a FINAL component longer than 255 characters. An
-#     over-long component that is not the final one arrives as
-#     ERROR_PATH_NOT_FOUND instead, and trailing spaces and dots are stripped
-#     before the lookup.
+#     parse: any ORDINARY component containing `< > " | ? *` or a control
+#     character in the range U+0001 through U+001F -- exactly that range and
+#     no wider, since U+007F is legal in an ordinary name -- or a FINAL
+#     component longer than 255 characters. An over-long component not the
+#     final one arrives as ERROR_PATH_NOT_FOUND instead, and trailing spaces
+#     and dots are stripped before the lookup.
 #
-#     NUL is the exception among the control characters and is excluded above
-#     deliberately: CPython raises `ValueError` for an embedded NUL before it
-#     ever calls the OS, so such a path never reaches the Win32 parser, never
-#     carries a winerror, and is handled by the ValueError branch below rather
-#     than by this set.
+#     ORDINARY is load-bearing there: that rule governs the filename and
+#     directory portions of a path, not an alternate-data-stream name. All 31
+#     control characters U+0001 through U+001F are PERMITTED inside a stream
+#     name -- measured creatable there, with `os.stat` then succeeding on the
+#     created stream, and giving ordinary ENOENT with winerror 2 rather than
+#     winerror 123 before creation -- and so are the reserved characters. A
+#     colon is the one character there that is not simply another byte, and
+#     not because it is forbidden: it ends the stream name and begins the
+#     stream TYPE, so `name.npz:stream:$DATA` names the same stream as
+#     `name.npz:stream`. What is refused is a malformed TYPE, below.
+#
+#     NUL is not part of that rule at all, and is excluded above deliberately:
+#     CPython raises `ValueError` for an embedded NUL before it ever calls the
+#     OS, so such a path never reaches the Win32 parser, never carries a
+#     winerror, and is handled by the ValueError branch below rather than by
+#     this set -- in an ordinary component and inside a stream name alike.
 #
 #     It is narrower than "a character NTFS forbids", and a colon shows why. A
 #     colon opens an alternate-data-stream reference, which is then resolved
@@ -440,9 +452,17 @@ _NOT_FOUND_WINERRORS = frozenset({
 # enabled -- which leaves the CLI ignorant, so it is tested FIRST and
 # overrides the errno it arrived with.
 #
-# Four arrive the same way and mean the same thing: a drive that is not ready,
-# a drive letter that is not mapped, and the two ways a network name fails to
-# resolve. None of them looked at anything.
+# Four more mean the same thing -- a drive that is not ready, a drive letter
+# that is not mapped, and the two ways a network name fails to resolve -- but
+# they do NOT all arrive the same way. ERROR_INVALID_DRIVE (15),
+# ERROR_BAD_NETPATH (53) and ERROR_BAD_NET_NAME (67) naturally arrive carrying
+# ENOENT, which the errnos above would otherwise claim as not-found;
+# ERROR_NOT_READY (21) naturally arrives carrying EACCES, which already
+# reaches `input-error` without being named here. All four belong to the
+# unexaminable class regardless, because the class follows what the OS
+# established -- nothing -- and not which errno CPython happened to pair the
+# winerror with. Naming 21 explicitly is what keeps that true if the pairing
+# is ever revised. None of them looked at anything.
 #
 # For 15, 53 and 67 this also removes an accident rather than creating an
 # exception. Neighbouring Windows failures meaning much the same thing already
@@ -479,11 +499,16 @@ def _examined(raw: str) -> _Optional[_os.stat_result]:
     and "I could not look" -- and telling those apart is the whole of this
     contract:
 
-      * every Python version swallows `ValueError`, which is what Windows
-        raises for an over-long path ("path too long for Windows") and what
-        every platform raises for a name containing NUL. A `ValueError` is
-        not an `OSError`, so no amount of catching `OSError` around a
-        predicate can recover it;
+      * the predicates swallow `ValueError` on every Python version tested
+        for this branch -- 3.12 and 3.13 measured directly, each answering
+        False for an embedded NUL and for an over-long Windows path, 3.12
+        being the version CI runs. On 3.14 the delegation described below
+        carries the same consequence, `os.path` swallowing `ValueError` as
+        well; that one is read from CPython's source rather than measured
+        here. `ValueError` is what Windows raises for an over-long path
+        ("path too long for Windows") and what every platform raises for a
+        name containing NUL, and it is not an `OSError`, so no amount of
+        catching `OSError` around a predicate can recover it;
       * from 3.14 the predicates delegate to `os.path.exists()` /
         `os.path.isdir()`, which swallow every `OSError`, so EACCES and
         ENAMETOOLONG answer False as well. Before 3.14 `pathlib._ignore_error`
