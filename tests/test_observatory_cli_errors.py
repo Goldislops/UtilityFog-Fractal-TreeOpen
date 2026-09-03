@@ -1402,9 +1402,14 @@ def test_windows_name_failures_keep_the_not_found_code(
     ERROR_INVALID_NAME is narrower than "a character NTFS forbids". It is the
     Win32 path parser refusing a final component that contains one of
     ``< > " | ? *`` or a control character, or that is longer than 255
-    characters. A colon is NOT one of them -- it is read as an alternate-data-
-    stream separator and yields ordinary ENOENT -- and trailing spaces and
-    dots are stripped before the lookup.
+    characters. Trailing spaces and dots are stripped before the lookup.
+
+    A colon is not simply exempt, and the honest statement is narrower than
+    that: WELL-FORMED alternate-data-stream syntax (`name.npz:stream`) parses
+    and yields ordinary ENOENT whether or not the base name exists, but
+    MALFORMED colon syntax does not -- `name.npz::stream`, `name.npz:::stream`
+    and a bare trailing `name.npz:` each yield ERROR_INVALID_NAME. So a colon
+    can land on either side of this classification depending on its shape.
 
     POSIX agrees only for the reserved characters, where those bytes are legal
     and the path is merely missing. It does NOT agree for an over-long
@@ -1503,6 +1508,16 @@ def test_the_winerror_outranks_the_errno_it_arrives_with(
 
     monkeypatch.setattr(
         os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 53))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    # ERROR_NOT_READY normally arrives as EACCES, which reaches the fallback
+    # through the errno alone -- so that pairing proves nothing about the
+    # winerror sets. Paired here with a MISLEADING ENOENT, the errno would say
+    # not-found and only the winerror can still say otherwise.
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 21))
     )
     assert _run_json(argv) == 1
     assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
@@ -1786,12 +1801,18 @@ def test_last_matching_envelope_wins_when_several_are_present():
 # export surface, whether or not anyone intended it as one: anything landing
 # here can be imported out of the module and depended on from elsewhere.
 #
-# This is a drift alarm, not a reconciliation against any earlier commit.
-# Three of these -- `errno`, `os` and `stat` -- are newer than the rest and
-# are accepted for what they are: ordinary module imports used throughout the
-# body, exactly like the `argparse`, `difflib`, `json` and `sys` already here.
-# What does not belong is typing machinery, which is why the test above tests
-# for that by identity rather than by trusting this list.
+# This is the surface as it stood before any of this work began, and it is
+# pinned to exactly that. An implementation helper is not an export: `errno`,
+# `os`, `stat` and the `typing` helper the annotation needs are all used
+# inside the body, and must be bound under leading underscores so they never
+# reach this set. Binding them that way is the accompanying production
+# change, so this pin is red until that lands -- deliberately, since it is
+# the evidence that the production change is what removes them. Nothing here
+# is a judgement about `import *` being a good idea; it is that this module's
+# answer to it must not drift.
+#
+# Deliberately no `__all__`: declaring one would itself change the surface
+# this test exists to hold still, and would let a later leak hide behind it.
 WILDCARD_VISIBLE_NAMES = frozenset({
     "NUM_MEMORY_CHANNELS",
     "Path",
@@ -1800,11 +1821,8 @@ WILDCARD_VISIBLE_NAMES = frozenset({
     "argparse",
     "cli_errors",
     "difflib",
-    "errno",
     "json",
     "main",
-    "os",
-    "stat",
     "sys",
 })
 
@@ -1858,6 +1876,13 @@ def test_the_wildcard_surface_is_exactly_what_it_should_be():
     )
     assert visible == WILDCARD_VISIBLE_NAMES
 
+    # And the attribute surface in its own right. Asserting only the wildcard
+    # set would let an `__all__` list these ten names while some other public
+    # attribute stayed reachable as `cli.thing` -- hidden from `import *` and
+    # from this test at once.
+    attributes = {name for name in vars(cli_mod) if not name.startswith("_")}
+    assert attributes == WILDCARD_VISIBLE_NAMES
+
 
 def test_examined_keeps_an_accurate_return_annotation():
     """The annotation has to survive being made private, and has to stay
@@ -1880,11 +1905,14 @@ def test_the_two_winerror_classes_stay_disjoint():
 
 
 def test_validating_a_path_raises_no_mutating_audit_event(tmp_path):
-    """Stronger than watching the directory afterwards: every mutating syscall
-    this test NAMES is refused outright, on any path, not merely inside the
-    directory being watched. The named set is not all of them -- `os.setxattr`,
-    for one, would not be caught -- so this is a broad guard rather than a
-    proof of total immutability."""
+    """Stronger than watching the directory afterwards: the hook RECORDS every
+    mutating syscall this test names, on any path rather than only inside the
+    directory being watched, and a recorded event fails the test. The hook
+    refuses nothing -- it observes.
+
+    The named set is broad but NOT exhaustive -- `os.setxattr`, for one, is a
+    mutating event nothing here would catch, and it is POSIX-only besides. This
+    is a wide guard, not a proof of total immutability."""
     watched = {
         "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link",
         "os.symlink", "os.truncate", "os.chmod", "os.chown", "os.utime",
@@ -1925,11 +1953,37 @@ def test_validating_a_path_raises_no_mutating_audit_event(tmp_path):
             _run_json(["--error-format", "json", *argv])
         assert seen == [], f"validation performed mutating operations: {seen}"
 
-        # Positive control: without it a misspelled event name would make every
-        # assertion above vacuous forever.
-        probe = tmp_path / "control_probe.txt"
-        probe.write_text("x", encoding="utf-8")
-        probe.unlink()
-        assert seen, "the audit hook is not observing anything; it is vacuous"
+        # Positive controls, raised synthetically with `sys.audit` so nothing
+        # is created, opened or removed. That matters twice over: the test
+        # stays non-mutating, and no cleanup can populate `seen` first and mask
+        # a control that never fired.
+        #
+        # EVERY watched name is controlled, not one of them. A synthetic event
+        # echoes back whatever string it is handed, so it can never check a
+        # name against CPython's own spelling -- but tying the control list to
+        # `watched` does catch the reachable version of that mistake, a name
+        # misspelled in one place and not the other.
+        controls = (
+            "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link",
+            "os.symlink", "os.truncate", "os.chmod", "os.chown", "os.utime",
+            "shutil.copyfile", "shutil.move", "shutil.rmtree",
+        )
+        assert set(controls) == watched, "a watched event has no control"
+        for event in controls:
+            sys.audit(event, "synthetic-control")
+        assert seen == list(controls), (
+            f"named-event detection is not working; saw {seen}"
+        )
+
+        # Both `open` routes, because the hook has a separate predicate for
+        # each: `os.open` reports mode None and carries the write intent in the
+        # flags, while the builtin reports a mode string. A predicate handling
+        # only one of them would miss the other.
+        sys.audit("open", "synthetic-flags", None, os.O_WRONLY | os.O_CREAT)
+        sys.audit("open", "synthetic-mode", "w", None)
+        assert seen == list(controls) + [
+            "open:synthetic-flags",
+            "open:synthetic-mode",
+        ], f"an open-route predicate is not working; saw {seen}"
     finally:
         active[0] = False
