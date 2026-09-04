@@ -1838,8 +1838,8 @@ def test_last_matching_envelope_wins_when_several_are_present():
 # is a judgement about `import *` being a good idea; it is that this module's
 # answer to it must not drift.
 #
-# Deliberately no `__all__`: declaring one would itself change the surface
-# this test exists to hold still, and would let a later leak hide behind it.
+# Deliberately no `__all__`: it would change the historical wildcard surface and
+# could hide a public leak from the wildcard assertion, but not the attribute assertion.
 WILDCARD_VISIBLE_NAMES = frozenset({
     "NUM_MEMORY_CHANNELS",
     "Path",
