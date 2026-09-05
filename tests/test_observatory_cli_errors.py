@@ -18,10 +18,12 @@ Two distinctions this module exists to pin down:
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import os
 import subprocess
 import sys
+import typing
 from pathlib import Path
 
 import pytest
@@ -1232,6 +1234,537 @@ def test_positively_established_path_kinds_keep_their_specific_codes(capsys, tmp
         assert _only_envelope(capsys)["code"] == expected, target
 
 
+# --- unexaminable: pinned per failure mode, not per platform ---------------
+
+
+def _stat_failing_for(target, exc):
+    """A drop-in `os.stat` that fails only for `target`.
+
+    The classifier's contract is stated in terms of specific failures --
+    EACCES, ELOOP, ENAMETOOLONG, a non-encodable name -- but no single real
+    filesystem produces all of them: NTFS, ext4 and a CI container disagree,
+    and some need privileges a test runner does not have. Injecting the
+    failure at the one syscall the classifier depends on pins the contract
+    itself, identically on every platform and Python version.
+
+    Every other path is delegated to the real `os.stat` untouched, so imports
+    and pytest's own machinery keep working while the patch is installed.
+    """
+    real = os.stat
+    wanted = str(Path(target))
+
+    def fake(path, *args, **kwargs):
+        try:
+            same = str(Path(os.fspath(path))) == wanted
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            raise exc
+        return real(path, *args, **kwargs)
+
+    return fake
+
+
+def _os_error(code, winerror=None, message="synthetic failure"):
+    """Build an `OSError` carrying a chosen errno and, portably, a winerror.
+
+    Assigning the attribute is the only construction that behaves the same on
+    both platforms. The four-argument `OSError(0, msg, None, winerror)` form
+    sets `winerror` on Windows -- remapping the errno as it goes -- but
+    silently discards it on POSIX, so a test written that way would pin the
+    Windows lane on Windows and assert nothing whatsoever on the Linux runner
+    that actually gates this repository.
+    """
+    exc = OSError(code, message)
+    if winerror is not None:
+        exc.winerror = winerror
+    return exc
+
+
+# A path the OS refused to look at. Nothing is established about it, so every
+# one of these must reach the honest fallback rather than a specific code.
+UNEXAMINABLE_FAILURES = [
+    pytest.param(OSError(errno.EACCES, "Permission denied"), id="eacces"),
+    pytest.param(OSError(errno.ENAMETOOLONG, "File name too long"), id="enametoolong"),
+    pytest.param(OSError(errno.EINVAL, "Invalid argument"), id="einval"),
+    pytest.param(ValueError("stat: path too long for Windows"), id="valueerror-too-long"),
+    pytest.param(ValueError("embedded null character in path"), id="valueerror-nul"),
+]
+
+# Failures the CLI reports as not-found. ENOENT and ENOTDIR are ordinary
+# absence; ELOOP and EBADF are not -- a link chain that will not resolve and a
+# bad descriptor establish nothing about what is at the path. They are mapped
+# to not-found for compatibility, because `Path.exists()` has always answered
+# False for them and that answer is part of the published contract. Either
+# way they must keep their specific codes: the fallback exists for the
+# failures that leave the CLI ignorant, not for every failure.
+NOT_FOUND_FAILURES = [
+    pytest.param(errno.ENOENT, id="enoent"),
+    pytest.param(errno.ENOTDIR, id="enotdir"),
+    pytest.param(errno.ELOOP, id="eloop"),
+    pytest.param(errno.EBADF, id="ebadf"),
+]
+
+
+@pytest.mark.parametrize("failure", UNEXAMINABLE_FAILURES)
+def test_every_unexaminable_failure_mode_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, failure
+):
+    """`ValueError` is the one that bites: it is not an `OSError`, and every
+    Python version's `pathlib` swallows it silently, so a predicate-based
+    check cannot see it at all. It is also exactly what Windows raises for an
+    over-long path."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(os, "stat", _stat_failing_for(target, failure))
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "input-error"
+    assert document["category"] == "input"
+
+
+@pytest.mark.parametrize("failure", UNEXAMINABLE_FAILURES)
+def test_every_unexaminable_animation_directory_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, failure
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(os, "stat", _stat_failing_for(target, failure))
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+@pytest.mark.parametrize("code", NOT_FOUND_FAILURES)
+def test_not_found_failures_are_not_swallowed_by_the_fallback(
+    capsys, tmp_path, monkeypatch, code
+):
+    """The mirror image of the fix. ENOENT and ENOTDIR are the OS reporting
+    ordinary absence; ELOOP and EBADF are resolution and descriptor failures
+    that `Path.exists()` has always answered False for, and are mapped to the
+    same not-found code to keep that published answer. Both kinds must keep
+    their specific code: a repair that routed every failure to `input-error`
+    would pass the tests above and still be wrong."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(code, "gone"))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+
+@pytest.mark.parametrize("code", NOT_FOUND_FAILURES)
+def test_not_found_animation_directory_keeps_its_code(
+    capsys, tmp_path, monkeypatch, code
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(code, "gone"))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "animation-directory-invalid"
+    )
+
+
+# Windows names the failure in `winerror` and then maps it onto whichever
+# errno is closest, which is not always the one that matters -- ERROR_INVALID_
+# DRIVE, ERROR_BAD_NETPATH and ERROR_BAD_NET_NAME all arrive as ENOENT, so the
+# errno alone would call them absent. These pin the classification of the
+# seven Windows conditions the CLI has to tell apart.
+#
+# They are synthetic on purpose, and must stay that way. 206 and 21 cannot be
+# provoked on a machine with long paths enabled and no removable drive; 15, 53
+# and 67 would need an unmapped drive letter or an unreachable share, which
+# this suite must never go looking for; and 123 needs a Win32 path parser.
+# Relying on native production would leave the contract untested wherever the
+# suite actually runs.
+WINDOWS_NAME_FAILURES = [
+    pytest.param(errno.EINVAL, 123, id="winerror-123-invalid-name"),
+    pytest.param(errno.EINVAL, 1921, id="winerror-1921-cannot-resolve-name"),
+]
+
+WINDOWS_UNEXAMINABLE_FAILURES = [
+    pytest.param(errno.ENOENT, 206, id="winerror-206-filename-exceeds-range"),
+    pytest.param(errno.EACCES, 21, id="winerror-21-drive-not-ready"),
+    pytest.param(errno.ENOENT, 15, id="winerror-15-invalid-drive"),
+    pytest.param(errno.ENOENT, 53, id="winerror-53-bad-netpath"),
+    pytest.param(errno.ENOENT, 67, id="winerror-67-bad-net-name"),
+]
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_NAME_FAILURES)
+def test_windows_name_failures_keep_the_not_found_code(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    """The two Windows conditions `pathlib` has always answered False for, so
+    they keep reporting not-found. That is a compatibility mapping, not a
+    search of the filesystem: the name could not be used.
+
+    ERROR_INVALID_NAME is narrower than "a character NTFS forbids", and the
+    two rules that produce it have different scopes. A reserved Win32
+    character -- ``< > " | ? *``, or any control character in the range
+    U+0001 through U+001F, exactly that range and no wider, since U+007F is
+    legal in an ordinary name -- produces it in ANY ORDINARY component, final
+    or not: that rule governs the filename and directory portions of a path.
+
+    Those same characters are PERMITTED inside an alternate-data-stream NAME,
+    where they are ordinary bytes. All 31 control characters U+0001 through
+    U+001F were measured creatable as a stream -- alternate data streams
+    require NTFS -- with `os.stat` then succeeding on the created stream, and
+    before creation such a name gives ordinary ENOENT with winerror 2 rather
+    than winerror 123. The reserved characters behave the same way there.
+
+    A colon is the one character there that is not simply another byte, and
+    not because it is forbidden: it ends the stream name and begins the
+    stream TYPE, so `name.npz:stream:$DATA` names the same stream as
+    `name.npz:stream`. What is refused is a malformed TYPE, below.
+
+    The 255-character limit produces ERROR_INVALID_NAME only in the FINAL
+    component: an over-long component earlier in the path comes back as
+    ERROR_PATH_NOT_FOUND instead. Trailing spaces and dots are stripped
+    before the lookup.
+
+    An embedded NUL is a separate matter, and not a Win32 rule at all.
+    CPython rejects a path containing U+0000 by raising `ValueError` BEFORE
+    the operating-system call, so it never reaches the Win32 parser, carries
+    no winerror, and is not an ERROR_INVALID_NAME case; it reaches the
+    fallback by the separate ValueError route. That holds in an ordinary
+    component and inside a stream name alike.
+
+    A colon is not simply exempt either. A colon opens an alternate-data-
+    stream reference, which is then resolved like any other name:
+    `name.npz:stream` SUCCEEDS when that stream exists and gives ordinary
+    ENOENT when it does not, and the canonical `name.npz::$DATA` succeeds for
+    an existing file. What produces ERROR_INVALID_NAME is a malformed stream
+    type -- measured for `name.npz::stream`, `name.npz:::stream` and a bare
+    trailing `name.npz:` -- not the doubled colon itself.
+
+    POSIX agrees only for the reserved characters, where those bytes are legal
+    and the path is merely missing. It does NOT agree for an over-long
+    component: POSIX answers ENAMETOOLONG there and so reports `input-error`,
+    while Windows has already rejected the name. That divergence is real and
+    is why no cross-platform test asserts a single answer for it.
+
+    ERROR_CANT_RESOLVE_FILENAME is the separate case: a link chain that will
+    not resolve, the counterpart of POSIX ELOOP."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_NAME_FAILURES)
+def test_windows_name_failures_keep_the_animation_directory_code(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "animation-directory-invalid"
+    )
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_UNEXAMINABLE_FAILURES)
+def test_windows_unexaminable_failures_reach_the_fallback(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    """A name past what the system can express, and a drive that is not
+    spinning. Neither establishes anything about what is at the path."""
+    target = tmp_path / "s.npz"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    document = _only_envelope(capsys, expect_status=1)
+    assert document["code"] == "input-error"
+    assert document["category"] == "input"
+
+
+@pytest.mark.parametrize("code, winerror", WINDOWS_UNEXAMINABLE_FAILURES)
+def test_windows_unexaminable_animation_directory_reaches_the_fallback(
+    capsys, tmp_path, monkeypatch, code, winerror
+):
+    target = tmp_path / "frames"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(code, winerror))
+    )
+    assert _run_json(["--error-format", "json", "animate", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def test_the_winerror_outranks_the_errno_it_arrives_with(
+    capsys, tmp_path, monkeypatch
+):
+    """The precedence that makes the Windows lane correct, pinned in the only
+    way that can catch its removal: the SAME errno twice, once carrying the
+    winerror and once not.
+
+    ERROR_FILENAME_EXCED_RANGE arrives as ENOENT, so reading the errno alone
+    would report the path absent -- the exact conflation this contract exists
+    to prevent. ERROR_INVALID_NAME and ERROR_CANT_RESOLVE_FILENAME arrive as
+    EINVAL, which on its own is unexaminable, so it must be the winerror that
+    pulls those back to not-found. A classifier that consulted only the errno,
+    or that swapped any of these winerrors between the sets, passes every
+    other test in this file and fails a leg of this one.
+    """
+    target = tmp_path / "s.npz"
+    argv = ["--error-format", "json", "info", str(target)]
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 206))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL, 123))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 53))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    # ERROR_NOT_READY normally arrives as EACCES, which reaches the fallback
+    # through the errno alone -- so that pairing proves nothing about the
+    # winerror sets. Paired here with a MISLEADING ENOENT, the errno would say
+    # not-found and only the winerror can still say otherwise.
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.ENOENT, 21))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL, 1921))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, _os_error(errno.EINVAL))
+    )
+    assert _run_json(argv) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def _path_of_total_length(root, total, suffix=".npz"):
+    """Build a path of exactly `total` characters from legal components.
+
+    The component that carries the suffix is fixed short and reserved FIRST.
+    Sized last it could exceed NAME_MAX for a long `root`, and the test would
+    quietly stop testing the thing it names -- an over-long TOTAL -- by
+    smuggling in an over-long COMPONENT, which is a different failure.
+
+    A one-character shortfall cannot be spent as a component, since a
+    component costs a separator plus at least one character; that case is
+    retried with a longer tail.
+    """
+    name_max = min(255, os.pathconf(str(root), "PC_NAME_MAX"))
+    for padding in (8, 9):
+        tail = "d" * padding + suffix
+        parts = []
+
+        def spent():
+            return (
+                len(str(root))
+                + sum(1 + len(part) for part in parts)
+                + 1
+                + len(tail)
+            )
+
+        while spent() + 1 + name_max <= total:
+            parts.append("d" * name_max)
+        shortfall = total - spent()
+        if shortfall == 1:
+            continue
+        if shortfall:
+            parts.append("d" * (shortfall - 1))
+        built = os.path.join(str(root), *parts, tail)
+        assert len(built) == total
+        assert all(1 <= len(part) <= name_max for part in built.split(os.sep) if part)
+        assert Path(built).suffix == suffix
+        return built
+    raise AssertionError(f"could not build a legal path of length {total}")
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "pathconf"),
+    reason="PATH_MAX is a POSIX limit; Windows bounds a path differently",
+)
+def test_the_path_max_boundary_separates_absence_from_ignorance(capsys, tmp_path):
+    """The other way a path can be too long, pinned as a BOUNDARY rather than
+    as a single case.
+
+    Every component here is a legal length and it is the TOTAL the kernel
+    refuses, with ENAMETOOLONG. One character shorter and the kernel does
+    look, finds nothing, and says ENOENT -- so the two sides must report
+    different codes.
+
+    Asserting only the long side would be satisfied by an implementation that
+    never reads the errno at all and simply calls any long path unexaminable.
+    That is why both sides are here, one character apart, and why each asserts
+    its own premise: a test whose input silently stops producing the error it
+    was written for passes for the wrong reason.
+
+    Nothing is created on disk -- the kernel rejects the name as it copies it
+    in, before resolving a single component.
+    """
+    path_max = os.pathconf(str(tmp_path), "PC_PATH_MAX")
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    shorter = _path_of_total_length(tmp_path, path_max - 1)
+    with pytest.raises(OSError) as raised:
+        os.stat(Path(shorter))
+    assert raised.value.errno == errno.ENOENT, "premise: the kernel looked"
+    assert _run_json(["--error-format", "json", "info", shorter]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-not-found"
+
+    longer = _path_of_total_length(tmp_path, path_max)
+    with pytest.raises(OSError) as raised:
+        os.stat(Path(longer))
+    assert raised.value.errno == errno.ENAMETOOLONG, "premise: it declined to look"
+    assert _run_json(["--error-format", "json", "info", longer]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    assert _run_json(["--error-format", "json", "animate", longer]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == before
+
+
+def test_unexaminable_outranks_the_lexical_suffix_test(capsys, tmp_path, monkeypatch):
+    """Suffix is a guess made from the name alone. Reporting it for a path the
+    OS refused to examine asserts "I looked, and this is a file of the wrong
+    format" -- which never happened. Examination therefore comes first."""
+    target = tmp_path / "s.bogus"
+    monkeypatch.setattr(
+        os, "stat", _stat_failing_for(target, OSError(errno.EACCES, "denied"))
+    )
+    assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+    assert _only_envelope(capsys, expect_status=1)["code"] == "input-error"
+
+
+def test_absent_path_with_an_unsupported_suffix_still_reports_the_suffix(
+    capsys, tmp_path
+):
+    """The established precedence, pinned so the repair cannot quietly
+    reorder it: a name the CLI could never load is reported as unsupported
+    even though it is also absent."""
+    assert _run_json(
+        ["--error-format", "json", "info", str(tmp_path / "absent.bogus")]
+    ) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-unsupported-suffix"
+    )
+
+
+def test_a_directory_outranks_its_own_misleading_suffix(capsys, tmp_path):
+    """A directory named `d.txt` is a wrong KIND of path, not an unsupported
+    format -- the kind check has to precede the suffix check to say so."""
+    directory = tmp_path / "d.txt"
+    directory.mkdir()
+    assert _run_json(["--error-format", "json", "info", str(directory)]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-wrong-path-kind"
+    )
+
+
+def test_path_spelling_is_normalised_exactly_as_before(capsys, tmp_path):
+    """Two spellings that only survive because the classifier examines
+    `Path(raw)` rather than the raw string: `Path("")` is the current
+    directory, and a trailing separator is dropped. Stat'ing the raw text
+    instead would turn both into errors the CLI never used to report."""
+    assert _run_json(["--error-format", "json", "info", ""]) == 1
+    assert (
+        _only_envelope(capsys, expect_status=1)["code"]
+        == "snapshot-wrong-path-kind"
+    )
+
+    snapshot = tmp_path / "s.npz"
+    snapshot.write_bytes(b"not really an archive")
+    assert _run_json(
+        ["--error-format", "json", "info", str(snapshot) + os.sep]
+    ) == 1
+    # Past validation entirely: the loader rejects the bytes, which is a
+    # different code and proves the trailing separator was tolerated.
+    assert _only_envelope(capsys, expect_status=1)["code"] == "snapshot-unreadable"
+
+
+def test_symlink_classification_is_unchanged(capsys, tmp_path):
+    """The repair must resolve symlinks, exactly as `Path.is_dir()` did. An
+    `lstat`-based classifier would pass all the tests above and still flip a
+    symlinked directory from `snapshot-wrong-path-kind` to something else."""
+    probe = tmp_path / "probe"
+    try:
+        probe.symlink_to(tmp_path)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform/user cannot create symlinks")
+    probe.unlink()
+
+    directory = tmp_path / "real_dir"
+    directory.mkdir()
+    to_dir = tmp_path / "to_dir.npz"
+    to_dir.symlink_to(directory)
+    broken = tmp_path / "broken.npz"
+    broken.symlink_to(tmp_path / "nowhere")
+    loop_a = tmp_path / "loop_a.npz"
+    loop_b = tmp_path / "loop_b.npz"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+
+    cases = [
+        (to_dir, "snapshot-wrong-path-kind"),
+        (broken, "snapshot-not-found"),
+        (loop_a, "snapshot-not-found"),
+    ]
+    for target, expected in cases:
+        assert _run_json(["--error-format", "json", "info", str(target)]) == 1
+        assert _only_envelope(capsys, expect_status=1)["code"] == expected, target
+
+
+def test_an_unexaminable_path_still_yields_one_bounded_envelope(capsys, tmp_path):
+    """The whole point of the contract: even a 60 000-character argument
+    leaves exactly one parseable line on stderr, with every field clipped."""
+    long_path = f"{tmp_path}{os.sep}{'q' * 60000}.npz"
+    assert _run_json(["--error-format", "json", "info", long_path]) == 1
+    text = capsys.readouterr().err
+    assert len([line for line in text.splitlines() if line.strip()]) == 1
+    document = json.loads(text)
+    assert document["code"] == "input-error"
+    assert len(document["message"]) <= cli_errors.MAX_FIELD_LENGTH + 3
+
+
+def test_validating_a_path_never_touches_the_filesystem(tmp_path):
+    """Validation answers a question; it must not create, open for writing or
+    delete anything on the way."""
+    before = sorted(p.name for p in tmp_path.iterdir())
+    for argv in (
+        ["info", str(tmp_path / "absent.npz")],
+        ["info", str(tmp_path)],
+        ["animate", str(tmp_path / "absent_dir")],
+        ["info", f"{tmp_path}{os.sep}{'q' * 60000}.npz"],
+    ):
+        _run_json(["--error-format", "json", *argv])
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
 # --- stderr framing: a schema-bearing line, not "the last line" ------------
 
 
@@ -1285,3 +1818,218 @@ def test_last_matching_envelope_wins_when_several_are_present():
     found = _envelopes_in(stream)
     assert len(found) == 2
     assert _envelope_line(stream)["code"] == "unknown-command"
+
+
+# --- the module's own surface --------------------------------------------
+
+
+# `vis.observatory.cli` declares no `__all__`, so `from ... import *` takes
+# every non-underscored name. That makes the set below the module's real
+# export surface, whether or not anyone intended it as one: anything landing
+# here can be imported out of the module and depended on from elsewhere.
+#
+# This is the surface as it stood before any of this work began, and it is
+# pinned to exactly that. An implementation helper is not an export: `errno`,
+# `os`, `stat` and the `typing` helper the annotation needs are all used
+# inside the body, and must be bound under leading underscores so they never
+# reach this set. Binding them that way is the accompanying production
+# change, so this pin is red until that lands -- deliberately, since it is
+# the evidence that the production change is what removes them. Nothing here
+# is a judgement about `import *` being a good idea; it is that this module's
+# answer to it must not drift.
+#
+# Deliberately no `__all__`: it would change the historical wildcard surface and
+# could hide a public leak from the wildcard assertion, but not the attribute assertion.
+WILDCARD_VISIBLE_NAMES = frozenset({
+    "NUM_MEMORY_CHANNELS",
+    "Path",
+    "SUPPORTED_SNAPSHOT_SUFFIXES",
+    "annotations",
+    "argparse",
+    "cli_errors",
+    "difflib",
+    "json",
+    "main",
+    "sys",
+})
+
+
+def test_the_module_exports_no_typing_helper():
+    """A typing helper is not part of this CLI's surface.
+
+    `from typing import Optional` annotates one private function and, as a
+    side effect, publishes `cli.Optional` for anything doing `import *` to
+    pick up and come to depend on. Aliasing it under a leading underscore
+    keeps the annotation and keeps the surface.
+
+    Identity against `typing.__all__` rather than a name check, so importing
+    some OTHER helper plainly is caught too. `typing.__all__` and not
+    `vars(typing)`: typing imports `sys` itself, so a predicate built on its
+    module dict reports this module's ordinary `import sys` as a leak.
+    """
+    exported = [
+        getattr(typing, name)
+        for name in typing.__all__
+        if not isinstance(
+            getattr(typing, name, None), (bool, int, float, str, bytes, type(None))
+        )
+    ]
+    leaked = sorted(
+        name
+        for name in vars(cli_mod)
+        if not name.startswith("_")
+        and (
+            getattr(cli_mod, name) is typing
+            or any(getattr(cli_mod, name) is helper for helper in exported)
+        )
+    )
+    assert leaked == [], f"typing machinery published as module attributes: {leaked}"
+
+
+def test_the_wildcard_surface_is_exactly_what_it_should_be():
+    """The whole set, pinned. A per-name assertion would have missed the
+    `Optional` leak until someone thought to look for it.
+
+    Three assertions, kept apart because each has a failure mode the other
+    two do not.
+
+    The wildcard-set assertion honours `__all__` if one ever appears, because
+    that is what `import *` would then bind. That is deliberate, and it has a
+    measured consequence: a curated `__all__` naming exactly these ten names
+    HIDES an additional public attribute from that assertion. It does not
+    hide it from this file. The third assertion reads the non-underscored
+    `vars()` attribute surface directly and catches the extra name.
+
+    The typing-identity test above is not the generic safeguard either. It
+    detects exported typing machinery specifically, by identity, so an
+    ordinary public attribute passes it untouched.
+    """
+    # Asserted first, and load-bearing on its own: this pins the historical
+    # ABSENCE of `__all__`, independently of whether a declared one would
+    # happen to agree with the set below.
+    #
+    # Measured on a disposable copy: with a curated `__all__` of these ten
+    # names plus one extra public attribute, deleting this line leaves the
+    # wildcard-set assertion PASSING and the attribute-surface assertion
+    # below FAILING on the extra name.
+    assert "__all__" not in vars(cli_mod)
+
+    declared = getattr(cli_mod, "__all__", None)
+    visible = (
+        set(declared)
+        if declared is not None
+        else {name for name in vars(cli_mod) if not name.startswith("_")}
+    )
+    assert visible == WILDCARD_VISIBLE_NAMES
+
+    # And the attribute surface in its own right. Asserting only the wildcard
+    # set would let an `__all__` list these ten names while some other public
+    # attribute stayed reachable as `cli.thing` -- hidden from `import *` and
+    # from this test at once.
+    attributes = {name for name in vars(cli_mod) if not name.startswith("_")}
+    assert attributes == WILDCARD_VISIBLE_NAMES
+
+
+def test_examined_keeps_an_accurate_return_annotation():
+    """The annotation has to survive being made private, and has to stay
+    RESOLVABLE: the module defers annotations, so a name that cannot be looked
+    up in module globals is a string that only looks like a type."""
+    annotation = cli_mod._examined.__annotations__["return"]
+    assert "os.stat_result" in annotation
+    # The load-bearing line. Deferred annotations make a stale name silent:
+    # aliasing the import and forgetting the annotation still imports, still
+    # runs, and still passes every behavioural test in this file. Only
+    # resolving it catches that.
+    resolved = typing.get_type_hints(cli_mod._examined)
+    assert resolved["return"] == typing.Optional[os.stat_result]
+
+
+def test_the_two_winerror_classes_stay_disjoint():
+    """One winerror cannot mean both 'nothing is there' and 'I could not
+    look'. Nothing else asserts this, and the two sets are edited by hand."""
+    assert cli_mod._NOT_FOUND_WINERRORS.isdisjoint(cli_mod._UNEXAMINABLE_WINERRORS)
+
+
+def test_validating_a_path_raises_no_mutating_audit_event(tmp_path):
+    """Stronger than watching the directory afterwards: the hook RECORDS every
+    mutating syscall this test names, on any path rather than only inside the
+    directory being watched, and a recorded event fails the test. The hook
+    refuses nothing -- it observes.
+
+    The named set is broad but NOT exhaustive -- `os.setxattr`, for one, is a
+    mutating event nothing here would catch, and it is POSIX-only besides. This
+    is a wide guard, not a proof of total immutability."""
+    watched = {
+        "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link",
+        "os.symlink", "os.truncate", "os.chmod", "os.chown", "os.utime",
+        "shutil.copyfile", "shutil.move", "shutil.rmtree",
+    }
+    seen = []
+    active = [True]
+
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+    def hook(event, args):
+        if not active[0]:
+            return
+        if event in watched:
+            seen.append(event)
+        elif event == "open":
+            mode = args[1] if len(args) > 1 else None
+            flags = args[2] if len(args) > 2 else 0
+            writing = bool(mode) and bool(set(str(mode)) & set("wxa+"))
+            # `os.open` reports mode None and carries the intent in the flags,
+            # so a mode-only check lets a descriptor-route write straight past.
+            if not writing and isinstance(flags, int):
+                writing = bool(flags & write_flags)
+            if writing:
+                seen.append(f"open:{args[0]}")
+
+    # An audit hook cannot be removed -- `sys` offers no `removeaudithook` --
+    # so it is switched off by flag once this test is done, rather than left
+    # doing work and growing a list for every later test in the session.
+    sys.addaudithook(hook)
+    try:
+        for argv in (
+            ["info", str(tmp_path / "absent.npz")],
+            ["info", str(tmp_path)],
+            ["animate", str(tmp_path / "absent_dir")],
+            ["info", f"{tmp_path}{os.sep}{'q' * 60000}.npz"],
+        ):
+            _run_json(["--error-format", "json", *argv])
+        assert seen == [], f"validation performed mutating operations: {seen}"
+
+        # Positive controls, raised synthetically with `sys.audit` so nothing
+        # is created, opened or removed. That matters twice over: the test
+        # stays non-mutating, and no cleanup can populate `seen` first and mask
+        # a control that never fired.
+        #
+        # EVERY watched name is controlled, not one of them. A synthetic event
+        # echoes back whatever string it is handed, so it can never check a
+        # name against CPython's own spelling -- but tying the control list to
+        # `watched` does catch the reachable version of that mistake, a name
+        # misspelled in one place and not the other.
+        controls = (
+            "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link",
+            "os.symlink", "os.truncate", "os.chmod", "os.chown", "os.utime",
+            "shutil.copyfile", "shutil.move", "shutil.rmtree",
+        )
+        assert set(controls) == watched, "a watched event has no control"
+        for event in controls:
+            sys.audit(event, "synthetic-control")
+        assert seen == list(controls), (
+            f"named-event detection is not working; saw {seen}"
+        )
+
+        # Both `open` routes, because the hook has a separate predicate for
+        # each: `os.open` reports mode None and carries the write intent in the
+        # flags, while the builtin reports a mode string. A predicate handling
+        # only one of them would miss the other.
+        sys.audit("open", "synthetic-flags", None, os.O_WRONLY | os.O_CREAT)
+        sys.audit("open", "synthetic-mode", "w", None)
+        assert seen == list(controls) + [
+            "open:synthetic-flags",
+            "open:synthetic-mode",
+        ], f"an open-route predicate is not working; saw {seen}"
+    finally:
+        active[0] = False
