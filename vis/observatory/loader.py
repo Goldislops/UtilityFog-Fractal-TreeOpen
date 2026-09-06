@@ -259,13 +259,22 @@ def load_snapshot_series(
     pattern: str = "v070_*.npz",
     max_count: Optional[int] = None,
 ) -> List[ObservatorySnapshot]:
-    """Load a time-ordered series of snapshots for animation.
+    """Load snapshots in numeric-aware filename order for animation.
 
-    Sorts by filename (which embeds generation/step/timestamp) for
-    chronological order.
+    The canonical default pattern requires the exact literal prefix ``v070_``
+    and suffix ``.npz`` on every platform; its wildcard text is unrestricted.
+    Other patterns retain native glob semantics, including case matching.
+    Filtering precedes ordering and limiting. Ordering is by filename, not
+    snapshot metadata; differently cased text keeps its existing sort order.
     """
     directory = Path(directory)
-    files = sorted(directory.glob(pattern), key=_natural_key)
+    candidates = directory.glob(pattern)
+    if pattern == "v070_*.npz":
+        candidates = (
+            path for path in candidates
+            if path.name.startswith("v070_") and path.name.endswith(".npz")
+        )
+    files = sorted(candidates, key=_natural_key)
     if max_count is not None:
         files = files[:max_count]
     if not files:
