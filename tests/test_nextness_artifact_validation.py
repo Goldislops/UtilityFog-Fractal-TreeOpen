@@ -795,6 +795,31 @@ def test_file_loader_bounds_fail_closed(tmp_path) -> None:
         load_evidence_packet(deep)
 
 
+@pytest.mark.parametrize(
+    "raw,cause",
+    [
+        pytest.param(b"[", json.JSONDecodeError, id="malformed-json"),
+        pytest.param(b"\xff", UnicodeDecodeError, id="invalid-utf8"),
+    ],
+)
+@pytest.mark.parametrize(
+    "loader",
+    [load_evaluation_artifact, load_lab_artifact, load_evidence_packet],
+    ids=["evaluation", "lab", "packet"],
+)
+def test_file_loaders_translate_malformed_input(tmp_path, loader, raw, cause) -> None:
+    # Shallow inputs reach the real, unchanged decoder through each public
+    # loader. Only the module's own stable prefix is pinned; the text after
+    # it is CPython's decoder diagnostic and is deliberately not asserted.
+    path = tmp_path / "malformed.json"
+    path.write_bytes(raw)
+    with pytest.raises(ArtifactValidationError) as excinfo:
+        loader(path)
+    assert type(excinfo.value) is ArtifactValidationError
+    assert str(excinfo.value).startswith("artifact is not valid UTF-8 JSON: ")
+    assert type(excinfo.value.__cause__) is cause
+
+
 def test_math_constants_still_pinned() -> None:
     # The evaluation validator's numeric ceiling mirrors NP5's; keep the
     # derivation visible so drift is loud here too.
