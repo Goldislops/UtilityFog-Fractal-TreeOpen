@@ -130,10 +130,19 @@ def test_epigenetic_snapshot_not_included_returns_none(tmp_path):
 
 @pytest.mark.parametrize("root", NON_OBJECT_JSON)
 def test_non_object_root_is_refused(tmp_path, root):
-    """The reported defect: valid JSON with a non-object root."""
+    """The reported defect: valid JSON with a non-object root.
+
+    The message is pinned by equality and the absent ``__cause__`` is asserted,
+    because together they are what separate this ORDINARY DOMAIN REFUSAL from
+    the decode-boundary translation: that one carries the originating
+    ``RecursionError`` as its cause and says "nested too deeply" instead. Both
+    raise ``PortableGenomeError``, so the class alone cannot tell them apart.
+    """
     path = _write(tmp_path, root)
-    with pytest.raises(PortableGenomeError, match="genome must be a JSON object"):
+    with pytest.raises(PortableGenomeError) as excinfo:
         extract_epigenetic_snapshot(path)
+    assert str(excinfo.value) == "genome must be a JSON object"
+    assert excinfo.value.__cause__ is None
 
 
 @pytest.mark.parametrize("section", NON_OBJECT_JSON)
@@ -394,13 +403,181 @@ def test_num_channels_must_be_positive(tmp_path, value):
         extract_epigenetic_snapshot(path)
 
 
-def test_deeply_nested_json_is_a_domain_refusal(tmp_path):
-    """CPython's JSON scanner recurses per level, so a deeply nested document
-    raises RecursionError -- a RuntimeError no caller sanely translates."""
-    path = tmp_path / "deep.json"
-    path.write_text("[" * 60000 + "]" * 60000, encoding="utf-8")
-    with pytest.raises(PortableGenomeError, match="genome JSON is nested too deeply"):
+# ---------------------------------------------------------------------------
+# The decode boundary -- two different subjects, deliberately kept apart
+#
+# ``extract_epigenetic_snapshot`` wraps exactly one call -- ``json.load(f)`` --
+# in a handler that translates ``RecursionError`` into the module domain error.
+# Two separate questions follow, and one fixed-depth fixture cannot answer both:
+#
+#   1. WHEN the decoder raises ``RecursionError``, is it translated correctly --
+#      exact message, originating exception preserved as the cause? That is a
+#      CATEGORICAL contract. It must not depend on whether some interpreter
+#      happens to exhaust its stack on some payload, so it is pinned below with
+#      a deterministic, path-scoped seam that raises a sentinel on demand.
+#
+#   2. WHAT does the REAL decoder do with a genuinely deep document? That is a
+#      property of the environment the suite runs in, not of this repository.
+#      Two outcomes are legitimate and both are already handled here: the
+#      decoder may raise and be translated, or it may decode the document to a
+#      list and be refused by the ordinary non-object-root check. The totality
+#      test below asserts only what holds whichever fires, and deliberately
+#      does not pin which one.
+#
+# The nesting depth is unchanged at 60 000 levels. Nothing here raises a
+# nesting constant, changes a recursion or stack limit, or broadens a permitted
+# exception set to obtain a green result.
+# ---------------------------------------------------------------------------
+
+#: Unchanged from the original fixture: 60 000 balanced levels.
+_DEEP_NEST_LEVELS = 60000
+
+
+class _DecodeSeam:
+    """Deterministic, path-scoped seam over the decoder.
+
+    Replaces ``json.load`` with a delegating wrapper that raises one specific
+    sentinel ``RecursionError`` for, and only for, the one file it was armed
+    with. Every other decode is forwarded to the real ``json.load`` with its
+    arguments intact, so an unrelated call behaves exactly as before.
+
+    The patch is NOT instance-local isolation: ``json`` is a single shared
+    module object, and ``scripts.portable_genome`` imported that same object,
+    which is precisely why patching it reaches the code under test. The patch
+    is therefore process-wide for as long as it is installed, and ``monkeypatch``
+    owns restoring it -- see
+    ``test_decode_seam_restores_the_shared_decoder``.
+    """
+
+    def __init__(self, target, error):
+        self._target = str(target)
+        self._error = error
+        self._real = json.load
+        self.reached = 0
+        self.delegated = 0
+
+    def __call__(self, fp, *args, **kwargs):
+        if getattr(fp, "name", None) == self._target:
+            self.reached += 1
+            raise self._error
+        self.delegated += 1
+        return self._real(fp, *args, **kwargs)
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(json, "load", self)
+        return self
+
+
+def test_decoder_recursionerror_is_translated_with_its_cause(tmp_path, monkeypatch):
+    """The categorical contract, independent of any stack behaviour.
+
+    The seam raises a sentinel at the one decode call the extractor makes, so
+    this pins the translation itself: the exact existing message, and the
+    ORIGINAL exception object preserved as ``__cause__`` -- identity, not merely
+    another exception of the same class.
+    """
+    path = tmp_path / "seamed.json"
+    path.write_text('{"epigenetic_snapshot": {"included": false}}', encoding="utf-8")
+    sentinel = RecursionError("sentinel: seam-injected decoder exhaustion")
+    seam = _DecodeSeam(path, sentinel).install(monkeypatch)
+
+    with pytest.raises(PortableGenomeError) as excinfo:
         extract_epigenetic_snapshot(path)
+
+    assert seam.reached == 1, "the seamed decode call was never reached"
+    assert str(excinfo.value) == "genome JSON is nested too deeply"
+    assert excinfo.value.__cause__ is sentinel
+
+
+def test_decode_seam_delegates_other_decodes_with_arguments_preserved(
+    tmp_path, monkeypatch
+):
+    """Anti-vacuity for the seam: it is scoped to ONE input, not a blanket kill.
+
+    An unrelated decode still reaches the real parser, and the keyword argument
+    it was given is forwarded rather than dropped.
+    """
+    armed = tmp_path / "armed.json"
+    armed.write_text("{}", encoding="utf-8")
+    other = tmp_path / "other.json"
+    other.write_text('{"n": 1.5}', encoding="utf-8")
+    seam = _DecodeSeam(armed, RecursionError("sentinel")).install(monkeypatch)
+
+    seen = []
+
+    def _parse_float(raw):
+        seen.append(raw)
+        return "forwarded"
+
+    with other.open(encoding="utf-8") as handle:
+        result = json.load(handle, parse_float=_parse_float)
+
+    assert result == {"n": "forwarded"}, "the real decoder did not run"
+    assert seen == ["1.5"], "parse_float was not forwarded intact"
+    assert seam.delegated == 1
+    assert seam.reached == 0
+
+
+def test_decode_seam_restores_the_shared_decoder(tmp_path, monkeypatch):
+    """``json`` is shared, so a leaked seam would contaminate every later test."""
+    original = json.load
+    armed = tmp_path / "armed.json"
+    armed.write_text("{}", encoding="utf-8")
+    seam = _DecodeSeam(armed, RecursionError("sentinel")).install(monkeypatch)
+    assert json.load is seam
+    monkeypatch.undo()
+    assert json.load is original
+
+
+def test_real_deep_nesting_is_refused_by_one_of_two_legitimate_paths(tmp_path):
+    """The genuine 60 000-level document through the REAL decoder, no seam.
+
+    Whether a payload of some fixed depth exhausts the decoder is a property of
+    the environment, so which of the two refusals fires is NOT pinned. What is
+    pinned is that the extractor refuses it as a domain error either way, with
+    one of the two exact existing messages, and that the cause is present when
+    and only when the decoder itself raised.
+    """
+    assert not isinstance(json.load, _DecodeSeam), "no decode seam may be active here"
+    path = tmp_path / "deep.json"
+    path.write_text("[" * _DEEP_NEST_LEVELS + "]" * _DEEP_NEST_LEVELS,
+                    encoding="utf-8")
+
+    with pytest.raises(PortableGenomeError) as excinfo:
+        extract_epigenetic_snapshot(path)
+
+    message = str(excinfo.value)
+    assert message in {
+        "genome JSON is nested too deeply",   # decoder exhausted, then translated
+        "genome must be a JSON object",       # decoder accepted it -> list root
+    }
+    if message == "genome JSON is nested too deeply":
+        assert isinstance(excinfo.value.__cause__, RecursionError)
+    else:
+        assert excinfo.value.__cause__ is None
+
+
+def test_post_decode_recursionerror_is_not_labelled_a_decode_failure(
+    tmp_path, monkeypatch
+):
+    """The handler wraps the decode call ONLY.
+
+    A ``RecursionError`` raised after ``json.load`` has returned is not a decode
+    failure and must not be translated into the decode-boundary message. It has
+    to escape as itself, or the extractor would be silently relabelling
+    unrelated defects as malformed input.
+    """
+    path = _write(tmp_path, {"epigenetic_snapshot": _valid_epi()})
+    sentinel = RecursionError("sentinel: raised AFTER the decode call returned")
+
+    def _raise_after_decode(*args, **kwargs):
+        raise sentinel
+
+    monkeypatch.setattr(pg, "_require_json_object_section", _raise_after_decode)
+
+    with pytest.raises(RecursionError) as excinfo:
+        extract_epigenetic_snapshot(path)
+    assert excinfo.value is sentinel
 
 
 def test_ordinary_json_syntax_error_is_unchanged(tmp_path):
