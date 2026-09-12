@@ -760,29 +760,282 @@ def test_cli_read_side_oserror_propagates(tmp_path, monkeypatch, capsys) -> None
 
 
 # ---------------------------------------------------------------------------
-# Parser deep-nesting (RecursionError) decoder totality: a row nested
-# deeper than the parser's recursion limit — while inside the byte
-# ceilings — must follow the reader's EXISTING malformed-row containment
-# policy (counted, run continues), never crash with a traceback.
+# Decode-boundary RecursionError, and real deep input: two subjects, two
+# mechanisms.
+#
+# The seam tests inject a RecursionError AT the decode boundary
+# deterministically, so the decoder-originated rejection contract is pinned
+# the same way wherever the suite runs: such a row follows the reader's
+# EXISTING malformed-row containment policy — counted, the run continues —
+# and never crashes with a traceback.
+#
+# The separate fixed-depth fixture is fed to the REAL decoder, exercising
+# genuine decoding and whichever rejection/containment path then applies.
+# That fixture is NOT guaranteed to exhaust every decoder, so its test pins
+# only what holds whichever disposition fires.
 # ---------------------------------------------------------------------------
 
-_DEEP_NEST_ROW = ('{"generation": 1, "token_counts": {"void_static": '
+#: Marker carried by the deep-nesting fixture so the decoder seam below can
+#: recognise exactly that record and no other.
+_DEEP_NEST_MARKER = "DEEP-NEST-PROBE"
+
+#: A genuinely deep record: 20 000 nested arrays, ~40 KiB, comfortably inside
+#: the 65 536-byte default ``max_line_bytes`` ceiling, so the byte ceilings
+#: never pre-empt the decode and the record does reach ``json.loads``.
+#: It serves two different subjects: the seam tests mark it and inject the
+#: decoder exception deterministically, while the real-decoder totality test
+#: feeds these same bytes to the ACTUAL parser and pins only what every
+#: interpreter agrees on. The nesting is therefore load-bearing, not
+#: decoration.
+_DEEP_NEST_ROW = ('{"generation": 1, "probe": "' + _DEEP_NEST_MARKER
+                  + '", "token_counts": {"void_static": '
                   + "[" * 20000 + "]" * 20000 + '}}')
 
 
-def test_cli_deeply_nested_row_is_contained_malformed(tmp_path, capsys) -> None:
-    """Inherited reader containment: the nested row is counted malformed
-    and the receipt still emits — exit 0, no traceback."""
-    log = tmp_path / "nest.jsonl"
-    good = "\n".join(
-        json.dumps({"generation": i + 2, "token_counts": {t: 3}})
+class _DecodeSeam:
+    """Deterministic, marker-scoped seam over the shared ``json`` decoder.
+
+    Whether a payload of some fixed nesting depth exhausts the decoder is a
+    property of the environment the suite runs in, not of this repository.
+    Measured on this fixture (``_DEEP_NEST_ROW``: 20 000 nested arrays,
+    ~40 KiB) on 2026-09-09: Windows CPython 3.12.14 [MSC v.1944] raised
+    ``RecursionError`` from ``json.loads``, while Linux CPython 3.14.4
+    [GCC 15.2.0] decoded the identical bytes successfully, after which the
+    record fell through to an unrelated domain-validation rejection. Those
+    two environments differ in interpreter version, operating system, C
+    compiler, build configuration and stack layout simultaneously, so the
+    difference is NOT attributable to interpreter version alone, and OS,
+    build, compiler and stack effects are not ruled out. Nothing is claimed
+    here about any other depth, payload or environment.
+
+    A fixed nesting depth is therefore not a dependable cross-environment
+    trigger for the decode-boundary ``RecursionError`` contract. This seam
+    supplies that exception deterministically instead, so the contract is
+    pinned the same way wherever the suite runs, while a separate fixed-input
+    test feeds these same bytes to the REAL decoder and asserts only what
+    holds whichever disposition fires — so genuine decoding and the
+    containment plumbing stay exercised.
+
+    SCOPE WARNING: ``module.json`` is the ONE process-wide ``json`` module.
+    Installing this seam replaces ``json.loads`` for every caller in the
+    process, not just for ``module``; the ``module`` argument names the
+    consumer under test, it does not narrow the patch. Safety rests on the
+    marker instead: every unmarked call is delegated to the real decoder with
+    its positional and keyword arguments forwarded unchanged, and each test
+    calls ``restore()`` BEFORE parsing its own output — that ordering is
+    load-bearing, not incidental.
+
+    Restoration is exact: the previous ``json.loads`` is put back without
+    disturbing any other ``monkeypatch`` made by the same test, and
+    ``monkeypatch`` still owns the fallback, so the decoder is restored even
+    when the test body raises before ``restore()`` is reached.
+    """
+
+    def __init__(self, marker: str, message: str) -> None:
+        self.marker = marker
+        self.message = message
+        self.raised = 0                                # sentinels raised
+        self.marked: list[tuple[tuple, dict]] = []     # marked calls
+        self.delegated: list[tuple[tuple, dict]] = []  # pass-through calls
+
+    def install(self, monkeypatch, module) -> "_DecodeSeam":
+        self._monkeypatch = monkeypatch
+        self._module = module
+        real = module.json.loads
+        self._real = real
+
+        def patched(s, *args, **kwargs):
+            if type(s) is str and self.marker in s:
+                self.marked.append((args, dict(kwargs)))
+                self.raised += 1
+                raise RecursionError(self.message)
+            self.delegated.append((args, dict(kwargs)))
+            return real(s, *args, **kwargs)
+
+        monkeypatch.setattr(module.json, "loads", patched)
+        assert module.json.loads is patched      # the seam is actually armed
+        return self
+
+    def restore(self) -> None:
+        """Put the real decoder back, exactly, and prove it is back."""
+        self._monkeypatch.setattr(self._module.json, "loads", self._real)
+        assert self._module.json.loads is self._real
+
+
+class _ReaderRecorder:
+    """Pass-through recorder over the reader boundary the monitor already
+    calls.
+
+    It invokes the REAL reader, forwards its arguments unchanged, returns
+    its result unchanged, and records what happened as a side effect. It
+    classifies nothing, counts nothing of its own, and cannot manufacture a
+    result: every value asserted against below is a value the real reader
+    returned.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.calls: list[tuple] = []
+
+    def __call__(self, *args, **kwargs):
+        sequence, rejections, rows_read = self._real(*args, **kwargs)
+        self.calls.append((args, dict(kwargs), list(sequence),
+                           dict(rejections), rows_read))
+        return sequence, rejections, rows_read
+
+
+def test_cli_decode_recursionerror_row_contained_receipt_unaffected(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Inherited reader containment, asserted at the reader boundary AND at
+    the monitor's own output surface.
+
+    The monitor discards the shared reader's rejection counters, and the
+    fixed receipt shape stays exactly as it is — no production change and no
+    new receipt field. The rejection CATEGORY is therefore pinned where it
+    is actually produced: a test-local pass-through recorder wraps the
+    reader boundary the monitor already calls, so the counters asserted
+    below are the ones the unchanged reader really returned.
+
+    That distinction is the point. The receipt is byte-identical whether the
+    offending record was contained at the decode boundary or turned away
+    later by an unrelated domain-validation rejection, so receipt equality
+    alone cannot tell those apart. ``seam.raised == 1`` shows the marked
+    decode was reached; the recorded ``malformed_json`` count shows what the
+    reader made of it; the recorded sequence and row accounting show that
+    every other record survived intact.
+
+    The reference receipt remains the check that processing continued and
+    the contained record contributed nothing to the output."""
+    import scripts.nextness_monitor as monitor_module
+    from scripts.nextness_predictor import REJECT_REASONS
+
+    good_rows = "\n".join(
+        json.dumps({"generation": i, "token_counts": {t: 3}})
         for i, t in enumerate([A, B] * 30))
-    log.write_text(_DEEP_NEST_ROW + "\n" + good + "\n", encoding="utf-8")
+    log = tmp_path / "nest.jsonl"
+
+    # Reference: exactly these good rows, no offending record, no seam.
+    log.write_text(good_rows + "\n", encoding="utf-8")
+    assert main([str(log)]) == 0
+    reference = capsys.readouterr().out
+    # Anchor the self-generated reference to absolute facts, so a defect
+    # that corrupted BOTH runs identically cannot hide inside the comparison.
+    reference_receipt = json.loads(reference)
+    assert reference_receipt["schema"] == RECEIPT_SCHEMA
+    assert reference_receipt["observation_count"] == 15
+
+    # Record the reader boundary for the seam-armed run only, so the counts
+    # below belong to that run and to no other.
+    recorder = _ReaderRecorder(monitor_module.read_dominant_sequence)
+    monkeypatch.setattr(monitor_module, "read_dominant_sequence", recorder)
+
+    # The same good rows, with the offending record first and the seam armed.
+    log.write_text(_DEEP_NEST_ROW + "\n" + good_rows + "\n", encoding="utf-8")
+    before = log.read_bytes()
+    seam = _DecodeSeam(_DEEP_NEST_MARKER, "sentinel parser depth probe")
+    seam.install(monkeypatch, monitor_module)
+    assert main([str(log)]) == 0
+    seam.restore()
+    captured = capsys.readouterr()
+    assert seam.raised == 1                    # the marked decode ran, once
+    assert len(seam.delegated) == 60           # every good row delegated
+    assert all(kw == {} for _a, kw in seam.delegated)   # reader: no kwargs
+
+    # The intended reader invocation happened, exactly once, on this log,
+    # with the bounding arguments the monitor is supposed to forward.
+    assert len(recorder.calls) == 1
+    args, kwargs, sequence, rejections, rows_read = recorder.calls[0]
+    assert pathlib.Path(args[0]) == log
+    assert set(kwargs) == {"max_rows", "max_line_bytes"}
+
+    # The contained record was counted as malformed_json and as nothing
+    # else. The vocabulary is taken from the reader's own contract, so a
+    # category renamed or dropped there fails here instead of slipping past.
+    assert set(rejections) == set(REJECT_REASONS)
+    assert rejections["malformed_json"] == 1
+    assert {r: c for r, c in rejections.items() if c} == {"malformed_json": 1}
+    assert sum(rejections.values()) == 1
+
+    # Continuation is exact, and it is the RIGHT rows in the RIGHT order —
+    # not merely the right tally.
+    assert sequence == [A, B] * 30
+    assert len(sequence) == 60                 # rows accepted
+    assert rows_read == 61                     # physical rows read
+
+    assert "Traceback" not in captured.err
+    assert captured.err == ""
+    assert captured.out == reference           # contained: receipt unchanged
+    assert log.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Real-decoder totality. The seam tests above pin WHICH rejection a
+# decode-boundary RecursionError produces; they cannot exercise the real
+# parser, because they raise before it is called. These tests do the
+# complement: the same genuinely deep bytes go through the ACTUAL decoder,
+# and only interpreter-invariant properties are asserted. Which disposition
+# fires is deliberately NOT pinned here — that is the seam tests' subject,
+# and pinning it here is exactly the runtime dependence this file removed.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_real_deeply_nested_row_survivable_on_any_decoder(
+    tmp_path, capsys
+) -> None:
+    """NO seam: the genuine 20 000-deep, ~40 KiB record is fed to the real
+    parser ahead of the good rows.
+
+    Invariant on every interpreter, and all this test claims: the record
+    never reaches the receipt — which is byte-identical to the receipt for
+    the same log without it — exit 0, no traceback, input byte-unchanged."""
+    good_rows = "\n".join(
+        json.dumps({"generation": i, "token_counts": {t: 3}})
+        for i, t in enumerate([A, B] * 30))
+    log = tmp_path / "nest.jsonl"
+    log.write_text(good_rows + "\n", encoding="utf-8")
+    assert main([str(log)]) == 0
+    reference = capsys.readouterr().out
+    assert json.loads(reference)["schema"] == RECEIPT_SCHEMA
+
+    log.write_text(_DEEP_NEST_ROW + "\n" + good_rows + "\n", encoding="utf-8")
     before = log.read_bytes()
     assert main([str(log)]) == 0
     captured = capsys.readouterr()
-    assert "Traceback" not in captured.err
     assert captured.err == ""
+    assert "Traceback" not in captured.err
+    assert captured.out == reference
+    assert log.read_bytes() == before
+
+
+def test_post_decode_recursionerror_propagates(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Outside-seam pin for the consumer. A sentinel RecursionError raised
+    AFTER a successful decode — from the monitor's own distribution builder
+    — propagates exactly: no containment, no typed translation, no
+    stdout/stderr, input unchanged. This pins ONE post-decode site, which is
+    what shows the inherited containment is not broad swallowing; it is not
+    by itself a proof of locality at every site."""
+    import scripts.nextness_monitor as monitor_module
+
+    log = _write_log(tmp_path, [A, B] * 30)
+    before = log.read_bytes()
+    real_first_order = monitor_module.first_order_distribution
+
+    def patched(*args, **kwargs):
+        raise RecursionError("sentinel post-decode recursion")
+
+    monkeypatch.setattr(monitor_module, "first_order_distribution", patched)
+    with pytest.raises(RecursionError) as excinfo:
+        main([str(log)])
+    monkeypatch.undo()
+    assert monitor_module.first_order_distribution is real_first_order
+    assert type(excinfo.value) is RecursionError
+    assert str(excinfo.value) == "sentinel post-decode recursion"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the CLI emitted nothing
+    assert captured.err == ""  # no misleading concise conversion
     assert log.read_bytes() == before
 
 
